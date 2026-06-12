@@ -74,6 +74,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _polling = false;
   bool _speechReady = false;
   bool _listening = false;
+  bool _sending = false;
+  bool _voiceFinalHandled = false;
   bool _autoSpeak = true;
   String? _ownPubkey;
   String? _status;
@@ -257,17 +259,43 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         (message.kind == 'response' ||
             message.kind == 'error' ||
             message.kind == 'invalid')) {
-      unawaited(_tts.speak(message.text));
+      unawaited(_speak(message.text));
     }
   }
 
-  Future<void> _sendQuery() async {
+  Future<void> _speak(String text) async {
+    final spoken = text.trim();
+    if (spoken.isEmpty) return;
+
+    try {
+      await _tts.stop();
+      await _tts.speak(spoken);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _status = 'Text-to-speech error: $error');
+    }
+  }
+
+  Future<void> _sendQuery({bool fromVoice = false}) async {
     final query = _queryController.text.trim();
     if (query.isEmpty) return;
+    if (_sending) return;
     if (!_connected) {
       _showError('Connect before sending a query');
       return;
     }
+
+    if (!fromVoice && _listening) {
+      try {
+        await _speech.stop();
+      } catch (_) {}
+      if (mounted) setState(() => _listening = false);
+    }
+
+    setState(() {
+      _sending = true;
+      _status = 'Sending query...';
+    });
 
     try {
       final eventId = await nostrSendQuery(query: query);
@@ -288,12 +316,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       });
     } catch (error) {
       _showError('Send failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _sending = false);
+      }
     }
   }
 
   Future<void> _toggleSpeech() async {
     if (_listening) {
-      await _speech.stop();
+      try {
+        await _speech.stop();
+      } catch (_) {}
       if (mounted) setState(() => _listening = false);
       return;
     }
@@ -319,19 +353,51 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return;
     }
 
-    await _speech.listen(
-      listenOptions: stt.SpeechListenOptions(
-        listenMode: stt.ListenMode.dictation,
-        partialResults: true,
-        cancelOnError: true,
-        pauseFor: const Duration(seconds: 3),
-      ),
-      onResult: (result) {
-        if (!mounted) return;
-        setState(() => _queryController.text = result.recognizedWords);
-      },
-    );
-    if (mounted) setState(() => _listening = true);
+    _voiceFinalHandled = false;
+    try {
+      await _speech.listen(
+        listenOptions: stt.SpeechListenOptions(
+          listenMode: stt.ListenMode.dictation,
+          partialResults: true,
+          cancelOnError: true,
+          pauseFor: const Duration(seconds: 2),
+          listenFor: const Duration(seconds: 20),
+        ),
+        onResult: (result) {
+          if (!mounted) return;
+          final recognized = result.recognizedWords.trim();
+          setState(() {
+            _queryController.text = recognized;
+            if (result.finalResult) {
+              _listening = false;
+              _status = recognized.isEmpty
+                  ? 'No speech detected'
+                  : 'Speech captured';
+            }
+          });
+
+          if (result.finalResult &&
+              !_voiceFinalHandled &&
+              _connected &&
+              recognized.isNotEmpty) {
+            _voiceFinalHandled = true;
+            unawaited(_sendQuery(fromVoice: true));
+          }
+        },
+      );
+      if (mounted) {
+        setState(() {
+          _listening = true;
+          _status = 'Listening...';
+        });
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _listening = false;
+        _status = 'Speech start failed: $error';
+      });
+    }
   }
 
   List<String> _relayLines() {
@@ -393,9 +459,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             _Composer(
               controller: _queryController,
               connected: _connected,
+              sending: _sending,
               listening: _listening,
               onMicPressed: _toggleSpeech,
-              onSendPressed: _sendQuery,
+              onSendPressed: () => _sendQuery(),
             ),
             const SizedBox(height: 12),
             if (_status != null)
@@ -538,6 +605,7 @@ class _Composer extends StatelessWidget {
   const _Composer({
     required this.controller,
     required this.connected,
+    required this.sending,
     required this.listening,
     required this.onMicPressed,
     required this.onSendPressed,
@@ -545,6 +613,7 @@ class _Composer extends StatelessWidget {
 
   final TextEditingController controller;
   final bool connected;
+  final bool sending;
   final bool listening;
   final VoidCallback onMicPressed;
   final VoidCallback onSendPressed;
@@ -570,15 +639,20 @@ class _Composer extends StatelessWidget {
               children: [
                 IconButton.filledTonal(
                   tooltip: listening ? 'Stop listening' : 'Speak query',
-                  onPressed: onMicPressed,
+                  onPressed: sending ? null : onMicPressed,
                   icon: Icon(listening ? Icons.mic_off : Icons.mic),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: connected ? onSendPressed : null,
-                    icon: const Icon(Icons.send),
-                    label: const Text('Send query'),
+                    onPressed: connected && !sending ? onSendPressed : null,
+                    icon: sending
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.send),
+                    label: Text(sending ? 'Sending...' : 'Send query'),
                   ),
                 ),
               ],
