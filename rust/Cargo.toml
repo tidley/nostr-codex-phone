@@ -1,0 +1,27 @@
+[package]
+name = "rust_lib_nostr_codex_phone"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+anyhow = "1"
+flutter_rust_bridge = "=2.11.1"
+nostr = { version = "0.45.0-alpha.1", features = ["std", "os-rng", "nip59"] }
+nostr-sdk = "0.45.0-alpha.1"
+once_cell = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shell-words = "1.1"
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+
+[[bin]]
+name = "nostr-codex-server"
+path = "src/bin/nostr_codex_server.rs"
