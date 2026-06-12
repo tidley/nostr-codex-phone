@@ -72,7 +72,7 @@ pub async fn nostr_start(config: BridgeNostrConfig) -> Result<BridgeSessionStatu
     let messenger = Arc::new(
         NostrMessenger::connect(NostrConfig {
             secret_key: config.secret_key,
-            peer_pubkey: config.peer_pubkey,
+            peer_pubkey: Some(config.peer_pubkey),
             relays: relays.clone(),
         })
         .await?,
@@ -81,7 +81,7 @@ pub async fn nostr_start(config: BridgeNostrConfig) -> Result<BridgeSessionStatu
     let status = BridgeSessionStatus {
         public_key: messenger.public_key_bech32()?,
         public_key_hex: messenger.public_key_hex(),
-        peer_pubkey: messenger.peer_pubkey_bech32()?,
+        peer_pubkey: messenger.peer_pubkey_bech32()?.unwrap_or_default(),
         relay_count: relays.len() as u32,
     };
 

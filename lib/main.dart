@@ -20,10 +20,28 @@ class NostrCodexApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Nostr Codex',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff1f7a63)),
         useMaterial3: true,
       ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xff42d3a6),
+          brightness: Brightness.dark,
+        ),
+        scaffoldBackgroundColor: const Color(0xff0c1110),
+        cardTheme: const CardThemeData(
+          color: Color(0xff151b1a),
+          surfaceTintColor: Color(0xff42d3a6),
+        ),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xff0c1110),
+          foregroundColor: Color(0xffe8f3ef),
+        ),
+        useMaterial3: true,
+      ),
+      themeMode: ThemeMode.dark,
       home: const NostrCodexHome(),
     );
   }
