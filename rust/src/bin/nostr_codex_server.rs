@@ -1,7 +1,7 @@
 use std::env;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use rust_lib_nostr_codex_phone::codex::{run_codex, CodexConfig};
 use rust_lib_nostr_codex_phone::nostr_client::{default_relays, NostrConfig, NostrMessenger};
 use tracing::{error, info, warn};
@@ -21,7 +21,10 @@ async fn main() -> Result<()> {
 
     info!("server pubkey: {}", messenger.public_key_bech32()?);
     info!("server pubkey hex: {}", messenger.public_key_hex());
-    info!("peer pubkey: {}", nostr_config.peer_pubkey);
+    match &nostr_config.peer_pubkey {
+        Some(peer) => info!("peer pubkey: {peer}"),
+        None => warn!("peer pubkey not configured; accepting DMs from any sender"),
+    }
     info!("relays: {}", nostr_config.relays.join(", "));
     info!(
         "codex command: {} {}",
@@ -41,8 +44,12 @@ async fn main() -> Result<()> {
                     Ok(response) => response,
                     Err(err) => {
                         error!("codex failed: {err:#}");
-                        if let Err(send_err) =
-                            messenger.send_error(format!("Codex failed: {err:#}")).await
+                        if let Err(send_err) = messenger
+                            .send_error_to(
+                                &message.sender_pubkey_hex,
+                                format!("Codex failed: {err:#}"),
+                            )
+                            .await
                         {
                             error!("failed to send error DM: {send_err:#}");
                         }
@@ -50,14 +57,20 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                if let Err(err) = messenger.send_response(response).await {
+                if let Err(err) = messenger
+                    .send_response_to(&message.sender_pubkey_hex, response)
+                    .await
+                {
                     error!("failed to send response DM: {err:#}");
                 }
             }
             "invalid" => {
                 warn!("invalid JSON DM from peer: {}", message.text);
                 if let Err(err) = messenger
-                    .send_error(format!("Invalid request JSON: {}", message.text))
+                    .send_error_to(
+                        &message.sender_pubkey_hex,
+                        format!("Invalid request JSON: {}", message.text),
+                    )
                     .await
                 {
                     error!("failed to send invalid-json error DM: {err:#}");
@@ -78,7 +91,9 @@ fn nostr_config_from_env() -> Result<NostrConfig> {
         .context("NOSTR_SECRET_KEY must contain the server nsec/secret key")?;
     let peer_pubkey = env::var("NOSTR_PEER_PUBKEY")
         .or_else(|_| env::var("NOSTR_MOBILE_PUBKEY"))
-        .map_err(|_| anyhow!("NOSTR_PEER_PUBKEY or NOSTR_MOBILE_PUBKEY must be set"))?;
+        .ok()
+        .map(|peer| peer.trim().to_string())
+        .filter(|peer| !peer.is_empty());
     let relays = env::var("NOSTR_RELAYS")
         .ok()
         .map(|raw| {

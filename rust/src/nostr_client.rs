@@ -10,7 +10,7 @@ use crate::protocol::{parse_wire_message, WireMessage};
 #[derive(Debug, Clone)]
 pub struct NostrConfig {
     pub secret_key: String,
-    pub peer_pubkey: String,
+    pub peer_pubkey: Option<String>,
     pub relays: Vec<String>,
 }
 
@@ -26,7 +26,7 @@ pub struct IncomingMessage {
 
 pub struct NostrMessenger {
     keys: Keys,
-    peer: PublicKey,
+    peer: Option<PublicKey>,
     client: Client,
     incoming: Mutex<mpsc::Receiver<IncomingMessage>>,
     listener: JoinHandle<()>,
@@ -40,8 +40,14 @@ impl NostrMessenger {
 
         let keys =
             Keys::parse(config.secret_key.trim()).context("invalid local nsec/secret key")?;
-        let peer =
-            PublicKey::parse(config.peer_pubkey.trim()).context("invalid peer public key")?;
+        let peer = config
+            .peer_pubkey
+            .as_deref()
+            .map(str::trim)
+            .filter(|peer| !peer.is_empty())
+            .map(PublicKey::parse)
+            .transpose()
+            .context("invalid peer public key")?;
         let client = Client::default();
 
         for relay in &config.relays {
@@ -109,8 +115,11 @@ impl NostrMessenger {
         self.keys.public_key().to_hex()
     }
 
-    pub fn peer_pubkey_bech32(&self) -> Result<String> {
-        Ok(self.peer.to_bech32()?)
+    pub fn peer_pubkey_bech32(&self) -> Result<Option<String>> {
+        self.peer
+            .map(|peer| peer.to_bech32())
+            .transpose()
+            .map_err(Into::into)
     }
 
     pub async fn send_query(&self, query: impl Into<String>) -> Result<String> {
@@ -121,13 +130,48 @@ impl NostrMessenger {
         self.send_wire(WireMessage::response(response)).await
     }
 
+    pub async fn send_response_to(
+        &self,
+        receiver_pubkey: &str,
+        response: impl Into<String>,
+    ) -> Result<String> {
+        self.send_wire_to_pubkey(receiver_pubkey, WireMessage::response(response))
+            .await
+    }
+
     pub async fn send_error(&self, error: impl Into<String>) -> Result<String> {
         self.send_wire(WireMessage::error(error)).await
     }
 
+    pub async fn send_error_to(
+        &self,
+        receiver_pubkey: &str,
+        error: impl Into<String>,
+    ) -> Result<String> {
+        self.send_wire_to_pubkey(receiver_pubkey, WireMessage::error(error))
+            .await
+    }
+
     pub async fn send_wire(&self, message: WireMessage) -> Result<String> {
+        let receiver = self
+            .peer
+            .ok_or_else(|| anyhow!("peer public key is not configured"))?;
+        self.send_wire_to(receiver, message).await
+    }
+
+    pub async fn send_wire_to_pubkey(
+        &self,
+        receiver_pubkey: &str,
+        message: WireMessage,
+    ) -> Result<String> {
+        let receiver =
+            PublicKey::parse(receiver_pubkey.trim()).context("invalid receiver pubkey")?;
+        self.send_wire_to(receiver, message).await
+    }
+
+    pub async fn send_wire_to(&self, receiver: PublicKey, message: WireMessage) -> Result<String> {
         let payload = message.to_json()?;
-        let event = PrivateDirectMessageBuilder::new(self.peer, payload)
+        let event = PrivateDirectMessageBuilder::new(receiver, payload)
             .finalize(&self.keys)
             .context("failed to build GiftWrapped DM")?;
         let output = self
@@ -167,13 +211,13 @@ impl NostrMessenger {
 
 fn decode_gift_wrap(
     keys: &Keys,
-    expected_peer: PublicKey,
+    expected_peer: Option<PublicKey>,
     event: &Event,
 ) -> Result<Option<IncomingMessage>> {
     let UnwrappedGift { rumor, sender } =
         UnwrappedGift::from_gift_wrap(keys, event).context("failed to unwrap GiftWrap")?;
 
-    if sender != expected_peer {
+    if expected_peer.is_some_and(|peer| sender != peer) {
         return Ok(None);
     }
 

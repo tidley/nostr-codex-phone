@@ -32,6 +32,14 @@ export NOSTR_PEER_PUBKEY='npub...' # mobile public key
 export NOSTR_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://nostr.mom'
 ```
 
+`NOSTR_PEER_PUBKEY` is optional for the server. If omitted, the server subscribes
+to its own GiftWrap inbox and replies to the sender of each valid query. Set it
+when you want to restrict processing to one phone key:
+
+```bash
+export NOSTR_PEER_PUBKEY='npub...'
+```
+
 Optional Codex configuration:
 
 ```bash
