@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
 import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
+import 'package:speech_to_text/speech_recognition_error.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 Future<void> main() async {
@@ -59,6 +60,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _secretKeyStorageKey = 'nostr_secret_key';
   static const _peerPubkeyStorageKey = 'nostr_peer_pubkey';
   static const _relaysStorageKey = 'nostr_relays';
+  static const _speechRecognizerUnavailable =
+      'Speech input is unavailable. On GrapheneOS this usually means no Android speech recognition service is installed or enabled. Use typed input, keyboard dictation, or install a SpeechRecognizer provider.';
+  static const _speechRecognizerUnavailableShort =
+      'Speech input unavailable. Use typed input or install a SpeechRecognizer provider.';
 
   final _secretKeyController = TextEditingController();
   final _peerPubkeyController = TextEditingController();
@@ -333,23 +338,24 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
 
     if (!_speechReady) {
-      _speechReady = await _speech.initialize(
-        onStatus: (status) {
-          if (!mounted) return;
-          setState(() => _listening = status == 'listening');
-        },
-        onError: (error) {
-          if (!mounted) return;
-          setState(() {
-            _listening = false;
-            _status = 'Speech error: ${error.errorMsg}';
-          });
-        },
-      );
+      try {
+        _speechReady = await _speech.initialize(
+          onStatus: (status) {
+            if (!mounted) return;
+            setState(() => _listening = status == 'listening');
+          },
+          onError: _handleSpeechError,
+        );
+      } catch (error) {
+        _handleSpeechStartupError(error);
+        return;
+      }
     }
 
     if (!_speechReady) {
-      _showError('Speech recognition is not available');
+      if (!mounted) return;
+      _showError(_speechRecognizerUnavailableShort);
+      setState(() => _status = _speechRecognizerUnavailable);
       return;
     }
 
@@ -392,12 +398,63 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         });
       }
     } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _listening = false;
-        _status = 'Speech start failed: $error';
-      });
+      _handleSpeechStartupError(error);
     }
+  }
+
+  void _handleSpeechError(SpeechRecognitionError error) {
+    if (!mounted) return;
+
+    final message = _speechErrorMessage(error.errorMsg);
+    final resetRecognizer = _isRecognizerUnavailable(error.errorMsg);
+    setState(() {
+      _listening = false;
+      if (resetRecognizer) _speechReady = false;
+      _status = message;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          resetRecognizer ? _speechRecognizerUnavailableShort : message,
+        ),
+      ),
+    );
+  }
+
+  void _handleSpeechStartupError(Object error) {
+    if (!mounted) return;
+
+    final raw = error.toString();
+    final message = _speechErrorMessage(raw);
+    final resetRecognizer = _isRecognizerUnavailable(raw);
+    setState(() {
+      _listening = false;
+      if (resetRecognizer) _speechReady = false;
+      _status = message;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          resetRecognizer ? _speechRecognizerUnavailableShort : message,
+        ),
+      ),
+    );
+  }
+
+  String _speechErrorMessage(String rawError) {
+    if (_isRecognizerUnavailable(rawError)) {
+      return _speechRecognizerUnavailable;
+    }
+
+    return 'Speech error: $rawError';
+  }
+
+  bool _isRecognizerUnavailable(String rawError) {
+    final normalized = rawError.toLowerCase();
+    return normalized.contains('error_client') ||
+        normalized.contains('recognitionservice') ||
+        normalized.contains('recognition service') ||
+        normalized.contains('speech recognition service is not available');
   }
 
   List<String> _relayLines() {
