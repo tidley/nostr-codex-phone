@@ -178,6 +178,8 @@ impl NostrMessenger {
             .client
             .send_event(&event)
             .broadcast()
+            .ack_policy(AckPolicy::none())
+            .ok_timeout(Duration::from_secs(2))
             .await
             .context("failed to send GiftWrapped DM")?;
 
