@@ -98,11 +98,16 @@ Optional Codex configuration:
 
 ```bash
 export CODEX_BIN='/home/tom/.nvm/versions/node/v24.12.0/bin/codex'
-export CODEX_ARGS='--ask-for-approval never --sandbox read-only -c model_reasoning_effort=medium exec --skip-git-repo-check'
+export CODEX_ARGS='--ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=medium exec --skip-git-repo-check'
 export CODEX_WORKDIR="$PWD"
 export CODEX_TIMEOUT_SECS=180
 export CODEX_PERSIST_SESSIONS=1
 ```
+
+`danger-full-access` lets the DM-driven Codex session edit files, run builds,
+commit, and push. Use it only with a trusted `NOSTR_PEER_PUBKEY` and relays you
+are comfortable using for this control path. Switch the sandbox back to
+`read-only` when you only want remote inspection.
 
 For user turns, the server uses `codex exec --json` and stores the returned
 Codex `thread_id` in SQLite per phone peer and workdir. Follow-up turns resume
