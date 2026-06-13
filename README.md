@@ -58,6 +58,9 @@ The server listens for `{ "query": "..." }` and `{ "audio": { ... } }`, runs
 Codex non-interactively, and replies with `{ "response": "..." }` or
 `{ "error": "..." }`.
 
+Both server and mobile dedupe incoming GiftWrapped DMs by event ID so the same
+event delivered by multiple relays is only processed once per session.
+
 Required environment:
 
 ```bash

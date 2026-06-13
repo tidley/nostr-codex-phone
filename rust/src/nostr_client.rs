@@ -1,3 +1,4 @@
+use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -73,12 +74,18 @@ impl NostrMessenger {
         let listener_keys = keys.clone();
         let listener_peer = peer;
         let listener = tokio::spawn(async move {
+            let mut seen_event_ids = SeenEventIds::new(4096);
+
             while let Some(notification) = notifications.next().await {
                 let ClientNotification::Event { event, .. } = notification else {
                     continue;
                 };
 
                 if event.kind != Kind::GiftWrap {
+                    continue;
+                }
+
+                if !seen_event_ids.insert(event.id.to_hex()) {
                     continue;
                 }
 
@@ -224,6 +231,39 @@ impl NostrMessenger {
     }
 }
 
+struct SeenEventIds {
+    max_len: usize,
+    order: VecDeque<String>,
+    set: HashSet<String>,
+}
+
+impl SeenEventIds {
+    fn new(max_len: usize) -> Self {
+        Self {
+            max_len: max_len.max(1),
+            order: VecDeque::new(),
+            set: HashSet::new(),
+        }
+    }
+
+    fn insert(&mut self, event_id: String) -> bool {
+        if self.set.contains(&event_id) {
+            return false;
+        }
+
+        self.order.push_back(event_id.clone());
+        self.set.insert(event_id);
+
+        while self.order.len() > self.max_len {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+
+        true
+    }
+}
+
 fn decode_gift_wrap(
     keys: &Keys,
     expected_peer: Option<PublicKey>,
@@ -275,4 +315,21 @@ pub fn default_relays() -> Vec<String> {
         "wss://nos.lol".to_string(),
         "wss://nostr.mom".to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seen_event_ids_rejects_duplicates_and_evicts_oldest() {
+        let mut seen = SeenEventIds::new(2);
+
+        assert!(seen.insert("a".to_string()));
+        assert!(!seen.insert("a".to_string()));
+        assert!(seen.insert("b".to_string()));
+        assert!(seen.insert("c".to_string()));
+        assert!(seen.insert("a".to_string()));
+        assert!(!seen.insert("c".to_string()));
+    }
 }

@@ -178,6 +178,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   final _recorder = AudioRecorder();
   final _tts = FlutterTts();
   final _messages = <ConversationMessage>[];
+  final _seenIncomingEventIds = <String>{};
 
   bool _loadingSettings = true;
   bool _connecting = false;
@@ -513,6 +514,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   void _receiveMessage(BridgeIncomingMessage message) {
+    final eventId = message.eventId.trim();
+    if (eventId.isNotEmpty && !_seenIncomingEventIds.add(eventId)) {
+      return;
+    }
+
     final conversationMessage = ConversationMessage(
       direction: MessageDirection.incoming,
       kind: message.kind,
