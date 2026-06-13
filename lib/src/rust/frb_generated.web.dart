@@ -30,12 +30,30 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  BridgeAudioReference dco_decode_box_autoadd_bridge_audio_reference(
+    dynamic raw,
+  );
+
+  @protected
+  BridgeBlossomUploadConfig dco_decode_box_autoadd_bridge_blossom_upload_config(
+    dynamic raw,
+  );
+
+  @protected
   BridgeIncomingMessage dco_decode_box_autoadd_bridge_incoming_message(
     dynamic raw,
   );
 
   @protected
   BridgeNostrConfig dco_decode_box_autoadd_bridge_nostr_config(dynamic raw);
+
+  @protected
+  BridgeAudioReference dco_decode_bridge_audio_reference(dynamic raw);
+
+  @protected
+  BridgeBlossomUploadConfig dco_decode_bridge_blossom_upload_config(
+    dynamic raw,
+  );
 
   @protected
   BridgeIncomingMessage dco_decode_bridge_incoming_message(dynamic raw);
@@ -54,6 +72,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw);
 
   @protected
   BridgeIncomingMessage? dco_decode_opt_box_autoadd_bridge_incoming_message(
@@ -82,12 +103,32 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  BridgeAudioReference sse_decode_box_autoadd_bridge_audio_reference(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BridgeBlossomUploadConfig sse_decode_box_autoadd_bridge_blossom_upload_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BridgeIncomingMessage sse_decode_box_autoadd_bridge_incoming_message(
     SseDeserializer deserializer,
   );
 
   @protected
   BridgeNostrConfig sse_decode_box_autoadd_bridge_nostr_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BridgeAudioReference sse_decode_bridge_audio_reference(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BridgeBlossomUploadConfig sse_decode_bridge_blossom_upload_config(
     SseDeserializer deserializer,
   );
 
@@ -114,6 +155,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
   BridgeIncomingMessage? sse_decode_opt_box_autoadd_bridge_incoming_message(
@@ -148,6 +192,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_bridge_audio_reference(
+    BridgeAudioReference self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_bridge_blossom_upload_config(
+    BridgeBlossomUploadConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_bridge_incoming_message(
     BridgeIncomingMessage self,
     SseSerializer serializer,
@@ -156,6 +212,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_bridge_nostr_config(
     BridgeNostrConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bridge_audio_reference(
+    BridgeAudioReference self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bridge_blossom_upload_config(
+    BridgeBlossomUploadConfig self,
     SseSerializer serializer,
   );
 
@@ -188,6 +256,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     Uint8List self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_bridge_incoming_message(

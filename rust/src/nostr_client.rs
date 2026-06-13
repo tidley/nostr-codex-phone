@@ -5,7 +5,7 @@ use nostr_sdk::prelude::*;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
-use crate::protocol::{parse_wire_message, WireMessage};
+use crate::protocol::{parse_wire_message, AudioReference, WireMessage};
 
 #[derive(Debug, Clone)]
 pub struct NostrConfig {
@@ -124,6 +124,10 @@ impl NostrMessenger {
 
     pub async fn send_query(&self, query: impl Into<String>) -> Result<String> {
         self.send_wire(WireMessage::query(query)).await
+    }
+
+    pub async fn send_audio(&self, audio: AudioReference) -> Result<String> {
+        self.send_wire(WireMessage::audio(audio)).await
     }
 
     pub async fn send_response(&self, response: impl Into<String>) -> Result<String> {

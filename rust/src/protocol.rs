@@ -6,8 +6,20 @@ use serde_json::{json, Value};
 #[serde(untagged)]
 pub enum WireMessage {
     Query { query: String },
+    Audio { audio: AudioReference },
     Response { response: String },
     Error { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioReference {
+    pub url: String,
+    pub sha256: String,
+    pub size: u64,
+    #[serde(rename = "type")]
+    pub media_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl WireMessage {
@@ -15,6 +27,10 @@ impl WireMessage {
         Self::Query {
             query: query.into(),
         }
+    }
+
+    pub fn audio(audio: AudioReference) -> Self {
+        Self::Audio { audio }
     }
 
     pub fn response<S: Into<String>>(response: S) -> Self {
@@ -32,6 +48,7 @@ impl WireMessage {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Query { .. } => "query",
+            Self::Audio { .. } => "audio",
             Self::Response { .. } => "response",
             Self::Error { .. } => "error",
         }
@@ -40,14 +57,23 @@ impl WireMessage {
     pub fn text(&self) -> &str {
         match self {
             Self::Query { query } => query,
+            Self::Audio { audio } => &audio.url,
             Self::Response { response } => response,
             Self::Error { error } => error,
+        }
+    }
+
+    pub fn audio_reference(&self) -> Option<&AudioReference> {
+        match self {
+            Self::Audio { audio } => Some(audio),
+            _ => None,
         }
     }
 
     pub fn to_json(&self) -> Result<String> {
         let value = match self {
             Self::Query { query } => json!({ "query": query }),
+            Self::Audio { audio } => json!({ "audio": audio }),
             Self::Response { response } => json!({ "response": response }),
             Self::Error { error } => json!({ "error": error }),
         };
@@ -69,6 +95,13 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
             .ok_or_else(|| anyhow!("field `query` must be a string"));
     }
 
+    if let Some(audio) = object.get("audio") {
+        let audio: AudioReference = serde_json::from_value(audio.clone())
+            .map_err(|err| anyhow!("field `audio` is invalid: {err}"))?;
+        validate_audio_reference(&audio)?;
+        return Ok(WireMessage::audio(audio));
+    }
+
     if let Some(response) = object.get("response") {
         return response
             .as_str()
@@ -84,8 +117,26 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `response`, or `error` field"
+        "message must contain a string `query`, `response`, `error`, or object `audio` field"
     ))
+}
+
+fn validate_audio_reference(audio: &AudioReference) -> Result<()> {
+    if !(audio.url.starts_with("https://") || audio.url.starts_with("http://")) {
+        return Err(anyhow!("field `audio.url` must be an HTTP(S) URL"));
+    }
+    if audio.sha256.len() != 64 || !audio.sha256.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "field `audio.sha256` must be a 64-character hex SHA-256"
+        ));
+    }
+    if audio.size == 0 {
+        return Err(anyhow!("field `audio.size` must be greater than zero"));
+    }
+    if !audio.media_type.starts_with("audio/") {
+        return Err(anyhow!("field `audio.type` must be an audio MIME type"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -109,9 +160,35 @@ mod tests {
     }
 
     #[test]
+    fn parses_audio_contract() {
+        let parsed = parse_wire_message(
+            r#"{
+                "audio": {
+                    "url": "https://cdn.example.com/abc.mp4",
+                    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    "size": 123,
+                    "type": "audio/mp4",
+                    "name": "voice.m4a"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.kind(), "audio");
+        assert_eq!(parsed.text(), "https://cdn.example.com/abc.mp4");
+        assert_eq!(
+            parsed.audio_reference().unwrap().sha256,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+    }
+
+    #[test]
     fn rejects_malformed_payloads() {
         assert!(parse_wire_message(r#"{ "query": 42 }"#).is_err());
         assert!(parse_wire_message(r#"{ "message": "hello" }"#).is_err());
+        assert!(parse_wire_message(
+            r#"{ "audio": { "url": "ftp://x", "sha256": "bad", "size": 1, "type": "audio/mp4" } }"#
+        )
+        .is_err());
         assert!(parse_wire_message("hello").is_err());
     }
 }

@@ -4,6 +4,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use rust_lib_nostr_codex_phone::codex::{run_codex, CodexConfig};
 use rust_lib_nostr_codex_phone::nostr_client::{default_relays, NostrConfig, NostrMessenger};
+use rust_lib_nostr_codex_phone::protocol::{parse_wire_message, WireMessage};
+use rust_lib_nostr_codex_phone::transcribe::{
+    download_blossom_audio, transcribe_audio, AudioConfig, TranscribeConfig,
+};
 use tracing::{error, info, warn};
 
 #[tokio::main]
@@ -17,6 +21,8 @@ async fn main() -> Result<()> {
 
     let nostr_config = nostr_config_from_env()?;
     let codex_config = CodexConfig::from_env()?;
+    let audio_config = AudioConfig::from_env();
+    let transcribe_config = TranscribeConfig::from_env()?;
     let messenger = NostrMessenger::connect(nostr_config.clone()).await?;
 
     info!("server pubkey: {}", messenger.public_key_bech32()?);
@@ -31,6 +37,12 @@ async fn main() -> Result<()> {
         codex_config.bin,
         codex_config.args.join(" ")
     );
+    info!(
+        "transcribe command: {} {}",
+        transcribe_config.bin,
+        transcribe_config.args.join(" ")
+    );
+    info!("max audio bytes: {}", audio_config.max_bytes);
 
     loop {
         let Some(message) = messenger.next_message(Duration::from_secs(3600)).await? else {
@@ -40,21 +52,94 @@ async fn main() -> Result<()> {
         match message.kind.as_str() {
             "query" => {
                 info!("received query event {}", message.event_id);
-                let response = match run_codex(&message.text, &codex_config).await {
+                let response = match run_codex_and_report(
+                    &messenger,
+                    &message.sender_pubkey_hex,
+                    &message.text,
+                    &codex_config,
+                )
+                .await
+                {
                     Ok(response) => response,
+                    Err(()) => continue,
+                };
+
+                if let Err(err) = messenger
+                    .send_response_to(&message.sender_pubkey_hex, response)
+                    .await
+                {
+                    error!("failed to send response DM: {err:#}");
+                }
+            }
+            "audio" => {
+                info!("received audio event {}", message.event_id);
+                let audio = match parse_wire_message(&message.raw_json) {
+                    Ok(WireMessage::Audio { audio }) => audio,
+                    Ok(_) => {
+                        warn!("audio event parsed as a different message kind");
+                        continue;
+                    }
                     Err(err) => {
-                        error!("codex failed: {err:#}");
+                        error!("failed to parse audio JSON: {err:#}");
                         if let Err(send_err) = messenger
                             .send_error_to(
                                 &message.sender_pubkey_hex,
-                                format!("Codex failed: {err:#}"),
+                                format!("Invalid audio JSON: {err:#}"),
                             )
                             .await
                         {
-                            error!("failed to send error DM: {send_err:#}");
+                            error!("failed to send audio parse error DM: {send_err:#}");
                         }
                         continue;
                     }
+                };
+
+                let downloaded = match download_blossom_audio(&audio, &audio_config).await {
+                    Ok(downloaded) => downloaded,
+                    Err(err) => {
+                        error!("audio download failed: {err:#}");
+                        if let Err(send_err) = messenger
+                            .send_error_to(
+                                &message.sender_pubkey_hex,
+                                format!("Audio download failed: {err:#}"),
+                            )
+                            .await
+                        {
+                            error!("failed to send audio download error DM: {send_err:#}");
+                        }
+                        continue;
+                    }
+                };
+
+                let transcript = match transcribe_audio(&downloaded.path, &transcribe_config).await
+                {
+                    Ok(transcript) => transcript,
+                    Err(err) => {
+                        error!("audio transcription failed: {err:#}");
+                        if let Err(send_err) = messenger
+                            .send_error_to(
+                                &message.sender_pubkey_hex,
+                                format!("Audio transcription failed: {err:#}"),
+                            )
+                            .await
+                        {
+                            error!("failed to send transcription error DM: {send_err:#}");
+                        }
+                        continue;
+                    }
+                };
+
+                info!("transcribed audio event {}", message.event_id);
+                let response = match run_codex_and_report(
+                    &messenger,
+                    &message.sender_pubkey_hex,
+                    &transcript,
+                    &codex_config,
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(()) => continue,
                 };
 
                 if let Err(err) = messenger
@@ -82,6 +167,27 @@ async fn main() -> Result<()> {
             other => {
                 info!("ignored `{other}` DM event {}", message.event_id);
             }
+        }
+    }
+}
+
+async fn run_codex_and_report(
+    messenger: &NostrMessenger,
+    receiver_pubkey: &str,
+    prompt: &str,
+    codex_config: &CodexConfig,
+) -> std::result::Result<String, ()> {
+    match run_codex(prompt, codex_config).await {
+        Ok(response) => Ok(response),
+        Err(err) => {
+            error!("codex failed: {err:#}");
+            if let Err(send_err) = messenger
+                .send_error_to(receiver_pubkey, format!("Codex failed: {err:#}"))
+                .await
+            {
+                error!("failed to send error DM: {send_err:#}");
+            }
+            Err(())
         }
     }
 }

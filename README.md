@@ -11,6 +11,18 @@ Both peers send NIP-17/NIP-59 GiftWrapped private direct messages whose decrypte
 ```
 
 ```json
+{
+  "audio": {
+    "url": "https://blossom.example/sha256.wav",
+    "sha256": "64-character-lowercase-hex",
+    "size": 12345,
+    "type": "audio/wav",
+    "name": "voice.wav"
+  }
+}
+```
+
+```json
 { "response": "text" }
 ```
 
@@ -20,9 +32,15 @@ Both peers send NIP-17/NIP-59 GiftWrapped private direct messages whose decrypte
 
 Malformed JSON from the trusted peer is surfaced as an `invalid` message on mobile and answered by the server with `{ "error": "..." }`.
 
+Audio DMs contain a Blossom blob reference only. The server downloads the URL,
+verifies the downloaded bytes match `sha256`, transcribes the audio locally,
+then treats the transcript like a text query.
+
 ## Server
 
-The server listens for `{ "query": "..." }`, runs Codex non-interactively, and replies with `{ "response": "..." }` or `{ "error": "..." }`.
+The server listens for `{ "query": "..." }` and `{ "audio": { ... } }`, runs
+Codex non-interactively, and replies with `{ "response": "..." }` or
+`{ "error": "..." }`.
 
 Required environment:
 
@@ -49,17 +67,36 @@ export CODEX_WORKDIR="$PWD"
 export CODEX_TIMEOUT_SECS=180
 ```
 
+Optional audio transcription configuration:
+
+```bash
+export TRANSCRIBE_BIN='/home/tom/.local/bin/whisper-cpp'
+export TRANSCRIBE_ARGS='-m /path/to/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/transcript -nt'
+export TRANSCRIBE_TIMEOUT_SECS=300
+export AUDIO_MAX_BYTES=52428800
+```
+
+`{audio}` is replaced with the verified downloaded audio file path and
+`{output_dir}` is replaced with a temporary transcript directory. If
+`TRANSCRIBE_ARGS` is not set, the server defaults to the Python `whisper` CLI
+style arguments.
+
 Run:
 
 ```bash
 cargo run --manifest-path rust/Cargo.toml --bin nostr-codex-server
 ```
 
-`codex exec` must be installed and authenticated on the server. If it is missing or fails, the peer receives a JSON error DM instead of the server crashing.
+`codex exec` and the configured transcriber must be installed and authenticated
+on the server. If either is missing or fails, the peer receives a JSON error DM
+instead of the server crashing.
 
 ## Mobile
 
-The Flutter app stores the local `nsec`, peer pubkey, and relay list in `flutter_secure_storage`.
+The Flutter app stores the local `nsec`, peer pubkey, relay list, and Blossom
+server in `flutter_secure_storage`. The mic button records a WAV file, uploads
+it to the configured Blossom server with a Nostr-signed BUD-11 authorization
+token, and sends the returned URL/hash over an encrypted Nostr DM.
 
 Run:
 
@@ -69,7 +106,7 @@ flutter run
 
 Use the app to generate or paste the mobile key, copy the displayed mobile public key into `NOSTR_PEER_PUBKEY` on the server, paste the server public key into the app, and use the same relay list on both sides.
 
-Android permissions include internet and microphone access. iOS includes microphone and speech recognition usage descriptions.
+Android permissions include internet and microphone access.
 
 ## Verification
 
