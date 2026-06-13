@@ -163,6 +163,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _peerPubkeyStorageKey = 'nostr_peer_pubkey';
   static const _relaysStorageKey = 'nostr_relays';
   static const _blossomServerStorageKey = 'blossom_server';
+  static const _ttsLanguageStorageKey = 'tts_language';
+  static const _ttsEngineStorageKey = 'tts_engine';
+  static const _ttsRateStorageKey = 'tts_rate';
+  static const _ttsPitchStorageKey = 'tts_pitch';
+  static const _ttsVolumeStorageKey = 'tts_volume';
   static const _audioContentType = 'audio/wav';
 
   final _secretKeyController = TextEditingController();
@@ -183,6 +188,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _sendingAudio = false;
   bool _autoSpeak = true;
   bool _speaking = false;
+  double _ttsRate = 0.48;
+  double _ttsPitch = 1.0;
+  double _ttsVolume = 1.0;
+  String _ttsLanguage = 'en-US';
+  String? _ttsEngine;
+  List<String> _ttsLanguages = const ['en-US'];
+  List<String> _ttsEngines = const [];
   String? _lastSpokenText;
   String? _ownPubkey;
   String? _status;
@@ -190,8 +202,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   @override
   void initState() {
     super.initState();
-    _loadSettings();
-    unawaited(_configureTts());
+    _configureTtsHandlers();
+    unawaited(_loadSettings());
   }
 
   @override
@@ -214,6 +226,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final peerPubkey = await _storage.read(key: _peerPubkeyStorageKey);
     final relays = await _storage.read(key: _relaysStorageKey);
     final blossomServer = await _storage.read(key: _blossomServerStorageKey);
+    final ttsLanguage = await _storage.read(key: _ttsLanguageStorageKey);
+    final ttsEngine = await _storage.read(key: _ttsEngineStorageKey);
+    final ttsRate = await _storage.read(key: _ttsRateStorageKey);
+    final ttsPitch = await _storage.read(key: _ttsPitchStorageKey);
+    final ttsVolume = await _storage.read(key: _ttsVolumeStorageKey);
 
     if (!mounted) return;
     setState(() {
@@ -221,30 +238,31 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _peerPubkeyController.text = peerPubkey ?? '';
       _relayController.text = relays?.replaceAll(',', '\n') ?? defaultRelays;
       _blossomServerController.text = blossomServer ?? _autoBlossomServer;
+      _ttsLanguage = _cleanStoredString(ttsLanguage) ?? _ttsLanguage;
+      _ttsEngine = _cleanStoredString(ttsEngine);
+      _ttsRate = _storedDouble(ttsRate, _ttsRate, 0.1, 1.0);
+      _ttsPitch = _storedDouble(ttsPitch, _ttsPitch, 0.5, 2.0);
+      _ttsVolume = _storedDouble(ttsVolume, _ttsVolume, 0.0, 1.0);
       _loadingSettings = false;
     });
     _refreshOwnPubkey();
+    await _applyTtsSettings();
+    unawaited(_loadTtsOptions());
   }
 
-  Future<void> _configureTts() async {
-    try {
-      await _tts.setLanguage('en-US');
-      await _tts.setSpeechRate(0.48);
-      _tts.setStartHandler(() {
-        if (mounted) setState(() => _speaking = true);
-      });
-      _tts.setCompletionHandler(() {
-        if (mounted) setState(() => _speaking = false);
-      });
-      _tts.setCancelHandler(() {
-        if (mounted) setState(() => _speaking = false);
-      });
-      _tts.setErrorHandler((_) {
-        if (mounted) setState(() => _speaking = false);
-      });
-    } catch (_) {
-      // Some test and simulator environments do not register a TTS engine.
-    }
+  void _configureTtsHandlers() {
+    _tts.setStartHandler(() {
+      if (mounted) setState(() => _speaking = true);
+    });
+    _tts.setCompletionHandler(() {
+      if (mounted) setState(() => _speaking = false);
+    });
+    _tts.setCancelHandler(() {
+      if (mounted) setState(() => _speaking = false);
+    });
+    _tts.setErrorHandler((_) {
+      if (mounted) setState(() => _speaking = false);
+    });
   }
 
   Future<void> _saveSettings() async {
@@ -264,6 +282,127 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       key: _blossomServerStorageKey,
       value: _blossomServerController.text.trim(),
     );
+    await _saveTtsSettings();
+  }
+
+  Future<void> _saveTtsSettings() async {
+    await _storage.write(key: _ttsLanguageStorageKey, value: _ttsLanguage);
+    await _storage.write(key: _ttsRateStorageKey, value: _ttsRate.toString());
+    await _storage.write(key: _ttsPitchStorageKey, value: _ttsPitch.toString());
+    await _storage.write(
+      key: _ttsVolumeStorageKey,
+      value: _ttsVolume.toString(),
+    );
+
+    final engine = _cleanStoredString(_ttsEngine);
+    if (engine == null) {
+      await _storage.delete(key: _ttsEngineStorageKey);
+    } else {
+      await _storage.write(key: _ttsEngineStorageKey, value: engine);
+    }
+  }
+
+  Future<void> _loadTtsOptions() async {
+    try {
+      final languages = _cleanStringList(await _tts.getLanguages);
+      final engines = Platform.isAndroid
+          ? _cleanStringList(await _tts.getEngines)
+          : <String>[];
+      final defaultEngine = Platform.isAndroid
+          ? _cleanStoredString((await _tts.getDefaultEngine)?.toString())
+          : null;
+
+      if (!mounted) return;
+      setState(() {
+        _ttsLanguages = _withSelected(_ttsLanguage, languages);
+        _ttsEngines = engines;
+        _ttsEngine ??= defaultEngine;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _status = 'TTS options unavailable: $error');
+    }
+  }
+
+  Future<void> _applyTtsSettings() async {
+    try {
+      final engine = _cleanStoredString(_ttsEngine);
+      if (Platform.isAndroid && engine != null) {
+        await _tts.setEngine(engine);
+      }
+      await _tts.setLanguage(_ttsLanguage);
+      await _tts.setSpeechRate(_ttsRate);
+      await _tts.setPitch(_ttsPitch);
+      await _tts.setVolume(_ttsVolume);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _status = 'TTS settings error: $error');
+    }
+  }
+
+  Future<void> _applyAndSaveTtsSettings() async {
+    await _applyTtsSettings();
+    await _saveTtsSettings();
+  }
+
+  void _setTtsLanguage(String language) {
+    setState(() => _ttsLanguage = language);
+    unawaited(_applyAndSaveTtsSettings());
+  }
+
+  void _setTtsEngine(String? engine) {
+    setState(() => _ttsEngine = _cleanStoredString(engine));
+    unawaited(_applyAndSaveTtsSettings().then((_) => _loadTtsOptions()));
+  }
+
+  void _setTtsRate(double value) {
+    setState(() => _ttsRate = value);
+  }
+
+  void _setTtsPitch(double value) {
+    setState(() => _ttsPitch = value);
+  }
+
+  void _setTtsVolume(double value) {
+    setState(() => _ttsVolume = value);
+  }
+
+  void _commitTtsSettings(double _) {
+    unawaited(_applyAndSaveTtsSettings());
+  }
+
+  Future<void> _testTtsSettings() async {
+    await _speak('Text to speech test. Rate, pitch, and volume are active.');
+  }
+
+  String? _cleanStoredString(String? value) {
+    final cleaned = value?.trim();
+    if (cleaned == null || cleaned.isEmpty) return null;
+    return cleaned;
+  }
+
+  double _storedDouble(String? raw, double fallback, double min, double max) {
+    final parsed = double.tryParse(raw ?? '');
+    if (parsed == null) return fallback;
+    return parsed.clamp(min, max).toDouble();
+  }
+
+  List<String> _cleanStringList(dynamic raw) {
+    final values = raw is Iterable ? raw : const [];
+    final cleaned =
+        values
+            .map((value) => value.toString().trim())
+            .where((value) => value.isNotEmpty)
+            .toSet()
+            .toList()
+          ..sort();
+    return cleaned;
+  }
+
+  List<String> _withSelected(String selected, List<String> values) {
+    final next = values.toSet()..add(selected);
+    final sorted = next.toList()..sort();
+    return sorted;
   }
 
   Future<void> _generateKey() async {
@@ -708,6 +847,23 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               onReplay: _replayLastSpoken,
               onAutoSpeakChanged: (value) => setState(() => _autoSpeak = value),
             ),
+            const SizedBox(height: 12),
+            _SpeechSettingsPanel(
+              language: _ttsLanguage,
+              languages: _ttsLanguages,
+              engine: _ttsEngine,
+              engines: _ttsEngines,
+              rate: _ttsRate,
+              pitch: _ttsPitch,
+              volume: _ttsVolume,
+              onLanguageChanged: _setTtsLanguage,
+              onEngineChanged: _setTtsEngine,
+              onRateChanged: _setTtsRate,
+              onPitchChanged: _setTtsPitch,
+              onVolumeChanged: _setTtsVolume,
+              onSliderChangeEnd: _commitTtsSettings,
+              onTest: _testTtsSettings,
+            ),
             const SizedBox(height: 16),
             _Composer(
               controller: _queryController,
@@ -938,6 +1094,185 @@ class _PlaybackControls extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _SpeechSettingsPanel extends StatelessWidget {
+  const _SpeechSettingsPanel({
+    required this.language,
+    required this.languages,
+    required this.engine,
+    required this.engines,
+    required this.rate,
+    required this.pitch,
+    required this.volume,
+    required this.onLanguageChanged,
+    required this.onEngineChanged,
+    required this.onRateChanged,
+    required this.onPitchChanged,
+    required this.onVolumeChanged,
+    required this.onSliderChangeEnd,
+    required this.onTest,
+  });
+
+  final String language;
+  final List<String> languages;
+  final String? engine;
+  final List<String> engines;
+  final double rate;
+  final double pitch;
+  final double volume;
+  final ValueChanged<String> onLanguageChanged;
+  final ValueChanged<String?> onEngineChanged;
+  final ValueChanged<double> onRateChanged;
+  final ValueChanged<double> onPitchChanged;
+  final ValueChanged<double> onVolumeChanged;
+  final ValueChanged<double> onSliderChangeEnd;
+  final VoidCallback onTest;
+
+  @override
+  Widget build(BuildContext context) {
+    final languageItems = (languages.toSet()..add(language)).toList()..sort();
+    final engineValue = engine != null && engines.contains(engine)
+        ? engine!
+        : '';
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Voice',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: onTest,
+                  icon: const Icon(Icons.record_voice_over),
+                  label: const Text('Test'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              initialValue: languageItems.contains(language)
+                  ? language
+                  : languageItems.first,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Language',
+              ),
+              items: [
+                for (final item in languageItems)
+                  DropdownMenuItem(value: item, child: Text(item)),
+              ],
+              onChanged: (value) {
+                if (value != null) onLanguageChanged(value);
+              },
+            ),
+            if (engines.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: engineValue,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: 'Engine',
+                ),
+                items: [
+                  const DropdownMenuItem(
+                    value: '',
+                    child: Text('System default'),
+                  ),
+                  for (final item in engines)
+                    DropdownMenuItem(value: item, child: Text(item)),
+                ],
+                onChanged: (value) => onEngineChanged(
+                  value == null || value.isEmpty ? null : value,
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            _SpeechSlider(
+              label: 'Rate',
+              value: rate,
+              min: 0.1,
+              max: 1.0,
+              divisions: 18,
+              onChanged: onRateChanged,
+              onChangeEnd: onSliderChangeEnd,
+            ),
+            _SpeechSlider(
+              label: 'Pitch',
+              value: pitch,
+              min: 0.5,
+              max: 2.0,
+              divisions: 30,
+              onChanged: onPitchChanged,
+              onChangeEnd: onSliderChangeEnd,
+            ),
+            _SpeechSlider(
+              label: 'Volume',
+              value: volume,
+              min: 0.0,
+              max: 1.0,
+              divisions: 20,
+              onChanged: onVolumeChanged,
+              onChangeEnd: onSliderChangeEnd,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SpeechSlider extends StatelessWidget {
+  const _SpeechSlider({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.divisions,
+    required this.onChanged,
+    required this.onChangeEnd,
+  });
+
+  final String label;
+  final double value;
+  final double min;
+  final double max;
+  final int divisions;
+  final ValueChanged<double> onChanged;
+  final ValueChanged<double> onChangeEnd;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Row(
+          children: [
+            Expanded(child: Text(label)),
+            Text(value.toStringAsFixed(2)),
+          ],
+        ),
+        Slider(
+          value: value.clamp(min, max).toDouble(),
+          min: min,
+          max: max,
+          divisions: divisions,
+          label: value.toStringAsFixed(2),
+          onChanged: onChanged,
+          onChangeEnd: onChangeEnd,
+        ),
+      ],
     );
   }
 }
