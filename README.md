@@ -113,17 +113,17 @@ Optional audio transcription configuration:
 export TRANSCRIBE_BIN='/home/tom/.local/bin/whisper-cpp'
 export TRANSCRIBE_ARGS='-m /path/to/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/transcript -nt'
 export TRANSCRIBE_TIMEOUT_SECS=300
-export FFMPEG_BIN='ffmpeg'
+export FFMPEG_BIN='ffmpeg' # optional fallback for unsupported compressed audio
 export AUDIO_TRANSCODE_TIMEOUT_SECS=60
 export AUDIO_MAX_BYTES=52428800
 ```
 
 `{audio}` is replaced with the verified downloaded audio file path and
 `{output_dir}` is replaced with a temporary transcript directory. Compressed
-phone audio is transcoded to 16 kHz mono WAV with `ffmpeg` before invoking
-Whisper; install `ffmpeg` or set `FFMPEG_BIN` if using AAC/M4A uploads. If
-`TRANSCRIBE_ARGS` is not set, the server defaults to the Python `whisper` CLI
-style arguments.
+phone audio is decoded to 16 kHz mono WAV in-process with pure Rust
+Symphonia/Hound before invoking Whisper. `ffmpeg` is only used as an optional
+fallback if the Rust decoder cannot handle a compressed file. If `TRANSCRIBE_ARGS`
+is not set, the server defaults to the Python `whisper` CLI style arguments.
 
 Run:
 

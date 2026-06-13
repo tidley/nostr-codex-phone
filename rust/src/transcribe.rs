@@ -1,10 +1,21 @@
 use std::env;
+use std::fs::File;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use hound::{SampleFormat, WavSpec, WavWriter};
 use reqwest::Client;
+use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+use symphonia::default::{get_codecs, get_probe};
 use tempfile::TempDir;
 use tokio::process::Command;
 
@@ -227,7 +238,13 @@ async fn prepare_audio_for_transcription(
 
     let temp_dir = tempfile::tempdir().context("failed to create transcode temp directory")?;
     let wav_path = temp_dir.path().join("audio.wav");
-    transcode_to_wav(audio_path, &wav_path, config).await?;
+    if let Err(rust_err) = transcode_to_wav_with_rust(audio_path, &wav_path) {
+        transcode_to_wav_with_ffmpeg(audio_path, &wav_path, config)
+            .await
+            .with_context(|| {
+                format!("pure-Rust audio transcode failed: {rust_err:#}; ffmpeg fallback failed")
+            })?;
+    }
 
     Ok(PreparedAudio {
         _temp_dir: Some(temp_dir),
@@ -235,7 +252,149 @@ async fn prepare_audio_for_transcription(
     })
 }
 
-async fn transcode_to_wav(input: &Path, output: &Path, config: &TranscribeConfig) -> Result<()> {
+fn transcode_to_wav_with_rust(input: &Path, output: &Path) -> Result<()> {
+    let source = File::open(input)
+        .with_context(|| format!("failed to open compressed audio `{}`", input.display()))?;
+    let media_source = MediaSourceStream::new(Box::new(source), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = input.extension().and_then(|extension| extension.to_str()) {
+        hint.with_extension(extension);
+    }
+
+    let probed = get_probe()
+        .format(
+            &hint,
+            media_source,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .context("failed to probe compressed audio container")?;
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .or_else(|| {
+            format
+                .tracks()
+                .iter()
+                .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        })
+        .ok_or_else(|| anyhow!("compressed audio contains no supported audio track"))?;
+    let track_id = track.id;
+    let codec_params = track.codec_params.clone();
+    let mut decoder = get_codecs()
+        .make(&codec_params, &DecoderOptions::default())
+        .context("failed to create compressed audio decoder")?;
+
+    let mut mono_samples = Vec::<f32>::new();
+    let mut sample_rate = codec_params.sample_rate.unwrap_or(0);
+
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) => packet,
+            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
+            Err(err) => return Err(anyhow!("failed to read compressed audio packet: {err}")),
+        };
+
+        if packet.track_id() != track_id {
+            continue;
+        }
+
+        let decoded = match decoder.decode(&packet) {
+            Ok(decoded) => decoded,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(SymphoniaError::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
+            Err(err) => return Err(anyhow!("failed to decode compressed audio packet: {err}")),
+        };
+        append_decoded_mono_samples(decoded, &mut mono_samples, &mut sample_rate)?;
+    }
+
+    if mono_samples.is_empty() {
+        return Err(anyhow!("compressed audio decoded to no samples"));
+    }
+    if sample_rate == 0 {
+        return Err(anyhow!("compressed audio sample rate is unknown"));
+    }
+
+    let resampled = resample_linear_mono(&mono_samples, sample_rate, 16_000);
+    write_mono_wav(output, 16_000, &resampled)?;
+    Ok(())
+}
+
+fn append_decoded_mono_samples(
+    decoded: AudioBufferRef<'_>,
+    mono_samples: &mut Vec<f32>,
+    sample_rate: &mut u32,
+) -> Result<()> {
+    let spec = *decoded.spec();
+    if *sample_rate == 0 {
+        *sample_rate = spec.rate;
+    }
+
+    let channels = spec.channels.count();
+    if channels == 0 {
+        return Err(anyhow!("decoded audio packet has no channels"));
+    }
+
+    let mut sample_buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
+    sample_buffer.copy_interleaved_ref(decoded);
+    for frame in sample_buffer.samples().chunks(channels) {
+        let mono = frame.iter().copied().sum::<f32>() / frame.len().max(1) as f32;
+        mono_samples.push(mono);
+    }
+
+    Ok(())
+}
+
+fn resample_linear_mono(samples: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32> {
+    if samples.is_empty() || input_rate == output_rate {
+        return samples.to_vec();
+    }
+
+    let output_len = ((samples.len() as u64 * output_rate as u64) / input_rate as u64)
+        .max(1)
+        .min(usize::MAX as u64) as usize;
+    let step = input_rate as f64 / output_rate as f64;
+    let mut output = Vec::with_capacity(output_len);
+
+    for output_index in 0..output_len {
+        let position = output_index as f64 * step;
+        let base = position.floor() as usize;
+        let next = (base + 1).min(samples.len() - 1);
+        let fraction = (position - base as f64) as f32;
+        output.push(samples[base] + (samples[next] - samples[base]) * fraction);
+    }
+
+    output
+}
+
+fn write_mono_wav(path: &Path, sample_rate: u32, samples: &[f32]) -> Result<()> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    let mut writer = WavWriter::create(path, spec)
+        .with_context(|| format!("failed to create WAV `{}`", path.display()))?;
+    for sample in samples {
+        writer
+            .write_sample(f32_to_i16(*sample))
+            .context("failed to write WAV sample")?;
+    }
+    writer.finalize().context("failed to finalize WAV")?;
+    Ok(())
+}
+
+fn f32_to_i16(sample: f32) -> i16 {
+    let clamped = sample.clamp(-1.0, 1.0);
+    (clamped * i16::MAX as f32).round() as i16
+}
+
+async fn transcode_to_wav_with_ffmpeg(
+    input: &Path,
+    output: &Path,
+    config: &TranscribeConfig,
+) -> Result<()> {
     let mut command = Command::new(&config.ffmpeg_bin);
     command
         .arg("-y")
@@ -266,7 +425,7 @@ async fn transcode_to_wav(input: &Path, output: &Path, config: &TranscribeConfig
         })?
         .with_context(|| {
             format!(
-                "failed to run `{}`; install ffmpeg or set FFMPEG_BIN for compressed audio",
+                "failed to run `{}`; install ffmpeg or set FFMPEG_BIN for unsupported compressed audio fallback",
                 config.ffmpeg_bin
             )
         })?;
@@ -351,5 +510,61 @@ mod tests {
         assert!(is_wav_path(Path::new("voice.wav")));
         assert!(is_wav_path(Path::new("voice.WAV")));
         assert!(!is_wav_path(Path::new("voice.m4a")));
+    }
+
+    #[test]
+    fn resamples_mono_audio_to_target_rate() {
+        let input = vec![0.0, 1.0, 0.0, -1.0];
+        let output = resample_linear_mono(&input, 4, 2);
+
+        assert_eq!(output.len(), 2);
+        assert_eq!(output, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn clamps_f32_samples_to_i16() {
+        assert_eq!(f32_to_i16(2.0), i16::MAX);
+        assert_eq!(f32_to_i16(-2.0), -i16::MAX);
+        assert_eq!(f32_to_i16(0.0), 0);
+    }
+
+    #[test]
+    fn pure_rust_transcodes_generated_m4a_when_ffmpeg_is_available() {
+        let ffmpeg = std::env::var("FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
+        if std::process::Command::new(&ffmpeg)
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let input = temp_dir.path().join("test.m4a");
+        let output = temp_dir.path().join("test.wav");
+        let status = std::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=1",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&input)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        transcode_to_wav_with_rust(&input, &output).unwrap();
+        assert!(is_wav_path(&output));
+        assert!(std::fs::metadata(output).unwrap().len() > 44);
     }
 }
