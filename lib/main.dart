@@ -52,7 +52,7 @@ class _BlossomPreset {
   final String note;
 }
 
-enum _VoiceFormat { m4a, wav }
+enum _VoiceFormat { opus, wav }
 
 class _VoiceRecordingFormat {
   const _VoiceRecordingFormat({
@@ -70,12 +70,12 @@ class _VoiceRecordingFormat {
   final int bitRate;
 }
 
-const _m4aVoiceFormat = _VoiceRecordingFormat(
-  format: _VoiceFormat.m4a,
-  extension: 'm4a',
-  contentType: 'audio/mp4',
-  encoder: AudioEncoder.aacLc,
-  bitRate: 48000,
+const _opusVoiceFormat = _VoiceRecordingFormat(
+  format: _VoiceFormat.opus,
+  extension: 'ogg',
+  contentType: 'audio/ogg',
+  encoder: AudioEncoder.opus,
+  bitRate: 32000,
 );
 
 const _wavVoiceFormat = _VoiceRecordingFormat(
@@ -687,7 +687,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       final timestamp = DateTime.now().millisecondsSinceEpoch;
       final recordingFormat = _wavRetryRequested
           ? _wavVoiceFormat
-          : _m4aVoiceFormat;
+          : _opusVoiceFormat;
       path =
           '${directory.path}/nostr_codex_voice_$timestamp.${recordingFormat.extension}';
       await _recorder.start(
@@ -725,7 +725,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   Future<void> _stopAndSendRecording() async {
     final fallbackPath = _recordingPath;
-    final recordingFormat = _activeRecordingFormat ?? _m4aVoiceFormat;
+    final recordingFormat = _activeRecordingFormat ?? _opusVoiceFormat;
     String? path;
     try {
       path = await _recorder.stop();
