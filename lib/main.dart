@@ -168,7 +168,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _ttsRateStorageKey = 'tts_rate';
   static const _ttsPitchStorageKey = 'tts_pitch';
   static const _ttsVolumeStorageKey = 'tts_volume';
-  static const _audioContentType = 'audio/wav';
+  static const _audioContentType = 'audio/mp4';
 
   final _secretKeyController = TextEditingController();
   final _peerPubkeyController = TextEditingController();
@@ -643,11 +643,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       await _saveSettings();
       final directory = await getTemporaryDirectory();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      path = '${directory.path}/nostr_codex_voice_$timestamp.wav';
+      path = '${directory.path}/nostr_codex_voice_$timestamp.m4a';
       await _recorder.start(
         const RecordConfig(
-          encoder: AudioEncoder.wav,
-          bitRate: 64000,
+          encoder: AudioEncoder.aacLc,
+          bitRate: 48000,
           sampleRate: 16000,
           numChannels: 1,
           autoGain: true,

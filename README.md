@@ -13,18 +13,18 @@ Both peers send NIP-17/NIP-59 GiftWrapped private direct messages whose decrypte
 ```json
 {
   "audio": {
-    "url": "https://blossom.example/sha256.wav",
+    "url": "https://blossom.example/sha256.m4a",
     "sha256": "ciphertext-sha256-hex",
     "size": 12345,
-    "type": "audio/wav",
-    "name": "voice.wav",
+    "type": "audio/mp4",
+    "name": "voice.m4a",
     "encryption": {
       "algorithm": "xchacha20poly1305",
       "key": "base64url-32-byte-key",
       "nonce": "base64url-24-byte-nonce",
       "plaintext_sha256": "plaintext-sha256-hex",
       "plaintext_size": 12329,
-      "plaintext_type": "audio/wav"
+      "plaintext_type": "audio/mp4"
     }
   }
 }
@@ -113,11 +113,15 @@ Optional audio transcription configuration:
 export TRANSCRIBE_BIN='/home/tom/.local/bin/whisper-cpp'
 export TRANSCRIBE_ARGS='-m /path/to/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/transcript -nt'
 export TRANSCRIBE_TIMEOUT_SECS=300
+export FFMPEG_BIN='ffmpeg'
+export AUDIO_TRANSCODE_TIMEOUT_SECS=60
 export AUDIO_MAX_BYTES=52428800
 ```
 
 `{audio}` is replaced with the verified downloaded audio file path and
-`{output_dir}` is replaced with a temporary transcript directory. If
+`{output_dir}` is replaced with a temporary transcript directory. Compressed
+phone audio is transcoded to 16 kHz mono WAV with `ffmpeg` before invoking
+Whisper; install `ffmpeg` or set `FFMPEG_BIN` if using AAC/M4A uploads. If
 `TRANSCRIBE_ARGS` is not set, the server defaults to the Python `whisper` CLI
 style arguments.
 
@@ -144,7 +148,7 @@ instead of the server crashing.
 ## Mobile
 
 The Flutter app stores the local `nsec`, peer pubkey, relay list, and Blossom
-selection in `flutter_secure_storage`. The mic button records a WAV file,
+selection in `flutter_secure_storage`. The mic button records an AAC-LC M4A file,
 encrypts it locally, uploads the ciphertext with a Nostr-signed BUD-11
 authorization token, and sends the returned URL/hash plus decryption metadata
 over an encrypted Nostr DM. While recording, the stop button sends the voice
