@@ -22,6 +22,8 @@ pub struct TranscribeConfig {
     pub bin: String,
     pub args: Vec<String>,
     pub timeout: Duration,
+    pub ffmpeg_bin: String,
+    pub transcode_timeout: Duration,
 }
 
 pub struct DownloadedAudio {
@@ -59,11 +61,18 @@ impl TranscribeConfig {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(180);
+        let ffmpeg_bin = env::var("FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
+        let transcode_timeout_secs = env::var("AUDIO_TRANSCODE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60);
 
         Ok(Self {
             bin,
             args,
             timeout: Duration::from_secs(timeout_secs),
+            ffmpeg_bin,
+            transcode_timeout: Duration::from_secs(transcode_timeout_secs),
         })
     }
 }
@@ -141,8 +150,9 @@ pub async fn download_blossom_audio(
 }
 
 pub async fn transcribe_audio(audio_path: &Path, config: &TranscribeConfig) -> Result<String> {
+    let prepared_audio = prepare_audio_for_transcription(audio_path, config).await?;
     let output_dir = tempfile::tempdir().context("failed to create transcript temp directory")?;
-    let audio_arg = audio_path.to_string_lossy().to_string();
+    let audio_arg = prepared_audio.path.to_string_lossy().to_string();
     let output_dir_arg = output_dir.path().to_string_lossy().to_string();
     let args = config
         .args
@@ -199,6 +209,95 @@ pub async fn transcribe_audio(audio_path: &Path, config: &TranscribeConfig) -> R
     Ok(transcript)
 }
 
+struct PreparedAudio {
+    _temp_dir: Option<TempDir>,
+    path: PathBuf,
+}
+
+async fn prepare_audio_for_transcription(
+    audio_path: &Path,
+    config: &TranscribeConfig,
+) -> Result<PreparedAudio> {
+    if is_wav_path(audio_path) {
+        return Ok(PreparedAudio {
+            _temp_dir: None,
+            path: audio_path.to_path_buf(),
+        });
+    }
+
+    let temp_dir = tempfile::tempdir().context("failed to create transcode temp directory")?;
+    let wav_path = temp_dir.path().join("audio.wav");
+    transcode_to_wav(audio_path, &wav_path, config).await?;
+
+    Ok(PreparedAudio {
+        _temp_dir: Some(temp_dir),
+        path: wav_path,
+    })
+}
+
+async fn transcode_to_wav(input: &Path, output: &Path, config: &TranscribeConfig) -> Result<()> {
+    let mut command = Command::new(&config.ffmpeg_bin);
+    command
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(input)
+        .arg("-ac")
+        .arg("1")
+        .arg("-ar")
+        .arg("16000")
+        .arg("-c:a")
+        .arg("pcm_s16le")
+        .arg(output)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let output_result = tokio::time::timeout(config.transcode_timeout, command.output())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "audio transcode timed out after {}s",
+                config.transcode_timeout.as_secs()
+            )
+        })?
+        .with_context(|| {
+            format!(
+                "failed to run `{}`; install ffmpeg or set FFMPEG_BIN for compressed audio",
+                config.ffmpeg_bin
+            )
+        })?;
+
+    let stderr = String::from_utf8_lossy(&output_result.stderr)
+        .trim()
+        .to_string();
+    if !output_result.status.success() {
+        if stderr.is_empty() {
+            return Err(anyhow!(
+                "audio transcode exited with status {}",
+                output_result.status
+            ));
+        }
+        return Err(anyhow!(
+            "audio transcode exited with status {}: {}",
+            output_result.status,
+            stderr
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_wav_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.eq_ignore_ascii_case("wav"))
+        .unwrap_or(false)
+}
+
 fn audio_extension(audio: &AudioReference) -> String {
     let media_type = audio
         .encryption
@@ -241,4 +340,16 @@ async fn read_transcript_file(output_dir: &Path) -> Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_wav_paths_case_insensitively() {
+        assert!(is_wav_path(Path::new("voice.wav")));
+        assert!(is_wav_path(Path::new("voice.WAV")));
+        assert!(!is_wav_path(Path::new("voice.m4a")));
+    }
 }
