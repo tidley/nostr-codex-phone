@@ -13,18 +13,18 @@ Both peers send NIP-17/NIP-59 GiftWrapped private direct messages whose decrypte
 ```json
 {
   "audio": {
-    "url": "https://blossom.example/sha256.m4a",
+    "url": "https://blossom.example/sha256.ogg",
     "sha256": "ciphertext-sha256-hex",
     "size": 12345,
-    "type": "audio/mp4",
-    "name": "voice.m4a",
+    "type": "audio/ogg",
+    "name": "voice.ogg",
     "encryption": {
       "algorithm": "xchacha20poly1305",
       "key": "base64url-32-byte-key",
       "nonce": "base64url-24-byte-nonce",
       "plaintext_sha256": "plaintext-sha256-hex",
       "plaintext_size": 12329,
-      "plaintext_type": "audio/mp4"
+      "plaintext_type": "audio/ogg"
     }
   }
 }
@@ -63,6 +63,11 @@ the transcript like a text query. If compressed audio cannot be decoded or
 transcribed after all server-side fallbacks, the server sends `audio_retry` and
 the phone records the next voice note as WAV.
 
+GrapheneOS/Android local speech-to-text is not required and is not the primary
+path. The phone records push-to-talk audio, encrypts it, uploads it to Blossom,
+and lets the server run Whisper. Android-local STT can be added later as an
+optional fast path, but server-side STT is the reliable default.
+
 ## Server
 
 The server listens for `{ "query": "..." }` and `{ "audio": { ... } }`, runs
@@ -93,10 +98,18 @@ Optional Codex configuration:
 
 ```bash
 export CODEX_BIN='/home/tom/.nvm/versions/node/v24.12.0/bin/codex'
-export CODEX_ARGS='--ask-for-approval never --sandbox read-only exec --ephemeral --skip-git-repo-check'
+export CODEX_ARGS='--ask-for-approval never --sandbox read-only -c model_reasoning_effort=medium exec --skip-git-repo-check'
 export CODEX_WORKDIR="$PWD"
 export CODEX_TIMEOUT_SECS=180
+export CODEX_PERSIST_SESSIONS=1
 ```
+
+For user turns, the server uses `codex exec --json` and stores the returned
+Codex `thread_id` in SQLite per phone peer and workdir. Follow-up turns resume
+that session with `codex exec resume <thread_id>` instead of rebuilding the full
+prompt every time. If a stored session cannot be resumed, it is cleared and the
+turn is retried once as a fresh session. Existing `--ephemeral` entries in
+`CODEX_ARGS` are stripped for session-backed user turns.
 
 Optional SQLite memory configuration:
 
@@ -110,9 +123,11 @@ export CODEX_MEMORY_COMPACTION_MAX_CHARS=12000
 ```
 
 Memory is enabled by default. The server stores per-peer message history in
-SQLite, injects only a compact summary plus bounded recent turns into each Codex
-prompt, and periodically compacts older turns into a summary. The database
-contains decrypted queries, transcripts, and responses, so keep it local; the
+SQLite, stores the Codex session id per peer/workdir, caches transcripts by
+audio hash, adds lightweight topic metadata, and injects selectively retrieved
+memory only when a fresh Codex session needs fallback context. It periodically
+compacts older turns into a summary in the background. The database contains
+decrypted queries, transcripts, responses, and session ids, so keep it local; the
 default hidden database path is gitignored.
 
 Send `/memory` or `/summary` from the phone to inspect the current compact
@@ -132,10 +147,10 @@ export AUDIO_MAX_BYTES=52428800
 
 `{audio}` is replaced with the verified downloaded audio file path and
 `{output_dir}` is replaced with a temporary transcript directory. Compressed
-phone audio is decoded to 16 kHz mono WAV in-process with pure Rust
-Symphonia/Hound before invoking Whisper. `ffmpeg` is only used as an optional
-fallback if the Rust decoder cannot handle a compressed file. If `TRANSCRIBE_ARGS`
-is not set, the server defaults to the Python `whisper` CLI style arguments.
+phone audio is prepared as 16 kHz mono WAV before invoking Whisper. AAC/M4A is
+decoded in-process with pure Rust Symphonia/Hound; Opus/Ogg uses the optional
+`ffmpeg` fallback when the Rust decoder cannot handle it. If `TRANSCRIBE_ARGS` is
+not set, the server defaults to the Python `whisper` CLI style arguments.
 
 Run:
 
@@ -160,11 +175,11 @@ instead of the server crashing.
 ## Mobile
 
 The Flutter app stores the local `nsec`, peer pubkey, relay list, and Blossom
-selection in `flutter_secure_storage`. The mic button records an AAC-LC M4A file
+selection in `flutter_secure_storage`. The mic button records an Opus/Ogg file
 by default, encrypts it locally, uploads the ciphertext with a Nostr-signed
 BUD-11 authorization token, and sends the returned URL/hash plus decryption
 metadata over an encrypted Nostr DM. If the server sends `audio_retry`, the next
-recording is sent as WAV and then the app returns to M4A. While recording, the
+recording is sent as WAV and then the app returns to Opus/Ogg. While recording, the
 stop button sends the voice note and the cancel button discards it locally
 without uploading.
 Returned transcripts are styled as user-side speech bubbles next to the audio
@@ -197,6 +212,14 @@ For a more Nostr-native media setup, clients can also publish and read
 `kind:10063` Blossom server lists. This app keeps a curated fallback list for
 voice-note uploads so a missing or failing default server does not block the
 query path.
+
+The server handles local/no-heavy-Codex requests directly, including `/summary`,
+`/memory`, `/forget`, `repeat last`, `status`, and `what repo am I in?`. It also
+routes obvious no-op filler such as "thanks" without invoking Codex.
+
+Incoming Nostr DMs are dispatched to per-peer worker queues. The relay listener
+keeps receiving while Whisper/Codex work runs, and each peer's messages are still
+processed in order.
 
 Run:
 
