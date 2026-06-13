@@ -39,6 +39,15 @@ Both peers send NIP-17/NIP-59 GiftWrapped private direct messages whose decrypte
 ```
 
 ```json
+{
+  "audio_retry": {
+    "format": "wav",
+    "reason": "Compressed voice audio could not be decoded or transcribed. Please retry; the phone will send the next recording as WAV."
+  }
+}
+```
+
+```json
 { "error": "text" }
 ```
 
@@ -50,13 +59,16 @@ audio payload with XChaCha20-Poly1305 before upload. The Blossom `sha256` and
 inside the encrypted Nostr DM only. The server downloads the URL, verifies the
 ciphertext hash, decrypts and verifies the plaintext hash, transcribes the audio
 locally, sends the transcript back as a non-spoken `transcript` DM, then treats
-the transcript like a text query.
+the transcript like a text query. If compressed audio cannot be decoded or
+transcribed after all server-side fallbacks, the server sends `audio_retry` and
+the phone records the next voice note as WAV.
 
 ## Server
 
 The server listens for `{ "query": "..." }` and `{ "audio": { ... } }`, runs
 Codex non-interactively, and replies with `{ "response": "..." }` or
-`{ "error": "..." }`.
+`{ "error": "..." }`. For compressed audio transcription failures, it can also
+reply with `{ "audio_retry": { "format": "wav", "reason": "..." } }`.
 
 Both server and mobile dedupe incoming GiftWrapped DMs by event ID so the same
 event delivered by multiple relays is only processed once per session.
@@ -148,11 +160,13 @@ instead of the server crashing.
 ## Mobile
 
 The Flutter app stores the local `nsec`, peer pubkey, relay list, and Blossom
-selection in `flutter_secure_storage`. The mic button records an AAC-LC M4A file,
-encrypts it locally, uploads the ciphertext with a Nostr-signed BUD-11
-authorization token, and sends the returned URL/hash plus decryption metadata
-over an encrypted Nostr DM. While recording, the stop button sends the voice
-note and the cancel button discards it locally without uploading.
+selection in `flutter_secure_storage`. The mic button records an AAC-LC M4A file
+by default, encrypts it locally, uploads the ciphertext with a Nostr-signed
+BUD-11 authorization token, and sends the returned URL/hash plus decryption
+metadata over an encrypted Nostr DM. If the server sends `audio_retry`, the next
+recording is sent as WAV and then the app returns to M4A. While recording, the
+stop button sends the voice note and the cancel button discards it locally
+without uploading.
 Returned transcripts are styled as user-side speech bubbles next to the audio
 message, while Codex responses remain visually distinct.
 

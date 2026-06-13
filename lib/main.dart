@@ -52,6 +52,40 @@ class _BlossomPreset {
   final String note;
 }
 
+enum _VoiceFormat { m4a, wav }
+
+class _VoiceRecordingFormat {
+  const _VoiceRecordingFormat({
+    required this.format,
+    required this.extension,
+    required this.contentType,
+    required this.encoder,
+    required this.bitRate,
+  });
+
+  final _VoiceFormat format;
+  final String extension;
+  final String contentType;
+  final AudioEncoder encoder;
+  final int bitRate;
+}
+
+const _m4aVoiceFormat = _VoiceRecordingFormat(
+  format: _VoiceFormat.m4a,
+  extension: 'm4a',
+  contentType: 'audio/mp4',
+  encoder: AudioEncoder.aacLc,
+  bitRate: 48000,
+);
+
+const _wavVoiceFormat = _VoiceRecordingFormat(
+  format: _VoiceFormat.wav,
+  extension: 'wav',
+  contentType: 'audio/wav',
+  encoder: AudioEncoder.wav,
+  bitRate: 256000,
+);
+
 String cleanTextForSpeech(String text) {
   var cleaned = text.replaceAll('\r\n', '\n');
 
@@ -168,7 +202,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _ttsRateStorageKey = 'tts_rate';
   static const _ttsPitchStorageKey = 'tts_pitch';
   static const _ttsVolumeStorageKey = 'tts_volume';
-  static const _audioContentType = 'audio/mp4';
 
   final _secretKeyController = TextEditingController();
   final _peerPubkeyController = TextEditingController();
@@ -191,6 +224,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _speaking = false;
   bool _connectionExpanded = true;
   bool _speechExpanded = false;
+  bool _wavRetryRequested = false;
   double _ttsRate = 0.48;
   double _ttsPitch = 1.0;
   double _ttsVolume = 1.0;
@@ -200,6 +234,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   List<String> _ttsEngines = const [];
   String? _lastSpokenText;
   String? _recordingPath;
+  _VoiceRecordingFormat? _activeRecordingFormat;
   String? _ownPubkey;
   String? _status;
 
@@ -531,13 +566,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       eventId: message.eventId,
       timestamp: DateTime.now(),
     );
+    final audioRetryRequested = message.kind == 'audio_retry';
     setState(() {
       _messages.insert(0, conversationMessage);
-      _status = 'Received ${message.kind}';
+      if (audioRetryRequested) {
+        _wavRetryRequested = true;
+        _status = 'Server requested WAV retry';
+      } else {
+        _status = 'Received ${message.kind}';
+      }
     });
 
     if (_autoSpeak &&
         (message.kind == 'response' ||
+            message.kind == 'audio_retry' ||
             message.kind == 'error' ||
             message.kind == 'invalid')) {
       unawaited(_speak(message.text, remember: true));
@@ -643,11 +685,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       await _saveSettings();
       final directory = await getTemporaryDirectory();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      path = '${directory.path}/nostr_codex_voice_$timestamp.m4a';
+      final recordingFormat = _wavRetryRequested
+          ? _wavVoiceFormat
+          : _m4aVoiceFormat;
+      path =
+          '${directory.path}/nostr_codex_voice_$timestamp.${recordingFormat.extension}';
       await _recorder.start(
-        const RecordConfig(
-          encoder: AudioEncoder.aacLc,
-          bitRate: 48000,
+        RecordConfig(
+          encoder: recordingFormat.encoder,
+          bitRate: recordingFormat.bitRate,
           sampleRate: 16000,
           numChannels: 1,
           autoGain: true,
@@ -660,7 +706,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       setState(() {
         _recording = true;
         _recordingPath = path;
-        _status = 'Recording voice query...';
+        _activeRecordingFormat = recordingFormat;
+        _status = recordingFormat.format == _VoiceFormat.wav
+            ? 'Recording WAV retry...'
+            : 'Recording voice query...';
       });
     } catch (error) {
       if (path != null) unawaited(_deleteTempAudio(path));
@@ -668,6 +717,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       setState(() {
         _recording = false;
         _recordingPath = null;
+        _activeRecordingFormat = null;
       });
       _showError('Recording failed: $error');
     }
@@ -675,6 +725,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   Future<void> _stopAndSendRecording() async {
     final fallbackPath = _recordingPath;
+    final recordingFormat = _activeRecordingFormat ?? _m4aVoiceFormat;
     String? path;
     try {
       path = await _recorder.stop();
@@ -684,6 +735,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         setState(() {
           _recording = false;
           _recordingPath = null;
+          _activeRecordingFormat = null;
         });
         _showError('Stop recording failed: $error');
       }
@@ -694,6 +746,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _recording = false;
       _recordingPath = null;
+      _activeRecordingFormat = null;
       _sendingAudio = true;
       _status = 'Uploading voice note to Blossom...';
     });
@@ -706,7 +759,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     try {
       final fileName = path.split(Platform.pathSeparator).last;
-      final audio = await _uploadAudioToBlossom(path, fileName);
+      final audio = await _uploadAudioToBlossom(
+        path,
+        fileName,
+        recordingFormat.contentType,
+      );
 
       if (!mounted) return;
       setState(() => _status = 'Sending Blossom audio reference...');
@@ -714,6 +771,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       final eventId = await nostrSendAudio(audio: audio);
       if (!mounted) return;
       setState(() {
+        if (recordingFormat.format == _VoiceFormat.wav) {
+          _wavRetryRequested = false;
+        }
         _messages.insert(
           0,
           ConversationMessage(
@@ -757,6 +817,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _recording = false;
       _recordingPath = null;
+      _activeRecordingFormat = null;
       _status = stopError == null
           ? 'Recording cancelled'
           : 'Cancel recording failed: $stopError';
@@ -784,6 +845,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   Future<BridgeAudioReference> _uploadAudioToBlossom(
     String path,
     String fileName,
+    String contentType,
   ) async {
     final servers = _selectedBlossomServers();
     Object? lastError;
@@ -801,7 +863,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             secretKey: _secretKeyController.text.trim(),
             serverUrl: server,
             filePath: path,
-            contentType: _audioContentType,
+            contentType: contentType,
             fileName: fileName,
           ),
         );
@@ -949,6 +1011,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               sending: _sending,
               sendingAudio: _sendingAudio,
               recording: _recording,
+              wavRetryRequested: _wavRetryRequested,
               onMicPressed: _toggleRecording,
               onCancelRecording: _cancelRecording,
               onSendPressed: () => _sendQuery(),
@@ -1440,6 +1503,7 @@ class _Composer extends StatelessWidget {
     required this.sending,
     required this.sendingAudio,
     required this.recording,
+    required this.wavRetryRequested,
     required this.onMicPressed,
     required this.onCancelRecording,
     required this.onSendPressed,
@@ -1450,6 +1514,7 @@ class _Composer extends StatelessWidget {
   final bool sending;
   final bool sendingAudio;
   final bool recording;
+  final bool wavRetryRequested;
   final VoidCallback onMicPressed;
   final VoidCallback onCancelRecording;
   final VoidCallback onSendPressed;
@@ -1476,11 +1541,19 @@ class _Composer extends StatelessWidget {
                 IconButton.filledTonal(
                   tooltip: recording
                       ? 'Stop and send recording'
+                      : wavRetryRequested
+                      ? 'Record WAV retry'
                       : 'Record voice query',
                   onPressed: sending || sendingAudio || !connected
                       ? null
                       : onMicPressed,
-                  icon: Icon(recording ? Icons.stop : Icons.mic),
+                  icon: Icon(
+                    recording
+                        ? Icons.stop
+                        : wavRetryRequested
+                        ? Icons.mic_external_on
+                        : Icons.mic,
+                  ),
                 ),
                 if (recording) ...[
                   const SizedBox(width: 8),

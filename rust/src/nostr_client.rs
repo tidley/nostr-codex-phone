@@ -150,6 +150,16 @@ impl NostrMessenger {
             .await
     }
 
+    pub async fn send_audio_retry_to(
+        &self,
+        receiver_pubkey: &str,
+        format: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<String> {
+        self.send_wire_to_pubkey(receiver_pubkey, WireMessage::audio_retry(format, reason))
+            .await
+    }
+
     pub async fn send_response_to(
         &self,
         receiver_pubkey: &str,
