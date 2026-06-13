@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
@@ -49,6 +50,64 @@ class _BlossomPreset {
   final String label;
   final String url;
   final String note;
+}
+
+String cleanTextForSpeech(String text) {
+  var cleaned = text.replaceAll('\r\n', '\n');
+
+  cleaned = cleaned.replaceAllMapped(
+    RegExp(r'```[^\n]*\n?([\s\S]*?)```'),
+    (match) => match.group(1) ?? '',
+  );
+  cleaned = cleaned.replaceAllMapped(
+    RegExp(r'`([^`]+)`'),
+    (match) => match.group(1) ?? '',
+  );
+  cleaned = cleaned.replaceAllMapped(
+    RegExp(r'!\[([^\]]*)\]\([^)]+\)'),
+    (match) => match.group(1) ?? '',
+  );
+  cleaned = cleaned.replaceAllMapped(
+    RegExp(r'\[([^\]]+)\]\([^)]+\)'),
+    (match) => match.group(1) ?? '',
+  );
+  cleaned = cleaned.replaceAll(
+    RegExp(r'^\s{0,3}#{1,6}\s+', multiLine: true),
+    '',
+  );
+  cleaned = cleaned.replaceAll(
+    RegExp(r'^\s{0,3}[-*+]\s+', multiLine: true),
+    '',
+  );
+  cleaned = cleaned.replaceAll(
+    RegExp(r'^\s{0,3}\d+[.)]\s+', multiLine: true),
+    '',
+  );
+  cleaned = cleaned.replaceAll(RegExp(r'^\s{0,3}>\s?', multiLine: true), '');
+  cleaned = cleaned.replaceAllMapped(
+    RegExp(r'(\*\*|__)(.*?)\1'),
+    (match) => match.group(2) ?? '',
+  );
+  cleaned = cleaned.replaceAllMapped(
+    RegExp(r'(\*|_)(.*?)\1'),
+    (match) => match.group(2) ?? '',
+  );
+  cleaned = cleaned.replaceAllMapped(
+    RegExp(r'~~(.*?)~~'),
+    (match) => match.group(1) ?? '',
+  );
+  cleaned = cleaned.replaceAll(
+    RegExp(r'^\s*[-*_]{3,}\s*$', multiLine: true),
+    '',
+  );
+  cleaned = cleaned
+      .split('\n')
+      .map((line) => line.trim())
+      .join('\n')
+      .replaceAll(RegExp(r'[ \t]+'), ' ')
+      .replaceAll(RegExp(r'\n{3,}'), '\n\n');
+
+  return cleaned.trim();
 }
 
 Future<void> main() async {
@@ -123,6 +182,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _recording = false;
   bool _sendingAudio = false;
   bool _autoSpeak = true;
+  bool _speaking = false;
+  String? _lastSpokenText;
   String? _ownPubkey;
   String? _status;
 
@@ -169,6 +230,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     try {
       await _tts.setLanguage('en-US');
       await _tts.setSpeechRate(0.48);
+      _tts.setStartHandler(() {
+        if (mounted) setState(() => _speaking = true);
+      });
+      _tts.setCompletionHandler(() {
+        if (mounted) setState(() => _speaking = false);
+      });
+      _tts.setCancelHandler(() {
+        if (mounted) setState(() => _speaking = false);
+      });
+      _tts.setErrorHandler((_) {
+        if (mounted) setState(() => _speaking = false);
+      });
     } catch (_) {
       // Some test and simulator environments do not register a TTS engine.
     }
@@ -312,21 +385,44 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         (message.kind == 'response' ||
             message.kind == 'error' ||
             message.kind == 'invalid')) {
-      unawaited(_speak(message.text));
+      unawaited(_speak(message.text, remember: true));
     }
   }
 
-  Future<void> _speak(String text) async {
-    final spoken = text.trim();
+  Future<void> _speak(String text, {bool remember = false}) async {
+    final spoken = cleanTextForSpeech(text);
     if (spoken.isEmpty) return;
 
     try {
       await _tts.stop();
+      if (mounted) {
+        setState(() {
+          _speaking = true;
+          if (remember) _lastSpokenText = text;
+        });
+      }
       await _tts.speak(spoken);
     } catch (error) {
       if (!mounted) return;
-      setState(() => _status = 'Text-to-speech error: $error');
+      setState(() {
+        _speaking = false;
+        _status = 'Text-to-speech error: $error';
+      });
     }
+  }
+
+  Future<void> _stopSpeaking() async {
+    try {
+      await _tts.stop();
+    } finally {
+      if (mounted) setState(() => _speaking = false);
+    }
+  }
+
+  Future<void> _replayLastSpoken() async {
+    final text = _lastSpokenText;
+    if (text == null || text.trim().isEmpty) return;
+    await _speak(text);
   }
 
   Future<void> _sendQuery() async {
@@ -595,11 +691,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               ownPubkey: _ownPubkey,
               connected: _connected,
               connecting: _connecting,
-              autoSpeak: _autoSpeak,
               onGenerateKey: _generateKey,
               onSecretChanged: (_) => _refreshOwnPubkey(),
               onConnect: _connect,
               onDisconnect: _disconnect,
+            ),
+            const SizedBox(height: 12),
+            _PlaybackControls(
+              speaking: _speaking,
+              hasReplay: _lastSpokenText?.trim().isNotEmpty ?? false,
+              autoSpeak: _autoSpeak,
+              onStop: _stopSpeaking,
+              onReplay: _replayLastSpoken,
               onAutoSpeakChanged: (value) => setState(() => _autoSpeak = value),
             ),
             const SizedBox(height: 16),
@@ -639,12 +742,10 @@ class _ConnectionPanel extends StatelessWidget {
     required this.ownPubkey,
     required this.connected,
     required this.connecting,
-    required this.autoSpeak,
     required this.onGenerateKey,
     required this.onSecretChanged,
     required this.onConnect,
     required this.onDisconnect,
-    required this.onAutoSpeakChanged,
   });
 
   final TextEditingController secretKeyController;
@@ -655,12 +756,10 @@ class _ConnectionPanel extends StatelessWidget {
   final String? ownPubkey;
   final bool connected;
   final bool connecting;
-  final bool autoSpeak;
   final VoidCallback onGenerateKey;
   final ValueChanged<String> onSecretChanged;
   final VoidCallback onConnect;
   final VoidCallback onDisconnect;
-  final ValueChanged<bool> onAutoSpeakChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -678,8 +777,10 @@ class _ConnectionPanel extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
-                Switch(value: autoSpeak, onChanged: onAutoSpeakChanged),
-                const Text('Speak'),
+                Icon(
+                  connected ? Icons.cloud_done : Icons.cloud_off,
+                  color: Theme.of(context).colorScheme.secondary,
+                ),
               ],
             ),
             const SizedBox(height: 12),
@@ -779,6 +880,65 @@ class _ConnectionPanel extends StatelessWidget {
   }
 }
 
+class _PlaybackControls extends StatelessWidget {
+  const _PlaybackControls({
+    required this.speaking,
+    required this.hasReplay,
+    required this.autoSpeak,
+    required this.onStop,
+    required this.onReplay,
+    required this.onAutoSpeakChanged,
+  });
+
+  final bool speaking;
+  final bool hasReplay;
+  final bool autoSpeak;
+  final VoidCallback onStop;
+  final VoidCallback onReplay;
+  final ValueChanged<bool> onAutoSpeakChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            Icon(
+              speaking ? Icons.volume_up : Icons.volume_off,
+              color: speaking ? colorScheme.primary : colorScheme.secondary,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                speaking ? 'Speaking' : 'Speech idle',
+                style: Theme.of(context).textTheme.titleSmall,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            Tooltip(
+              message: autoSpeak ? 'Auto speak on' : 'Auto speak off',
+              child: Switch(value: autoSpeak, onChanged: onAutoSpeakChanged),
+            ),
+            IconButton.filledTonal(
+              tooltip: 'Replay speech',
+              onPressed: hasReplay ? onReplay : null,
+              icon: const Icon(Icons.replay),
+            ),
+            const SizedBox(width: 4),
+            IconButton.filled(
+              tooltip: 'Stop speech',
+              onPressed: speaking ? onStop : null,
+              icon: const Icon(Icons.stop),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _Composer extends StatelessWidget {
   const _Composer({
     required this.controller,
@@ -862,17 +1022,40 @@ class _MessageTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final incoming = message.direction == MessageDirection.incoming;
+    final colorScheme = Theme.of(context).colorScheme;
     return Card(
       color: incoming
-          ? Theme.of(context).colorScheme.surfaceContainerHigh
-          : Theme.of(context).colorScheme.primaryContainer,
-      child: ListTile(
-        leading: Icon(incoming ? Icons.call_received : Icons.call_made),
-        title: Text(message.kind),
-        subtitle: Text(message.text),
-        trailing: Text(
-          _formatTime(message.timestamp),
-          style: Theme.of(context).textTheme.labelSmall,
+          ? colorScheme.surfaceContainerHigh
+          : colorScheme.primaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(incoming ? Icons.call_received : Icons.call_made),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    message.kind,
+                    style: Theme.of(context).textTheme.titleSmall,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Text(
+                  _formatTime(message.timestamp),
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            MarkdownBody(
+              data: message.text,
+              selectable: true,
+              softLineBreak: true,
+            ),
+          ],
         ),
       ),
     );

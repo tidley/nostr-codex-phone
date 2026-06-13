@@ -108,6 +108,11 @@ selection in `flutter_secure_storage`. The mic button records a WAV file,
 uploads it with a Nostr-signed BUD-11 authorization token, and sends the
 returned URL/hash over an encrypted Nostr DM.
 
+Incoming response bodies render as GitHub-style Markdown, so Codex output such
+as `**bold**`, lists, and code blocks is formatted on screen. Auto-speak strips
+Markdown markers before sending text to TTS, and the playback bar can stop or
+replay the last spoken response.
+
 The Blossom field accepts a custom server URL or `auto`. Auto-select tries these
 public free/free-tier servers in order until one accepts the upload:
 
