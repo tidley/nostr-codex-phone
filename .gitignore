@@ -4,6 +4,7 @@
 *.pyc
 *.swp
 .env*
+.nostr-codex-memory*.sqlite*
 .DS_Store
 .atom/
 .build/
