@@ -7,4 +7,25 @@ void main() {
   test('app widget is available', () {
     expect(const NostrCodexApp(), isA<StatelessWidget>());
   });
+
+  test('cleans markdown before text to speech', () {
+    final spoken = cleanTextForSpeech('''
+# Result
+
+**Important bits**
+
+- first item
+- `second item`
+
+Use [the docs](https://example.com).
+''');
+
+    expect(spoken, isNot(contains('**')));
+    expect(spoken, isNot(contains('- first')));
+    expect(spoken, isNot(contains('`')));
+    expect(spoken, contains('Important bits'));
+    expect(spoken, contains('first item'));
+    expect(spoken, contains('second item'));
+    expect(spoken, contains('the docs'));
+  });
 }
