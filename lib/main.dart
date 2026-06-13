@@ -1536,11 +1536,13 @@ class _MessageTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final incoming = message.direction == MessageDirection.incoming;
+    final transcript = message.kind == 'transcript';
+    final userSide = !incoming || transcript;
     final colorScheme = Theme.of(context).colorScheme;
     return Card(
-      color: incoming
-          ? colorScheme.surfaceContainerHigh
-          : colorScheme.primaryContainer,
+      color: userSide
+          ? colorScheme.primaryContainer
+          : colorScheme.surfaceContainerHigh,
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
@@ -1548,7 +1550,12 @@ class _MessageTile extends StatelessWidget {
           children: [
             Row(
               children: [
-                Icon(incoming ? Icons.call_received : Icons.call_made),
+                Icon(
+                  _messageIcon(incoming: incoming, transcript: transcript),
+                  color: userSide
+                      ? colorScheme.onPrimaryContainer
+                      : colorScheme.onSurface,
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -1573,6 +1580,11 @@ class _MessageTile extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  IconData _messageIcon({required bool incoming, required bool transcript}) {
+    if (transcript) return Icons.notes;
+    return incoming ? Icons.call_received : Icons.call_made;
   }
 
   String _formatTime(DateTime value) {
