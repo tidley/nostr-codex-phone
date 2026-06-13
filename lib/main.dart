@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
@@ -39,6 +40,8 @@ const _autoBlossomUploadServers = <String>[
   'https://blossom.primal.net',
   'https://cdn.nostrcheck.me',
 ];
+
+const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 
 class _BlossomPreset {
   const _BlossomPreset({
@@ -233,6 +236,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   List<String> _ttsLanguages = const ['en-US'];
   List<String> _ttsEngines = const [];
   int _speechGeneration = 0;
+  DateTime? _autoSpeakSuppressedUntil;
   String? _lastSpokenText;
   String? _recordingPath;
   _VoiceRecordingFormat? _activeRecordingFormat;
@@ -419,7 +423,44 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   Future<void> _testTtsSettings() async {
-    await _speak('Text to speech test. Rate, pitch, and volume are active.');
+    await _speak(
+      'Text to speech test. Rate, pitch, and volume are active.',
+      manual: true,
+    );
+  }
+
+  bool get _autoSpeakSuppressed {
+    final until = _autoSpeakSuppressedUntil;
+    return until != null && until.isAfter(DateTime.now());
+  }
+
+  void _clearAutoSpeakSuppression() {
+    _autoSpeakSuppressedUntil = null;
+  }
+
+  void _suppressAutoSpeakBriefly() {
+    _autoSpeakSuppressedUntil = DateTime.now().add(const Duration(seconds: 3));
+  }
+
+  Future<void> _ignoreTtsFailure(Future<dynamic> Function() action) async {
+    try {
+      await action();
+    } catch (_) {
+      // Stop paths should be best-effort. The visible status is updated once.
+    }
+  }
+
+  Future<void> _nativeAndroidTtsStop() async {
+    if (!Platform.isAndroid) return;
+    await _ignoreTtsFailure(
+      () => _ttsControlChannel.invokeMethod<void>('hardStop'),
+    );
+  }
+
+  Future<void> _stopTtsEngines() async {
+    await _ignoreTtsFailure(() => _tts.pause());
+    await _ignoreTtsFailure(() => _tts.stop());
+    await _nativeAndroidTtsStop();
   }
 
   String? _cleanStoredString(String? value) {
@@ -582,15 +623,23 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     });
 
     if (_autoSpeak &&
+        !_autoSpeakSuppressed &&
         (message.kind == 'response' ||
             message.kind == 'audio_retry' ||
             message.kind == 'error' ||
             message.kind == 'invalid')) {
-      unawaited(_speak(message.text, remember: true));
+      unawaited(_speak(message.text, remember: true, manual: false));
     }
   }
 
-  Future<void> _speak(String text, {bool remember = false}) async {
+  Future<void> _speak(
+    String text, {
+    bool remember = false,
+    bool manual = true,
+  }) async {
+    if (!manual && _autoSpeakSuppressed) return;
+    if (manual) _clearAutoSpeakSuppression();
+
     final spoken = cleanTextForSpeech(text);
     if (spoken.isEmpty) return;
     final generation = ++_speechGeneration;
@@ -616,12 +665,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   Future<void> _stopSpeaking() async {
     final generation = ++_speechGeneration;
+    _suppressAutoSpeakBriefly();
+    if (mounted) {
+      setState(() {
+        _speaking = false;
+        _status = 'Stopping speech...';
+      });
+    }
+
     try {
-      await _tts.stop();
+      await _stopTtsEngines();
       if (Platform.isAndroid) {
-        await Future<void>.delayed(const Duration(milliseconds: 80));
+        await Future<void>.delayed(const Duration(milliseconds: 120));
         if (generation == _speechGeneration) {
-          await _tts.stop();
+          await _stopTtsEngines();
         }
       }
     } finally {
@@ -637,7 +694,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   Future<void> _replayLastSpoken() async {
     final text = _lastSpokenText;
     if (text == null || text.trim().isEmpty) return;
-    await _speak(text);
+    await _speak(text, manual: true);
   }
 
   Future<void> _sendQuery() async {
@@ -648,6 +705,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _showError('Connect before sending a query');
       return;
     }
+    _clearAutoSpeakSuppression();
 
     setState(() {
       _sending = true;
@@ -691,6 +749,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return;
     }
     if (_sending || _sendingAudio) return;
+    _clearAutoSpeakSuppression();
 
     String? path;
     try {
@@ -1011,6 +1070,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               onStop: _stopSpeaking,
               onReplay: _replayLastSpoken,
               onAutoSpeakChanged: (value) {
+                if (value) _clearAutoSpeakSuppression();
                 setState(() => _autoSpeak = value);
                 if (!value) unawaited(_stopSpeaking());
               },
