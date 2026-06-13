@@ -35,6 +35,10 @@ Both peers send NIP-17/NIP-59 GiftWrapped private direct messages whose decrypte
 ```
 
 ```json
+{ "transcript": "text heard from audio" }
+```
+
+```json
 { "error": "text" }
 ```
 
@@ -45,7 +49,8 @@ audio payload with XChaCha20-Poly1305 before upload. The Blossom `sha256` and
 `size` fields refer to the ciphertext; the random decryption key and nonce are
 inside the encrypted Nostr DM only. The server downloads the URL, verifies the
 ciphertext hash, decrypts and verifies the plaintext hash, transcribes the audio
-locally, then treats the transcript like a text query.
+locally, sends the transcript back as a non-spoken `transcript` DM, then treats
+the transcript like a text query.
 
 ## Server
 
