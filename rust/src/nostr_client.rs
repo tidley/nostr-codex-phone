@@ -134,6 +134,15 @@ impl NostrMessenger {
         self.send_wire(WireMessage::response(response)).await
     }
 
+    pub async fn send_transcript_to(
+        &self,
+        receiver_pubkey: &str,
+        transcript: impl Into<String>,
+    ) -> Result<String> {
+        self.send_wire_to_pubkey(receiver_pubkey, WireMessage::transcript(transcript))
+            .await
+    }
+
     pub async fn send_response_to(
         &self,
         receiver_pubkey: &str,

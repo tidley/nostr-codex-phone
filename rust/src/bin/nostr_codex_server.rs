@@ -135,11 +135,23 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                info!("transcribed audio event {}", message.event_id);
+                info!(
+                    "transcribed audio event {}: {}",
+                    message.event_id,
+                    transcript_preview(&transcript)
+                );
+                if let Err(err) = messenger
+                    .send_transcript_to(&message.sender_pubkey_hex, transcript.clone())
+                    .await
+                {
+                    warn!("failed to send transcript DM: {err:#}");
+                }
+
+                let prompt = codex_phone_prompt(&transcript);
                 let response = match run_codex_and_report(
                     &messenger,
                     &message.sender_pubkey_hex,
-                    &transcript,
+                    &prompt,
                     &codex_config,
                 )
                 .await
@@ -175,6 +187,25 @@ async fn main() -> Result<()> {
             }
         }
     }
+}
+
+fn codex_phone_prompt(user_request: &str) -> String {
+    format!(
+        "You are responding to a request sent from a phone over Nostr.\n\
+         Answer the user's request directly and concretely.\n\
+         If the request is ambiguous, say what you heard and ask one concise clarifying question.\n\
+         Do not answer with a generic greeting such as \"I'm here\" unless the user only greeted you.\n\n\
+         User request:\n{user_request}"
+    )
+}
+
+fn transcript_preview(transcript: &str) -> String {
+    let normalized = transcript.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut preview = normalized.chars().take(160).collect::<String>();
+    if normalized.chars().count() > 160 {
+        preview.push_str("...");
+    }
+    preview
 }
 
 async fn run_codex_and_report(

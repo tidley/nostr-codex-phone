@@ -11,6 +11,7 @@ pub const AUDIO_ENCRYPTION_ALGORITHM: &str = "xchacha20poly1305";
 pub enum WireMessage {
     Query { query: String },
     Audio { audio: AudioReference },
+    Transcript { transcript: String },
     Response { response: String },
     Error { error: String },
 }
@@ -56,6 +57,12 @@ impl WireMessage {
         }
     }
 
+    pub fn transcript<S: Into<String>>(transcript: S) -> Self {
+        Self::Transcript {
+            transcript: transcript.into(),
+        }
+    }
+
     pub fn error<S: Into<String>>(error: S) -> Self {
         Self::Error {
             error: error.into(),
@@ -66,6 +73,7 @@ impl WireMessage {
         match self {
             Self::Query { .. } => "query",
             Self::Audio { .. } => "audio",
+            Self::Transcript { .. } => "transcript",
             Self::Response { .. } => "response",
             Self::Error { .. } => "error",
         }
@@ -75,6 +83,7 @@ impl WireMessage {
         match self {
             Self::Query { query } => query,
             Self::Audio { audio } => &audio.url,
+            Self::Transcript { transcript } => transcript,
             Self::Response { response } => response,
             Self::Error { error } => error,
         }
@@ -91,6 +100,7 @@ impl WireMessage {
         let value = match self {
             Self::Query { query } => json!({ "query": query }),
             Self::Audio { audio } => json!({ "audio": audio }),
+            Self::Transcript { transcript } => json!({ "transcript": transcript }),
             Self::Response { response } => json!({ "response": response }),
             Self::Error { error } => json!({ "error": error }),
         };
@@ -126,6 +136,13 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
             .ok_or_else(|| anyhow!("field `response` must be a string"));
     }
 
+    if let Some(transcript) = object.get("transcript") {
+        return transcript
+            .as_str()
+            .map(WireMessage::transcript)
+            .ok_or_else(|| anyhow!("field `transcript` must be a string"));
+    }
+
     if let Some(error) = object.get("error") {
         return error
             .as_str()
@@ -134,7 +151,7 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `response`, `error`, or object `audio` field"
+        "message must contain a string `query`, `transcript`, `response`, `error`, or object `audio` field"
     ))
 }
 
@@ -221,6 +238,13 @@ mod tests {
             WireMessage::response("done").to_json().unwrap(),
             r#"{"response":"done"}"#
         );
+    }
+
+    #[test]
+    fn parses_transcript_contract() {
+        let parsed = parse_wire_message(r#"{ "transcript": "turn on the lights" }"#).unwrap();
+        assert_eq!(parsed.kind(), "transcript");
+        assert_eq!(parsed.text(), "turn on the lights");
     }
 
     #[test]
