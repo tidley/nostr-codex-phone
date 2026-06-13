@@ -149,6 +149,8 @@ encrypts it locally, uploads the ciphertext with a Nostr-signed BUD-11
 authorization token, and sends the returned URL/hash plus decryption metadata
 over an encrypted Nostr DM. While recording, the stop button sends the voice
 note and the cancel button discards it locally without uploading.
+Returned transcripts are styled as user-side speech bubbles next to the audio
+message, while Codex responses remain visually distinct.
 
 After connecting, the relay/key setup panel collapses into a compact expandable
 header so the conversation controls stay near the top of the screen.
