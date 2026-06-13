@@ -232,6 +232,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   String? _ttsEngine;
   List<String> _ttsLanguages = const ['en-US'];
   List<String> _ttsEngines = const [];
+  int _speechGeneration = 0;
   String? _lastSpokenText;
   String? _recordingPath;
   _VoiceRecordingFormat? _activeRecordingFormat;
@@ -372,6 +373,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       final engine = _cleanStoredString(_ttsEngine);
       if (Platform.isAndroid && engine != null) {
         await _tts.setEngine(engine);
+      }
+      if (Platform.isAndroid) {
+        await _tts.setQueueMode(0);
       }
       await _tts.setLanguage(_ttsLanguage);
       await _tts.setSpeechRate(_ttsRate);
@@ -589,9 +593,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   Future<void> _speak(String text, {bool remember = false}) async {
     final spoken = cleanTextForSpeech(text);
     if (spoken.isEmpty) return;
+    final generation = ++_speechGeneration;
 
     try {
       await _tts.stop();
+      if (generation != _speechGeneration) return;
       if (mounted) {
         setState(() {
           _speaking = true;
@@ -609,10 +615,22 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   Future<void> _stopSpeaking() async {
+    final generation = ++_speechGeneration;
     try {
       await _tts.stop();
+      if (Platform.isAndroid) {
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        if (generation == _speechGeneration) {
+          await _tts.stop();
+        }
+      }
     } finally {
-      if (mounted) setState(() => _speaking = false);
+      if (mounted && generation == _speechGeneration) {
+        setState(() {
+          _speaking = false;
+          _status = 'Speech stopped';
+        });
+      }
     }
   }
 
@@ -992,7 +1010,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               volume: _ttsVolume,
               onStop: _stopSpeaking,
               onReplay: _replayLastSpoken,
-              onAutoSpeakChanged: (value) => setState(() => _autoSpeak = value),
+              onAutoSpeakChanged: (value) {
+                setState(() => _autoSpeak = value);
+                if (!value) unawaited(_stopSpeaking());
+              },
               onExpandedChanged: (value) {
                 setState(() => _speechExpanded = value);
               },
@@ -1338,7 +1359,7 @@ class _PlaybackControls extends StatelessWidget {
                 const SizedBox(width: 4),
                 IconButton.filled(
                   tooltip: 'Stop speech',
-                  onPressed: speaking ? onStop : null,
+                  onPressed: onStop,
                   icon: const Icon(Icons.stop),
                 ),
                 IconButton(
