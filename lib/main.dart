@@ -9,6 +9,48 @@ import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
+const _autoBlossomServer = 'auto';
+const _blossomPresets = <_BlossomPreset>[
+  _BlossomPreset(
+    label: 'Auto-select',
+    url: _autoBlossomServer,
+    note: 'Try public free-tier servers in order',
+  ),
+  _BlossomPreset(
+    label: 'Nostr.build',
+    url: 'https://blossom.nostr.build',
+    note: 'Free audio uploads up to 20 MiB',
+  ),
+  _BlossomPreset(
+    label: 'Primal',
+    url: 'https://blossom.primal.net',
+    note: 'Public Blossom server',
+  ),
+  _BlossomPreset(
+    label: 'Nostrcheck',
+    url: 'https://cdn.nostrcheck.me',
+    note: 'Public Blossom endpoint',
+  ),
+];
+
+const _autoBlossomUploadServers = <String>[
+  'https://blossom.nostr.build',
+  'https://blossom.primal.net',
+  'https://cdn.nostrcheck.me',
+];
+
+class _BlossomPreset {
+  const _BlossomPreset({
+    required this.label,
+    required this.url,
+    required this.note,
+  });
+
+  final String label;
+  final String url;
+  final String note;
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
@@ -62,7 +104,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _peerPubkeyStorageKey = 'nostr_peer_pubkey';
   static const _relaysStorageKey = 'nostr_relays';
   static const _blossomServerStorageKey = 'blossom_server';
-  static const _defaultBlossomServer = 'https://blossom.primal.net';
   static const _audioContentType = 'audio/wav';
 
   final _secretKeyController = TextEditingController();
@@ -118,7 +159,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _secretKeyController.text = secretKey ?? '';
       _peerPubkeyController.text = peerPubkey ?? '';
       _relayController.text = relays?.replaceAll(',', '\n') ?? defaultRelays;
-      _blossomServerController.text = blossomServer ?? _defaultBlossomServer;
+      _blossomServerController.text = blossomServer ?? _autoBlossomServer;
       _loadingSettings = false;
     });
     _refreshOwnPubkey();
@@ -340,12 +381,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
     if (_sending || _sendingAudio) return;
 
-    final blossomServer = _blossomServerController.text.trim();
-    if (blossomServer.isEmpty) {
-      _showError('Blossom server is required');
-      return;
-    }
-
     try {
       final hasPermission = await _recorder.hasPermission();
       if (!hasPermission) {
@@ -408,15 +443,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     try {
       final fileName = path.split(Platform.pathSeparator).last;
-      final audio = await blossomUploadAudio(
-        config: BridgeBlossomUploadConfig(
-          secretKey: _secretKeyController.text.trim(),
-          serverUrl: _blossomServerController.text.trim(),
-          filePath: path,
-          contentType: _audioContentType,
-          fileName: fileName,
-        ),
-      );
+      final audio = await _uploadAudioToBlossom(path, fileName);
 
       if (!mounted) return;
       setState(() => _status = 'Sending Blossom audio reference...');
@@ -444,6 +471,62 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         setState(() => _sendingAudio = false);
       }
     }
+  }
+
+  Future<BridgeAudioReference> _uploadAudioToBlossom(
+    String path,
+    String fileName,
+  ) async {
+    final servers = _selectedBlossomServers();
+    Object? lastError;
+
+    for (final server in servers) {
+      if (mounted) {
+        setState(
+          () => _status = 'Uploading voice note to ${_serverLabel(server)}...',
+        );
+      }
+
+      try {
+        return await blossomUploadAudio(
+          config: BridgeBlossomUploadConfig(
+            secretKey: _secretKeyController.text.trim(),
+            serverUrl: server,
+            filePath: path,
+            contentType: _audioContentType,
+            fileName: fileName,
+          ),
+        );
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw Exception(
+      'all Blossom uploads failed across ${servers.length} server(s): $lastError',
+    );
+  }
+
+  List<String> _selectedBlossomServers() {
+    final selected = _blossomServerController.text.trim();
+    if (_isAutoBlossom(selected)) {
+      return _autoBlossomUploadServers;
+    }
+    return [selected];
+  }
+
+  bool _isAutoBlossom(String value) {
+    final normalized = value.trim().toLowerCase();
+    return normalized.isEmpty ||
+        normalized == _autoBlossomServer ||
+        normalized == 'auto-select';
+  }
+
+  String _serverLabel(String server) {
+    for (final preset in _blossomPresets) {
+      if (preset.url == server) return preset.label;
+    }
+    return server.replaceFirst(RegExp(r'^https?://'), '');
   }
 
   Future<void> _deleteTempAudio(String path) async {
@@ -508,6 +591,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               peerPubkeyController: _peerPubkeyController,
               relayController: _relayController,
               blossomServerController: _blossomServerController,
+              blossomPresets: _blossomPresets,
               ownPubkey: _ownPubkey,
               connected: _connected,
               connecting: _connecting,
@@ -551,6 +635,7 @@ class _ConnectionPanel extends StatelessWidget {
     required this.peerPubkeyController,
     required this.relayController,
     required this.blossomServerController,
+    required this.blossomPresets,
     required this.ownPubkey,
     required this.connected,
     required this.connecting,
@@ -566,6 +651,7 @@ class _ConnectionPanel extends StatelessWidget {
   final TextEditingController peerPubkeyController;
   final TextEditingController relayController;
   final TextEditingController blossomServerController;
+  final List<_BlossomPreset> blossomPresets;
   final String? ownPubkey;
   final bool connected;
   final bool connecting;
@@ -648,9 +734,27 @@ class _ConnectionPanel extends StatelessWidget {
             const SizedBox(height: 12),
             TextField(
               controller: blossomServerController,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                border: const OutlineInputBorder(),
                 labelText: 'Blossom server',
+                helperText: 'Use auto or choose a public server',
+                suffixIcon: PopupMenuButton<String>(
+                  tooltip: 'Choose Blossom server',
+                  icon: const Icon(Icons.expand_more),
+                  onSelected: (value) => blossomServerController.text = value,
+                  itemBuilder: (context) => [
+                    for (final preset in blossomPresets)
+                      PopupMenuItem<String>(
+                        value: preset.url,
+                        child: ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(preset.label),
+                          subtitle: Text(preset.note),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(height: 12),
