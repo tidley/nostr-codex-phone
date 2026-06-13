@@ -120,6 +120,9 @@ encrypts it locally, uploads the ciphertext with a Nostr-signed BUD-11
 authorization token, and sends the returned URL/hash plus decryption metadata
 over an encrypted Nostr DM.
 
+After connecting, the relay/key setup panel collapses into a compact expandable
+header so the conversation controls stay near the top of the screen.
+
 Incoming response bodies render as GitHub-style Markdown, so Codex output such
 as `**bold**`, lists, and code blocks is formatted on screen. Auto-speak strips
 Markdown markers before sending text to TTS, and the playback bar can stop or
