@@ -188,6 +188,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _sendingAudio = false;
   bool _autoSpeak = true;
   bool _speaking = false;
+  bool _connectionExpanded = true;
   double _ttsRate = 0.48;
   double _ttsPitch = 1.0;
   double _ttsVolume = 1.0;
@@ -462,6 +463,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       setState(() {
         _connected = true;
         _connecting = false;
+        _connectionExpanded = false;
         _ownPubkey = status.publicKey;
         _status = 'Connected to ${status.relayCount} relays';
       });
@@ -471,6 +473,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       setState(() {
         _connecting = false;
         _connected = false;
+        _connectionExpanded = true;
         _status = 'Connection failed';
       });
       _showError('Connection failed: $error');
@@ -483,6 +486,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!mounted) return;
     setState(() {
       _connected = false;
+      _connectionExpanded = true;
       _status = 'Disconnected';
     });
   }
@@ -833,10 +837,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               ownPubkey: _ownPubkey,
               connected: _connected,
               connecting: _connecting,
+              expanded: _connectionExpanded,
               onGenerateKey: _generateKey,
               onSecretChanged: (_) => _refreshOwnPubkey(),
               onConnect: _connect,
               onDisconnect: _disconnect,
+              onExpandedChanged: (value) {
+                setState(() => _connectionExpanded = value);
+              },
             ),
             const SizedBox(height: 12),
             _PlaybackControls(
@@ -901,10 +909,12 @@ class _ConnectionPanel extends StatelessWidget {
     required this.ownPubkey,
     required this.connected,
     required this.connecting,
+    required this.expanded,
     required this.onGenerateKey,
     required this.onSecretChanged,
     required this.onConnect,
     required this.onDisconnect,
+    required this.onExpandedChanged,
   });
 
   final TextEditingController secretKeyController;
@@ -915,127 +925,174 @@ class _ConnectionPanel extends StatelessWidget {
   final String? ownPubkey;
   final bool connected;
   final bool connecting;
+  final bool expanded;
   final VoidCallback onGenerateKey;
   final ValueChanged<String> onSecretChanged;
   final VoidCallback onConnect;
   final VoidCallback onDisconnect;
+  final ValueChanged<bool> onExpandedChanged;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final statusText = connecting
+        ? 'Connecting'
+        : connected
+        ? 'Connected'
+        : 'Disconnected';
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    connected ? 'Relay session active' : 'Relay session',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                ),
-                Icon(
-                  connected ? Icons.cloud_done : Icons.cloud_off,
-                  color: Theme.of(context).colorScheme.secondary,
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: secretKeyController,
-              obscureText: true,
-              enableSuggestions: false,
-              autocorrect: false,
-              onChanged: onSecretChanged,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: 'Local nsec',
-              ),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    ownPubkey ?? 'No valid local public key',
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ),
-                TextButton.icon(
-                  onPressed: connected ? null : onGenerateKey,
-                  icon: const Icon(Icons.key),
-                  label: const Text('Generate'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: peerPubkeyController,
-              enabled: !connected,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: 'Peer npub or hex',
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: relayController,
-              enabled: !connected,
-              minLines: 3,
-              maxLines: 5,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: 'Relays',
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: blossomServerController,
-              decoration: InputDecoration(
-                border: const OutlineInputBorder(),
-                labelText: 'Blossom server',
-                helperText: 'Use auto or choose a public server',
-                suffixIcon: PopupMenuButton<String>(
-                  tooltip: 'Choose Blossom server',
-                  icon: const Icon(Icons.expand_more),
-                  onSelected: (value) => blossomServerController.text = value,
-                  itemBuilder: (context) => [
-                    for (final preset in blossomPresets)
-                      PopupMenuItem<String>(
-                        value: preset.url,
-                        child: ListTile(
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
-                          title: Text(preset.label),
-                          subtitle: Text(preset.note),
-                        ),
+            InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => onExpandedChanged(!expanded),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+                child: Row(
+                  children: [
+                    Icon(
+                      connected ? Icons.cloud_done : Icons.cloud_off,
+                      color: theme.colorScheme.secondary,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Relay session',
+                            style: theme.textTheme.titleMedium,
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '$statusText${ownPubkey == null ? '' : ' · ${_compactPubkey(ownPubkey!)}'}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ],
                       ),
+                    ),
+                    Icon(expanded ? Icons.expand_less : Icons.expand_more),
                   ],
                 ),
               ),
             ),
-            const SizedBox(height: 12),
-            FilledButton.icon(
-              onPressed: connecting
-                  ? null
-                  : connected
-                  ? onDisconnect
-                  : onConnect,
-              icon: connecting
-                  ? const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : Icon(connected ? Icons.link_off : Icons.link),
-              label: Text(connected ? 'Disconnect' : 'Connect'),
+            AnimatedCrossFade(
+              duration: const Duration(milliseconds: 180),
+              crossFadeState: expanded
+                  ? CrossFadeState.showFirst
+                  : CrossFadeState.showSecond,
+              firstChild: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: secretKeyController,
+                    obscureText: true,
+                    enableSuggestions: false,
+                    autocorrect: false,
+                    onChanged: onSecretChanged,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Local nsec',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          ownPubkey ?? 'No valid local public key',
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall,
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: connected ? null : onGenerateKey,
+                        icon: const Icon(Icons.key),
+                        label: const Text('Generate'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: peerPubkeyController,
+                    enabled: !connected,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Peer npub or hex',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: relayController,
+                    enabled: !connected,
+                    minLines: 3,
+                    maxLines: 5,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Relays',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: blossomServerController,
+                    decoration: InputDecoration(
+                      border: const OutlineInputBorder(),
+                      labelText: 'Blossom server',
+                      helperText: 'Use auto or choose a public server',
+                      suffixIcon: PopupMenuButton<String>(
+                        tooltip: 'Choose Blossom server',
+                        icon: const Icon(Icons.expand_more),
+                        onSelected: (value) =>
+                            blossomServerController.text = value,
+                        itemBuilder: (context) => [
+                          for (final preset in blossomPresets)
+                            PopupMenuItem<String>(
+                              value: preset.url,
+                              child: ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                title: Text(preset.label),
+                                subtitle: Text(preset.note),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: connecting
+                        ? null
+                        : connected
+                        ? onDisconnect
+                        : onConnect,
+                    icon: connecting
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Icon(connected ? Icons.link_off : Icons.link),
+                    label: Text(connected ? 'Disconnect' : 'Connect'),
+                  ),
+                ],
+              ),
+              secondChild: const SizedBox.shrink(),
             ),
           ],
         ),
       ),
     );
+  }
+
+  String _compactPubkey(String pubkey) {
+    if (pubkey.length <= 18) return pubkey;
+    return '${pubkey.substring(0, 10)}...${pubkey.substring(pubkey.length - 6)}';
   }
 }
 
