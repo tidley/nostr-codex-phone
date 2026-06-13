@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use hound::{SampleFormat, WavSpec, WavWriter};
+use ogg::PacketReader;
+use opus_decoder::OpusDecoder;
 use reqwest::Client;
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
@@ -253,6 +255,10 @@ async fn prepare_audio_for_transcription(
 }
 
 fn transcode_to_wav_with_rust(input: &Path, output: &Path) -> Result<()> {
+    if is_ogg_path(input) {
+        return transcode_ogg_opus_to_wav_with_rust(input, output);
+    }
+
     let source = File::open(input)
         .with_context(|| format!("failed to open compressed audio `{}`", input.display()))?;
     let media_source = MediaSourceStream::new(Box::new(source), Default::default());
@@ -318,6 +324,113 @@ fn transcode_to_wav_with_rust(input: &Path, output: &Path) -> Result<()> {
     let resampled = resample_linear_mono(&mono_samples, sample_rate, 16_000);
     write_mono_wav(output, 16_000, &resampled)?;
     Ok(())
+}
+
+fn transcode_ogg_opus_to_wav_with_rust(input: &Path, output: &Path) -> Result<()> {
+    let source = File::open(input)
+        .with_context(|| format!("failed to open Ogg Opus `{}`", input.display()))?;
+    let mut reader = PacketReader::new(source);
+
+    let head_packet = reader
+        .read_packet()
+        .context("failed to read Ogg Opus head packet")?
+        .ok_or_else(|| anyhow!("Ogg Opus stream is empty"))?;
+    let head = parse_opus_head(&head_packet.data)?;
+    if head.mapping_family != 0 {
+        return Err(anyhow!(
+            "unsupported Ogg Opus channel mapping family {}; only mono/stereo family 0 is supported",
+            head.mapping_family
+        ));
+    }
+    if !(1..=2).contains(&head.channels) {
+        return Err(anyhow!(
+            "unsupported Ogg Opus channel count {}; only mono/stereo is supported",
+            head.channels
+        ));
+    }
+
+    let tags_packet = reader
+        .read_packet()
+        .context("failed to read Ogg Opus tags packet")?
+        .ok_or_else(|| anyhow!("Ogg Opus stream is missing OpusTags packet"))?;
+    if !tags_packet.data.starts_with(b"OpusTags") {
+        return Err(anyhow!("Ogg Opus stream is missing OpusTags packet"));
+    }
+
+    let mut decoder = OpusDecoder::new(48_000, head.channels)
+        .map_err(|err| anyhow!("failed to create pure-Rust Opus decoder: {err:?}"))?;
+    let mut frame = vec![0i16; OpusDecoder::MAX_FRAME_SIZE_48K * head.channels];
+    let mut decoded = Vec::<f32>::new();
+    let mut samples_to_skip = head.pre_skip_48k;
+
+    while let Some(packet) = reader
+        .read_packet()
+        .context("failed to read Ogg Opus audio packet")?
+    {
+        if packet.data.is_empty() {
+            continue;
+        }
+        let samples_per_channel = decoder
+            .decode(&packet.data, &mut frame, false)
+            .map_err(|err| anyhow!("failed to decode Ogg Opus packet: {err:?}"))?;
+        let frame_samples = &frame[..samples_per_channel * head.channels];
+
+        for sample_index in 0..samples_per_channel {
+            if samples_to_skip > 0 {
+                samples_to_skip -= 1;
+                continue;
+            }
+
+            let mono = if head.channels == 1 {
+                frame_samples[sample_index] as f32 / i16::MAX as f32
+            } else {
+                let left = frame_samples[sample_index * 2] as f32 / i16::MAX as f32;
+                let right = frame_samples[sample_index * 2 + 1] as f32 / i16::MAX as f32;
+                (left + right) * 0.5
+            };
+            decoded.push(mono.clamp(-1.0, 1.0));
+        }
+    }
+
+    if decoded.is_empty() {
+        return Err(anyhow!("Ogg Opus decoded to no samples"));
+    }
+
+    let resampled = resample_linear_mono(&decoded, 48_000, 16_000);
+    write_mono_wav(output, 16_000, &resampled)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OpusHead {
+    channels: usize,
+    pre_skip_48k: usize,
+    mapping_family: u8,
+}
+
+fn parse_opus_head(packet: &[u8]) -> Result<OpusHead> {
+    if packet.len() < 19 || !packet.starts_with(b"OpusHead") {
+        return Err(anyhow!("Ogg stream is missing OpusHead packet"));
+    }
+
+    let version = packet[8];
+    if version & 0xf0 != 0 {
+        return Err(anyhow!("unsupported OpusHead version {version}"));
+    }
+
+    let channels = packet[9] as usize;
+    if channels == 0 {
+        return Err(anyhow!("OpusHead channel count must be greater than zero"));
+    }
+
+    let pre_skip_48k = u16::from_le_bytes([packet[10], packet[11]]) as usize;
+    let mapping_family = packet[18];
+
+    Ok(OpusHead {
+        channels,
+        pre_skip_48k,
+        mapping_family,
+    })
 }
 
 fn append_decoded_mono_samples(
@@ -457,6 +570,15 @@ fn is_wav_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_ogg_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            extension.eq_ignore_ascii_case("ogg") || extension.eq_ignore_ascii_case("opus")
+        })
+        .unwrap_or(false)
+}
+
 fn audio_extension(audio: &AudioReference) -> String {
     let media_type = audio
         .encryption
@@ -513,6 +635,24 @@ mod tests {
     }
 
     #[test]
+    fn detects_ogg_paths_case_insensitively() {
+        assert!(is_ogg_path(Path::new("voice.ogg")));
+        assert!(is_ogg_path(Path::new("voice.OPUS")));
+        assert!(!is_ogg_path(Path::new("voice.m4a")));
+    }
+
+    #[test]
+    fn parses_opus_head_contract() {
+        let mut packet = b"OpusHead".to_vec();
+        packet.extend_from_slice(&[1, 1, 0x80, 0x02, 0x80, 0xbb, 0x00, 0x00, 0, 0, 0]);
+
+        let head = parse_opus_head(&packet).unwrap();
+        assert_eq!(head.channels, 1);
+        assert_eq!(head.pre_skip_48k, 640);
+        assert_eq!(head.mapping_family, 0);
+    }
+
+    #[test]
     fn resamples_mono_audio_to_target_rate() {
         let input = vec![0.0, 1.0, 0.0, -1.0];
         let output = resample_linear_mono(&input, 4, 2);
@@ -564,6 +704,50 @@ mod tests {
         assert!(status.success());
 
         transcode_to_wav_with_rust(&input, &output).unwrap();
+        assert!(is_wav_path(&output));
+        assert!(std::fs::metadata(output).unwrap().len() > 44);
+    }
+
+    #[test]
+    fn pure_rust_transcodes_generated_ogg_opus_when_ffmpeg_is_available() {
+        let ffmpeg = std::env::var("FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
+        if std::process::Command::new(&ffmpeg)
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let input = temp_dir.path().join("test.ogg");
+        let output = temp_dir.path().join("test.wav");
+        let status = std::process::Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=1",
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "32k",
+            ])
+            .arg(&input)
+            .status()
+            .unwrap();
+        if !status.success() {
+            return;
+        }
+
+        transcode_ogg_opus_to_wav_with_rust(&input, &output).unwrap();
         assert!(is_wav_path(&output));
         assert!(std::fs::metadata(output).unwrap().len() > 44);
     }

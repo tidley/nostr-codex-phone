@@ -147,10 +147,12 @@ export AUDIO_MAX_BYTES=52428800
 
 `{audio}` is replaced with the verified downloaded audio file path and
 `{output_dir}` is replaced with a temporary transcript directory. Compressed
-phone audio is prepared as 16 kHz mono WAV before invoking Whisper. AAC/M4A is
-decoded in-process with pure Rust Symphonia/Hound; Opus/Ogg uses the optional
-`ffmpeg` fallback when the Rust decoder cannot handle it. If `TRANSCRIBE_ARGS` is
-not set, the server defaults to the Python `whisper` CLI style arguments.
+phone audio is prepared as 16 kHz mono WAV before invoking Whisper. Opus/Ogg is
+decoded in-process with pure Rust `ogg` + `opus-decoder` for mono/stereo Opus
+streams, and AAC/M4A is decoded in-process with pure Rust Symphonia/Hound.
+`ffmpeg` is only used as an optional fallback for unsupported containers,
+channel mappings, or decoder failures. If `TRANSCRIBE_ARGS` is not set, the
+server defaults to the Python `whisper` CLI style arguments.
 
 Run:
 
