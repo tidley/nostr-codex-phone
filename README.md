@@ -125,6 +125,12 @@ as `**bold**`, lists, and code blocks is formatted on screen. Auto-speak strips
 Markdown markers before sending text to TTS, and the playback bar can stop or
 replay the last spoken response.
 
+The Voice panel controls TTS language, Android engine, rate, pitch, and volume,
+and includes a test button. On GrapheneOS/Android, install TTS engines through
+your app store, then change system defaults under Settings -> System ->
+Languages & input -> Text-to-speech output; the app also lists installed engines
+when Android exposes them.
+
 The Blossom field accepts a custom server URL or `auto`. Auto-select tries these
 public free/free-tier servers in order until one accepts the upload:
 
