@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::blossom::{upload_audio, BlossomUploadConfig};
 use crate::nostr_client::{default_relays, IncomingMessage, NostrConfig, NostrMessenger};
-use crate::protocol::AudioReference;
+use crate::protocol::{AudioEncryption, AudioReference};
 
 static SESSION: Lazy<Mutex<Option<Arc<NostrMessenger>>>> = Lazy::new(|| Mutex::new(None));
 
@@ -51,6 +51,17 @@ pub struct BridgeAudioReference {
     pub size: u64,
     pub media_type: String,
     pub name: Option<String>,
+    pub encryption: Option<BridgeAudioEncryption>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeAudioEncryption {
+    pub algorithm: String,
+    pub key: String,
+    pub nonce: String,
+    pub plaintext_sha256: String,
+    pub plaintext_size: u64,
+    pub plaintext_media_type: String,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +224,7 @@ impl From<AudioReference> for BridgeAudioReference {
             size: value.size,
             media_type: value.media_type,
             name: value.name,
+            encryption: value.encryption.map(BridgeAudioEncryption::from),
         }
     }
 }
@@ -225,6 +237,33 @@ impl From<BridgeAudioReference> for AudioReference {
             size: value.size,
             media_type: value.media_type,
             name: value.name,
+            encryption: value.encryption.map(AudioEncryption::from),
+        }
+    }
+}
+
+impl From<AudioEncryption> for BridgeAudioEncryption {
+    fn from(value: AudioEncryption) -> Self {
+        Self {
+            algorithm: value.algorithm,
+            key: value.key,
+            nonce: value.nonce,
+            plaintext_sha256: value.plaintext_sha256,
+            plaintext_size: value.plaintext_size,
+            plaintext_media_type: value.plaintext_media_type,
+        }
+    }
+}
+
+impl From<BridgeAudioEncryption> for AudioEncryption {
+    fn from(value: BridgeAudioEncryption) -> Self {
+        Self {
+            algorithm: value.algorithm,
+            key: value.key,
+            nonce: value.nonce,
+            plaintext_sha256: value.plaintext_sha256,
+            plaintext_size: value.plaintext_size,
+            plaintext_media_type: value.plaintext_media_type,
         }
     }
 }

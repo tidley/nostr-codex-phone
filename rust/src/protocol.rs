@@ -1,6 +1,10 @@
 use anyhow::{anyhow, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+pub const AUDIO_ENCRYPTION_ALGORITHM: &str = "xchacha20poly1305";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -20,6 +24,19 @@ pub struct AudioReference {
     pub media_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<AudioEncryption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioEncryption {
+    pub algorithm: String,
+    pub key: String,
+    pub nonce: String,
+    pub plaintext_sha256: String,
+    pub plaintext_size: u64,
+    #[serde(rename = "plaintext_type")]
+    pub plaintext_media_type: String,
 }
 
 impl WireMessage {
@@ -136,6 +153,53 @@ fn validate_audio_reference(audio: &AudioReference) -> Result<()> {
     if !audio.media_type.starts_with("audio/") {
         return Err(anyhow!("field `audio.type` must be an audio MIME type"));
     }
+    if let Some(encryption) = &audio.encryption {
+        validate_audio_encryption(encryption)?;
+    }
+    Ok(())
+}
+
+fn validate_audio_encryption(encryption: &AudioEncryption) -> Result<()> {
+    if encryption.algorithm != AUDIO_ENCRYPTION_ALGORITHM {
+        return Err(anyhow!(
+            "field `audio.encryption.algorithm` must be `{AUDIO_ENCRYPTION_ALGORITHM}`"
+        ));
+    }
+    validate_base64url_len("audio.encryption.key", &encryption.key, 32)?;
+    validate_base64url_len("audio.encryption.nonce", &encryption.nonce, 24)?;
+    if encryption.plaintext_sha256.len() != 64
+        || !encryption
+            .plaintext_sha256
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit())
+    {
+        return Err(anyhow!(
+            "field `audio.encryption.plaintext_sha256` must be a 64-character hex SHA-256"
+        ));
+    }
+    if encryption.plaintext_size == 0 {
+        return Err(anyhow!(
+            "field `audio.encryption.plaintext_size` must be greater than zero"
+        ));
+    }
+    if !encryption.plaintext_media_type.starts_with("audio/") {
+        return Err(anyhow!(
+            "field `audio.encryption.plaintext_type` must be an audio MIME type"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_base64url_len(field: &str, value: &str, expected_len: usize) -> Result<()> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|err| anyhow!("field `{field}` must be base64url: {err}"))?;
+    if decoded.len() != expected_len {
+        return Err(anyhow!(
+            "field `{field}` must decode to {expected_len} bytes, got {} bytes",
+            decoded.len()
+        ));
+    }
     Ok(())
 }
 
@@ -168,7 +232,15 @@ mod tests {
                     "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     "size": 123,
                     "type": "audio/mp4",
-                    "name": "voice.m4a"
+                    "name": "voice.m4a",
+                    "encryption": {
+                        "algorithm": "xchacha20poly1305",
+                        "key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        "plaintext_sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                        "plaintext_size": 107,
+                        "plaintext_type": "audio/mp4"
+                    }
                 }
             }"#,
         )
@@ -179,6 +251,7 @@ mod tests {
             parsed.audio_reference().unwrap().sha256,
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
+        assert!(parsed.audio_reference().unwrap().encryption.is_some());
     }
 
     #[test]
@@ -187,6 +260,10 @@ mod tests {
         assert!(parse_wire_message(r#"{ "message": "hello" }"#).is_err());
         assert!(parse_wire_message(
             r#"{ "audio": { "url": "ftp://x", "sha256": "bad", "size": 1, "type": "audio/mp4" } }"#
+        )
+        .is_err());
+        assert!(parse_wire_message(
+            r#"{ "audio": { "url": "https://x", "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "size": 1, "type": "audio/mp4", "encryption": { "algorithm": "xchacha20poly1305", "key": "bad", "nonce": "bad", "plaintext_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "plaintext_size": 1, "plaintext_type": "audio/mp4" } } }"#
         )
         .is_err());
         assert!(parse_wire_message("hello").is_err());

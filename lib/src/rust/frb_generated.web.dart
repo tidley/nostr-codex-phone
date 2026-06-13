@@ -30,6 +30,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  BridgeAudioEncryption dco_decode_box_autoadd_bridge_audio_encryption(
+    dynamic raw,
+  );
+
+  @protected
   BridgeAudioReference dco_decode_box_autoadd_bridge_audio_reference(
     dynamic raw,
   );
@@ -46,6 +51,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BridgeNostrConfig dco_decode_box_autoadd_bridge_nostr_config(dynamic raw);
+
+  @protected
+  BridgeAudioEncryption dco_decode_bridge_audio_encryption(dynamic raw);
 
   @protected
   BridgeAudioReference dco_decode_bridge_audio_reference(dynamic raw);
@@ -77,6 +85,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  BridgeAudioEncryption? dco_decode_opt_box_autoadd_bridge_audio_encryption(
+    dynamic raw,
+  );
+
+  @protected
   BridgeIncomingMessage? dco_decode_opt_box_autoadd_bridge_incoming_message(
     dynamic raw,
   );
@@ -103,6 +116,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  BridgeAudioEncryption sse_decode_box_autoadd_bridge_audio_encryption(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BridgeAudioReference sse_decode_box_autoadd_bridge_audio_reference(
     SseDeserializer deserializer,
   );
@@ -119,6 +137,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BridgeNostrConfig sse_decode_box_autoadd_bridge_nostr_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BridgeAudioEncryption sse_decode_bridge_audio_encryption(
     SseDeserializer deserializer,
   );
 
@@ -160,6 +183,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
+  BridgeAudioEncryption? sse_decode_opt_box_autoadd_bridge_audio_encryption(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BridgeIncomingMessage? sse_decode_opt_box_autoadd_bridge_incoming_message(
     SseDeserializer deserializer,
   );
@@ -192,6 +220,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_bridge_audio_encryption(
+    BridgeAudioEncryption self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_bridge_audio_reference(
     BridgeAudioReference self,
     SseSerializer serializer,
@@ -212,6 +246,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_bridge_nostr_config(
     BridgeNostrConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bridge_audio_encryption(
+    BridgeAudioEncryption self,
     SseSerializer serializer,
   );
 
@@ -259,6 +299,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_bridge_audio_encryption(
+    BridgeAudioEncryption? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_opt_box_autoadd_bridge_incoming_message(

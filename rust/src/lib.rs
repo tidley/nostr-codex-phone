@@ -1,4 +1,5 @@
 pub mod api;
+pub mod audio_crypto;
 pub mod blossom;
 pub mod codex;
 mod frb_generated;

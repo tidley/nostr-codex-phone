@@ -8,6 +8,7 @@ use reqwest::Client;
 use tempfile::TempDir;
 use tokio::process::Command;
 
+use crate::audio_crypto::decrypt_audio_payload;
 use crate::blossom::sha256_hex;
 use crate::protocol::AudioReference;
 
@@ -112,12 +113,24 @@ pub async fn download_blossom_audio(
         ));
     }
 
+    let (audio_bytes, audio_hash) = if let Some(encryption) = &audio.encryption {
+        let plaintext = decrypt_audio_payload(&bytes, encryption)?;
+        if plaintext.len() as u64 > config.max_bytes {
+            return Err(anyhow!(
+                "decrypted audio is too large: {} bytes > {} byte limit",
+                plaintext.len(),
+                config.max_bytes
+            ));
+        }
+        (plaintext, encryption.plaintext_sha256.to_lowercase())
+    } else {
+        (bytes.to_vec(), actual_hash)
+    };
+
     let temp_dir = tempfile::tempdir().context("failed to create audio temp directory")?;
     let extension = audio_extension(audio);
-    let path = temp_dir
-        .path()
-        .join(format!("{}.{}", audio.sha256, extension));
-    tokio::fs::write(&path, &bytes)
+    let path = temp_dir.path().join(format!("{audio_hash}.{extension}"));
+    tokio::fs::write(&path, &audio_bytes)
         .await
         .with_context(|| format!("failed to write downloaded audio to `{}`", path.display()))?;
 
@@ -187,7 +200,13 @@ pub async fn transcribe_audio(audio_path: &Path, config: &TranscribeConfig) -> R
 }
 
 fn audio_extension(audio: &AudioReference) -> String {
-    match audio.media_type.as_str() {
+    let media_type = audio
+        .encryption
+        .as_ref()
+        .map(|encryption| encryption.plaintext_media_type.as_str())
+        .unwrap_or(audio.media_type.as_str());
+
+    match media_type {
         "audio/mpeg" | "audio/mp3" => "mp3".to_string(),
         "audio/wav" | "audio/wave" | "audio/x-wav" => "wav".to_string(),
         "audio/ogg" => "ogg".to_string(),

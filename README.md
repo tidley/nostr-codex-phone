@@ -14,10 +14,18 @@ Both peers send NIP-17/NIP-59 GiftWrapped private direct messages whose decrypte
 {
   "audio": {
     "url": "https://blossom.example/sha256.wav",
-    "sha256": "64-character-lowercase-hex",
+    "sha256": "ciphertext-sha256-hex",
     "size": 12345,
     "type": "audio/wav",
-    "name": "voice.wav"
+    "name": "voice.wav",
+    "encryption": {
+      "algorithm": "xchacha20poly1305",
+      "key": "base64url-32-byte-key",
+      "nonce": "base64url-24-byte-nonce",
+      "plaintext_sha256": "plaintext-sha256-hex",
+      "plaintext_size": 12329,
+      "plaintext_type": "audio/wav"
+    }
   }
 }
 ```
@@ -32,9 +40,12 @@ Both peers send NIP-17/NIP-59 GiftWrapped private direct messages whose decrypte
 
 Malformed JSON from the trusted peer is surfaced as an `invalid` message on mobile and answered by the server with `{ "error": "..." }`.
 
-Audio DMs contain a Blossom blob reference only. The server downloads the URL,
-verifies the downloaded bytes match `sha256`, transcribes the audio locally,
-then treats the transcript like a text query.
+Audio DMs contain a Blossom blob reference only. New mobile uploads encrypt the
+audio payload with XChaCha20-Poly1305 before upload. The Blossom `sha256` and
+`size` fields refer to the ciphertext; the random decryption key and nonce are
+inside the encrypted Nostr DM only. The server downloads the URL, verifies the
+ciphertext hash, decrypts and verifies the plaintext hash, transcribes the audio
+locally, then treats the transcript like a text query.
 
 ## Server
 
@@ -105,8 +116,9 @@ instead of the server crashing.
 
 The Flutter app stores the local `nsec`, peer pubkey, relay list, and Blossom
 selection in `flutter_secure_storage`. The mic button records a WAV file,
-uploads it with a Nostr-signed BUD-11 authorization token, and sends the
-returned URL/hash over an encrypted Nostr DM.
+encrypts it locally, uploads the ciphertext with a Nostr-signed BUD-11
+authorization token, and sends the returned URL/hash plus decryption metadata
+over an encrypted Nostr DM.
 
 Incoming response bodies render as GitHub-style Markdown, so Codex output such
 as `**bold**`, lists, and code blocks is formatted on screen. Auto-speak strips

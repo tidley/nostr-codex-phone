@@ -523,6 +523,26 @@ impl SseDecode for bool {
     }
 }
 
+impl SseDecode for crate::api::nostr::BridgeAudioEncryption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_algorithm = <String>::sse_decode(deserializer);
+        let mut var_key = <String>::sse_decode(deserializer);
+        let mut var_nonce = <String>::sse_decode(deserializer);
+        let mut var_plaintextSha256 = <String>::sse_decode(deserializer);
+        let mut var_plaintextSize = <u64>::sse_decode(deserializer);
+        let mut var_plaintextMediaType = <String>::sse_decode(deserializer);
+        return crate::api::nostr::BridgeAudioEncryption {
+            algorithm: var_algorithm,
+            key: var_key,
+            nonce: var_nonce,
+            plaintext_sha256: var_plaintextSha256,
+            plaintext_size: var_plaintextSize,
+            plaintext_media_type: var_plaintextMediaType,
+        };
+    }
+}
+
 impl SseDecode for crate::api::nostr::BridgeAudioReference {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -531,12 +551,15 @@ impl SseDecode for crate::api::nostr::BridgeAudioReference {
         let mut var_size = <u64>::sse_decode(deserializer);
         let mut var_mediaType = <String>::sse_decode(deserializer);
         let mut var_name = <Option<String>>::sse_decode(deserializer);
+        let mut var_encryption =
+            <Option<crate::api::nostr::BridgeAudioEncryption>>::sse_decode(deserializer);
         return crate::api::nostr::BridgeAudioReference {
             url: var_url,
             sha256: var_sha256,
             size: var_size,
             media_type: var_mediaType,
             name: var_name,
+            encryption: var_encryption,
         };
     }
 }
@@ -658,6 +681,19 @@ impl SseDecode for Option<String> {
     }
 }
 
+impl SseDecode for Option<crate::api::nostr::BridgeAudioEncryption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::nostr::BridgeAudioEncryption>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::nostr::BridgeIncomingMessage> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -745,6 +781,31 @@ fn pde_ffi_dispatcher_sync_impl(
 // Section: rust2dart
 
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::nostr::BridgeAudioEncryption {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.algorithm.into_into_dart().into_dart(),
+            self.key.into_into_dart().into_dart(),
+            self.nonce.into_into_dart().into_dart(),
+            self.plaintext_sha256.into_into_dart().into_dart(),
+            self.plaintext_size.into_into_dart().into_dart(),
+            self.plaintext_media_type.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::nostr::BridgeAudioEncryption
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::nostr::BridgeAudioEncryption>
+    for crate::api::nostr::BridgeAudioEncryption
+{
+    fn into_into_dart(self) -> crate::api::nostr::BridgeAudioEncryption {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::nostr::BridgeAudioReference {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -753,6 +814,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::nostr::BridgeAudioReference {
             self.size.into_into_dart().into_dart(),
             self.media_type.into_into_dart().into_dart(),
             self.name.into_into_dart().into_dart(),
+            self.encryption.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -906,6 +968,18 @@ impl SseEncode for bool {
     }
 }
 
+impl SseEncode for crate::api::nostr::BridgeAudioEncryption {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.algorithm, serializer);
+        <String>::sse_encode(self.key, serializer);
+        <String>::sse_encode(self.nonce, serializer);
+        <String>::sse_encode(self.plaintext_sha256, serializer);
+        <u64>::sse_encode(self.plaintext_size, serializer);
+        <String>::sse_encode(self.plaintext_media_type, serializer);
+    }
+}
+
 impl SseEncode for crate::api::nostr::BridgeAudioReference {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -914,6 +988,7 @@ impl SseEncode for crate::api::nostr::BridgeAudioReference {
         <u64>::sse_encode(self.size, serializer);
         <String>::sse_encode(self.media_type, serializer);
         <Option<String>>::sse_encode(self.name, serializer);
+        <Option<crate::api::nostr::BridgeAudioEncryption>>::sse_encode(self.encryption, serializer);
     }
 }
 
@@ -994,6 +1069,16 @@ impl SseEncode for Option<String> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <String>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::nostr::BridgeAudioEncryption> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::nostr::BridgeAudioEncryption>::sse_encode(value, serializer);
         }
     }
 }

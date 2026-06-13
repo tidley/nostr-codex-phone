@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `active_session`, `clean_relays`, `key_pair_from_keys`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`
 
 List<String> nostrDefaultRelays() =>
     RustLib.instance.api.crateApiNostrNostrDefaultRelays();
@@ -45,12 +45,52 @@ Future<BridgeIncomingMessage?> nostrNextMessage({required BigInt timeoutMs}) =>
 Future<bool> nostrIsStarted() =>
     RustLib.instance.api.crateApiNostrNostrIsStarted();
 
+class BridgeAudioEncryption {
+  final String algorithm;
+  final String key;
+  final String nonce;
+  final String plaintextSha256;
+  final BigInt plaintextSize;
+  final String plaintextMediaType;
+
+  const BridgeAudioEncryption({
+    required this.algorithm,
+    required this.key,
+    required this.nonce,
+    required this.plaintextSha256,
+    required this.plaintextSize,
+    required this.plaintextMediaType,
+  });
+
+  @override
+  int get hashCode =>
+      algorithm.hashCode ^
+      key.hashCode ^
+      nonce.hashCode ^
+      plaintextSha256.hashCode ^
+      plaintextSize.hashCode ^
+      plaintextMediaType.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeAudioEncryption &&
+          runtimeType == other.runtimeType &&
+          algorithm == other.algorithm &&
+          key == other.key &&
+          nonce == other.nonce &&
+          plaintextSha256 == other.plaintextSha256 &&
+          plaintextSize == other.plaintextSize &&
+          plaintextMediaType == other.plaintextMediaType;
+}
+
 class BridgeAudioReference {
   final String url;
   final String sha256;
   final BigInt size;
   final String mediaType;
   final String? name;
+  final BridgeAudioEncryption? encryption;
 
   const BridgeAudioReference({
     required this.url,
@@ -58,6 +98,7 @@ class BridgeAudioReference {
     required this.size,
     required this.mediaType,
     this.name,
+    this.encryption,
   });
 
   @override
@@ -66,7 +107,8 @@ class BridgeAudioReference {
       sha256.hashCode ^
       size.hashCode ^
       mediaType.hashCode ^
-      name.hashCode;
+      name.hashCode ^
+      encryption.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -77,7 +119,8 @@ class BridgeAudioReference {
           sha256 == other.sha256 &&
           size == other.size &&
           mediaType == other.mediaType &&
-          name == other.name;
+          name == other.name &&
+          encryption == other.encryption;
 }
 
 class BridgeBlossomUploadConfig {
