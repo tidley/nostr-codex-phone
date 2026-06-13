@@ -86,6 +86,27 @@ export CODEX_WORKDIR="$PWD"
 export CODEX_TIMEOUT_SECS=180
 ```
 
+Optional SQLite memory configuration:
+
+```bash
+export CODEX_MEMORY=1
+export CODEX_MEMORY_DB="$PWD/.nostr-codex-memory.sqlite3"
+export CODEX_MEMORY_RECENT_MESSAGES=12
+export CODEX_MEMORY_COMPACT_AFTER_MESSAGES=16
+export CODEX_MEMORY_SUMMARY_MAX_CHARS=5000
+export CODEX_MEMORY_COMPACTION_MAX_CHARS=12000
+```
+
+Memory is enabled by default. The server stores per-peer message history in
+SQLite, injects only a compact summary plus bounded recent turns into each Codex
+prompt, and periodically compacts older turns into a summary. The database
+contains decrypted queries, transcripts, and responses, so keep it local; the
+default hidden database path is gitignored.
+
+Send `/memory` or `/summary` from the phone to inspect the current compact
+summary. Send `/forget`, `/reset`, or `/reset memory` to clear memory for that
+phone key.
+
 Optional audio transcription configuration:
 
 ```bash
