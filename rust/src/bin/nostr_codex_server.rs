@@ -7,7 +7,7 @@ mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
 use rust_lib_nostr_codex_phone::codex::{run_codex, CodexConfig};
 use rust_lib_nostr_codex_phone::nostr_client::{default_relays, NostrConfig, NostrMessenger};
-use rust_lib_nostr_codex_phone::protocol::{parse_wire_message, WireMessage};
+use rust_lib_nostr_codex_phone::protocol::{parse_wire_message, AudioReference, WireMessage};
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_audio, transcribe_audio, AudioConfig, TranscribeConfig,
 };
@@ -173,7 +173,26 @@ async fn main() -> Result<()> {
                     Ok(transcript) => transcript,
                     Err(err) => {
                         error!("audio transcription failed: {err:#}");
-                        if let Err(send_err) = messenger
+                        if should_request_wav_retry(&audio) {
+                            let reason = wav_retry_reason();
+                            if let Some(memory) = memory.as_mut() {
+                                if let Err(memory_err) = memory.update_message(
+                                    recorded.id,
+                                    "audio_retry",
+                                    &format!("{reason}\n\nTranscription error: {err:#}"),
+                                ) {
+                                    warn!(
+                                        "failed to mark audio retry request in memory: {memory_err:#}"
+                                    );
+                                }
+                            }
+                            if let Err(send_err) = messenger
+                                .send_audio_retry_to(&message.sender_pubkey_hex, "wav", reason)
+                                .await
+                            {
+                                error!("failed to send WAV retry request DM: {send_err:#}");
+                            }
+                        } else if let Err(send_err) = messenger
                             .send_error_to(
                                 &message.sender_pubkey_hex,
                                 format!("Audio transcription failed: {err:#}"),
@@ -318,6 +337,35 @@ fn low_information_transcript_response(transcript: &str) -> Option<String> {
     }
 
     None
+}
+
+fn should_request_wav_retry(audio: &AudioReference) -> bool {
+    !is_wav_media_type(audio_plaintext_media_type(audio))
+}
+
+fn audio_plaintext_media_type(audio: &AudioReference) -> &str {
+    audio
+        .encryption
+        .as_ref()
+        .map(|encryption| encryption.plaintext_media_type.as_str())
+        .unwrap_or(audio.media_type.as_str())
+}
+
+fn is_wav_media_type(media_type: &str) -> bool {
+    let normalized = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "audio/wav" | "audio/wave" | "audio/x-wav" | "audio/vnd.wave"
+    )
+}
+
+fn wav_retry_reason() -> &'static str {
+    "Compressed voice audio could not be decoded or transcribed. Please retry; the phone will send the next recording as WAV."
 }
 
 fn normalize_transcript(transcript: &str) -> String {
@@ -563,5 +611,22 @@ mod tests {
     fn allows_meaningful_transcripts() {
         assert!(low_information_transcript_response("status").is_none());
         assert!(low_information_transcript_response("turn the lights off").is_none());
+    }
+
+    #[test]
+    fn requests_wav_retry_for_compressed_audio_only() {
+        let mut audio = AudioReference {
+            url: "https://example.com/audio.m4a".to_string(),
+            sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            size: 123,
+            media_type: "audio/mp4".to_string(),
+            name: Some("voice.m4a".to_string()),
+            encryption: None,
+        };
+
+        assert!(should_request_wav_retry(&audio));
+
+        audio.media_type = "audio/wav; codecs=1".to_string();
+        assert!(!should_request_wav_retry(&audio));
     }
 }

@@ -11,6 +11,7 @@ pub const AUDIO_ENCRYPTION_ALGORITHM: &str = "xchacha20poly1305";
 pub enum WireMessage {
     Query { query: String },
     Audio { audio: AudioReference },
+    AudioRetry { audio_retry: AudioRetryRequest },
     Transcript { transcript: String },
     Response { response: String },
     Error { error: String },
@@ -40,6 +41,12 @@ pub struct AudioEncryption {
     pub plaintext_media_type: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioRetryRequest {
+    pub format: String,
+    pub reason: String,
+}
+
 impl WireMessage {
     pub fn query<S: Into<String>>(query: S) -> Self {
         Self::Query {
@@ -49,6 +56,15 @@ impl WireMessage {
 
     pub fn audio(audio: AudioReference) -> Self {
         Self::Audio { audio }
+    }
+
+    pub fn audio_retry(format: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::AudioRetry {
+            audio_retry: AudioRetryRequest {
+                format: format.into(),
+                reason: reason.into(),
+            },
+        }
     }
 
     pub fn response<S: Into<String>>(response: S) -> Self {
@@ -73,6 +89,7 @@ impl WireMessage {
         match self {
             Self::Query { .. } => "query",
             Self::Audio { .. } => "audio",
+            Self::AudioRetry { .. } => "audio_retry",
             Self::Transcript { .. } => "transcript",
             Self::Response { .. } => "response",
             Self::Error { .. } => "error",
@@ -83,6 +100,7 @@ impl WireMessage {
         match self {
             Self::Query { query } => query,
             Self::Audio { audio } => &audio.url,
+            Self::AudioRetry { audio_retry } => &audio_retry.reason,
             Self::Transcript { transcript } => transcript,
             Self::Response { response } => response,
             Self::Error { error } => error,
@@ -100,6 +118,7 @@ impl WireMessage {
         let value = match self {
             Self::Query { query } => json!({ "query": query }),
             Self::Audio { audio } => json!({ "audio": audio }),
+            Self::AudioRetry { audio_retry } => json!({ "audio_retry": audio_retry }),
             Self::Transcript { transcript } => json!({ "transcript": transcript }),
             Self::Response { response } => json!({ "response": response }),
             Self::Error { error } => json!({ "error": error }),
@@ -129,6 +148,16 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
         return Ok(WireMessage::audio(audio));
     }
 
+    if let Some(audio_retry) = object.get("audio_retry") {
+        let audio_retry: AudioRetryRequest = serde_json::from_value(audio_retry.clone())
+            .map_err(|err| anyhow!("field `audio_retry` is invalid: {err}"))?;
+        validate_audio_retry_request(&audio_retry)?;
+        return Ok(WireMessage::audio_retry(
+            audio_retry.format,
+            audio_retry.reason,
+        ));
+    }
+
     if let Some(response) = object.get("response") {
         return response
             .as_str()
@@ -151,7 +180,7 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `transcript`, `response`, `error`, or object `audio` field"
+        "message must contain a string `query`, `transcript`, `response`, `error`, object `audio`, or object `audio_retry` field"
     ))
 }
 
@@ -202,6 +231,20 @@ fn validate_audio_encryption(encryption: &AudioEncryption) -> Result<()> {
     if !encryption.plaintext_media_type.starts_with("audio/") {
         return Err(anyhow!(
             "field `audio.encryption.plaintext_type` must be an audio MIME type"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_audio_retry_request(request: &AudioRetryRequest) -> Result<()> {
+    if request.format.trim().is_empty() {
+        return Err(anyhow!(
+            "field `audio_retry.format` must be a non-empty string"
+        ));
+    }
+    if request.reason.trim().is_empty() {
+        return Err(anyhow!(
+            "field `audio_retry.reason` must be a non-empty string"
         ));
     }
     Ok(())
@@ -279,6 +322,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_audio_retry_contract() {
+        let parsed = parse_wire_message(
+            r#"{
+                "audio_retry": {
+                    "format": "wav",
+                    "reason": "Compressed audio failed; please retry in WAV mode."
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.kind(), "audio_retry");
+        assert_eq!(
+            parsed.text(),
+            "Compressed audio failed; please retry in WAV mode."
+        );
+        assert_eq!(
+            parsed.to_json().unwrap(),
+            r#"{"audio_retry":{"format":"wav","reason":"Compressed audio failed; please retry in WAV mode."}}"#
+        );
+    }
+
+    #[test]
     fn rejects_malformed_payloads() {
         assert!(parse_wire_message(r#"{ "query": 42 }"#).is_err());
         assert!(parse_wire_message(r#"{ "message": "hello" }"#).is_err());
@@ -290,6 +356,11 @@ mod tests {
             r#"{ "audio": { "url": "https://x", "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "size": 1, "type": "audio/mp4", "encryption": { "algorithm": "xchacha20poly1305", "key": "bad", "nonce": "bad", "plaintext_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "plaintext_size": 1, "plaintext_type": "audio/mp4" } } }"#
         )
         .is_err());
+        assert!(parse_wire_message(r#"{ "audio_retry": "wav" }"#).is_err());
+        assert!(
+            parse_wire_message(r#"{ "audio_retry": { "format": "", "reason": "retry" } }"#)
+                .is_err()
+        );
         assert!(parse_wire_message("hello").is_err());
     }
 }
