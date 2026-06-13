@@ -104,9 +104,23 @@ instead of the server crashing.
 ## Mobile
 
 The Flutter app stores the local `nsec`, peer pubkey, relay list, and Blossom
-server in `flutter_secure_storage`. The mic button records a WAV file, uploads
-it to the configured Blossom server with a Nostr-signed BUD-11 authorization
-token, and sends the returned URL/hash over an encrypted Nostr DM.
+selection in `flutter_secure_storage`. The mic button records a WAV file,
+uploads it with a Nostr-signed BUD-11 authorization token, and sends the
+returned URL/hash over an encrypted Nostr DM.
+
+The Blossom field accepts a custom server URL or `auto`. Auto-select tries these
+public free/free-tier servers in order until one accepts the upload:
+
+```text
+https://blossom.nostr.build
+https://blossom.primal.net
+https://cdn.nostrcheck.me
+```
+
+For a more Nostr-native media setup, clients can also publish and read
+`kind:10063` Blossom server lists. This app keeps a curated fallback list for
+voice-note uploads so a missing or failing default server does not block the
+query path.
 
 Run:
 
