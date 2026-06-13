@@ -212,6 +212,18 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                if let Some(response) = low_information_transcript_response(&transcript) {
+                    if let Some(memory) = memory.as_mut() {
+                        if let Err(err) =
+                            memory.update_message(recorded.id, "ignored_transcript", &transcript)
+                        {
+                            warn!("failed to mark transcript as ignored in memory: {err:#}");
+                        }
+                    }
+                    send_response(&messenger, &message.sender_pubkey_hex, response).await;
+                    continue;
+                }
+
                 let prompt = codex_phone_prompt(
                     &transcript,
                     memory_context(&memory, &message.sender_pubkey_hex, recorded.id).as_deref(),
@@ -286,6 +298,61 @@ fn transcript_preview(transcript: &str) -> String {
         preview.push_str("...");
     }
     preview
+}
+
+fn low_information_transcript_response(transcript: &str) -> Option<String> {
+    let normalized = normalize_transcript(transcript);
+    if normalized.is_empty() {
+        return Some(
+            "I could not hear a request. Start recording, speak the full request, then tap stop."
+                .to_string(),
+        );
+    }
+
+    let words = normalized.split_whitespace().collect::<Vec<_>>();
+    if words.len() == 1 && is_low_information_word(words[0]) {
+        let heard = transcript.trim();
+        return Some(format!(
+            "I only heard \"{heard}\".\n\nStart recording, speak the full request, then tap stop. If this keeps happening on GrapheneOS, check the app microphone permission and the system privacy mic toggle."
+        ));
+    }
+
+    None
+}
+
+fn normalize_transcript(transcript: &str) -> String {
+    transcript
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch.is_whitespace() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_low_information_word(word: &str) -> bool {
+    matches!(
+        word,
+        "you"
+            | "yeah"
+            | "yes"
+            | "no"
+            | "ok"
+            | "okay"
+            | "uh"
+            | "um"
+            | "hm"
+            | "hmm"
+            | "hello"
+            | "hi"
+            | "hey"
+    )
 }
 
 fn open_memory_store(config: MemoryConfig) -> Option<MemoryStore> {
@@ -479,4 +546,22 @@ fn nostr_config_from_env() -> Result<NostrConfig> {
         peer_pubkey,
         relays,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_low_information_transcripts() {
+        let response = low_information_transcript_response("You").unwrap();
+        assert!(response.contains("I only heard \"You\""));
+        assert!(low_information_transcript_response("  okay. ").is_some());
+    }
+
+    #[test]
+    fn allows_meaningful_transcripts() {
+        assert!(low_information_transcript_response("status").is_none());
+        assert!(low_information_transcript_response("turn the lights off").is_none());
+    }
 }
