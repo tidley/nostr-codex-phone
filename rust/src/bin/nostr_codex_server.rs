@@ -51,7 +51,10 @@ async fn main() -> Result<()> {
 
         match message.kind.as_str() {
             "query" => {
-                info!("received query event {}", message.event_id);
+                info!(
+                    "received query event {} from {}",
+                    message.event_id, message.sender_pubkey
+                );
                 let response = match run_codex_and_report(
                     &messenger,
                     &message.sender_pubkey_hex,
@@ -72,7 +75,10 @@ async fn main() -> Result<()> {
                 }
             }
             "audio" => {
-                info!("received audio event {}", message.event_id);
+                info!(
+                    "received audio event {} from {}",
+                    message.event_id, message.sender_pubkey
+                );
                 let audio = match parse_wire_message(&message.raw_json) {
                     Ok(WireMessage::Audio { audio }) => audio,
                     Ok(_) => {

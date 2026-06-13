@@ -87,6 +87,16 @@ Run:
 cargo run --manifest-path rust/Cargo.toml --bin nostr-codex-server
 ```
 
+Send a one-off response DM from the local machine to the configured phone peer:
+
+```bash
+printf 'This is a local-machine test reply.' \
+  | cargo run --manifest-path rust/Cargo.toml --bin nostr-send-response
+```
+
+The phone receives that as `{ "response": "..." }`, so Auto speak reads it
+through TTS.
+
 `codex exec` and the configured transcriber must be installed and authenticated
 on the server. If either is missing or fails, the peer receives a JSON error DM
 instead of the server crashing.
