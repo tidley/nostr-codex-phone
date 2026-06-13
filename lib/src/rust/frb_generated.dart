@@ -506,6 +506,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeAudioEncryption dco_decode_box_autoadd_bridge_audio_encryption(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_bridge_audio_encryption(raw);
+  }
+
+  @protected
   BridgeAudioReference dco_decode_box_autoadd_bridge_audio_reference(
     dynamic raw,
   ) {
@@ -536,17 +544,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeAudioEncryption dco_decode_bridge_audio_encryption(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return BridgeAudioEncryption(
+      algorithm: dco_decode_String(arr[0]),
+      key: dco_decode_String(arr[1]),
+      nonce: dco_decode_String(arr[2]),
+      plaintextSha256: dco_decode_String(arr[3]),
+      plaintextSize: dco_decode_u_64(arr[4]),
+      plaintextMediaType: dco_decode_String(arr[5]),
+    );
+  }
+
+  @protected
   BridgeAudioReference dco_decode_bridge_audio_reference(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return BridgeAudioReference(
       url: dco_decode_String(arr[0]),
       sha256: dco_decode_String(arr[1]),
       size: dco_decode_u_64(arr[2]),
       mediaType: dco_decode_String(arr[3]),
       name: dco_decode_opt_String(arr[4]),
+      encryption: dco_decode_opt_box_autoadd_bridge_audio_encryption(arr[5]),
     );
   }
 
@@ -642,6 +667,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeAudioEncryption? dco_decode_opt_box_autoadd_bridge_audio_encryption(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_bridge_audio_encryption(raw);
+  }
+
+  @protected
   BridgeIncomingMessage? dco_decode_opt_box_autoadd_bridge_incoming_message(
     dynamic raw,
   ) {
@@ -696,6 +731,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeAudioEncryption sse_decode_box_autoadd_bridge_audio_encryption(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_bridge_audio_encryption(deserializer));
+  }
+
+  @protected
   BridgeAudioReference sse_decode_box_autoadd_bridge_audio_reference(
     SseDeserializer deserializer,
   ) {
@@ -728,6 +771,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeAudioEncryption sse_decode_bridge_audio_encryption(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_algorithm = sse_decode_String(deserializer);
+    var var_key = sse_decode_String(deserializer);
+    var var_nonce = sse_decode_String(deserializer);
+    var var_plaintextSha256 = sse_decode_String(deserializer);
+    var var_plaintextSize = sse_decode_u_64(deserializer);
+    var var_plaintextMediaType = sse_decode_String(deserializer);
+    return BridgeAudioEncryption(
+      algorithm: var_algorithm,
+      key: var_key,
+      nonce: var_nonce,
+      plaintextSha256: var_plaintextSha256,
+      plaintextSize: var_plaintextSize,
+      plaintextMediaType: var_plaintextMediaType,
+    );
+  }
+
+  @protected
   BridgeAudioReference sse_decode_bridge_audio_reference(
     SseDeserializer deserializer,
   ) {
@@ -737,12 +801,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_size = sse_decode_u_64(deserializer);
     var var_mediaType = sse_decode_String(deserializer);
     var var_name = sse_decode_opt_String(deserializer);
+    var var_encryption = sse_decode_opt_box_autoadd_bridge_audio_encryption(
+      deserializer,
+    );
     return BridgeAudioReference(
       url: var_url,
       sha256: var_sha256,
       size: var_size,
       mediaType: var_mediaType,
       name: var_name,
+      encryption: var_encryption,
     );
   }
 
@@ -862,6 +930,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeAudioEncryption? sse_decode_opt_box_autoadd_bridge_audio_encryption(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_bridge_audio_encryption(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   BridgeIncomingMessage? sse_decode_opt_box_autoadd_bridge_incoming_message(
     SseDeserializer deserializer,
   ) {
@@ -925,6 +1006,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_bridge_audio_encryption(
+    BridgeAudioEncryption self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bridge_audio_encryption(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_bridge_audio_reference(
     BridgeAudioReference self,
     SseSerializer serializer,
@@ -961,6 +1051,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_bridge_audio_encryption(
+    BridgeAudioEncryption self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.algorithm, serializer);
+    sse_encode_String(self.key, serializer);
+    sse_encode_String(self.nonce, serializer);
+    sse_encode_String(self.plaintextSha256, serializer);
+    sse_encode_u_64(self.plaintextSize, serializer);
+    sse_encode_String(self.plaintextMediaType, serializer);
+  }
+
+  @protected
   void sse_encode_bridge_audio_reference(
     BridgeAudioReference self,
     SseSerializer serializer,
@@ -971,6 +1075,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.size, serializer);
     sse_encode_String(self.mediaType, serializer);
     sse_encode_opt_String(self.name, serializer);
+    sse_encode_opt_box_autoadd_bridge_audio_encryption(
+      self.encryption,
+      serializer,
+    );
   }
 
   @protected
@@ -1060,6 +1168,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_String(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_bridge_audio_encryption(
+    BridgeAudioEncryption? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_bridge_audio_encryption(self, serializer);
     }
   }
 

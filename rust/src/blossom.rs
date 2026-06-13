@@ -10,6 +10,7 @@ use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::audio_crypto::encrypt_audio_payload;
 use crate::protocol::AudioReference;
 
 const BLOSSOM_AUTH_KIND: u16 = 24_242;
@@ -29,29 +30,31 @@ struct BlobDescriptor {
     sha256: String,
     size: u64,
     #[serde(rename = "type")]
-    media_type: String,
+    _media_type: String,
 }
 
 pub async fn upload_audio(config: BlossomUploadConfig) -> Result<AudioReference> {
-    let bytes = tokio::fs::read(&config.file_path)
+    let plaintext = tokio::fs::read(&config.file_path)
         .await
         .with_context(|| format!("failed to read audio file `{}`", config.file_path))?;
-    if bytes.is_empty() {
+    if plaintext.is_empty() {
         return Err(anyhow!("audio file is empty"));
     }
 
-    let sha256 = sha256_hex(&bytes);
+    let content_type = clean_content_type(&config.content_type);
+    let (upload_bytes, encryption) = encrypt_audio_payload(&plaintext, &content_type)?;
+    let sha256 = sha256_hex(&upload_bytes);
+    let upload_len = upload_bytes.len();
     let upload_url = upload_url(&config.server_url)?;
     let auth = blossom_upload_auth(&config.secret_key, &upload_url, &sha256)?;
-    let content_type = clean_content_type(&config.content_type);
 
     let response = Client::new()
         .put(upload_url.clone())
         .header(CONTENT_TYPE, content_type.as_str())
-        .header(CONTENT_LENGTH, bytes.len().to_string())
+        .header(CONTENT_LENGTH, upload_len.to_string())
         .header("X-SHA-256", sha256.as_str())
         .header("Authorization", auth)
-        .body(bytes)
+        .body(upload_bytes)
         .send()
         .await
         .with_context(|| format!("failed to upload audio to Blossom server `{upload_url}`"))?;
@@ -79,12 +82,19 @@ pub async fn upload_audio(config: BlossomUploadConfig) -> Result<AudioReference>
     if descriptor.size as usize == 0 {
         return Err(anyhow!("Blossom server returned an empty blob descriptor"));
     }
+    if descriptor.size as usize != upload_len {
+        return Err(anyhow!(
+            "Blossom server returned mismatched size: expected {}, got {}",
+            upload_len,
+            descriptor.size
+        ));
+    }
 
     Ok(AudioReference {
         url: descriptor.url,
         sha256,
         size: descriptor.size,
-        media_type: clean_content_type(&descriptor.media_type),
+        media_type: content_type,
         name: config
             .file_name
             .filter(|name| !name.trim().is_empty())
@@ -94,6 +104,7 @@ pub async fn upload_audio(config: BlossomUploadConfig) -> Result<AudioReference>
                     .and_then(|name| name.to_str())
                     .map(ToOwned::to_owned)
             }),
+        encryption: Some(encryption),
     })
 }
 

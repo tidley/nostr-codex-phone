@@ -638,7 +638,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final shortHash = audio.sha256.length >= 12
         ? audio.sha256.substring(0, 12)
         : audio.sha256;
-    return '${audio.name ?? 'voice note'}\n${audio.url}\nsha256: $shortHash...';
+    final privacy = audio.encryption == null
+        ? 'unencrypted payload'
+        : 'encrypted payload';
+    return '${audio.name ?? 'voice note'}\n${audio.url}\n$privacy\ncipher sha256: $shortHash...';
   }
 
   List<String> _relayLines() {
