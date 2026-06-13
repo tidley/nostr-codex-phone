@@ -36,6 +36,7 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+models/
 
 # Local/native build outputs
 /android/local.properties

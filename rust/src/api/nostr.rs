@@ -6,7 +6,9 @@ use nostr_sdk::prelude::*;
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
 
+use crate::blossom::{upload_audio, BlossomUploadConfig};
 use crate::nostr_client::{default_relays, IncomingMessage, NostrConfig, NostrMessenger};
+use crate::protocol::AudioReference;
 
 static SESSION: Lazy<Mutex<Option<Arc<NostrMessenger>>>> = Lazy::new(|| Mutex::new(None));
 
@@ -40,6 +42,24 @@ pub struct BridgeIncomingMessage {
     pub text: String,
     pub raw_json: String,
     pub event_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeAudioReference {
+    pub url: String,
+    pub sha256: String,
+    pub size: u64,
+    pub media_type: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeBlossomUploadConfig {
+    pub secret_key: String,
+    pub server_url: String,
+    pub file_path: String,
+    pub content_type: String,
+    pub file_name: Option<String>,
 }
 
 #[flutter_rust_bridge::frb(sync)]
@@ -109,6 +129,24 @@ pub async fn nostr_send_query(query: String) -> Result<String> {
     active_session().await?.send_query(query).await
 }
 
+pub async fn blossom_upload_audio(
+    config: BridgeBlossomUploadConfig,
+) -> Result<BridgeAudioReference> {
+    upload_audio(BlossomUploadConfig {
+        secret_key: config.secret_key,
+        server_url: config.server_url,
+        file_path: config.file_path,
+        content_type: config.content_type,
+        file_name: config.file_name,
+    })
+    .await
+    .map(BridgeAudioReference::from)
+}
+
+pub async fn nostr_send_audio(audio: BridgeAudioReference) -> Result<String> {
+    active_session().await?.send_audio(audio.into()).await
+}
+
 pub async fn nostr_send_response(response: String) -> Result<String> {
     active_session().await?.send_response(response).await
 }
@@ -163,6 +201,30 @@ impl From<IncomingMessage> for BridgeIncomingMessage {
             text: value.text,
             raw_json: value.raw_json,
             event_id: value.event_id,
+        }
+    }
+}
+
+impl From<AudioReference> for BridgeAudioReference {
+    fn from(value: AudioReference) -> Self {
+        Self {
+            url: value.url,
+            sha256: value.sha256,
+            size: value.size,
+            media_type: value.media_type,
+            name: value.name,
+        }
+    }
+}
+
+impl From<BridgeAudioReference> for AudioReference {
+    fn from(value: BridgeAudioReference) -> Self {
+        Self {
+            url: value.url,
+            sha256: value.sha256,
+            size: value.size,
+            media_type: value.media_type,
+            name: value.name,
         }
     }
 }

@@ -1,12 +1,13 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
 import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
-import 'package:speech_to_text/speech_recognition_error.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -60,16 +61,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _secretKeyStorageKey = 'nostr_secret_key';
   static const _peerPubkeyStorageKey = 'nostr_peer_pubkey';
   static const _relaysStorageKey = 'nostr_relays';
-  static const _speechRecognizerUnavailable =
-      'Speech input is unavailable. On GrapheneOS this usually means no Android speech recognition service is installed or enabled. Use typed input, keyboard dictation, or install a SpeechRecognizer provider.';
-  static const _speechRecognizerUnavailableShort =
-      'Speech input unavailable. Use typed input or install a SpeechRecognizer provider.';
+  static const _blossomServerStorageKey = 'blossom_server';
+  static const _defaultBlossomServer = 'https://blossom.primal.net';
+  static const _audioContentType = 'audio/wav';
 
   final _secretKeyController = TextEditingController();
   final _peerPubkeyController = TextEditingController();
   final _relayController = TextEditingController();
+  final _blossomServerController = TextEditingController();
   final _queryController = TextEditingController();
-  final _speech = stt.SpeechToText();
+  final _recorder = AudioRecorder();
   final _tts = FlutterTts();
   final _messages = <ConversationMessage>[];
 
@@ -77,10 +78,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _connecting = false;
   bool _connected = false;
   bool _polling = false;
-  bool _speechReady = false;
-  bool _listening = false;
   bool _sending = false;
-  bool _voiceFinalHandled = false;
+  bool _recording = false;
+  bool _sendingAudio = false;
   bool _autoSpeak = true;
   String? _ownPubkey;
   String? _status;
@@ -95,11 +95,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   @override
   void dispose() {
     _polling = false;
-    _speech.cancel();
+    unawaited(_recorder.dispose());
     _tts.stop();
     _secretKeyController.dispose();
     _peerPubkeyController.dispose();
     _relayController.dispose();
+    _blossomServerController.dispose();
     _queryController.dispose();
     unawaited(nostrStop());
     super.dispose();
@@ -110,12 +111,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final secretKey = await _storage.read(key: _secretKeyStorageKey);
     final peerPubkey = await _storage.read(key: _peerPubkeyStorageKey);
     final relays = await _storage.read(key: _relaysStorageKey);
+    final blossomServer = await _storage.read(key: _blossomServerStorageKey);
 
     if (!mounted) return;
     setState(() {
       _secretKeyController.text = secretKey ?? '';
       _peerPubkeyController.text = peerPubkey ?? '';
       _relayController.text = relays?.replaceAll(',', '\n') ?? defaultRelays;
+      _blossomServerController.text = blossomServer ?? _defaultBlossomServer;
       _loadingSettings = false;
     });
     _refreshOwnPubkey();
@@ -142,6 +145,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     await _storage.write(
       key: _relaysStorageKey,
       value: _relayLines().join(','),
+    );
+    await _storage.write(
+      key: _blossomServerStorageKey,
+      value: _blossomServerController.text.trim(),
     );
   }
 
@@ -281,20 +288,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
-  Future<void> _sendQuery({bool fromVoice = false}) async {
+  Future<void> _sendQuery() async {
     final query = _queryController.text.trim();
     if (query.isEmpty) return;
     if (_sending) return;
     if (!_connected) {
       _showError('Connect before sending a query');
       return;
-    }
-
-    if (!fromVoice && _listening) {
-      try {
-        await _speech.stop();
-      } catch (_) {}
-      if (mounted) setState(() => _listening = false);
     }
 
     setState(() {
@@ -328,133 +328,138 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
-  Future<void> _toggleSpeech() async {
-    if (_listening) {
-      try {
-        await _speech.stop();
-      } catch (_) {}
-      if (mounted) setState(() => _listening = false);
+  Future<void> _toggleRecording() async {
+    if (_recording) {
+      await _stopAndSendRecording();
       return;
     }
 
-    if (!_speechReady) {
-      try {
-        _speechReady = await _speech.initialize(
-          onStatus: (status) {
-            if (!mounted) return;
-            setState(() => _listening = status == 'listening');
-          },
-          onError: _handleSpeechError,
-        );
-      } catch (error) {
-        _handleSpeechStartupError(error);
+    if (!_connected) {
+      _showError('Connect before recording a voice query');
+      return;
+    }
+    if (_sending || _sendingAudio) return;
+
+    final blossomServer = _blossomServerController.text.trim();
+    if (blossomServer.isEmpty) {
+      _showError('Blossom server is required');
+      return;
+    }
+
+    try {
+      final hasPermission = await _recorder.hasPermission();
+      if (!hasPermission) {
+        _showError('Microphone permission denied');
         return;
       }
-    }
 
-    if (!_speechReady) {
+      await _saveSettings();
+      final directory = await getTemporaryDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final path = '${directory.path}/nostr_codex_voice_$timestamp.wav';
+      await _recorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.wav,
+          bitRate: 64000,
+          sampleRate: 16000,
+          numChannels: 1,
+          autoGain: true,
+          noiseSuppress: true,
+        ),
+        path: path,
+      );
+
       if (!mounted) return;
-      _showError(_speechRecognizerUnavailableShort);
-      setState(() => _status = _speechRecognizerUnavailable);
+      setState(() {
+        _recording = true;
+        _status = 'Recording voice query...';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _recording = false);
+      _showError('Recording failed: $error');
+    }
+  }
+
+  Future<void> _stopAndSendRecording() async {
+    String? path;
+    try {
+      path = await _recorder.stop();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _recording = false);
+        _showError('Stop recording failed: $error');
+      }
       return;
     }
 
-    _voiceFinalHandled = false;
+    if (!mounted) return;
+    setState(() {
+      _recording = false;
+      _sendingAudio = true;
+      _status = 'Uploading voice note to Blossom...';
+    });
+
+    if (path == null || path.isEmpty) {
+      _showError('Recording did not produce an audio file');
+      if (mounted) setState(() => _sendingAudio = false);
+      return;
+    }
+
     try {
-      await _speech.listen(
-        listenOptions: stt.SpeechListenOptions(
-          listenMode: stt.ListenMode.dictation,
-          partialResults: true,
-          cancelOnError: true,
-          pauseFor: const Duration(seconds: 2),
-          listenFor: const Duration(seconds: 20),
+      final fileName = path.split(Platform.pathSeparator).last;
+      final audio = await blossomUploadAudio(
+        config: BridgeBlossomUploadConfig(
+          secretKey: _secretKeyController.text.trim(),
+          serverUrl: _blossomServerController.text.trim(),
+          filePath: path,
+          contentType: _audioContentType,
+          fileName: fileName,
         ),
-        onResult: (result) {
-          if (!mounted) return;
-          final recognized = result.recognizedWords.trim();
-          setState(() {
-            _queryController.text = recognized;
-            if (result.finalResult) {
-              _listening = false;
-              _status = recognized.isEmpty
-                  ? 'No speech detected'
-                  : 'Speech captured';
-            }
-          });
-
-          if (result.finalResult &&
-              !_voiceFinalHandled &&
-              _connected &&
-              recognized.isNotEmpty) {
-            _voiceFinalHandled = true;
-            unawaited(_sendQuery(fromVoice: true));
-          }
-        },
       );
-      if (mounted) {
-        setState(() {
-          _listening = true;
-          _status = 'Listening...';
-        });
-      }
+
+      if (!mounted) return;
+      setState(() => _status = 'Sending Blossom audio reference...');
+
+      final eventId = await nostrSendAudio(audio: audio);
+      if (!mounted) return;
+      setState(() {
+        _messages.insert(
+          0,
+          ConversationMessage(
+            direction: MessageDirection.outgoing,
+            kind: 'audio',
+            text: _audioSummary(audio),
+            eventId: eventId,
+            timestamp: DateTime.now(),
+          ),
+        );
+        _status = 'Voice query sent';
+      });
     } catch (error) {
-      _handleSpeechStartupError(error);
+      _showError('Voice query failed: $error');
+    } finally {
+      unawaited(_deleteTempAudio(path));
+      if (mounted) {
+        setState(() => _sendingAudio = false);
+      }
     }
   }
 
-  void _handleSpeechError(SpeechRecognitionError error) {
-    if (!mounted) return;
-
-    final message = _speechErrorMessage(error.errorMsg);
-    final resetRecognizer = _isRecognizerUnavailable(error.errorMsg);
-    setState(() {
-      _listening = false;
-      if (resetRecognizer) _speechReady = false;
-      _status = message;
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          resetRecognizer ? _speechRecognizerUnavailableShort : message,
-        ),
-      ),
-    );
+  Future<void> _deleteTempAudio(String path) async {
+    try {
+      final file = File(path);
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (_) {}
   }
 
-  void _handleSpeechStartupError(Object error) {
-    if (!mounted) return;
-
-    final raw = error.toString();
-    final message = _speechErrorMessage(raw);
-    final resetRecognizer = _isRecognizerUnavailable(raw);
-    setState(() {
-      _listening = false;
-      if (resetRecognizer) _speechReady = false;
-      _status = message;
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          resetRecognizer ? _speechRecognizerUnavailableShort : message,
-        ),
-      ),
-    );
-  }
-
-  String _speechErrorMessage(String rawError) {
-    if (_isRecognizerUnavailable(rawError)) {
-      return _speechRecognizerUnavailable;
-    }
-
-    return 'Speech error: $rawError';
-  }
-
-  bool _isRecognizerUnavailable(String rawError) {
-    final normalized = rawError.toLowerCase();
-    return normalized.contains('error_client') ||
-        normalized.contains('recognitionservice') ||
-        normalized.contains('recognition service') ||
-        normalized.contains('speech recognition service is not available');
+  String _audioSummary(BridgeAudioReference audio) {
+    final shortHash = audio.sha256.length >= 12
+        ? audio.sha256.substring(0, 12)
+        : audio.sha256;
+    return '${audio.name ?? 'voice note'}\n${audio.url}\nsha256: $shortHash...';
   }
 
   List<String> _relayLines() {
@@ -502,6 +507,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               secretKeyController: _secretKeyController,
               peerPubkeyController: _peerPubkeyController,
               relayController: _relayController,
+              blossomServerController: _blossomServerController,
               ownPubkey: _ownPubkey,
               connected: _connected,
               connecting: _connecting,
@@ -517,8 +523,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               controller: _queryController,
               connected: _connected,
               sending: _sending,
-              listening: _listening,
-              onMicPressed: _toggleSpeech,
+              sendingAudio: _sendingAudio,
+              recording: _recording,
+              onMicPressed: _toggleRecording,
               onSendPressed: () => _sendQuery(),
             ),
             const SizedBox(height: 12),
@@ -543,6 +550,7 @@ class _ConnectionPanel extends StatelessWidget {
     required this.secretKeyController,
     required this.peerPubkeyController,
     required this.relayController,
+    required this.blossomServerController,
     required this.ownPubkey,
     required this.connected,
     required this.connecting,
@@ -557,6 +565,7 @@ class _ConnectionPanel extends StatelessWidget {
   final TextEditingController secretKeyController;
   final TextEditingController peerPubkeyController;
   final TextEditingController relayController;
+  final TextEditingController blossomServerController;
   final String? ownPubkey;
   final bool connected;
   final bool connecting;
@@ -637,6 +646,14 @@ class _ConnectionPanel extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 12),
+            TextField(
+              controller: blossomServerController,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Blossom server',
+              ),
+            ),
+            const SizedBox(height: 12),
             FilledButton.icon(
               onPressed: connecting
                   ? null
@@ -663,7 +680,8 @@ class _Composer extends StatelessWidget {
     required this.controller,
     required this.connected,
     required this.sending,
-    required this.listening,
+    required this.sendingAudio,
+    required this.recording,
     required this.onMicPressed,
     required this.onSendPressed,
   });
@@ -671,7 +689,8 @@ class _Composer extends StatelessWidget {
   final TextEditingController controller;
   final bool connected;
   final bool sending;
-  final bool listening;
+  final bool sendingAudio;
+  final bool recording;
   final VoidCallback onMicPressed;
   final VoidCallback onSendPressed;
 
@@ -695,21 +714,31 @@ class _Composer extends StatelessWidget {
             Row(
               children: [
                 IconButton.filledTonal(
-                  tooltip: listening ? 'Stop listening' : 'Speak query',
-                  onPressed: sending ? null : onMicPressed,
-                  icon: Icon(listening ? Icons.mic_off : Icons.mic),
+                  tooltip: recording ? 'Stop recording' : 'Record voice query',
+                  onPressed: sending || sendingAudio || !connected
+                      ? null
+                      : onMicPressed,
+                  icon: Icon(recording ? Icons.stop : Icons.mic),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: connected && !sending ? onSendPressed : null,
-                    icon: sending
+                    onPressed: connected && !sending && !sendingAudio
+                        ? onSendPressed
+                        : null,
+                    icon: sending || sendingAudio
                         ? const SizedBox.square(
                             dimension: 18,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.send),
-                    label: Text(sending ? 'Sending...' : 'Send query'),
+                    label: Text(
+                      sendingAudio
+                          ? 'Sending voice...'
+                          : sending
+                          ? 'Sending...'
+                          : 'Send query',
+                    ),
                   ),
                 ),
               ],

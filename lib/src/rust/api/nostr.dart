@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `active_session`, `clean_relays`, `key_pair_from_keys`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`
 
 List<String> nostrDefaultRelays() =>
     RustLib.instance.api.crateApiNostrNostrDefaultRelays();
@@ -26,6 +26,13 @@ Future<void> nostrStop() => RustLib.instance.api.crateApiNostrNostrStop();
 Future<String> nostrSendQuery({required String query}) =>
     RustLib.instance.api.crateApiNostrNostrSendQuery(query: query);
 
+Future<BridgeAudioReference> blossomUploadAudio({
+  required BridgeBlossomUploadConfig config,
+}) => RustLib.instance.api.crateApiNostrBlossomUploadAudio(config: config);
+
+Future<String> nostrSendAudio({required BridgeAudioReference audio}) =>
+    RustLib.instance.api.crateApiNostrNostrSendAudio(audio: audio);
+
 Future<String> nostrSendResponse({required String response}) =>
     RustLib.instance.api.crateApiNostrNostrSendResponse(response: response);
 
@@ -37,6 +44,76 @@ Future<BridgeIncomingMessage?> nostrNextMessage({required BigInt timeoutMs}) =>
 
 Future<bool> nostrIsStarted() =>
     RustLib.instance.api.crateApiNostrNostrIsStarted();
+
+class BridgeAudioReference {
+  final String url;
+  final String sha256;
+  final BigInt size;
+  final String mediaType;
+  final String? name;
+
+  const BridgeAudioReference({
+    required this.url,
+    required this.sha256,
+    required this.size,
+    required this.mediaType,
+    this.name,
+  });
+
+  @override
+  int get hashCode =>
+      url.hashCode ^
+      sha256.hashCode ^
+      size.hashCode ^
+      mediaType.hashCode ^
+      name.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeAudioReference &&
+          runtimeType == other.runtimeType &&
+          url == other.url &&
+          sha256 == other.sha256 &&
+          size == other.size &&
+          mediaType == other.mediaType &&
+          name == other.name;
+}
+
+class BridgeBlossomUploadConfig {
+  final String secretKey;
+  final String serverUrl;
+  final String filePath;
+  final String contentType;
+  final String? fileName;
+
+  const BridgeBlossomUploadConfig({
+    required this.secretKey,
+    required this.serverUrl,
+    required this.filePath,
+    required this.contentType,
+    this.fileName,
+  });
+
+  @override
+  int get hashCode =>
+      secretKey.hashCode ^
+      serverUrl.hashCode ^
+      filePath.hashCode ^
+      contentType.hashCode ^
+      fileName.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeBlossomUploadConfig &&
+          runtimeType == other.runtimeType &&
+          secretKey == other.secretKey &&
+          serverUrl == other.serverUrl &&
+          filePath == other.filePath &&
+          contentType == other.contentType &&
+          fileName == other.fileName;
+}
 
 class BridgeIncomingMessage {
   final String senderPubkey;

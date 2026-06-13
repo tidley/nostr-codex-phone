@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 992255835;
+  int get rustContentHash => -1761624526;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -77,6 +77,10 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  Future<BridgeAudioReference> crateApiNostrBlossomUploadAudio({
+    required BridgeBlossomUploadConfig config,
+  });
+
   Future<void> crateApiSimpleInitApp();
 
   List<String> crateApiNostrNostrDefaultRelays();
@@ -90,6 +94,10 @@ abstract class RustLibApi extends BaseApi {
   });
 
   BridgeKeyPair crateApiNostrNostrPublicKey({required String secretKey});
+
+  Future<String> crateApiNostrNostrSendAudio({
+    required BridgeAudioReference audio,
+  });
 
   Future<String> crateApiNostrNostrSendError({required String error});
 
@@ -113,6 +121,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
+  Future<BridgeAudioReference> crateApiNostrBlossomUploadAudio({
+    required BridgeBlossomUploadConfig config,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_blossom_upload_config(
+            config,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 1,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_audio_reference,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrBlossomUploadAudioConstMeta,
+        argValues: [config],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrBlossomUploadAudioConstMeta =>
+      const TaskConstMeta(
+        debugName: "blossom_upload_audio",
+        argNames: ["config"],
+      );
+
+  @override
   Future<void> crateApiSimpleInitApp() {
     return handler.executeNormal(
       NormalTask(
@@ -121,7 +165,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 1,
+            funcId: 2,
             port: port_,
           );
         },
@@ -145,7 +189,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_String,
@@ -167,7 +211,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bridge_key_pair,
@@ -192,7 +236,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 5,
             port: port_,
           );
         },
@@ -222,7 +266,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 6,
             port: port_,
           );
         },
@@ -250,7 +294,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(secretKey, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bridge_key_pair,
@@ -270,6 +314,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<String> crateApiNostrNostrSendAudio({
+    required BridgeAudioReference audio,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_audio_reference(audio, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrNostrSendAudioConstMeta,
+        argValues: [audio],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrNostrSendAudioConstMeta =>
+      const TaskConstMeta(debugName: "nostr_send_audio", argNames: ["audio"]);
+
+  @override
   Future<String> crateApiNostrNostrSendError({required String error}) {
     return handler.executeNormal(
       NormalTask(
@@ -279,7 +353,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 9,
             port: port_,
           );
         },
@@ -307,7 +381,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 10,
             port: port_,
           );
         },
@@ -335,7 +409,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 11,
             port: port_,
           );
         },
@@ -368,7 +442,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 12,
             port: port_,
           );
         },
@@ -395,7 +469,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 13,
             port: port_,
           );
         },
@@ -432,6 +506,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeAudioReference dco_decode_box_autoadd_bridge_audio_reference(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_bridge_audio_reference(raw);
+  }
+
+  @protected
+  BridgeBlossomUploadConfig dco_decode_box_autoadd_bridge_blossom_upload_config(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_bridge_blossom_upload_config(raw);
+  }
+
+  @protected
   BridgeIncomingMessage dco_decode_box_autoadd_bridge_incoming_message(
     dynamic raw,
   ) {
@@ -443,6 +533,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   BridgeNostrConfig dco_decode_box_autoadd_bridge_nostr_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_bridge_nostr_config(raw);
+  }
+
+  @protected
+  BridgeAudioReference dco_decode_bridge_audio_reference(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return BridgeAudioReference(
+      url: dco_decode_String(arr[0]),
+      sha256: dco_decode_String(arr[1]),
+      size: dco_decode_u_64(arr[2]),
+      mediaType: dco_decode_String(arr[3]),
+      name: dco_decode_opt_String(arr[4]),
+    );
+  }
+
+  @protected
+  BridgeBlossomUploadConfig dco_decode_bridge_blossom_upload_config(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return BridgeBlossomUploadConfig(
+      secretKey: dco_decode_String(arr[0]),
+      serverUrl: dco_decode_String(arr[1]),
+      filePath: dco_decode_String(arr[2]),
+      contentType: dco_decode_String(arr[3]),
+      fileName: dco_decode_opt_String(arr[4]),
+    );
   }
 
   @protected
@@ -514,6 +636,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  String? dco_decode_opt_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_String(raw);
+  }
+
+  @protected
   BridgeIncomingMessage? dco_decode_opt_box_autoadd_bridge_incoming_message(
     dynamic raw,
   ) {
@@ -568,6 +696,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeAudioReference sse_decode_box_autoadd_bridge_audio_reference(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_bridge_audio_reference(deserializer));
+  }
+
+  @protected
+  BridgeBlossomUploadConfig sse_decode_box_autoadd_bridge_blossom_upload_config(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_bridge_blossom_upload_config(deserializer));
+  }
+
+  @protected
   BridgeIncomingMessage sse_decode_box_autoadd_bridge_incoming_message(
     SseDeserializer deserializer,
   ) {
@@ -581,6 +725,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_bridge_nostr_config(deserializer));
+  }
+
+  @protected
+  BridgeAudioReference sse_decode_bridge_audio_reference(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_url = sse_decode_String(deserializer);
+    var var_sha256 = sse_decode_String(deserializer);
+    var var_size = sse_decode_u_64(deserializer);
+    var var_mediaType = sse_decode_String(deserializer);
+    var var_name = sse_decode_opt_String(deserializer);
+    return BridgeAudioReference(
+      url: var_url,
+      sha256: var_sha256,
+      size: var_size,
+      mediaType: var_mediaType,
+      name: var_name,
+    );
+  }
+
+  @protected
+  BridgeBlossomUploadConfig sse_decode_bridge_blossom_upload_config(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_secretKey = sse_decode_String(deserializer);
+    var var_serverUrl = sse_decode_String(deserializer);
+    var var_filePath = sse_decode_String(deserializer);
+    var var_contentType = sse_decode_String(deserializer);
+    var var_fileName = sse_decode_opt_String(deserializer);
+    return BridgeBlossomUploadConfig(
+      secretKey: var_secretKey,
+      serverUrl: var_serverUrl,
+      filePath: var_filePath,
+      contentType: var_contentType,
+      fileName: var_fileName,
+    );
   }
 
   @protected
@@ -669,6 +851,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_String(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   BridgeIncomingMessage? sse_decode_opt_box_autoadd_bridge_incoming_message(
     SseDeserializer deserializer,
   ) {
@@ -732,6 +925,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_bridge_audio_reference(
+    BridgeAudioReference self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bridge_audio_reference(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_bridge_blossom_upload_config(
+    BridgeBlossomUploadConfig self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bridge_blossom_upload_config(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_bridge_incoming_message(
     BridgeIncomingMessage self,
     SseSerializer serializer,
@@ -747,6 +958,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bridge_nostr_config(self, serializer);
+  }
+
+  @protected
+  void sse_encode_bridge_audio_reference(
+    BridgeAudioReference self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.url, serializer);
+    sse_encode_String(self.sha256, serializer);
+    sse_encode_u_64(self.size, serializer);
+    sse_encode_String(self.mediaType, serializer);
+    sse_encode_opt_String(self.name, serializer);
+  }
+
+  @protected
+  void sse_encode_bridge_blossom_upload_config(
+    BridgeBlossomUploadConfig self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.secretKey, serializer);
+    sse_encode_String(self.serverUrl, serializer);
+    sse_encode_String(self.filePath, serializer);
+    sse_encode_String(self.contentType, serializer);
+    sse_encode_opt_String(self.fileName, serializer);
   }
 
   @protected
@@ -814,6 +1051,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_String(self, serializer);
+    }
   }
 
   @protected
