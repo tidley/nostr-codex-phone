@@ -189,6 +189,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _autoSpeak = true;
   bool _speaking = false;
   bool _connectionExpanded = true;
+  bool _speechExpanded = false;
   double _ttsRate = 0.48;
   double _ttsPitch = 1.0;
   double _ttsVolume = 1.0;
@@ -851,12 +852,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               speaking: _speaking,
               hasReplay: _lastSpokenText?.trim().isNotEmpty ?? false,
               autoSpeak: _autoSpeak,
-              onStop: _stopSpeaking,
-              onReplay: _replayLastSpoken,
-              onAutoSpeakChanged: (value) => setState(() => _autoSpeak = value),
-            ),
-            const SizedBox(height: 12),
-            _SpeechSettingsPanel(
+              expanded: _speechExpanded,
               language: _ttsLanguage,
               languages: _ttsLanguages,
               engine: _ttsEngine,
@@ -864,6 +860,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               rate: _ttsRate,
               pitch: _ttsPitch,
               volume: _ttsVolume,
+              onStop: _stopSpeaking,
+              onReplay: _replayLastSpoken,
+              onAutoSpeakChanged: (value) => setState(() => _autoSpeak = value),
+              onExpandedChanged: (value) {
+                setState(() => _speechExpanded = value);
+              },
               onLanguageChanged: _setTtsLanguage,
               onEngineChanged: _setTtsEngine,
               onRateChanged: _setTtsRate,
@@ -1101,62 +1103,7 @@ class _PlaybackControls extends StatelessWidget {
     required this.speaking,
     required this.hasReplay,
     required this.autoSpeak,
-    required this.onStop,
-    required this.onReplay,
-    required this.onAutoSpeakChanged,
-  });
-
-  final bool speaking;
-  final bool hasReplay;
-  final bool autoSpeak;
-  final VoidCallback onStop;
-  final VoidCallback onReplay;
-  final ValueChanged<bool> onAutoSpeakChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        child: Row(
-          children: [
-            Icon(
-              speaking ? Icons.volume_up : Icons.volume_off,
-              color: speaking ? colorScheme.primary : colorScheme.secondary,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                speaking ? 'Speaking' : 'Speech idle',
-                style: Theme.of(context).textTheme.titleSmall,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            Tooltip(
-              message: autoSpeak ? 'Auto speak on' : 'Auto speak off',
-              child: Switch(value: autoSpeak, onChanged: onAutoSpeakChanged),
-            ),
-            IconButton.filledTonal(
-              tooltip: 'Replay speech',
-              onPressed: hasReplay ? onReplay : null,
-              icon: const Icon(Icons.replay),
-            ),
-            const SizedBox(width: 4),
-            IconButton.filled(
-              tooltip: 'Stop speech',
-              onPressed: speaking ? onStop : null,
-              icon: const Icon(Icons.stop),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SpeechSettingsPanel extends StatelessWidget {
-  const _SpeechSettingsPanel({
+    required this.expanded,
     required this.language,
     required this.languages,
     required this.engine,
@@ -1164,6 +1111,10 @@ class _SpeechSettingsPanel extends StatelessWidget {
     required this.rate,
     required this.pitch,
     required this.volume,
+    required this.onStop,
+    required this.onReplay,
+    required this.onAutoSpeakChanged,
+    required this.onExpandedChanged,
     required this.onLanguageChanged,
     required this.onEngineChanged,
     required this.onRateChanged,
@@ -1173,6 +1124,10 @@ class _SpeechSettingsPanel extends StatelessWidget {
     required this.onTest,
   });
 
+  final bool speaking;
+  final bool hasReplay;
+  final bool autoSpeak;
+  final bool expanded;
   final String language;
   final List<String> languages;
   final String? engine;
@@ -1180,6 +1135,10 @@ class _SpeechSettingsPanel extends StatelessWidget {
   final double rate;
   final double pitch;
   final double volume;
+  final VoidCallback onStop;
+  final VoidCallback onReplay;
+  final ValueChanged<bool> onAutoSpeakChanged;
+  final ValueChanged<bool> onExpandedChanged;
   final ValueChanged<String> onLanguageChanged;
   final ValueChanged<String?> onEngineChanged;
   final ValueChanged<double> onRateChanged;
@@ -1190,6 +1149,8 @@ class _SpeechSettingsPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
     final languageItems = (languages.toSet()..add(language)).toList()..sort();
     final engineValue = engine != null && engines.contains(engine)
         ? engine!
@@ -1203,86 +1164,155 @@ class _SpeechSettingsPanel extends StatelessWidget {
           children: [
             Row(
               children: [
+                Icon(
+                  speaking ? Icons.volume_up : Icons.volume_off,
+                  color: speaking ? colorScheme.primary : colorScheme.secondary,
+                ),
+                const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
-                    'Voice',
-                    style: Theme.of(context).textTheme.titleSmall,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: () => onExpandedChanged(!expanded),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Speech', style: theme.textTheme.titleMedium),
+                          const SizedBox(height: 2),
+                          Text(
+                            speaking ? 'Speaking' : 'Speech idle',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
-                TextButton.icon(
-                  onPressed: onTest,
-                  icon: const Icon(Icons.record_voice_over),
-                  label: const Text('Test'),
+                Tooltip(
+                  message: autoSpeak ? 'Auto speak on' : 'Auto speak off',
+                  child: Switch(
+                    value: autoSpeak,
+                    onChanged: onAutoSpeakChanged,
+                  ),
+                ),
+                IconButton.filledTonal(
+                  tooltip: 'Replay speech',
+                  onPressed: hasReplay ? onReplay : null,
+                  icon: const Icon(Icons.replay),
+                ),
+                const SizedBox(width: 4),
+                IconButton.filled(
+                  tooltip: 'Stop speech',
+                  onPressed: speaking ? onStop : null,
+                  icon: const Icon(Icons.stop),
+                ),
+                IconButton(
+                  tooltip: expanded
+                      ? 'Collapse speech settings'
+                      : 'Expand speech settings',
+                  onPressed: () => onExpandedChanged(!expanded),
+                  icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            DropdownButtonFormField<String>(
-              initialValue: languageItems.contains(language)
-                  ? language
-                  : languageItems.first,
-              isExpanded: true,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: 'Language',
-              ),
-              items: [
-                for (final item in languageItems)
-                  DropdownMenuItem(value: item, child: Text(item)),
-              ],
-              onChanged: (value) {
-                if (value != null) onLanguageChanged(value);
-              },
-            ),
-            if (engines.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: engineValue,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                  labelText: 'Engine',
-                ),
-                items: [
-                  const DropdownMenuItem(
-                    value: '',
-                    child: Text('System default'),
+            AnimatedCrossFade(
+              duration: const Duration(milliseconds: 180),
+              crossFadeState: expanded
+                  ? CrossFadeState.showFirst
+                  : CrossFadeState.showSecond,
+              firstChild: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Voice settings',
+                          style: theme.textTheme.titleSmall,
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: onTest,
+                        icon: const Icon(Icons.record_voice_over),
+                        label: const Text('Test'),
+                      ),
+                    ],
                   ),
-                  for (final item in engines)
-                    DropdownMenuItem(value: item, child: Text(item)),
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<String>(
+                    initialValue: languageItems.contains(language)
+                        ? language
+                        : languageItems.first,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Language',
+                    ),
+                    items: [
+                      for (final item in languageItems)
+                        DropdownMenuItem(value: item, child: Text(item)),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) onLanguageChanged(value);
+                    },
+                  ),
+                  if (engines.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: engineValue,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        labelText: 'Engine',
+                      ),
+                      items: [
+                        const DropdownMenuItem(
+                          value: '',
+                          child: Text('System default'),
+                        ),
+                        for (final item in engines)
+                          DropdownMenuItem(value: item, child: Text(item)),
+                      ],
+                      onChanged: (value) => onEngineChanged(
+                        value == null || value.isEmpty ? null : value,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  _SpeechSlider(
+                    label: 'Rate',
+                    value: rate,
+                    min: 0.1,
+                    max: 1.0,
+                    divisions: 18,
+                    onChanged: onRateChanged,
+                    onChangeEnd: onSliderChangeEnd,
+                  ),
+                  _SpeechSlider(
+                    label: 'Pitch',
+                    value: pitch,
+                    min: 0.5,
+                    max: 2.0,
+                    divisions: 30,
+                    onChanged: onPitchChanged,
+                    onChangeEnd: onSliderChangeEnd,
+                  ),
+                  _SpeechSlider(
+                    label: 'Volume',
+                    value: volume,
+                    min: 0.0,
+                    max: 1.0,
+                    divisions: 20,
+                    onChanged: onVolumeChanged,
+                    onChangeEnd: onSliderChangeEnd,
+                  ),
                 ],
-                onChanged: (value) => onEngineChanged(
-                  value == null || value.isEmpty ? null : value,
-                ),
               ),
-            ],
-            const SizedBox(height: 12),
-            _SpeechSlider(
-              label: 'Rate',
-              value: rate,
-              min: 0.1,
-              max: 1.0,
-              divisions: 18,
-              onChanged: onRateChanged,
-              onChangeEnd: onSliderChangeEnd,
-            ),
-            _SpeechSlider(
-              label: 'Pitch',
-              value: pitch,
-              min: 0.5,
-              max: 2.0,
-              divisions: 30,
-              onChanged: onPitchChanged,
-              onChangeEnd: onSliderChangeEnd,
-            ),
-            _SpeechSlider(
-              label: 'Volume',
-              value: volume,
-              min: 0.0,
-              max: 1.0,
-              divisions: 20,
-              onChanged: onVolumeChanged,
-              onChangeEnd: onSliderChangeEnd,
+              secondChild: const SizedBox.shrink(),
             ),
           ],
         ),
