@@ -199,6 +199,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   List<String> _ttsLanguages = const ['en-US'];
   List<String> _ttsEngines = const [];
   String? _lastSpokenText;
+  String? _recordingPath;
   String? _ownPubkey;
   String? _status;
 
@@ -212,7 +213,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   @override
   void dispose() {
     _polling = false;
+    final recordingPath = _recordingPath;
     unawaited(_recorder.dispose());
+    if (recordingPath != null) {
+      unawaited(_deleteTempAudio(recordingPath));
+    }
     _tts.stop();
     _secretKeyController.dispose();
     _peerPubkeyController.dispose();
@@ -627,6 +632,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
     if (_sending || _sendingAudio) return;
 
+    String? path;
     try {
       final hasPermission = await _recorder.hasPermission();
       if (!hasPermission) {
@@ -637,7 +643,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       await _saveSettings();
       final directory = await getTemporaryDirectory();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final path = '${directory.path}/nostr_codex_voice_$timestamp.wav';
+      path = '${directory.path}/nostr_codex_voice_$timestamp.wav';
       await _recorder.start(
         const RecordConfig(
           encoder: AudioEncoder.wav,
@@ -653,22 +659,32 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (!mounted) return;
       setState(() {
         _recording = true;
+        _recordingPath = path;
         _status = 'Recording voice query...';
       });
     } catch (error) {
+      if (path != null) unawaited(_deleteTempAudio(path));
       if (!mounted) return;
-      setState(() => _recording = false);
+      setState(() {
+        _recording = false;
+        _recordingPath = null;
+      });
       _showError('Recording failed: $error');
     }
   }
 
   Future<void> _stopAndSendRecording() async {
+    final fallbackPath = _recordingPath;
     String? path;
     try {
       path = await _recorder.stop();
+      path = _usableAudioPath(path, fallbackPath);
     } catch (error) {
       if (mounted) {
-        setState(() => _recording = false);
+        setState(() {
+          _recording = false;
+          _recordingPath = null;
+        });
         _showError('Stop recording failed: $error');
       }
       return;
@@ -677,11 +693,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!mounted) return;
     setState(() {
       _recording = false;
+      _recordingPath = null;
       _sendingAudio = true;
       _status = 'Uploading voice note to Blossom...';
     });
 
-    if (path == null || path.isEmpty) {
+    if (path == null) {
       _showError('Recording did not produce an audio file');
       if (mounted) setState(() => _sendingAudio = false);
       return;
@@ -717,6 +734,51 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         setState(() => _sendingAudio = false);
       }
     }
+  }
+
+  Future<void> _cancelRecording() async {
+    if (!_recording) return;
+
+    final fallbackPath = _recordingPath;
+    String? path;
+    Object? stopError;
+    try {
+      path = await _recorder.stop();
+    } catch (error) {
+      stopError = error;
+    }
+
+    final deletePath = _usableAudioPath(path, fallbackPath);
+    if (deletePath != null) {
+      unawaited(_deleteTempAudio(deletePath));
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _recording = false;
+      _recordingPath = null;
+      _status = stopError == null
+          ? 'Recording cancelled'
+          : 'Cancel recording failed: $stopError';
+    });
+
+    if (stopError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Cancel recording failed: $stopError')),
+      );
+    }
+  }
+
+  String? _usableAudioPath(String? primary, String? fallback) {
+    final cleanedPrimary = primary?.trim();
+    if (cleanedPrimary != null && cleanedPrimary.isNotEmpty) {
+      return cleanedPrimary;
+    }
+    final cleanedFallback = fallback?.trim();
+    if (cleanedFallback != null && cleanedFallback.isNotEmpty) {
+      return cleanedFallback;
+    }
+    return null;
   }
 
   Future<BridgeAudioReference> _uploadAudioToBlossom(
@@ -888,6 +950,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               sendingAudio: _sendingAudio,
               recording: _recording,
               onMicPressed: _toggleRecording,
+              onCancelRecording: _cancelRecording,
               onSendPressed: () => _sendQuery(),
             ),
             const SizedBox(height: 12),
@@ -1378,6 +1441,7 @@ class _Composer extends StatelessWidget {
     required this.sendingAudio,
     required this.recording,
     required this.onMicPressed,
+    required this.onCancelRecording,
     required this.onSendPressed,
   });
 
@@ -1387,6 +1451,7 @@ class _Composer extends StatelessWidget {
   final bool sendingAudio;
   final bool recording;
   final VoidCallback onMicPressed;
+  final VoidCallback onCancelRecording;
   final VoidCallback onSendPressed;
 
   @override
@@ -1409,16 +1474,32 @@ class _Composer extends StatelessWidget {
             Row(
               children: [
                 IconButton.filledTonal(
-                  tooltip: recording ? 'Stop recording' : 'Record voice query',
+                  tooltip: recording
+                      ? 'Stop and send recording'
+                      : 'Record voice query',
                   onPressed: sending || sendingAudio || !connected
                       ? null
                       : onMicPressed,
                   icon: Icon(recording ? Icons.stop : Icons.mic),
                 ),
+                if (recording) ...[
+                  const SizedBox(width: 8),
+                  IconButton.outlined(
+                    tooltip: 'Cancel recording',
+                    onPressed: sending || sendingAudio
+                        ? null
+                        : onCancelRecording,
+                    style: IconButton.styleFrom(
+                      foregroundColor: Theme.of(context).colorScheme.error,
+                    ),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
                 const SizedBox(width: 12),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: connected && !sending && !sendingAudio
+                    onPressed:
+                        connected && !sending && !sendingAudio && !recording
                         ? onSendPressed
                         : null,
                     icon: sending || sendingAudio
@@ -1432,6 +1513,8 @@ class _Composer extends StatelessWidget {
                           ? 'Sending voice...'
                           : sending
                           ? 'Sending...'
+                          : recording
+                          ? 'Recording...'
                           : 'Send query',
                     ),
                   ),

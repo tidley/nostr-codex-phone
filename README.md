@@ -147,7 +147,8 @@ The Flutter app stores the local `nsec`, peer pubkey, relay list, and Blossom
 selection in `flutter_secure_storage`. The mic button records a WAV file,
 encrypts it locally, uploads the ciphertext with a Nostr-signed BUD-11
 authorization token, and sends the returned URL/hash plus decryption metadata
-over an encrypted Nostr DM.
+over an encrypted Nostr DM. While recording, the stop button sends the voice
+note and the cancel button discards it locally without uploading.
 
 After connecting, the relay/key setup panel collapses into a compact expandable
 header so the conversation controls stay near the top of the screen.
