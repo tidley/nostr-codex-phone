@@ -8,6 +8,8 @@ use tokio::task::JoinHandle;
 
 use crate::protocol::{parse_wire_message, AudioReference, WireMessage};
 
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Clone)]
 pub struct NostrConfig {
     pub secret_key: String,
@@ -204,14 +206,17 @@ impl NostrMessenger {
         let event = PrivateDirectMessageBuilder::new(receiver, payload)
             .finalize(&self.keys)
             .context("failed to build GiftWrapped DM")?;
-        let output = self
-            .client
-            .send_event(&event)
-            .broadcast()
-            .ack_policy(AckPolicy::none())
-            .ok_timeout(Duration::from_secs(2))
-            .await
-            .context("failed to send GiftWrapped DM")?;
+        let output = tokio::time::timeout(
+            SEND_TIMEOUT,
+            self.client
+                .send_event(&event)
+                .broadcast()
+                .ack_policy(AckPolicy::none())
+                .ok_timeout(Duration::from_secs(2)),
+        )
+        .await
+        .map_err(|_| anyhow!("timed out sending GiftWrapped DM after {SEND_TIMEOUT:?}"))?
+        .context("failed to send GiftWrapped DM")?;
 
         if output.success.is_empty() {
             return Err(anyhow!(
