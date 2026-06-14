@@ -1722,6 +1722,19 @@ class _MessageTile extends StatelessWidget {
                   _formatTime(message.timestamp),
                   style: Theme.of(context).textTheme.labelSmall,
                 ),
+                if (incoming && message.text.trim().isNotEmpty) ...[
+                  const SizedBox(width: 4),
+                  SizedBox.square(
+                    dimension: 36,
+                    child: IconButton(
+                      tooltip: 'Copy full message',
+                      visualDensity: VisualDensity.compact,
+                      iconSize: 18,
+                      onPressed: () => _copyMessage(context),
+                      icon: const Icon(Icons.content_copy),
+                    ),
+                  ),
+                ],
               ],
             ),
             const SizedBox(height: 8),
@@ -1734,6 +1747,14 @@ class _MessageTile extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _copyMessage(BuildContext context) async {
+    await Clipboard.setData(ClipboardData(text: message.text));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(content: Text('Copied')));
   }
 
   IconData _messageIcon({required bool incoming, required bool transcript}) {
