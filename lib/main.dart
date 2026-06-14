@@ -1920,13 +1920,11 @@ class _Composer extends StatelessWidget {
                     ? 'Sending voice...'
                     : sending
                     ? 'Sending...'
-                    : recording
-                    ? 'Send voice'
-                    : hasText
-                    ? 'Send query'
+                    : recording || hasText
+                    ? 'Send'
                     : wavRetryRequested
-                    ? 'Record WAV retry'
-                    : 'Record voice';
+                    ? 'Record WAV'
+                    : 'Record';
                 final tooltip = recording
                     ? 'Send recording'
                     : hasText
