@@ -1,10 +1,13 @@
+use std::any::Any;
 use std::collections::HashMap;
 use std::env;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use futures_util::FutureExt;
 #[path = "nostr_codex_server/memory.rs"]
 mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
@@ -81,24 +84,60 @@ async fn main() -> Result<()> {
         };
 
         let worker_key = message.sender_pubkey_hex.clone();
-        let sender = peer_workers.entry(worker_key.clone()).or_insert_with(|| {
-            let (tx, rx) = mpsc::channel(32);
-            tokio::spawn(peer_worker(
-                worker_key,
-                rx,
+        let sender = peer_workers
+            .entry(worker_key.clone())
+            .or_insert_with(|| {
+                spawn_peer_worker(
+                    worker_key.clone(),
+                    Arc::clone(&messenger),
+                    memory_config.clone(),
+                    codex_config.clone(),
+                    audio_config.clone(),
+                    transcribe_config.clone(),
+                )
+            })
+            .clone();
+
+        if let Err(send_err) = sender.send(message).await {
+            warn!("peer worker for {worker_key} stopped; restarting and retrying message");
+            peer_workers.remove(&worker_key);
+            let message = send_err.0;
+            let sender = spawn_peer_worker(
+                worker_key.clone(),
                 Arc::clone(&messenger),
                 memory_config.clone(),
                 codex_config.clone(),
                 audio_config.clone(),
                 transcribe_config.clone(),
-            ));
-            tx
-        });
-
-        if sender.send(message).await.is_err() {
-            warn!("peer worker stopped; dropping incoming message");
+            );
+            if sender.send(message).await.is_err() {
+                error!("restarted peer worker for {worker_key} stopped; dropping incoming message");
+            } else {
+                peer_workers.insert(worker_key, sender);
+            }
         }
     }
+}
+
+fn spawn_peer_worker(
+    peer_pubkey: String,
+    messenger: Arc<NostrMessenger>,
+    memory_config: MemoryConfig,
+    codex_config: CodexConfig,
+    audio_config: AudioConfig,
+    transcribe_config: TranscribeConfig,
+) -> mpsc::Sender<IncomingMessage> {
+    let (tx, rx) = mpsc::channel(32);
+    tokio::spawn(peer_worker(
+        peer_pubkey,
+        rx,
+        messenger,
+        memory_config,
+        codex_config,
+        audio_config,
+        transcribe_config,
+    ));
+    tx
 }
 
 async fn peer_worker(
@@ -114,16 +153,46 @@ async fn peer_worker(
     info!("started worker for peer {peer_pubkey}");
 
     while let Some(message) = receiver.recv().await {
-        process_message(
+        let event_id = message.event_id.clone();
+        let sender_pubkey_hex = message.sender_pubkey_hex.clone();
+        let kind = message.kind.clone();
+        let result = AssertUnwindSafe(process_message(
             message,
             &messenger,
             &mut memory,
             &codex_config,
             &audio_config,
             &transcribe_config,
-        )
+        ))
+        .catch_unwind()
         .await;
+
+        if let Err(payload) = result {
+            let details = panic_payload_description(payload.as_ref());
+            error!(
+                "peer worker recovered from panic while processing {kind} event {event_id} from {sender_pubkey_hex}: {details}"
+            );
+            if let Err(err) = messenger
+                .send_error_to(
+                    &sender_pubkey_hex,
+                    "Server hit an internal error while processing that message. The worker recovered; please retry the request.",
+                )
+                .await
+            {
+                error!("failed to send recovered-panic error DM: {err:#}");
+            }
+        }
     }
+}
+
+fn panic_payload_description(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "non-string panic payload".to_string()
 }
 
 async fn process_message(
