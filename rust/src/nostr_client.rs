@@ -206,16 +206,23 @@ impl NostrMessenger {
         let event = PrivateDirectMessageBuilder::new(receiver, payload)
             .finalize(&self.keys)
             .context("failed to build GiftWrapped DM")?;
-        let output = tokio::time::timeout(
-            SEND_TIMEOUT,
-            self.client
+        let client = self.client.clone();
+        let mut send_task = tokio::spawn(async move {
+            client
                 .send_event(&event)
                 .broadcast()
                 .ack_policy(AckPolicy::none())
-                .ok_timeout(Duration::from_secs(2)),
-        )
-        .await
-        .map_err(|_| anyhow!("timed out sending GiftWrapped DM after {SEND_TIMEOUT:?}"))?
+                .ok_timeout(Duration::from_secs(2))
+                .await
+        });
+        let output = tokio::select! {
+            result = &mut send_task => result
+                .context("GiftWrapped DM send task failed")?,
+            _ = tokio::time::sleep(SEND_TIMEOUT) => {
+                send_task.abort();
+                return Err(anyhow!("timed out sending GiftWrapped DM after {SEND_TIMEOUT:?}"));
+            }
+        }
         .context("failed to send GiftWrapped DM")?;
 
         if output.success.is_empty() {
