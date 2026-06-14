@@ -226,7 +226,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _autoSpeak = true;
   bool _speaking = false;
   bool _connectionExpanded = true;
-  bool _speechExpanded = false;
   bool _wavRetryRequested = false;
   double _ttsRate = 0.48;
   double _ttsPitch = 1.0;
@@ -738,6 +737,114 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
+  bool _isResendableMessage(ConversationMessage message) {
+    if (message.kind == 'query' &&
+        message.direction == MessageDirection.outgoing &&
+        message.text.trim().isNotEmpty) {
+      return true;
+    }
+    if (message.kind == 'transcript' &&
+        message.direction == MessageDirection.incoming &&
+        message.text.trim().isNotEmpty) {
+      return true;
+    }
+    return message.kind == 'audio' &&
+        message.direction == MessageDirection.outgoing &&
+        message.audio != null;
+  }
+
+  bool _canResendMessage(ConversationMessage message) {
+    return _isResendableMessage(message) &&
+        _connected &&
+        !_sending &&
+        !_sendingAudio &&
+        !_recording;
+  }
+
+  Future<void> _resendMessage(ConversationMessage message) async {
+    if (!_canResendMessage(message)) return;
+    _clearAutoSpeakSuppression();
+
+    final audio = message.audio;
+    if (audio != null && message.kind == 'audio') {
+      await _resendAudioMessage(audio);
+      return;
+    }
+
+    final query = message.text.trim();
+    if (query.isEmpty) return;
+    await _resendTextMessage(
+      query,
+      fromTranscript: message.kind == 'transcript',
+    );
+  }
+
+  Future<void> _resendTextMessage(
+    String query, {
+    required bool fromTranscript,
+  }) async {
+    if (_sending) return;
+    setState(() {
+      _sending = true;
+      _status = fromTranscript
+          ? 'Sending transcript as query...'
+          : 'Resending query...';
+    });
+
+    try {
+      final eventId = await nostrSendQuery(query: query);
+      if (!mounted) return;
+      setState(() {
+        _messages.insert(
+          0,
+          ConversationMessage(
+            direction: MessageDirection.outgoing,
+            kind: 'query',
+            text: query,
+            eventId: eventId,
+            timestamp: DateTime.now(),
+          ),
+        );
+        _status = fromTranscript ? 'Transcript sent' : 'Query resent';
+      });
+    } catch (error) {
+      _showError('Resend failed: $error');
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<void> _resendAudioMessage(BridgeAudioReference audio) async {
+    if (_sendingAudio) return;
+    setState(() {
+      _sendingAudio = true;
+      _status = 'Resending voice note...';
+    });
+
+    try {
+      final eventId = await nostrSendAudio(audio: audio);
+      if (!mounted) return;
+      setState(() {
+        _messages.insert(
+          0,
+          ConversationMessage(
+            direction: MessageDirection.outgoing,
+            kind: 'audio',
+            text: _audioSummary(audio),
+            eventId: eventId,
+            timestamp: DateTime.now(),
+            audio: audio,
+          ),
+        );
+        _status = 'Voice note resent';
+      });
+    } catch (error) {
+      _showError('Voice resend failed: $error');
+    } finally {
+      if (mounted) setState(() => _sendingAudio = false);
+    }
+  }
+
   Future<void> _toggleRecording() async {
     if (_recording) {
       await _stopAndSendRecording();
@@ -859,6 +966,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             text: _audioSummary(audio),
             eventId: eventId,
             timestamp: DateTime.now(),
+            audio: audio,
           ),
         );
         _status = 'Voice query sent';
@@ -1045,21 +1153,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               ownPubkey: _ownPubkey,
               connected: _connected,
               connecting: _connecting,
-              expanded: _connectionExpanded,
-              onGenerateKey: _generateKey,
-              onSecretChanged: (_) => _refreshOwnPubkey(),
-              onConnect: _connect,
-              onDisconnect: _disconnect,
-              onExpandedChanged: (value) {
-                setState(() => _connectionExpanded = value);
-              },
-            ),
-            const SizedBox(height: 12),
-            _PlaybackControls(
               speaking: _speaking,
               hasReplay: _lastSpokenText?.trim().isNotEmpty ?? false,
               autoSpeak: _autoSpeak,
-              expanded: _speechExpanded,
               language: _ttsLanguage,
               languages: _ttsLanguages,
               engine: _ttsEngine,
@@ -1067,15 +1163,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               rate: _ttsRate,
               pitch: _ttsPitch,
               volume: _ttsVolume,
+              expanded: _connectionExpanded,
+              onGenerateKey: _generateKey,
+              onSecretChanged: (_) => _refreshOwnPubkey(),
+              onConnect: _connect,
+              onDisconnect: _disconnect,
               onStop: _stopSpeaking,
               onReplay: _replayLastSpoken,
               onAutoSpeakChanged: (value) {
                 if (value) _clearAutoSpeakSuppression();
                 setState(() => _autoSpeak = value);
                 if (!value) unawaited(_stopSpeaking());
-              },
-              onExpandedChanged: (value) {
-                setState(() => _speechExpanded = value);
               },
               onLanguageChanged: _setTtsLanguage,
               onEngineChanged: _setTtsEngine,
@@ -1084,6 +1182,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               onVolumeChanged: _setTtsVolume,
               onSliderChangeEnd: _commitTtsSettings,
               onTest: _testTtsSettings,
+              onExpandedChanged: (value) {
+                setState(() => _connectionExpanded = value);
+              },
             ),
             const SizedBox(height: 16),
             _Composer(
@@ -1106,7 +1207,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             if (_messages.isEmpty)
               const Text('No messages yet')
             else
-              ..._messages.map((message) => _MessageTile(message: message)),
+              ..._messages.map(
+                (message) => _MessageTile(
+                  message: message,
+                  showResend: _isResendableMessage(message),
+                  onResend: _canResendMessage(message)
+                      ? () => _resendMessage(message)
+                      : null,
+                ),
+              ),
           ],
         ),
       ),
@@ -1124,11 +1233,31 @@ class _ConnectionPanel extends StatelessWidget {
     required this.ownPubkey,
     required this.connected,
     required this.connecting,
+    required this.speaking,
+    required this.hasReplay,
+    required this.autoSpeak,
+    required this.language,
+    required this.languages,
+    required this.engine,
+    required this.engines,
+    required this.rate,
+    required this.pitch,
+    required this.volume,
     required this.expanded,
     required this.onGenerateKey,
     required this.onSecretChanged,
     required this.onConnect,
     required this.onDisconnect,
+    required this.onStop,
+    required this.onReplay,
+    required this.onAutoSpeakChanged,
+    required this.onLanguageChanged,
+    required this.onEngineChanged,
+    required this.onRateChanged,
+    required this.onPitchChanged,
+    required this.onVolumeChanged,
+    required this.onSliderChangeEnd,
+    required this.onTest,
     required this.onExpandedChanged,
   });
 
@@ -1140,11 +1269,31 @@ class _ConnectionPanel extends StatelessWidget {
   final String? ownPubkey;
   final bool connected;
   final bool connecting;
+  final bool speaking;
+  final bool hasReplay;
+  final bool autoSpeak;
+  final String language;
+  final List<String> languages;
+  final String? engine;
+  final List<String> engines;
+  final double rate;
+  final double pitch;
+  final double volume;
   final bool expanded;
   final VoidCallback onGenerateKey;
   final ValueChanged<String> onSecretChanged;
   final VoidCallback onConnect;
   final VoidCallback onDisconnect;
+  final VoidCallback onStop;
+  final VoidCallback onReplay;
+  final ValueChanged<bool> onAutoSpeakChanged;
+  final ValueChanged<String> onLanguageChanged;
+  final ValueChanged<String?> onEngineChanged;
+  final ValueChanged<double> onRateChanged;
+  final ValueChanged<double> onPitchChanged;
+  final ValueChanged<double> onVolumeChanged;
+  final ValueChanged<double> onSliderChangeEnd;
+  final VoidCallback onTest;
   final ValueChanged<bool> onExpandedChanged;
 
   @override
@@ -1155,6 +1304,11 @@ class _ConnectionPanel extends StatelessWidget {
         : connected
         ? 'Connected'
         : 'Disconnected';
+    final colorScheme = theme.colorScheme;
+    final languageItems = (languages.toSet()..add(language)).toList()..sort();
+    final engineValue = engine != null && engines.contains(engine)
+        ? engine!
+        : '';
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -1178,12 +1332,12 @@ class _ConnectionPanel extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Relay session',
+                            'Session and speech',
                             style: theme.textTheme.titleMedium,
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            '$statusText${ownPubkey == null ? '' : ' · ${_compactPubkey(ownPubkey!)}'}',
+                            '$statusText · ${speaking ? 'Speaking' : 'Speech idle'}${ownPubkey == null ? '' : ' · ${_compactPubkey(ownPubkey!)}'}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall,
@@ -1205,6 +1359,8 @@ class _ConnectionPanel extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const SizedBox(height: 12),
+                  Text('Relay session', style: theme.textTheme.titleSmall),
+                  const SizedBox(height: 8),
                   TextField(
                     controller: secretKeyController,
                     obscureText: true,
@@ -1295,6 +1451,126 @@ class _ConnectionPanel extends StatelessWidget {
                         : Icon(connected ? Icons.link_off : Icons.link),
                     label: Text(connected ? 'Disconnect' : 'Connect'),
                   ),
+                  const Divider(height: 28),
+                  Row(
+                    children: [
+                      Icon(
+                        speaking ? Icons.volume_up : Icons.volume_off,
+                        color: speaking
+                            ? colorScheme.primary
+                            : colorScheme.secondary,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Speech',
+                          style: theme.textTheme.titleSmall,
+                        ),
+                      ),
+                      Tooltip(
+                        message: autoSpeak ? 'Auto speak on' : 'Auto speak off',
+                        child: Switch(
+                          value: autoSpeak,
+                          onChanged: onAutoSpeakChanged,
+                        ),
+                      ),
+                      IconButton.filledTonal(
+                        tooltip: 'Replay speech',
+                        onPressed: hasReplay ? onReplay : null,
+                        icon: const Icon(Icons.replay),
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton.filled(
+                        tooltip: 'Stop speech',
+                        onPressed: onStop,
+                        icon: const Icon(Icons.stop),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Voice settings',
+                          style: theme.textTheme.titleSmall,
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: onTest,
+                        icon: const Icon(Icons.record_voice_over),
+                        label: const Text('Test'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<String>(
+                    initialValue: languageItems.contains(language)
+                        ? language
+                        : languageItems.first,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Language',
+                    ),
+                    items: [
+                      for (final item in languageItems)
+                        DropdownMenuItem(value: item, child: Text(item)),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) onLanguageChanged(value);
+                    },
+                  ),
+                  if (engines.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      initialValue: engineValue,
+                      isExpanded: true,
+                      decoration: const InputDecoration(
+                        border: OutlineInputBorder(),
+                        labelText: 'Engine',
+                      ),
+                      items: [
+                        const DropdownMenuItem(
+                          value: '',
+                          child: Text('System default'),
+                        ),
+                        for (final item in engines)
+                          DropdownMenuItem(value: item, child: Text(item)),
+                      ],
+                      onChanged: (value) => onEngineChanged(
+                        value == null || value.isEmpty ? null : value,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  _SpeechSlider(
+                    label: 'Rate',
+                    value: rate,
+                    min: 0.1,
+                    max: 1.0,
+                    divisions: 18,
+                    onChanged: onRateChanged,
+                    onChangeEnd: onSliderChangeEnd,
+                  ),
+                  _SpeechSlider(
+                    label: 'Pitch',
+                    value: pitch,
+                    min: 0.5,
+                    max: 2.0,
+                    divisions: 30,
+                    onChanged: onPitchChanged,
+                    onChangeEnd: onSliderChangeEnd,
+                  ),
+                  _SpeechSlider(
+                    label: 'Volume',
+                    value: volume,
+                    min: 0.0,
+                    max: 1.0,
+                    divisions: 20,
+                    onChanged: onVolumeChanged,
+                    onChangeEnd: onSliderChangeEnd,
+                  ),
                 ],
               ),
               secondChild: const SizedBox.shrink(),
@@ -1311,6 +1587,7 @@ class _ConnectionPanel extends StatelessWidget {
   }
 }
 
+// ignore: unused_element
 class _PlaybackControls extends StatelessWidget {
   const _PlaybackControls({
     required this.speaking,
@@ -1617,63 +1894,73 @@ class _Composer extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                IconButton.filledTonal(
-                  tooltip: recording
-                      ? 'Stop and send recording'
-                      : wavRetryRequested
-                      ? 'Record WAV retry'
-                      : 'Record voice query',
-                  onPressed: sending || sendingAudio || !connected
-                      ? null
-                      : onMicPressed,
-                  icon: Icon(
-                    recording
-                        ? Icons.stop
-                        : wavRetryRequested
-                        ? Icons.mic_external_on
-                        : Icons.mic,
-                  ),
-                ),
-                if (recording) ...[
-                  const SizedBox(width: 8),
-                  IconButton.outlined(
-                    tooltip: 'Cancel recording',
-                    onPressed: sending || sendingAudio
-                        ? null
-                        : onCancelRecording,
-                    style: IconButton.styleFrom(
-                      foregroundColor: Theme.of(context).colorScheme.error,
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: controller,
+              builder: (context, value, _) {
+                final hasText = value.text.trim().isNotEmpty;
+                final busy = sending || sendingAudio;
+                final onMainPressed = !connected || busy
+                    ? null
+                    : recording
+                    ? onMicPressed
+                    : hasText
+                    ? onSendPressed
+                    : onMicPressed;
+                final icon = busy
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : recording || hasText
+                    ? const Icon(Icons.send)
+                    : Icon(
+                        wavRetryRequested ? Icons.mic_external_on : Icons.mic,
+                      );
+                final label = sendingAudio
+                    ? 'Sending voice...'
+                    : sending
+                    ? 'Sending...'
+                    : recording
+                    ? 'Send voice'
+                    : hasText
+                    ? 'Send query'
+                    : wavRetryRequested
+                    ? 'Record WAV retry'
+                    : 'Record voice';
+                final tooltip = recording
+                    ? 'Send recording'
+                    : hasText
+                    ? 'Send query'
+                    : wavRetryRequested
+                    ? 'Record WAV retry'
+                    : 'Record voice query';
+
+                return Row(
+                  children: [
+                    if (recording) ...[
+                      IconButton.outlined(
+                        tooltip: 'Cancel recording',
+                        onPressed: busy ? null : onCancelRecording,
+                        style: IconButton.styleFrom(
+                          foregroundColor: Theme.of(context).colorScheme.error,
+                        ),
+                        icon: const Icon(Icons.close),
+                      ),
+                      const SizedBox(width: 12),
+                    ],
+                    Expanded(
+                      child: Tooltip(
+                        message: tooltip,
+                        child: FilledButton.icon(
+                          onPressed: onMainPressed,
+                          icon: icon,
+                          label: Text(label),
+                        ),
+                      ),
                     ),
-                    icon: const Icon(Icons.close),
-                  ),
-                ],
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed:
-                        connected && !sending && !sendingAudio && !recording
-                        ? onSendPressed
-                        : null,
-                    icon: sending || sendingAudio
-                        ? const SizedBox.square(
-                            dimension: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.send),
-                    label: Text(
-                      sendingAudio
-                          ? 'Sending voice...'
-                          : sending
-                          ? 'Sending...'
-                          : recording
-                          ? 'Recording...'
-                          : 'Send query',
-                    ),
-                  ),
-                ),
-              ],
+                  ],
+                );
+              },
             ),
           ],
         ),
@@ -1683,9 +1970,15 @@ class _Composer extends StatelessWidget {
 }
 
 class _MessageTile extends StatelessWidget {
-  const _MessageTile({required this.message});
+  const _MessageTile({
+    required this.message,
+    required this.showResend,
+    required this.onResend,
+  });
 
   final ConversationMessage message;
+  final bool showResend;
+  final VoidCallback? onResend;
 
   @override
   Widget build(BuildContext context) {
@@ -1722,6 +2015,19 @@ class _MessageTile extends StatelessWidget {
                   _formatTime(message.timestamp),
                   style: Theme.of(context).textTheme.labelSmall,
                 ),
+                if (showResend) ...[
+                  const SizedBox(width: 4),
+                  SizedBox.square(
+                    dimension: 36,
+                    child: IconButton(
+                      tooltip: _resendTooltip(),
+                      visualDensity: VisualDensity.compact,
+                      iconSize: 18,
+                      onPressed: onResend,
+                      icon: const Icon(Icons.refresh),
+                    ),
+                  ),
+                ],
                 if (incoming && message.text.trim().isNotEmpty) ...[
                   const SizedBox(width: 4),
                   SizedBox.square(
@@ -1747,6 +2053,12 @@ class _MessageTile extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  String _resendTooltip() {
+    if (message.kind == 'audio') return 'Resend voice note';
+    if (message.kind == 'transcript') return 'Send transcript as query';
+    return 'Resend query';
   }
 
   Future<void> _copyMessage(BuildContext context) async {
@@ -1778,6 +2090,7 @@ class ConversationMessage {
     required this.text,
     required this.eventId,
     required this.timestamp,
+    this.audio,
   });
 
   final MessageDirection direction;
@@ -1785,4 +2098,5 @@ class ConversationMessage {
   final String text;
   final String eventId;
   final DateTime timestamp;
+  final BridgeAudioReference? audio;
 }

@@ -186,9 +186,11 @@ selection in `flutter_secure_storage`. The mic button records an Opus/Ogg file
 by default, encrypts it locally, uploads the ciphertext with a Nostr-signed
 BUD-11 authorization token, and sends the returned URL/hash plus decryption
 metadata over an encrypted Nostr DM. If the server sends `audio_retry`, the next
-recording is sent as WAV and then the app returns to Opus/Ogg. While recording, the
-stop button sends the voice note and the cancel button discards it locally
-without uploading.
+recording is sent as WAV and then the app returns to Opus/Ogg. The main composer
+button records when the query box is empty, sends typed text when text is present,
+and changes to send the voice note while recording. The cancel button discards a
+recording locally without uploading. Message actions allow copying incoming text
+and resending typed queries, uploaded audio references, or returned transcripts.
 Returned transcripts are styled as user-side speech bubbles next to the audio
 message, while Codex responses remain visually distinct.
 
