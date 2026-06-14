@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::env;
 use std::fs::File;
 use std::io::ErrorKind;
@@ -240,7 +241,9 @@ async fn prepare_audio_for_transcription(
 
     let temp_dir = tempfile::tempdir().context("failed to create transcode temp directory")?;
     let wav_path = temp_dir.path().join("audio.wav");
-    if let Err(rust_err) = transcode_to_wav_with_rust(audio_path, &wav_path) {
+    if let Err(rust_err) =
+        transcode_to_wav_with_rust_blocking(audio_path.to_path_buf(), wav_path.clone()).await
+    {
         transcode_to_wav_with_ffmpeg(audio_path, &wav_path, config)
             .await
             .with_context(|| {
@@ -252,6 +255,38 @@ async fn prepare_audio_for_transcription(
         _temp_dir: Some(temp_dir),
         path: wav_path,
     })
+}
+
+async fn transcode_to_wav_with_rust_blocking(input: PathBuf, output: PathBuf) -> Result<()> {
+    let input_display = input.display().to_string();
+    match tokio::task::spawn_blocking(move || transcode_to_wav_with_rust(&input, &output)).await {
+        Ok(result) => result,
+        Err(err) => Err(transcode_join_error(err, &input_display)),
+    }
+}
+
+fn transcode_join_error(err: tokio::task::JoinError, input: &str) -> anyhow::Error {
+    if err.is_panic() {
+        let payload = err.into_panic();
+        return anyhow!(
+            "pure-Rust audio transcode panicked for `{input}`: {}",
+            panic_payload_description(payload.as_ref())
+        );
+    }
+    if err.is_cancelled() {
+        return anyhow!("pure-Rust audio transcode task was cancelled for `{input}`");
+    }
+    anyhow!("pure-Rust audio transcode task failed for `{input}`: {err}")
+}
+
+fn panic_payload_description(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "non-string panic payload".to_string()
 }
 
 fn transcode_to_wav_with_rust(input: &Path, output: &Path) -> Result<()> {
