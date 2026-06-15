@@ -1854,7 +1854,7 @@ class _SpeechSlider extends StatelessWidget {
   }
 }
 
-class _Composer extends StatelessWidget {
+class _Composer extends StatefulWidget {
   const _Composer({
     required this.controller,
     required this.connected,
@@ -1878,6 +1878,52 @@ class _Composer extends StatelessWidget {
   final VoidCallback onSendPressed;
 
   @override
+  State<_Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends State<_Composer>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _breatheController;
+  late final Animation<double> _breathe;
+
+  @override
+  void initState() {
+    super.initState();
+    _breatheController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1150),
+    );
+    _breathe = CurvedAnimation(
+      parent: _breatheController,
+      curve: Curves.easeInOut,
+    );
+    _syncBreatheAnimation();
+  }
+
+  @override
+  void didUpdateWidget(covariant _Composer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.recording != widget.recording) {
+      _syncBreatheAnimation();
+    }
+  }
+
+  @override
+  void dispose() {
+    _breatheController.dispose();
+    super.dispose();
+  }
+
+  void _syncBreatheAnimation() {
+    if (widget.recording) {
+      _breatheController.repeat(reverse: true);
+    } else {
+      _breatheController.stop();
+      _breatheController.value = 0;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Card(
       child: Padding(
@@ -1885,7 +1931,7 @@ class _Composer extends StatelessWidget {
         child: Column(
           children: [
             TextField(
-              controller: controller,
+              controller: widget.controller,
               minLines: 2,
               maxLines: 5,
               decoration: const InputDecoration(
@@ -1895,50 +1941,60 @@ class _Composer extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             ValueListenableBuilder<TextEditingValue>(
-              valueListenable: controller,
+              valueListenable: widget.controller,
               builder: (context, value, _) {
                 final hasText = value.text.trim().isNotEmpty;
-                final busy = sending || sendingAudio;
-                final onMainPressed = !connected || busy
+                final busy = widget.sending || widget.sendingAudio;
+                final onMainPressed = !widget.connected || busy
                     ? null
-                    : recording
-                    ? onMicPressed
+                    : widget.recording
+                    ? widget.onMicPressed
                     : hasText
-                    ? onSendPressed
-                    : onMicPressed;
+                    ? widget.onSendPressed
+                    : widget.onMicPressed;
                 final icon = busy
                     ? const SizedBox.square(
                         dimension: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : recording || hasText
+                    : widget.recording || hasText
                     ? const Icon(Icons.send)
                     : Icon(
-                        wavRetryRequested ? Icons.mic_external_on : Icons.mic,
+                        widget.wavRetryRequested
+                            ? Icons.mic_external_on
+                            : Icons.mic,
                       );
-                final label = sendingAudio
+                final label = widget.sendingAudio
                     ? 'Sending voice...'
-                    : sending
+                    : widget.sending
                     ? 'Sending...'
-                    : recording || hasText
+                    : widget.recording || hasText
                     ? 'Send'
-                    : wavRetryRequested
+                    : widget.wavRetryRequested
                     ? 'Record WAV'
                     : 'Record';
-                final tooltip = recording
+                final tooltip = widget.recording
                     ? 'Send recording'
                     : hasText
                     ? 'Send query'
-                    : wavRetryRequested
+                    : widget.wavRetryRequested
                     ? 'Record WAV retry'
                     : 'Record voice query';
+                final mainButton = Tooltip(
+                  message: tooltip,
+                  child: FilledButton.icon(
+                    onPressed: onMainPressed,
+                    icon: icon,
+                    label: Text(label),
+                  ),
+                );
 
                 return Row(
                   children: [
-                    if (recording) ...[
+                    if (widget.recording) ...[
                       IconButton.outlined(
                         tooltip: 'Cancel recording',
-                        onPressed: busy ? null : onCancelRecording,
+                        onPressed: busy ? null : widget.onCancelRecording,
                         style: IconButton.styleFrom(
                           foregroundColor: Theme.of(context).colorScheme.error,
                         ),
@@ -1947,14 +2003,12 @@ class _Composer extends StatelessWidget {
                       const SizedBox(width: 12),
                     ],
                     Expanded(
-                      child: Tooltip(
-                        message: tooltip,
-                        child: FilledButton.icon(
-                          onPressed: onMainPressed,
-                          icon: icon,
-                          label: Text(label),
-                        ),
-                      ),
+                      child: widget.recording
+                          ? _BreathingRecordButton(
+                              animation: _breathe,
+                              child: mainButton,
+                            )
+                          : mainButton,
                     ),
                   ],
                 );
@@ -1963,6 +2017,38 @@ class _Composer extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _BreathingRecordButton extends StatelessWidget {
+  const _BreathingRecordButton({required this.animation, required this.child});
+
+  final Animation<double> animation;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return AnimatedBuilder(
+      animation: animation,
+      child: child,
+      builder: (context, child) {
+        final pulse = animation.value;
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(28),
+            boxShadow: [
+              BoxShadow(
+                color: colorScheme.primary.withValues(alpha: 0.16 * pulse),
+                blurRadius: 18 * pulse,
+                spreadRadius: 2 * pulse,
+              ),
+            ],
+          ),
+          child: Transform.scale(scale: 1 + (0.025 * pulse), child: child),
+        );
+      },
     );
   }
 }
