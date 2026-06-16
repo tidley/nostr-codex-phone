@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -55,6 +56,49 @@ class _BlossomPreset {
   final String note;
 }
 
+class _RepoTarget {
+  const _RepoTarget({
+    required this.id,
+    required this.name,
+    required this.pubkey,
+    required this.relays,
+  });
+
+  final String id;
+  final String name;
+  final String pubkey;
+  final List<String> relays;
+
+  String get displayName {
+    final cleaned = name.trim();
+    if (cleaned.isNotEmpty) return cleaned;
+    return _compactIdentifier(pubkey);
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'pubkey': pubkey,
+    'relays': relays,
+  };
+
+  static _RepoTarget? fromJson(dynamic raw) {
+    if (raw is! Map<String, dynamic>) return null;
+    final id = raw['id']?.toString().trim() ?? '';
+    final name = raw['name']?.toString().trim() ?? '';
+    final pubkey = raw['pubkey']?.toString().trim() ?? '';
+    final rawRelays = raw['relays'];
+    final relays = rawRelays is Iterable
+        ? rawRelays
+              .map((relay) => relay.toString().trim())
+              .where((relay) => relay.isNotEmpty)
+              .toList()
+        : <String>[];
+    if (id.isEmpty || pubkey.isEmpty || relays.isEmpty) return null;
+    return _RepoTarget(id: id, name: name, pubkey: pubkey, relays: relays);
+  }
+}
+
 enum _VoiceFormat { opus, wav }
 
 class _VoiceRecordingFormat {
@@ -88,6 +132,11 @@ const _wavVoiceFormat = _VoiceRecordingFormat(
   encoder: AudioEncoder.wav,
   bitRate: 256000,
 );
+
+String _compactIdentifier(String value) {
+  if (value.length <= 18) return value;
+  return '${value.substring(0, 10)}...${value.substring(value.length - 6)}';
+}
 
 String cleanTextForSpeech(String text) {
   var cleaned = text.replaceAll('\r\n', '\n');
@@ -199,6 +248,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _secretKeyStorageKey = 'nostr_secret_key';
   static const _peerPubkeyStorageKey = 'nostr_peer_pubkey';
   static const _relaysStorageKey = 'nostr_relays';
+  static const _repoTargetsStorageKey = 'repo_targets_v1';
+  static const _selectedRepoTargetStorageKey = 'selected_repo_target_id';
   static const _blossomServerStorageKey = 'blossom_server';
   static const _ttsLanguageStorageKey = 'tts_language';
   static const _ttsEngineStorageKey = 'tts_engine';
@@ -207,13 +258,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _ttsVolumeStorageKey = 'tts_volume';
 
   final _secretKeyController = TextEditingController();
+  final _targetNameController = TextEditingController();
   final _peerPubkeyController = TextEditingController();
   final _relayController = TextEditingController();
   final _blossomServerController = TextEditingController();
   final _queryController = TextEditingController();
   final _recorder = AudioRecorder();
   final _tts = FlutterTts();
-  final _messages = <ConversationMessage>[];
+  final _messagesByTarget = <String, List<ConversationMessage>>{};
   final _seenIncomingEventIds = <String>{};
 
   bool _loadingSettings = true;
@@ -227,6 +279,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _speaking = false;
   bool _connectionExpanded = true;
   bool _wavRetryRequested = false;
+  List<_RepoTarget> _repoTargets = const [];
+  String? _selectedRepoTargetId;
   double _ttsRate = 0.48;
   double _ttsPitch = 1.0;
   double _ttsVolume = 1.0;
@@ -241,6 +295,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   _VoiceRecordingFormat? _activeRecordingFormat;
   String? _ownPubkey;
   String? _status;
+
+  String get _activeConversationKey {
+    final selected = _selectedRepoTargetId;
+    if (selected != null && selected.isNotEmpty) return selected;
+    final peer = _peerPubkeyController.text.trim();
+    if (peer.isNotEmpty) return peer;
+    return 'default';
+  }
+
+  List<ConversationMessage> get _messages =>
+      _messagesByTarget.putIfAbsent(_activeConversationKey, () => []);
 
   @override
   void initState() {
@@ -259,6 +324,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
     _tts.stop();
     _secretKeyController.dispose();
+    _targetNameController.dispose();
     _peerPubkeyController.dispose();
     _relayController.dispose();
     _blossomServerController.dispose();
@@ -272,6 +338,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final secretKey = await _storage.read(key: _secretKeyStorageKey);
     final peerPubkey = await _storage.read(key: _peerPubkeyStorageKey);
     final relays = await _storage.read(key: _relaysStorageKey);
+    final repoTargets = await _storage.read(key: _repoTargetsStorageKey);
+    final selectedRepoTarget = await _storage.read(
+      key: _selectedRepoTargetStorageKey,
+    );
     final blossomServer = await _storage.read(key: _blossomServerStorageKey);
     final ttsLanguage = await _storage.read(key: _ttsLanguageStorageKey);
     final ttsEngine = await _storage.read(key: _ttsEngineStorageKey);
@@ -279,11 +349,32 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final ttsPitch = await _storage.read(key: _ttsPitchStorageKey);
     final ttsVolume = await _storage.read(key: _ttsVolumeStorageKey);
 
+    final migratedRelays = relays?.replaceAll(',', '\n') ?? defaultRelays;
+    final targets = _decodeRepoTargets(repoTargets);
+    if (targets.isEmpty && _cleanStoredString(peerPubkey) != null) {
+      targets.add(
+        _RepoTarget(
+          id: _newRepoTargetId(),
+          name: 'Default repo',
+          pubkey: peerPubkey!.trim(),
+          relays: _splitRelayText(migratedRelays),
+        ),
+      );
+    }
+    final selectedTarget =
+        _targetById(targets, selectedRepoTarget) ??
+        (targets.isNotEmpty ? targets.first : null);
+
     if (!mounted) return;
     setState(() {
       _secretKeyController.text = secretKey ?? '';
-      _peerPubkeyController.text = peerPubkey ?? '';
-      _relayController.text = relays?.replaceAll(',', '\n') ?? defaultRelays;
+      _repoTargets = targets;
+      _selectedRepoTargetId = selectedTarget?.id;
+      _targetNameController.text = selectedTarget?.name ?? '';
+      _peerPubkeyController.text = selectedTarget?.pubkey ?? peerPubkey ?? '';
+      _relayController.text = selectedTarget == null
+          ? migratedRelays
+          : selectedTarget.relays.join('\n');
       _blossomServerController.text = blossomServer ?? _autoBlossomServer;
       _ttsLanguage = _cleanStoredString(ttsLanguage) ?? _ttsLanguage;
       _ttsEngine = _cleanStoredString(ttsEngine);
@@ -313,6 +404,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   Future<void> _saveSettings() async {
+    _saveActiveRepoTargetInMemory();
     await _storage.write(
       key: _secretKeyStorageKey,
       value: _secretKeyController.text.trim(),
@@ -329,7 +421,192 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       key: _blossomServerStorageKey,
       value: _blossomServerController.text.trim(),
     );
+    await _storage.write(
+      key: _repoTargetsStorageKey,
+      value: jsonEncode(_repoTargets.map((target) => target.toJson()).toList()),
+    );
+    final selectedTargetId = _selectedRepoTargetId;
+    if (selectedTargetId == null || selectedTargetId.isEmpty) {
+      await _storage.delete(key: _selectedRepoTargetStorageKey);
+    } else {
+      await _storage.write(
+        key: _selectedRepoTargetStorageKey,
+        value: selectedTargetId,
+      );
+    }
     await _saveTtsSettings();
+  }
+
+  List<_RepoTarget> _decodeRepoTargets(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return [];
+      final targets = <_RepoTarget>[];
+      final seenIds = <String>{};
+      for (final item in decoded) {
+        final target = _RepoTarget.fromJson(item);
+        if (target == null || !seenIds.add(target.id)) continue;
+        targets.add(target);
+      }
+      return targets;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  _RepoTarget? _targetById(List<_RepoTarget> targets, String? id) {
+    final cleaned = _cleanStoredString(id);
+    if (cleaned == null) return null;
+    for (final target in targets) {
+      if (target.id == cleaned) return target;
+    }
+    return null;
+  }
+
+  String _newRepoTargetId() =>
+      DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+
+  List<String> _splitRelayText(String value) => value
+      .split(RegExp(r'[\n,]'))
+      .map((line) => line.trim())
+      .where((line) => line.isNotEmpty)
+      .toList();
+
+  String _defaultTargetName(String pubkey) {
+    if (pubkey.trim().isEmpty) return 'Repo';
+    return 'Repo ${_compactIdentifier(pubkey.trim())}';
+  }
+
+  _RepoTarget? _activeRepoTargetFromControllers() {
+    final pubkey = _peerPubkeyController.text.trim();
+    final relays = _relayLines();
+    if (pubkey.isEmpty || relays.isEmpty) return null;
+
+    final name = _targetNameController.text.trim();
+    return _RepoTarget(
+      id: _selectedRepoTargetId ?? _newRepoTargetId(),
+      name: name.isEmpty ? _defaultTargetName(pubkey) : name,
+      pubkey: pubkey,
+      relays: relays,
+    );
+  }
+
+  void _saveActiveRepoTargetInMemory() {
+    final target = _activeRepoTargetFromControllers();
+    if (target == null) return;
+
+    final targets = [..._repoTargets];
+    final index = targets.indexWhere((item) => item.id == target.id);
+    if (index == -1) {
+      targets.add(target);
+    } else {
+      targets[index] = target;
+    }
+    _repoTargets = targets;
+    _selectedRepoTargetId = target.id;
+    _targetNameController.text = target.name;
+  }
+
+  Future<void> _saveCurrentRepoTarget() async {
+    if (_peerPubkeyController.text.trim().isEmpty || _relayLines().isEmpty) {
+      _showError('Target pubkey and relays are required');
+      return;
+    }
+    await _saveSettings();
+    if (!mounted) return;
+    setState(() => _status = 'Saved target ${_activeTargetName()}');
+  }
+
+  Future<void> _createRepoTarget() async {
+    if (_recording) {
+      await _cancelRecording();
+    }
+    if (_connected || _connecting) {
+      await _disconnect(expand: true);
+    }
+    if (!mounted) return;
+    final defaultRelays = nostrDefaultRelays().join('\n');
+    setState(() {
+      _selectedRepoTargetId = null;
+      _targetNameController.text = '';
+      _peerPubkeyController.text = '';
+      _relayController.text = defaultRelays;
+      _seenIncomingEventIds.clear();
+      _wavRetryRequested = false;
+      _status = 'New repo target';
+      _connectionExpanded = true;
+    });
+  }
+
+  Future<void> _deleteSelectedRepoTarget() async {
+    final selectedId = _selectedRepoTargetId;
+    if (selectedId == null) return;
+    final nextTargets = _repoTargets
+        .where((target) => target.id != selectedId)
+        .toList();
+    final nextTarget = nextTargets.isNotEmpty ? nextTargets.first : null;
+
+    if (_recording) {
+      await _cancelRecording();
+    }
+    if (_connected || _connecting) {
+      await _disconnect(expand: true);
+    }
+    if (!mounted) return;
+    setState(() {
+      _repoTargets = nextTargets;
+      _applyRepoTargetFields(nextTarget);
+      _seenIncomingEventIds.clear();
+      _wavRetryRequested = false;
+      _status = nextTarget == null
+          ? 'Deleted target'
+          : 'Deleted target, selected ${nextTarget.displayName}';
+    });
+    await _saveSettings();
+  }
+
+  Future<void> _selectRepoTarget(String targetId) async {
+    if (targetId == _selectedRepoTargetId) return;
+    final target = _targetById(_repoTargets, targetId);
+    if (target == null) return;
+
+    final reconnect = _connected;
+    if (_recording) {
+      await _cancelRecording();
+    }
+    if (_connected || _connecting) {
+      await _disconnect(expand: false);
+    }
+    if (!mounted) return;
+    setState(() {
+      _applyRepoTargetFields(target);
+      _seenIncomingEventIds.clear();
+      _wavRetryRequested = false;
+      _status = 'Selected ${target.displayName}';
+    });
+    await _saveSettings();
+    if (reconnect && mounted) {
+      await _connect();
+    }
+  }
+
+  void _applyRepoTargetFields(_RepoTarget? target) {
+    _selectedRepoTargetId = target?.id;
+    _targetNameController.text = target?.name ?? '';
+    _peerPubkeyController.text = target?.pubkey ?? '';
+    _relayController.text =
+        target?.relays.join('\n') ?? nostrDefaultRelays().join('\n');
+  }
+
+  String _activeTargetName() {
+    final selected = _targetById(_repoTargets, _selectedRepoTargetId);
+    if (selected != null) return selected.displayName;
+    final name = _targetNameController.text.trim();
+    if (name.isNotEmpty) return name;
+    final peer = _peerPubkeyController.text.trim();
+    if (peer.isNotEmpty) return _defaultTargetName(peer);
+    return 'No target';
   }
 
   Future<void> _saveTtsSettings() async {
@@ -566,13 +843,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
-  Future<void> _disconnect() async {
+  Future<void> _disconnect({bool expand = true}) async {
     _polling = false;
     await nostrStop();
     if (!mounted) return;
     setState(() {
       _connected = false;
-      _connectionExpanded = true;
+      _connectionExpanded = expand;
       _status = 'Disconnected';
     });
   }
@@ -1145,6 +1422,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           padding: const EdgeInsets.all(16),
           children: [
             _ConnectionPanel(
+              repoTargets: _repoTargets,
+              selectedRepoTargetId: _selectedRepoTargetId,
+              activeTargetName: _activeTargetName(),
+              targetNameController: _targetNameController,
               secretKeyController: _secretKeyController,
               peerPubkeyController: _peerPubkeyController,
               relayController: _relayController,
@@ -1164,6 +1445,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               pitch: _ttsPitch,
               volume: _ttsVolume,
               expanded: _connectionExpanded,
+              onTargetChanged: (value) {
+                if (value != null) unawaited(_selectRepoTarget(value));
+              },
+              onSaveTarget: () => unawaited(_saveCurrentRepoTarget()),
+              onNewTarget: () => unawaited(_createRepoTarget()),
+              onDeleteTarget: _selectedRepoTargetId == null
+                  ? null
+                  : () => unawaited(_deleteSelectedRepoTarget()),
               onGenerateKey: _generateKey,
               onSecretChanged: (_) => _refreshOwnPubkey(),
               onConnect: _connect,
@@ -1225,6 +1514,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
 class _ConnectionPanel extends StatelessWidget {
   const _ConnectionPanel({
+    required this.repoTargets,
+    required this.selectedRepoTargetId,
+    required this.activeTargetName,
+    required this.targetNameController,
     required this.secretKeyController,
     required this.peerPubkeyController,
     required this.relayController,
@@ -1244,6 +1537,10 @@ class _ConnectionPanel extends StatelessWidget {
     required this.pitch,
     required this.volume,
     required this.expanded,
+    required this.onTargetChanged,
+    required this.onSaveTarget,
+    required this.onNewTarget,
+    required this.onDeleteTarget,
     required this.onGenerateKey,
     required this.onSecretChanged,
     required this.onConnect,
@@ -1261,6 +1558,10 @@ class _ConnectionPanel extends StatelessWidget {
     required this.onExpandedChanged,
   });
 
+  final List<_RepoTarget> repoTargets;
+  final String? selectedRepoTargetId;
+  final String activeTargetName;
+  final TextEditingController targetNameController;
   final TextEditingController secretKeyController;
   final TextEditingController peerPubkeyController;
   final TextEditingController relayController;
@@ -1280,6 +1581,10 @@ class _ConnectionPanel extends StatelessWidget {
   final double pitch;
   final double volume;
   final bool expanded;
+  final ValueChanged<String?> onTargetChanged;
+  final VoidCallback onSaveTarget;
+  final VoidCallback onNewTarget;
+  final VoidCallback? onDeleteTarget;
   final VoidCallback onGenerateKey;
   final ValueChanged<String> onSecretChanged;
   final VoidCallback onConnect;
@@ -1309,6 +1614,11 @@ class _ConnectionPanel extends StatelessWidget {
     final engineValue = engine != null && engines.contains(engine)
         ? engine!
         : '';
+    final targetValue =
+        selectedRepoTargetId != null &&
+            repoTargets.any((target) => target.id == selectedRepoTargetId)
+        ? selectedRepoTargetId
+        : null;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -1337,7 +1647,7 @@ class _ConnectionPanel extends StatelessWidget {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            '$statusText · ${speaking ? 'Speaking' : 'Speech idle'}${ownPubkey == null ? '' : ' · ${_compactPubkey(ownPubkey!)}'}',
+                            '$activeTargetName · $statusText · ${speaking ? 'Speaking' : 'Speech idle'}${ownPubkey == null ? '' : ' · ${_compactPubkey(ownPubkey!)}'}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall,
@@ -1359,6 +1669,59 @@ class _ConnectionPanel extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const SizedBox(height: 12),
+                  Text('Repo target', style: theme.textTheme.titleSmall),
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<String>(
+                    initialValue: targetValue,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Active repo service',
+                    ),
+                    hint: const Text('New unsaved target'),
+                    items: [
+                      for (final target in repoTargets)
+                        DropdownMenuItem(
+                          value: target.id,
+                          child: Text(
+                            target.displayName,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                    onChanged: connecting ? null : onTargetChanged,
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: targetNameController,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Target name',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      TextButton.icon(
+                        onPressed: connecting ? null : onNewTarget,
+                        icon: const Icon(Icons.add),
+                        label: const Text('New'),
+                      ),
+                      const SizedBox(width: 8),
+                      TextButton.icon(
+                        onPressed: connecting ? null : onSaveTarget,
+                        icon: const Icon(Icons.save),
+                        label: const Text('Save'),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        tooltip: 'Delete target',
+                        onPressed: connecting ? null : onDeleteTarget,
+                        icon: const Icon(Icons.delete_outline),
+                      ),
+                    ],
+                  ),
+                  const Divider(height: 28),
                   Text('Relay session', style: theme.textTheme.titleSmall),
                   const SizedBox(height: 8),
                   TextField(
