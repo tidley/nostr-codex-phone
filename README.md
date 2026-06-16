@@ -78,6 +78,42 @@ reply with `{ "audio_retry": { "format": "wav", "reason": "..." } }`.
 Both server and mobile dedupe incoming GiftWrapped DMs by event ID so the same
 event delivered by multiple relays is only processed once per session.
 
+## Multi-Repo Command And Control
+
+The phone can store multiple repo targets. Each target is a named Nostr peer
+pubkey plus relay list, so the same mobile key can quickly switch between
+separate repo services. Each repo service should have its own `NOSTR_SECRET_KEY`
+and therefore its own npub. The phone sends DMs to the selected target only.
+
+Generate a fresh server key for a repo service:
+
+```bash
+cargo run --manifest-path /home/tom/code/phone/rust/Cargo.toml --bin nostr-keygen
+```
+
+Create a per-repo env file such as `/path/to/repo/.env.server`:
+
+```bash
+NOSTR_SECRET_KEY='nsec...from nostr-keygen...'
+NOSTR_PEER_PUBKEY='npub...mobile public key...'
+NOSTR_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://nostr.mom'
+CODEX_BIN='/home/tom/.nvm/versions/node/v24.12.0/bin/codex'
+CODEX_ARGS='--ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=medium exec --skip-git-repo-check'
+TRANSCRIBE_BIN='/home/tom/.local/bin/whisper-cpp'
+TRANSCRIBE_ARGS='-m /home/tom/code/phone/models/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/transcript -nt'
+```
+
+Install a user systemd service for that repo:
+
+```bash
+/home/tom/code/phone/scripts/install-repo-service.sh /path/to/repo nostr-codex-myrepo /path/to/repo/.env.server
+```
+
+The installer uses this project’s `nostr-codex-server` binary, sets
+`CODEX_WORKDIR` to the target repo, enables user lingering, and enables the
+service at boot. The service npub printed in `journalctl --user -u
+nostr-codex-myrepo` is the pubkey to add as a target in the phone app.
+
 Required environment:
 
 ```bash
@@ -181,18 +217,24 @@ instead of the server crashing.
 
 ## Mobile
 
-The Flutter app stores the local `nsec`, peer pubkey, relay list, and Blossom
-selection in `flutter_secure_storage`. The mic button records an Opus/Ogg file
-by default, encrypts it locally, uploads the ciphertext with a Nostr-signed
-BUD-11 authorization token, and sends the returned URL/hash plus decryption
-metadata over an encrypted Nostr DM. If the server sends `audio_retry`, the next
-recording is sent as WAV and then the app returns to Opus/Ogg. The main composer
-button says `Record` when the query box is empty, changes to `Send` while
-recording, and sends typed text when text is present. The cancel button discards
-a recording locally without uploading. Message actions allow copying incoming text
-and resending typed queries, uploaded audio references, or returned transcripts.
-Returned transcripts are styled as user-side speech bubbles next to the audio
-message, while Codex responses remain visually distinct.
+The Flutter app stores the local `nsec`, repo targets, relay lists, and Blossom
+selection in `flutter_secure_storage`. A repo target is a display name, a service
+npub/hex pubkey, and the relays used by that service. Switching targets while
+connected disconnects from the current repo service, reconnects to the selected
+one, and keeps on-screen message history separated per target for the current
+app session.
+
+The mic button records an Opus/Ogg file by default, encrypts it locally, uploads
+the ciphertext with a Nostr-signed BUD-11 authorization token, and sends the
+returned URL/hash plus decryption metadata over an encrypted Nostr DM. If the
+server sends `audio_retry`, the next recording is sent as WAV and then the app
+returns to Opus/Ogg. The main composer button says `Record` when the query box
+is empty, changes to `Send` while recording, and sends typed text when text is
+present. The cancel button discards a recording locally without uploading.
+Message actions allow copying incoming text and resending typed queries,
+uploaded audio references, or returned transcripts. Returned transcripts are
+styled as user-side speech bubbles next to the audio message, while Codex
+responses remain visually distinct.
 
 After connecting, the relay/key setup panel collapses into a compact expandable
 header so the conversation controls stay near the top of the screen.
@@ -236,7 +278,10 @@ Run:
 flutter run
 ```
 
-Use the app to generate or paste the mobile key, copy the displayed mobile public key into `NOSTR_PEER_PUBKEY` on the server, paste the server public key into the app, and use the same relay list on both sides.
+Use the app to generate or paste the mobile key, copy the displayed mobile
+public key into each repo service's `NOSTR_PEER_PUBKEY`, add each service npub
+as a named repo target in the app, and use the same relay list on both sides of
+each target.
 
 Android permissions include internet and microphone access.
 
