@@ -330,13 +330,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   List<ConversationMessage> get _recentMessagesForActiveConversation {
     final now = DateTime.now();
     final cutoff = now.subtract(_recentMessagesWindow);
-    return _messages
+    final filtered = _messages
         .where(
           (message) =>
               message.timestamp.isAfter(cutoff) ||
               message.timestamp.isAtSameMomentAs(cutoff),
         )
         .toList();
+    return filtered.reversed.toList();
   }
 
   Future<void> _loadConversationHistoryForActiveSession() async {
@@ -1982,7 +1983,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   void _showError(String message) {
     if (!mounted) return;
+    final previousStatus = _status;
     setState(() => _status = message);
+    debugPrint('status update: ${previousStatus ?? '(none)'} -> $message');
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
@@ -2085,11 +2088,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       body: SafeArea(
         child: Column(
           children: [
-            if (_status != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                child: Text(_status!, style: theme.textTheme.bodySmall),
-              ),
             Expanded(
               child: _recentMessagesForActiveConversation.isEmpty
                   ? const Center(child: Text('No messages in last hour'))
