@@ -7,6 +7,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
 import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
@@ -279,6 +280,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _sending = false;
   bool _recording = false;
   bool _sendingAudio = false;
+  bool _sendingMedia = false;
   bool _autoSpeak = true;
   bool _speaking = false;
   bool _wavRetryRequested = false;
@@ -1369,6 +1371,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _connected &&
         !_sending &&
         !_sendingAudio &&
+        !_sendingMedia &&
         !_recording;
   }
 
@@ -1388,6 +1391,84 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       query,
       fromTranscript: message.kind == 'transcript',
     );
+  }
+
+  Future<void> _attachAndSendMedia() async {
+    if (_sending || _sendingAudio || _sendingMedia || _recording) return;
+    if (!_connected) {
+      _showError('Connect before sending media');
+      return;
+    }
+
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.any,
+      allowMultiple: false,
+      allowCompression: true,
+      withData: false,
+    );
+    if (result == null || result.files.isEmpty) return;
+
+    final selected = result.files.first;
+    final path = selected.path?.trim();
+    if (path == null || path.isEmpty) {
+      _showError('Could not read selected file');
+      return;
+    }
+
+    final queryText = _queryController.text.trim();
+    final fileName =
+        (selected.name.trim().isNotEmpty
+                ? selected.name
+                : path.split(Platform.pathSeparator).last)
+            .trim();
+    final contentType = _inferContentType(fileName, selected.extension);
+
+    setState(() {
+      _sendingMedia = true;
+      _status = 'Uploading attachment to Blossom...';
+    });
+
+    BridgeAudioReference attachment;
+    try {
+      attachment = await _uploadAudioToBlossom(path, fileName, contentType);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _sendingMedia = false);
+      _showError('Attachment upload failed: $error');
+      return;
+    }
+
+    final analysisQuery = _buildMediaAnalysisQuery(
+      attachment: attachment,
+      caption: queryText,
+    );
+
+    if (!mounted) return;
+    setState(() => _status = 'Sending attachment request...');
+
+    try {
+      final eventId = await nostrSendQuery(query: analysisQuery);
+      if (!mounted) return;
+      setState(() {
+        _appendMessageForActiveConversation(
+          ConversationMessage(
+            direction: MessageDirection.outgoing,
+            kind: 'query',
+            text: analysisQuery,
+            eventId: eventId,
+            timestamp: DateTime.now(),
+          ),
+        );
+        _queryController.clear();
+        _status = 'Attachment sent';
+      });
+    } catch (error) {
+      _showError('Attachment message failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _sendingMedia = false);
+      }
+    }
   }
 
   Future<void> _resendTextMessage(
@@ -1455,6 +1536,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   Future<void> _toggleRecording() async {
+    if (_speaking) {
+      await _stopSpeaking();
+    }
     if (_recording) {
       await _stopAndSendRecording();
       return;
@@ -1646,7 +1730,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     for (final server in servers) {
       if (mounted) {
         setState(
-          () => _status = 'Uploading voice note to ${_serverLabel(server)}...',
+          () => _status = 'Uploading attachment to ${_serverLabel(server)}...',
         );
       }
 
@@ -1668,6 +1752,89 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     throw Exception(
       'all Blossom uploads failed across ${servers.length} server(s): $lastError',
     );
+  }
+
+  String _inferContentType(String fileName, String? extension) {
+    final normalizedExtension =
+        extension?.trim().toLowerCase() ??
+        _pathExtension(fileName).toLowerCase();
+    switch (normalizedExtension) {
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'png':
+        return 'image/png';
+      case 'gif':
+        return 'image/gif';
+      case 'webp':
+        return 'image/webp';
+      case 'bmp':
+        return 'image/bmp';
+      case 'svg':
+        return 'image/svg+xml';
+      case 'mp4':
+        return 'video/mp4';
+      case 'm4v':
+        return 'video/x-m4v';
+      case 'mov':
+        return 'video/quicktime';
+      case 'webm':
+        return 'video/webm';
+      case 'avi':
+        return 'video/x-msvideo';
+      case 'mkv':
+        return 'video/x-matroska';
+      case 'mp3':
+        return 'audio/mpeg';
+      case 'flac':
+        return 'audio/flac';
+      case 'm4a':
+        return 'audio/mp4';
+      case 'ogg':
+        return 'audio/ogg';
+      case 'wav':
+        return 'audio/wav';
+      case 'pdf':
+        return 'application/pdf';
+      case 'txt':
+        return 'text/plain';
+      case 'json':
+        return 'application/json';
+      case 'md':
+        return 'text/markdown';
+      case 'csv':
+        return 'text/csv';
+      default:
+        return 'application/octet-stream';
+    }
+  }
+
+  String _pathExtension(String fileName) {
+    final value = fileName.trim();
+    final dotIndex = value.lastIndexOf('.');
+    if (dotIndex == -1 || dotIndex == value.length - 1) return '';
+    return value.substring(dotIndex + 1);
+  }
+
+  String _buildMediaAnalysisQuery({
+    required BridgeAudioReference attachment,
+    required String caption,
+  }) {
+    final payload = {
+      'type': 'media_analysis_request',
+      'version': 1,
+      'task': 'analyze_attachment',
+      'user_caption': caption.trim(),
+      'attachment': {
+        'name': attachment.name ?? 'media',
+        'url': attachment.url,
+        'sha256': attachment.sha256,
+        'content_type': attachment.mediaType,
+      },
+    };
+    const encoder = JsonEncoder.withIndent('  ');
+    return 'Please process this media analysis request using only the structured data:\n'
+        '${encoder.convert(payload)}';
   }
 
   List<String> _selectedBlossomServers() {
@@ -1854,11 +2021,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             _Composer(
               controller: _queryController,
               connected: _connected,
+              connecting: _connecting,
               sending: _sending,
               sendingAudio: _sendingAudio,
+              sendingMedia: _sendingMedia,
               recording: _recording,
               wavRetryRequested: _wavRetryRequested,
               onMicPressed: _toggleRecording,
+              onConnectPressed: _connect,
+              onAttachMedia: _attachAndSendMedia,
               onCancelRecording: _cancelRecording,
               onSendPressed: () => _sendQuery(),
             ),
@@ -2114,7 +2285,6 @@ class _SettingsPage extends StatelessWidget {
             rate: rate,
             pitch: pitch,
             volume: volume,
-            expanded: true,
             onTargetChanged: onTargetChanged,
             onSaveTarget: onSaveTarget,
             onNewTarget: onNewTarget,
@@ -2134,7 +2304,6 @@ class _SettingsPage extends StatelessWidget {
             onVolumeChanged: onVolumeChanged,
             onSliderChangeEnd: onSliderChangeEnd,
             onTest: onTest,
-            onExpandedChanged: (_) {},
           ),
           const SizedBox(height: 16),
           Card(
@@ -2193,7 +2362,6 @@ class _ConnectionPanel extends StatelessWidget {
     required this.rate,
     required this.pitch,
     required this.volume,
-    required this.expanded,
     required this.onTargetChanged,
     required this.onSaveTarget,
     required this.onNewTarget,
@@ -2213,7 +2381,6 @@ class _ConnectionPanel extends StatelessWidget {
     required this.onVolumeChanged,
     required this.onSliderChangeEnd,
     required this.onTest,
-    required this.onExpandedChanged,
   });
 
   final List<_RepoTarget> repoTargets;
@@ -2238,7 +2405,6 @@ class _ConnectionPanel extends StatelessWidget {
   final double rate;
   final double pitch;
   final double volume;
-  final bool expanded;
   final ValueChanged<String?> onTargetChanged;
   final VoidCallback onSaveTarget;
   final VoidCallback onNewTarget;
@@ -2258,16 +2424,10 @@ class _ConnectionPanel extends StatelessWidget {
   final ValueChanged<double> onVolumeChanged;
   final ValueChanged<double> onSliderChangeEnd;
   final VoidCallback onTest;
-  final ValueChanged<bool> onExpandedChanged;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final statusText = connecting
-        ? 'Connecting'
-        : connected
-        ? 'Connected'
-        : 'Disconnected';
     final colorScheme = theme.colorScheme;
     final languageItems = (languages.toSet()..add(language)).toList()..sort();
     final engineValue = engine != null && engines.contains(engine)
@@ -2284,402 +2444,159 @@ class _ConnectionPanel extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            InkWell(
-              borderRadius: BorderRadius.circular(8),
-              onTap: () => onExpandedChanged(!expanded),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-                child: Row(
-                  children: [
-                    Icon(
-                      connected ? Icons.cloud_done : Icons.cloud_off,
-                      color: theme.colorScheme.secondary,
+            Text('Session and speech', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 12),
+            Text('Repo target', style: theme.textTheme.titleSmall),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              initialValue: targetValue,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Active repo service',
+              ),
+              hint: const Text('New unsaved target'),
+              items: [
+                for (final target in repoTargets)
+                  DropdownMenuItem(
+                    value: target.id,
+                    child: Text(
+                      target.displayName,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Session and speech',
-                            style: theme.textTheme.titleMedium,
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            '$activeTargetName · $statusText · ${speaking ? 'Speaking' : 'Speech idle'}${ownPubkey == null ? '' : ' · ${_compactPubkey(ownPubkey!)}'}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodySmall,
-                          ),
-                        ],
+                  ),
+              ],
+              onChanged: connecting ? null : onTargetChanged,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: targetNameController,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Target name',
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                TextButton.icon(
+                  onPressed: connecting ? null : onNewTarget,
+                  icon: const Icon(Icons.add),
+                  label: const Text('New'),
+                ),
+                TextButton.icon(
+                  onPressed: connecting ? null : onSaveTarget,
+                  icon: const Icon(Icons.save),
+                  label: const Text('Save'),
+                ),
+                TextButton.icon(
+                  onPressed: connecting ? null : onScanTarget,
+                  icon: const Icon(Icons.qr_code_scanner),
+                  label: const Text('Scan'),
+                ),
+                IconButton(
+                  tooltip: 'Delete target',
+                  onPressed: connecting ? null : onDeleteTarget,
+                  icon: const Icon(Icons.delete_outline),
+                ),
+              ],
+            ),
+            const Divider(height: 28),
+            Text('Relay session', style: theme.textTheme.titleSmall),
+            const SizedBox(height: 8),
+            TextField(
+              controller: secretKeyController,
+              obscureText: true,
+              enableSuggestions: false,
+              autocorrect: false,
+              onChanged: onSecretChanged,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Local nsec',
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    ownPubkey ?? 'No valid local public key',
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: connected ? null : onGenerateKey,
+                  icon: const Icon(Icons.key),
+                  label: const Text('Generate'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: peerPubkeyController,
+              enabled: !connected,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Peer npub or hex',
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: relayController,
+              enabled: !connected,
+              minLines: 3,
+              maxLines: 5,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Relays',
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: blossomServerController,
+              decoration: InputDecoration(
+                border: const OutlineInputBorder(),
+                labelText: 'Blossom server',
+                helperText: 'Use auto or choose a public server',
+                suffixIcon: PopupMenuButton<String>(
+                  tooltip: 'Choose Blossom server',
+                  icon: const Icon(Icons.expand_more),
+                  onSelected: (value) => blossomServerController.text = value,
+                  itemBuilder: (context) => [
+                    for (final preset in blossomPresets)
+                      PopupMenuItem<String>(
+                        value: preset.url,
+                        child: ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(preset.label),
+                          subtitle: Text(preset.note),
+                        ),
                       ),
-                    ),
-                    Icon(expanded ? Icons.expand_less : Icons.expand_more),
                   ],
                 ),
               ),
             ),
-            AnimatedCrossFade(
-              duration: const Duration(milliseconds: 180),
-              crossFadeState: expanded
-                  ? CrossFadeState.showFirst
-                  : CrossFadeState.showSecond,
-              firstChild: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 12),
-                  Text('Repo target', style: theme.textTheme.titleSmall),
-                  const SizedBox(height: 8),
-                  DropdownButtonFormField<String>(
-                    initialValue: targetValue,
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Active repo service',
-                    ),
-                    hint: const Text('New unsaved target'),
-                    items: [
-                      for (final target in repoTargets)
-                        DropdownMenuItem(
-                          value: target.id,
-                          child: Text(
-                            target.displayName,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                    ],
-                    onChanged: connecting ? null : onTargetChanged,
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: targetNameController,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Target name',
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      TextButton.icon(
-                        onPressed: connecting ? null : onNewTarget,
-                        icon: const Icon(Icons.add),
-                        label: const Text('New'),
-                      ),
-                      TextButton.icon(
-                        onPressed: connecting ? null : onSaveTarget,
-                        icon: const Icon(Icons.save),
-                        label: const Text('Save'),
-                      ),
-                      TextButton.icon(
-                        onPressed: connecting ? null : onScanTarget,
-                        icon: const Icon(Icons.qr_code_scanner),
-                        label: const Text('Scan'),
-                      ),
-                      IconButton(
-                        tooltip: 'Delete target',
-                        onPressed: connecting ? null : onDeleteTarget,
-                        icon: const Icon(Icons.delete_outline),
-                      ),
-                    ],
-                  ),
-                  const Divider(height: 28),
-                  Text('Relay session', style: theme.textTheme.titleSmall),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: secretKeyController,
-                    obscureText: true,
-                    enableSuggestions: false,
-                    autocorrect: false,
-                    onChanged: onSecretChanged,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Local nsec',
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          ownPubkey ?? 'No valid local public key',
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.bodySmall,
-                        ),
-                      ),
-                      TextButton.icon(
-                        onPressed: connected ? null : onGenerateKey,
-                        icon: const Icon(Icons.key),
-                        label: const Text('Generate'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: peerPubkeyController,
-                    enabled: !connected,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Peer npub or hex',
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: relayController,
-                    enabled: !connected,
-                    minLines: 3,
-                    maxLines: 5,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Relays',
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: blossomServerController,
-                    decoration: InputDecoration(
-                      border: const OutlineInputBorder(),
-                      labelText: 'Blossom server',
-                      helperText: 'Use auto or choose a public server',
-                      suffixIcon: PopupMenuButton<String>(
-                        tooltip: 'Choose Blossom server',
-                        icon: const Icon(Icons.expand_more),
-                        onSelected: (value) =>
-                            blossomServerController.text = value,
-                        itemBuilder: (context) => [
-                          for (final preset in blossomPresets)
-                            PopupMenuItem<String>(
-                              value: preset.url,
-                              child: ListTile(
-                                dense: true,
-                                contentPadding: EdgeInsets.zero,
-                                title: Text(preset.label),
-                                subtitle: Text(preset.note),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  FilledButton.icon(
-                    onPressed: connecting
-                        ? null
-                        : connected
-                        ? onDisconnect
-                        : onConnect,
-                    icon: connecting
-                        ? const SizedBox.square(
-                            dimension: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : Icon(connected ? Icons.link_off : Icons.link),
-                    label: Text(connected ? 'Disconnect' : 'Connect'),
-                  ),
-                  const Divider(height: 28),
-                  Row(
-                    children: [
-                      Icon(
-                        speaking ? Icons.volume_up : Icons.volume_off,
-                        color: speaking
-                            ? colorScheme.primary
-                            : colorScheme.secondary,
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          'Speech',
-                          style: theme.textTheme.titleSmall,
-                        ),
-                      ),
-                      Tooltip(
-                        message: autoSpeak ? 'Auto speak on' : 'Auto speak off',
-                        child: Switch(
-                          value: autoSpeak,
-                          onChanged: onAutoSpeakChanged,
-                        ),
-                      ),
-                      IconButton.filledTonal(
-                        tooltip: 'Replay speech',
-                        onPressed: hasReplay ? onReplay : null,
-                        icon: const Icon(Icons.replay),
-                      ),
-                      const SizedBox(width: 4),
-                      IconButton.filled(
-                        tooltip: 'Stop speech',
-                        onPressed: onStop,
-                        icon: const Icon(Icons.stop),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'Voice settings',
-                          style: theme.textTheme.titleSmall,
-                        ),
-                      ),
-                      TextButton.icon(
-                        onPressed: onTest,
-                        icon: const Icon(Icons.record_voice_over),
-                        label: const Text('Test'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  DropdownButtonFormField<String>(
-                    initialValue: languageItems.contains(language)
-                        ? language
-                        : languageItems.first,
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Language',
-                    ),
-                    items: [
-                      for (final item in languageItems)
-                        DropdownMenuItem(value: item, child: Text(item)),
-                    ],
-                    onChanged: (value) {
-                      if (value != null) onLanguageChanged(value);
-                    },
-                  ),
-                  if (engines.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      initialValue: engineValue,
-                      isExpanded: true,
-                      decoration: const InputDecoration(
-                        border: OutlineInputBorder(),
-                        labelText: 'Engine',
-                      ),
-                      items: [
-                        const DropdownMenuItem(
-                          value: '',
-                          child: Text('System default'),
-                        ),
-                        for (final item in engines)
-                          DropdownMenuItem(value: item, child: Text(item)),
-                      ],
-                      onChanged: (value) => onEngineChanged(
-                        value == null || value.isEmpty ? null : value,
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 12),
-                  _SpeechSlider(
-                    label: 'Rate',
-                    value: rate,
-                    min: 0.1,
-                    max: 1.0,
-                    divisions: 18,
-                    onChanged: onRateChanged,
-                    onChangeEnd: onSliderChangeEnd,
-                  ),
-                  _SpeechSlider(
-                    label: 'Pitch',
-                    value: pitch,
-                    min: 0.5,
-                    max: 2.0,
-                    divisions: 30,
-                    onChanged: onPitchChanged,
-                    onChangeEnd: onSliderChangeEnd,
-                  ),
-                  _SpeechSlider(
-                    label: 'Volume',
-                    value: volume,
-                    min: 0.0,
-                    max: 1.0,
-                    divisions: 20,
-                    onChanged: onVolumeChanged,
-                    onChangeEnd: onSliderChangeEnd,
-                  ),
-                ],
-              ),
-              secondChild: const SizedBox.shrink(),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: connecting
+                  ? null
+                  : connected
+                  ? onDisconnect
+                  : onConnect,
+              icon: connecting
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(connected ? Icons.link_off : Icons.link),
+              label: Text(connected ? 'Disconnect' : 'Connect'),
             ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  String _compactPubkey(String pubkey) {
-    if (pubkey.length <= 18) return pubkey;
-    return '${pubkey.substring(0, 10)}...${pubkey.substring(pubkey.length - 6)}';
-  }
-}
-
-// ignore: unused_element
-class _PlaybackControls extends StatelessWidget {
-  const _PlaybackControls({
-    required this.speaking,
-    required this.hasReplay,
-    required this.autoSpeak,
-    required this.expanded,
-    required this.language,
-    required this.languages,
-    required this.engine,
-    required this.engines,
-    required this.rate,
-    required this.pitch,
-    required this.volume,
-    required this.onStop,
-    required this.onReplay,
-    required this.onAutoSpeakChanged,
-    required this.onExpandedChanged,
-    required this.onLanguageChanged,
-    required this.onEngineChanged,
-    required this.onRateChanged,
-    required this.onPitchChanged,
-    required this.onVolumeChanged,
-    required this.onSliderChangeEnd,
-    required this.onTest,
-  });
-
-  final bool speaking;
-  final bool hasReplay;
-  final bool autoSpeak;
-  final bool expanded;
-  final String language;
-  final List<String> languages;
-  final String? engine;
-  final List<String> engines;
-  final double rate;
-  final double pitch;
-  final double volume;
-  final VoidCallback onStop;
-  final VoidCallback onReplay;
-  final ValueChanged<bool> onAutoSpeakChanged;
-  final ValueChanged<bool> onExpandedChanged;
-  final ValueChanged<String> onLanguageChanged;
-  final ValueChanged<String?> onEngineChanged;
-  final ValueChanged<double> onRateChanged;
-  final ValueChanged<double> onPitchChanged;
-  final ValueChanged<double> onVolumeChanged;
-  final ValueChanged<double> onSliderChangeEnd;
-  final VoidCallback onTest;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-    final languageItems = (languages.toSet()..add(language)).toList()..sort();
-    final engineValue = engine != null && engines.contains(engine)
-        ? engine!
-        : '';
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+            const Divider(height: 28),
             Row(
               children: [
                 Icon(
@@ -2688,26 +2605,7 @@ class _PlaybackControls extends StatelessWidget {
                 ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(8),
-                    onTap: () => onExpandedChanged(!expanded),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 6),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('Speech', style: theme.textTheme.titleMedium),
-                          const SizedBox(height: 2),
-                          Text(
-                            speaking ? 'Speaking' : 'Speech idle',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodySmall,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
+                  child: Text('Speech', style: theme.textTheme.titleSmall),
                 ),
                 Tooltip(
                   message: autoSpeak ? 'Auto speak on' : 'Auto speak off',
@@ -2727,110 +2625,91 @@ class _PlaybackControls extends StatelessWidget {
                   onPressed: onStop,
                   icon: const Icon(Icons.stop),
                 ),
-                IconButton(
-                  tooltip: expanded
-                      ? 'Collapse speech settings'
-                      : 'Expand speech settings',
-                  onPressed: () => onExpandedChanged(!expanded),
-                  icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Voice settings',
+                    style: theme.textTheme.titleSmall,
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: onTest,
+                  icon: const Icon(Icons.record_voice_over),
+                  label: const Text('Test'),
                 ),
               ],
             ),
-            AnimatedCrossFade(
-              duration: const Duration(milliseconds: 180),
-              crossFadeState: expanded
-                  ? CrossFadeState.showFirst
-                  : CrossFadeState.showSecond,
-              firstChild: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'Voice settings',
-                          style: theme.textTheme.titleSmall,
-                        ),
-                      ),
-                      TextButton.icon(
-                        onPressed: onTest,
-                        icon: const Icon(Icons.record_voice_over),
-                        label: const Text('Test'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  DropdownButtonFormField<String>(
-                    initialValue: languageItems.contains(language)
-                        ? language
-                        : languageItems.first,
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Language',
-                    ),
-                    items: [
-                      for (final item in languageItems)
-                        DropdownMenuItem(value: item, child: Text(item)),
-                    ],
-                    onChanged: (value) {
-                      if (value != null) onLanguageChanged(value);
-                    },
-                  ),
-                  if (engines.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      initialValue: engineValue,
-                      isExpanded: true,
-                      decoration: const InputDecoration(
-                        border: OutlineInputBorder(),
-                        labelText: 'Engine',
-                      ),
-                      items: [
-                        const DropdownMenuItem(
-                          value: '',
-                          child: Text('System default'),
-                        ),
-                        for (final item in engines)
-                          DropdownMenuItem(value: item, child: Text(item)),
-                      ],
-                      onChanged: (value) => onEngineChanged(
-                        value == null || value.isEmpty ? null : value,
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 12),
-                  _SpeechSlider(
-                    label: 'Rate',
-                    value: rate,
-                    min: 0.1,
-                    max: 1.0,
-                    divisions: 18,
-                    onChanged: onRateChanged,
-                    onChangeEnd: onSliderChangeEnd,
-                  ),
-                  _SpeechSlider(
-                    label: 'Pitch',
-                    value: pitch,
-                    min: 0.5,
-                    max: 2.0,
-                    divisions: 30,
-                    onChanged: onPitchChanged,
-                    onChangeEnd: onSliderChangeEnd,
-                  ),
-                  _SpeechSlider(
-                    label: 'Volume',
-                    value: volume,
-                    min: 0.0,
-                    max: 1.0,
-                    divisions: 20,
-                    onChanged: onVolumeChanged,
-                    onChangeEnd: onSliderChangeEnd,
-                  ),
-                ],
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              initialValue: languageItems.contains(language)
+                  ? language
+                  : languageItems.first,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Language',
               ),
-              secondChild: const SizedBox.shrink(),
+              items: [
+                for (final item in languageItems)
+                  DropdownMenuItem(value: item, child: Text(item)),
+              ],
+              onChanged: (value) {
+                if (value != null) onLanguageChanged(value);
+              },
+            ),
+            if (engines.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                initialValue: engineValue,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: 'Engine',
+                ),
+                items: [
+                  const DropdownMenuItem(
+                    value: '',
+                    child: Text('System default'),
+                  ),
+                  for (final item in engines)
+                    DropdownMenuItem(value: item, child: Text(item)),
+                ],
+                onChanged: (value) => onEngineChanged(
+                  value == null || value.isEmpty ? null : value,
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
+            _SpeechSlider(
+              label: 'Rate',
+              value: rate,
+              min: 0.1,
+              max: 1.0,
+              divisions: 18,
+              onChanged: onRateChanged,
+              onChangeEnd: onSliderChangeEnd,
+            ),
+            _SpeechSlider(
+              label: 'Pitch',
+              value: pitch,
+              min: 0.5,
+              max: 2.0,
+              divisions: 30,
+              onChanged: onPitchChanged,
+              onChangeEnd: onSliderChangeEnd,
+            ),
+            _SpeechSlider(
+              label: 'Volume',
+              value: volume,
+              min: 0.0,
+              max: 1.0,
+              divisions: 20,
+              onChanged: onVolumeChanged,
+              onChangeEnd: onSliderChangeEnd,
             ),
           ],
         ),
@@ -2924,22 +2803,30 @@ class _Composer extends StatefulWidget {
   const _Composer({
     required this.controller,
     required this.connected,
+    required this.connecting,
     required this.sending,
     required this.sendingAudio,
+    required this.sendingMedia,
     required this.recording,
     required this.wavRetryRequested,
     required this.onMicPressed,
+    required this.onConnectPressed,
+    required this.onAttachMedia,
     required this.onCancelRecording,
     required this.onSendPressed,
   });
 
   final TextEditingController controller;
   final bool connected;
+  final bool connecting;
   final bool sending;
   final bool sendingAudio;
+  final bool sendingMedia;
   final bool recording;
   final bool wavRetryRequested;
   final VoidCallback onMicPressed;
+  final VoidCallback onConnectPressed;
+  final VoidCallback onAttachMedia;
   final VoidCallback onCancelRecording;
   final VoidCallback onSendPressed;
 
@@ -3013,15 +2900,33 @@ class _ComposerState extends State<_Composer>
               valueListenable: widget.controller,
               builder: (context, value, _) {
                 final hasText = value.text.trim().isNotEmpty;
-                final busy = widget.sending || widget.sendingAudio;
-                final onMainPressed = !widget.connected || busy
-                    ? null
-                    : widget.recording
-                    ? widget.onMicPressed
-                    : hasText
-                    ? widget.onSendPressed
-                    : widget.onMicPressed;
-                final icon = busy
+                final busy =
+                    widget.sending ||
+                    widget.sendingAudio ||
+                    widget.sendingMedia;
+                final canUseMainAction = !busy && !widget.connecting;
+                final onMainPressed = canUseMainAction
+                    ? widget.connected
+                          ? widget.recording
+                                ? widget.onMicPressed
+                                : hasText
+                                ? widget.onSendPressed
+                                : widget.onMicPressed
+                          : widget.onConnectPressed
+                    : null;
+
+                final disconnectedLabel = widget.connecting
+                    ? 'Connecting'
+                    : 'Connect';
+                final disconnectedTooltip = widget.connecting
+                    ? 'Connecting'
+                    : 'Connect to relay';
+                final canAttach =
+                    !busy && !widget.connecting && !widget.recording;
+
+                final icon = !widget.connected
+                    ? const Icon(Icons.cloud_off)
+                    : busy
                     ? SizedBox.square(
                         dimension: 18,
                         child: CircularProgressIndicator(
@@ -3029,6 +2934,8 @@ class _ComposerState extends State<_Composer>
                           color: theme.colorScheme.onPrimary,
                         ),
                       )
+                    : widget.recording
+                    ? const Icon(Icons.stop)
                     : hasText
                     ? const Icon(Icons.send)
                     : Icon(
@@ -3036,10 +2943,10 @@ class _ComposerState extends State<_Composer>
                             ? Icons.mic_external_on
                             : Icons.mic,
                       );
-                final label = widget.sendingAudio
+                final label = widget.sendingAudio || widget.sendingMedia
                     ? 'Sending'
-                    : widget.sending
-                    ? 'Sending'
+                    : !widget.connected
+                    ? disconnectedLabel
                     : hasText
                     ? 'Send'
                     : widget.wavRetryRequested
@@ -3047,6 +2954,8 @@ class _ComposerState extends State<_Composer>
                     : 'Record';
                 final tooltip = widget.recording
                     ? 'Send recording'
+                    : !widget.connected
+                    ? disconnectedTooltip
                     : hasText
                     ? 'Send text'
                     : widget.wavRetryRequested
@@ -3073,6 +2982,15 @@ class _ComposerState extends State<_Composer>
 
                 return Row(
                   children: [
+                    IconButton.filledTonal(
+                      tooltip: 'Attach photo or file',
+                      onPressed: canAttach ? widget.onAttachMedia : null,
+                      style: IconButton.styleFrom(
+                        minimumSize: const Size(48, 48),
+                      ),
+                      icon: const Icon(Icons.attach_file),
+                    ),
+                    const SizedBox(width: 10),
                     if (widget.recording) ...[
                       IconButton.filledTonal(
                         tooltip: 'Cancel recording',
