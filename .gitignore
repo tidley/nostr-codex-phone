@@ -5,6 +5,7 @@
 *.swp
 .env*
 .nostr-codex-memory*.sqlite*
+.nostr-codex-target.svg
 .DS_Store
 .atom/
 .build/

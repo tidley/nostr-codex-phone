@@ -7,6 +7,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
 import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
 import 'package:path_provider/path_provider.dart';
@@ -537,6 +538,125 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _status = 'New repo target';
       _connectionExpanded = true;
     });
+  }
+
+  Future<void> _scanRepoTargetQr() async {
+    final payload = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const _RepoTargetQrScannerPage()),
+    );
+    if (!mounted || payload == null || payload.trim().isEmpty) return;
+
+    final target = _repoTargetFromQrPayload(payload);
+    if (target == null) {
+      _showError('QR did not contain a Nostr Codex target');
+      return;
+    }
+
+    if (_recording) {
+      await _cancelRecording();
+    }
+    if (_connected || _connecting) {
+      await _disconnect(expand: true);
+    }
+    if (!mounted) return;
+
+    final targets = [..._repoTargets];
+    final existingIndex = targets.indexWhere(
+      (item) => item.pubkey == target.pubkey,
+    );
+    final savedTarget = existingIndex == -1
+        ? target
+        : _RepoTarget(
+            id: targets[existingIndex].id,
+            name: target.name,
+            pubkey: target.pubkey,
+            relays: target.relays,
+          );
+    if (existingIndex == -1) {
+      targets.add(savedTarget);
+    } else {
+      targets[existingIndex] = savedTarget;
+    }
+
+    setState(() {
+      _repoTargets = targets;
+      _applyRepoTargetFields(savedTarget);
+      _seenIncomingEventIds.clear();
+      _wavRetryRequested = false;
+      _connectionExpanded = true;
+      _status = 'Scanned target ${savedTarget.displayName}';
+    });
+    await _saveSettings();
+  }
+
+  _RepoTarget? _repoTargetFromQrPayload(String raw) {
+    try {
+      final payload = raw.trim();
+      if (payload.isEmpty) return null;
+
+      final jsonPayload = payload.startsWith('nostr-codex-target:')
+          ? _decodeTargetUriPayload(payload)
+          : payload;
+      if (jsonPayload == null) return null;
+
+      final decoded = jsonDecode(jsonPayload);
+      if (decoded is! Map<String, dynamic>) return null;
+      final type = decoded['type']?.toString();
+      if (type != 'nostr_codex_target' && type != 'nostr-codex-target') {
+        return null;
+      }
+
+      final pubkey =
+          decoded['pubkey']?.toString().trim() ??
+          decoded['npub']?.toString().trim() ??
+          '';
+      if (pubkey.isEmpty) return null;
+
+      final rawRelays = decoded['relays'];
+      final relays = rawRelays is Iterable
+          ? rawRelays
+                .map((relay) => relay.toString().trim())
+                .where((relay) => relay.isNotEmpty)
+                .toList()
+          : _splitRelayText(rawRelays?.toString() ?? '');
+      if (relays.isEmpty) return null;
+
+      final workdir = decoded['workdir']?.toString().trim();
+      final rawName = decoded['name']?.toString().trim() ?? '';
+      final name = rawName.isNotEmpty
+          ? rawName
+          : _workdirTargetName(workdir) ?? _defaultTargetName(pubkey);
+      return _RepoTarget(
+        id: _newRepoTargetId(),
+        name: name,
+        pubkey: pubkey,
+        relays: relays,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String? _decodeTargetUriPayload(String payload) {
+    final encoded = payload.substring('nostr-codex-target:'.length).trim();
+    if (encoded.isEmpty) return null;
+    try {
+      return utf8.decode(base64Url.decode(base64Url.normalize(encoded)));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String? _workdirTargetName(String? workdir) {
+    final cleaned = workdir?.trim();
+    if (cleaned == null || cleaned.isEmpty) return null;
+    final parts = cleaned
+        .split(RegExp(r'[/\\]'))
+        .map((part) => part.trim())
+        .where((part) => part.isNotEmpty)
+        .toList();
+    if (parts.isEmpty) return null;
+    return parts.last;
   }
 
   Future<void> _deleteSelectedRepoTarget() async {
@@ -1450,6 +1570,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               },
               onSaveTarget: () => unawaited(_saveCurrentRepoTarget()),
               onNewTarget: () => unawaited(_createRepoTarget()),
+              onScanTarget: () => unawaited(_scanRepoTargetQr()),
               onDeleteTarget: _selectedRepoTargetId == null
                   ? null
                   : () => unawaited(_deleteSelectedRepoTarget()),
@@ -1540,6 +1661,7 @@ class _ConnectionPanel extends StatelessWidget {
     required this.onTargetChanged,
     required this.onSaveTarget,
     required this.onNewTarget,
+    required this.onScanTarget,
     required this.onDeleteTarget,
     required this.onGenerateKey,
     required this.onSecretChanged,
@@ -1584,6 +1706,7 @@ class _ConnectionPanel extends StatelessWidget {
   final ValueChanged<String?> onTargetChanged;
   final VoidCallback onSaveTarget;
   final VoidCallback onNewTarget;
+  final VoidCallback onScanTarget;
   final VoidCallback? onDeleteTarget;
   final VoidCallback onGenerateKey;
   final ValueChanged<String> onSecretChanged;
@@ -1700,20 +1823,26 @@ class _ConnectionPanel extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  Row(
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       TextButton.icon(
                         onPressed: connecting ? null : onNewTarget,
                         icon: const Icon(Icons.add),
                         label: const Text('New'),
                       ),
-                      const SizedBox(width: 8),
                       TextButton.icon(
                         onPressed: connecting ? null : onSaveTarget,
                         icon: const Icon(Icons.save),
                         label: const Text('Save'),
                       ),
-                      const SizedBox(width: 8),
+                      TextButton.icon(
+                        onPressed: connecting ? null : onScanTarget,
+                        icon: const Icon(Icons.qr_code_scanner),
+                        label: const Text('Scan'),
+                      ),
                       IconButton(
                         tooltip: 'Delete target',
                         onPressed: connecting ? null : onDeleteTarget,
@@ -2213,6 +2342,44 @@ class _SpeechSlider extends StatelessWidget {
           onChangeEnd: onChangeEnd,
         ),
       ],
+    );
+  }
+}
+
+class _RepoTargetQrScannerPage extends StatefulWidget {
+  const _RepoTargetQrScannerPage();
+
+  @override
+  State<_RepoTargetQrScannerPage> createState() =>
+      _RepoTargetQrScannerPageState();
+}
+
+class _RepoTargetQrScannerPageState extends State<_RepoTargetQrScannerPage> {
+  final _controller = MobileScannerController();
+  bool _handled = false;
+
+  @override
+  void dispose() {
+    unawaited(_controller.dispose());
+    super.dispose();
+  }
+
+  void _handleDetect(BarcodeCapture capture) {
+    if (_handled) return;
+    for (final barcode in capture.barcodes) {
+      final value = barcode.rawValue?.trim();
+      if (value == null || value.isEmpty) continue;
+      _handled = true;
+      Navigator.of(context).pop(value);
+      return;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Scan Target')),
+      body: MobileScanner(controller: _controller, onDetect: _handleDetect),
     );
   }
 }

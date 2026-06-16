@@ -26,6 +26,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Microphone access is used to dictate Nostr queries.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Camera access is used to scan repo target QR codes.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Speech recognition is used to turn dictated queries into text.</string>
 	<key>UILaunchStoryboardName</key>

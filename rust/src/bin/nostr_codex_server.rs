@@ -1,13 +1,17 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::env;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::panic::AssertUnwindSafe;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
+use qrcode::{Color, QrCode};
 #[path = "nostr_codex_server/memory.rs"]
 mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
@@ -48,7 +52,8 @@ async fn main() -> Result<()> {
     let memory_probe = open_memory_store(memory_config.clone());
     let messenger = Arc::new(NostrMessenger::connect(nostr_config.clone()).await?);
 
-    info!("server pubkey: {}", messenger.public_key_bech32()?);
+    let server_pubkey = messenger.public_key_bech32()?;
+    info!("server pubkey: {}", server_pubkey);
     info!("server pubkey hex: {}", messenger.public_key_hex());
     match &nostr_config.peer_pubkey {
         Some(peer) => info!("peer pubkey: {peer}"),
@@ -74,6 +79,12 @@ async fn main() -> Result<()> {
         Some(memory) => info!("memory database: {}", memory.db_path().display()),
         None => warn!("SQLite memory is disabled or unavailable"),
     }
+    write_worker_target_qr(
+        &server_pubkey,
+        &messenger.public_key_hex(),
+        &codex_config.working_dir,
+        &nostr_config.relays,
+    );
     drop(memory_probe);
 
     let mut peer_workers = HashMap::<String, mpsc::Sender<IncomingMessage>>::new();
@@ -781,6 +792,134 @@ fn repo_status_text(workdir: &Path) -> String {
     format!("Repo/workdir: {repo}\nPath: {}", workdir.display())
 }
 
+fn write_worker_target_qr(pubkey: &str, pubkey_hex: &str, workdir: &Path, relays: &[String]) {
+    let payload = serde_json::json!({
+        "type": "nostr_codex_target",
+        "version": 1,
+        "name": worker_target_name(workdir),
+        "pubkey": pubkey,
+        "pubkey_hex": pubkey_hex,
+        "workdir": workdir.to_string_lossy(),
+        "relays": relays,
+    });
+    let Ok(payload) = serde_json::to_string(&payload) else {
+        warn!("failed to serialize worker QR payload");
+        return;
+    };
+
+    info!("worker target QR payload: {payload}");
+
+    let code = match QrCode::new(payload.as_bytes()) {
+        Ok(code) => code,
+        Err(err) => {
+            warn!("failed to build worker target QR: {err:#}");
+            return;
+        }
+    };
+
+    if env_bool("NOSTR_CODEX_QR_PRINT", true) {
+        println!(
+            "\nNostr Codex target for {}\n{}\n",
+            workdir.display(),
+            render_terminal_qr(&code)
+        );
+    }
+
+    let qr_path = env::var("NOSTR_CODEX_QR_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| workdir.join(".nostr-codex-target.svg"));
+    if let Some(parent) = qr_path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            warn!(
+                "failed to create worker QR directory `{}`: {err:#}",
+                parent.display()
+            );
+            return;
+        }
+    }
+    if let Err(err) = fs::write(&qr_path, render_svg_qr(&code)) {
+        warn!(
+            "failed to save worker target QR `{}`: {err:#}",
+            qr_path.display()
+        );
+        return;
+    }
+    info!("worker target QR saved: {}", qr_path.display());
+
+    if env_bool("NOSTR_CODEX_QR_OPEN", false) {
+        if let Err(err) = StdCommand::new("xdg-open").arg(&qr_path).spawn() {
+            warn!(
+                "failed to open worker target QR `{}`: {err:#}",
+                qr_path.display()
+            );
+        }
+    }
+}
+
+fn worker_target_name(workdir: &Path) -> String {
+    workdir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("repo")
+        .to_string()
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| !is_falsey_env(&value))
+        .unwrap_or(default)
+}
+
+fn is_falsey_env(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
+}
+
+fn render_terminal_qr(code: &QrCode) -> String {
+    const QUIET: isize = 2;
+    let width = code.width() as isize;
+    let mut out = String::new();
+
+    for y in -QUIET..(width + QUIET) {
+        for x in -QUIET..(width + QUIET) {
+            out.push_str(if qr_dark(code, x, y) { "██" } else { "  " });
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
+fn render_svg_qr(code: &QrCode) -> String {
+    const QUIET: isize = 4;
+    let width = code.width() as isize;
+    let size = width + (QUIET * 2);
+    let mut path = String::new();
+
+    for y in 0..width {
+        for x in 0..width {
+            if qr_dark(code, x, y) {
+                path.push_str(&format!("M{} {}h1v1h-1z", x + QUIET, y + QUIET));
+            }
+        }
+    }
+
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}" shape-rendering="crispEdges"><rect width="{size}" height="{size}" fill="#fff"/><path d="{path}" fill="#000"/></svg>"##
+    )
+}
+
+fn qr_dark(code: &QrCode, x: isize, y: isize) -> bool {
+    if x < 0 || y < 0 || x >= code.width() as isize || y >= code.width() as isize {
+        return false;
+    }
+    code[(x as usize, y as usize)] == Color::Dark
+}
+
 fn is_no_op_request(normalized: &str) -> bool {
     matches!(
         normalized,
@@ -802,15 +941,161 @@ fn load_codex_session(
     peer_pubkey: &str,
     workdir: &Path,
 ) -> Option<String> {
-    memory
-        .as_ref()
-        .and_then(|memory| match memory.codex_session(peer_pubkey, workdir) {
-            Ok(session_id) => session_id,
-            Err(err) => {
-                warn!("failed to load Codex session; starting a fresh turn: {err:#}");
-                None
-            }
+    let stored =
+        memory
+            .as_ref()
+            .and_then(|memory| match memory.codex_session(peer_pubkey, workdir) {
+                Ok(session_id) => session_id,
+                Err(err) => {
+                    warn!("failed to load Codex session; starting a fresh turn: {err:#}");
+                    None
+                }
+            });
+    if stored.is_some() {
+        return stored;
+    }
+
+    if !env_bool("CODEX_RESUME_LATEST_BY_WORKDIR", true) {
+        return None;
+    }
+
+    match latest_codex_session_for_workdir(workdir) {
+        Ok(Some(session_id)) => {
+            info!(
+                "adopting latest existing Codex session {session_id} for {}",
+                workdir.display()
+            );
+            Some(session_id)
+        }
+        Ok(None) => None,
+        Err(err) => {
+            warn!("failed to discover latest Codex session for workdir: {err:#}");
+            None
+        }
+    }
+}
+
+fn latest_codex_session_for_workdir(workdir: &Path) -> Result<Option<String>> {
+    let sessions_dir = env::var("CODEX_SESSIONS_DIR")
+        .map(PathBuf::from)
+        .or_else(|_| {
+            env::var("HOME").map(|home| PathBuf::from(home).join(".codex").join("sessions"))
         })
+        .context("HOME is not set and CODEX_SESSIONS_DIR was not provided")?;
+    latest_codex_session_for_workdir_in(&sessions_dir, workdir)
+}
+
+fn latest_codex_session_for_workdir_in(
+    sessions_dir: &Path,
+    workdir: &Path,
+) -> Result<Option<String>> {
+    if !sessions_dir.exists() {
+        return Ok(None);
+    }
+
+    let target = canonical_path_key(workdir);
+    let mut best: Option<(String, String)> = None;
+    collect_latest_codex_session(sessions_dir, &target, &mut best)?;
+    Ok(best.map(|(_, session_id)| session_id))
+}
+
+fn collect_latest_codex_session(
+    path: &Path,
+    target_workdir: &str,
+    best: &mut Option<(String, String)>,
+) -> Result<()> {
+    if path.is_dir() {
+        for entry in
+            fs::read_dir(path).with_context(|| format!("failed to read `{}`", path.display()))?
+        {
+            let entry = entry?;
+            collect_latest_codex_session(&entry.path(), target_workdir, best)?;
+        }
+        return Ok(());
+    }
+
+    if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+        return Ok(());
+    }
+
+    let Some(session) = parse_codex_session_file(path, target_workdir)? else {
+        return Ok(());
+    };
+    match best {
+        Some((best_timestamp, _)) if best_timestamp.as_str() >= session.0.as_str() => {}
+        _ => *best = Some(session),
+    }
+    Ok(())
+}
+
+fn parse_codex_session_file(path: &Path, target_workdir: &str) -> Result<Option<(String, String)>> {
+    let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut first_line = None;
+    let mut last_line = None;
+
+    for line in reader.lines() {
+        let line = line.with_context(|| format!("failed to read `{}`", path.display()))?;
+        if first_line.is_none() {
+            first_line = Some(line.clone());
+        }
+        if !line.trim().is_empty() {
+            last_line = Some(line);
+        }
+    }
+
+    let Some(first_line) = first_line else {
+        return Ok(None);
+    };
+    let first: serde_json::Value = match serde_json::from_str(&first_line) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if first.get("type").and_then(|value| value.as_str()) != Some("session_meta") {
+        return Ok(None);
+    }
+    let payload = &first["payload"];
+    let Some(session_id) = payload.get("id").and_then(|value| value.as_str()) else {
+        return Ok(None);
+    };
+    let Some(cwd) = payload.get("cwd").and_then(|value| value.as_str()) else {
+        return Ok(None);
+    };
+    if canonical_path_key(Path::new(cwd)) != target_workdir {
+        return Ok(None);
+    }
+
+    let last_timestamp = last_line
+        .as_deref()
+        .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .and_then(|value| {
+            value
+                .get("timestamp")
+                .and_then(|timestamp| timestamp.as_str())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            payload
+                .get("timestamp")
+                .and_then(|timestamp| timestamp.as_str())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            first
+                .get("timestamp")
+                .and_then(|timestamp| timestamp.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+
+    Ok(Some((last_timestamp, session_id.to_string())))
+}
+
+fn canonical_path_key(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
 }
 
 fn cached_transcript(memory: &Option<MemoryStore>, audio_hash: &str) -> Option<String> {
@@ -1064,5 +1349,65 @@ mod tests {
 
         audio.media_type = "audio/wav; codecs=1".to_string();
         assert!(!should_request_wav_retry(&audio));
+    }
+
+    #[test]
+    fn discovers_latest_codex_session_for_workdir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("sessions");
+        let workdir = temp_dir.path().join("repo");
+        let other_workdir = temp_dir.path().join("other");
+        fs::create_dir_all(sessions_dir.join("2026/06/16")).unwrap();
+        fs::create_dir_all(&workdir).unwrap();
+        fs::create_dir_all(&other_workdir).unwrap();
+
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/old.jsonl"),
+            "old-session",
+            &workdir,
+            "2026-06-16T10:00:00Z",
+            "2026-06-16T10:01:00Z",
+        );
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/new.jsonl"),
+            "new-session",
+            &workdir,
+            "2026-06-16T10:00:00Z",
+            "2026-06-16T10:05:00Z",
+        );
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/other.jsonl"),
+            "other-session",
+            &other_workdir,
+            "2026-06-16T10:00:00Z",
+            "2026-06-16T10:10:00Z",
+        );
+
+        let session = latest_codex_session_for_workdir_in(&sessions_dir, &workdir).unwrap();
+        assert_eq!(session.as_deref(), Some("new-session"));
+    }
+
+    fn write_session_fixture(
+        path: &Path,
+        session_id: &str,
+        workdir: &Path,
+        started_at: &str,
+        last_active: &str,
+    ) {
+        let first = serde_json::json!({
+            "timestamp": started_at,
+            "type": "session_meta",
+            "payload": {
+                "id": session_id,
+                "timestamp": started_at,
+                "cwd": workdir.to_string_lossy(),
+            }
+        });
+        let last = serde_json::json!({
+            "timestamp": last_active,
+            "type": "event_msg",
+            "payload": {"type": "token_count"}
+        });
+        fs::write(path, format!("{first}\n{last}\n")).unwrap();
     }
 }
