@@ -15,8 +15,10 @@ unit_file="$unit_dir/$service_name.service"
 binary="$bridge_dir/rust/target/debug/nostr-codex-server"
 
 if [[ ! -f "$env_file" ]]; then
-  echo "missing env file: $env_file" >&2
-  exit 1
+  mkdir -p "$(dirname "$env_file")"
+  touch "$env_file"
+  chmod 600 "$env_file"
+  echo "created empty env file: $env_file"
 fi
 
 if [[ ! -x "$binary" ]]; then
@@ -39,6 +41,7 @@ EnvironmentFile=$env_file
 Environment=PATH=$HOME/.nvm/versions/node/v24.12.0/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=CODEX_WORKDIR=$repo_dir
 Environment=CODEX_MEMORY_DB=$repo_dir/.nostr-codex-memory.sqlite3
+Environment=NOSTR_CODEX_ENV_FILE=$env_file
 ExecStart=$binary
 Restart=always
 RestartSec=5

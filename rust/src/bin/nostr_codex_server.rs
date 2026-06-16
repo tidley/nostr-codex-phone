@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
+use nostr_sdk::prelude::{Keys, PublicKey, ToBech32};
 use qrcode::{Color, QrCode};
 #[path = "nostr_codex_server/memory.rs"]
 mod memory;
@@ -35,8 +36,261 @@ enum RequestClass {
     NoOp,
 }
 
+#[derive(Debug, Clone)]
+struct WorkerEnvFile {
+    path: PathBuf,
+}
+
+impl WorkerEnvFile {
+    fn for_workdir(workdir: &Path) -> Self {
+        let path = env::var("NOSTR_CODEX_ENV_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| workdir.join(".env.server"));
+        Self { path }
+    }
+
+    fn load_missing(&self) -> Result<()> {
+        if !self.path.is_file() {
+            return Ok(());
+        }
+
+        let raw = fs::read_to_string(&self.path)
+            .with_context(|| format!("failed to read worker env file `{}`", self.path.display()))?;
+        for line in raw.lines() {
+            let Some((key, value)) = parse_env_assignment(line) else {
+                continue;
+            };
+            if env::var_os(&key).is_none() {
+                env::set_var(key, value);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn handle_cli_args() -> Result<bool> {
+    let mut args = env::args().skip(1);
+    let Some(first) = args.next() else {
+        return Ok(false);
+    };
+
+    match first.as_str() {
+        "--generate-key" | "generate-key" => {
+            print_generated_key()?;
+            Ok(true)
+        }
+        "--help" | "-h" => {
+            println!("nostr-codex-server");
+            println!("  --generate-key    print a fresh Nostr nsec/npub pair");
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn print_generated_key() -> Result<()> {
+    let keys = Keys::generate();
+    println!("NOSTR_SECRET_KEY={}", keys.secret_key().to_bech32()?);
+    println!("NOSTR_PUBLIC_KEY={}", keys.public_key().to_bech32()?);
+    println!("NOSTR_PUBLIC_KEY_HEX={}", keys.public_key().to_hex());
+    Ok(())
+}
+
+fn initial_workdir() -> Result<PathBuf> {
+    env::var("CODEX_WORKDIR")
+        .map(PathBuf::from)
+        .or_else(|_| env::current_dir())
+        .context("failed to resolve worker directory")
+}
+
+fn ensure_worker_secret(env_file: &WorkerEnvFile) -> Result<String> {
+    if let Some(secret_key) = env_nonempty("NOSTR_SECRET_KEY") {
+        return Ok(secret_key);
+    }
+
+    let keys = Keys::generate();
+    let secret_key = keys.secret_key().to_bech32()?;
+    let public_key = keys.public_key().to_bech32()?;
+    let public_key_hex = keys.public_key().to_hex();
+    upsert_env_file_values(
+        &env_file.path,
+        &[
+            ("NOSTR_SECRET_KEY", secret_key.as_str()),
+            ("NOSTR_PUBLIC_KEY", public_key.as_str()),
+            ("NOSTR_PUBLIC_KEY_HEX", public_key_hex.as_str()),
+        ],
+    )?;
+    env::set_var("NOSTR_SECRET_KEY", &secret_key);
+    env::set_var("NOSTR_PUBLIC_KEY", &public_key);
+    env::set_var("NOSTR_PUBLIC_KEY_HEX", &public_key_hex);
+    info!(
+        "generated and saved worker Nostr identity: {}",
+        env_file.path.display()
+    );
+
+    Ok(secret_key)
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_env_assignment(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let line = line.strip_prefix("export ").unwrap_or(line).trim();
+    let (key, value) = line.split_once('=')?;
+    let key = key.trim();
+    if !is_env_key(key) {
+        return None;
+    }
+
+    Some((key.to_string(), unquote_env_value(value.trim()).to_string()))
+}
+
+fn is_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn unquote_env_value(value: &str) -> &str {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let first = bytes[0];
+        let last = bytes[value.len() - 1];
+        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn upsert_env_file_values(path: &Path, values: &[(&str, &str)]) -> Result<()> {
+    let replacements: HashMap<&str, &str> = values.iter().copied().collect();
+    let mut seen = HashSet::<String>::new();
+    let mut lines = Vec::new();
+
+    if path.is_file() {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read worker env file `{}`", path.display()))?;
+        for line in raw.lines() {
+            if let Some((key, _)) = parse_env_assignment(line) {
+                if let Some(value) = replacements.get(key.as_str()) {
+                    lines.push(format!("{key}={}", format_env_value(value)));
+                    seen.insert(key);
+                    continue;
+                }
+            }
+            lines.push(line.to_string());
+        }
+    }
+
+    for (key, value) in values {
+        if !seen.contains(*key) {
+            lines.push(format!("{key}={}", format_env_value(value)));
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create worker env directory `{}`",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(path, format!("{}\n", lines.join("\n")))
+        .with_context(|| format!("failed to write worker env file `{}`", path.display()))?;
+    set_private_file_permissions(path);
+
+    Ok(())
+}
+
+fn format_env_value(value: &str) -> String {
+    if value.chars().all(|ch| {
+        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | ',' | '+')
+    }) {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Err(err) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+        warn!(
+            "failed to set private permissions on `{}`: {err:#}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) {}
+
+fn pubkey_to_hex(pubkey: &str) -> Result<String> {
+    Ok(PublicKey::parse(pubkey.trim())?.to_hex())
+}
+
+fn accept_or_claim_owner(
+    env_file: &WorkerEnvFile,
+    owner_peer_hex: &mut Option<String>,
+    message: &IncomingMessage,
+) -> bool {
+    match owner_peer_hex.as_deref() {
+        Some(owner) if owner != message.sender_pubkey_hex => {
+            warn!(
+                "ignored DM from non-owner {}; owner is {}",
+                message.sender_pubkey_hex, owner
+            );
+            false
+        }
+        Some(_) => true,
+        None => {
+            info!(
+                "claiming first DM sender as worker owner: {}",
+                message.sender_pubkey
+            );
+            if let Err(err) = upsert_env_file_values(
+                &env_file.path,
+                &[
+                    ("NOSTR_PEER_PUBKEY", message.sender_pubkey.as_str()),
+                    ("NOSTR_PEER_PUBKEY_HEX", message.sender_pubkey_hex.as_str()),
+                ],
+            ) {
+                warn!(
+                    "failed to save worker owner `{}` to `{}`: {err:#}",
+                    message.sender_pubkey,
+                    env_file.path.display()
+                );
+            }
+            *owner_peer_hex = Some(message.sender_pubkey_hex.clone());
+            true
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    if handle_cli_args()? {
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -44,20 +298,31 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let nostr_config = nostr_config_from_env()?;
+    let initial_env = WorkerEnvFile::for_workdir(&initial_workdir()?);
+    initial_env.load_missing()?;
     let codex_config = CodexConfig::from_env()?;
+    let worker_env = WorkerEnvFile::for_workdir(&codex_config.working_dir);
+    if worker_env.path != initial_env.path {
+        worker_env.load_missing()?;
+    }
+    let nostr_config = nostr_config_from_env(&worker_env)?;
     let audio_config = AudioConfig::from_env();
     let transcribe_config = TranscribeConfig::from_env()?;
     let memory_config = MemoryConfig::from_env(&codex_config.working_dir);
     let memory_probe = open_memory_store(memory_config.clone());
     let messenger = Arc::new(NostrMessenger::connect(nostr_config.clone()).await?);
+    let mut owner_peer_hex = nostr_config
+        .peer_pubkey
+        .as_deref()
+        .map(pubkey_to_hex)
+        .transpose()?;
 
     let server_pubkey = messenger.public_key_bech32()?;
     info!("server pubkey: {}", server_pubkey);
     info!("server pubkey hex: {}", messenger.public_key_hex());
     match &nostr_config.peer_pubkey {
         Some(peer) => info!("peer pubkey: {peer}"),
-        None => warn!("peer pubkey not configured; accepting DMs from any sender"),
+        None => warn!("peer pubkey not configured; first valid DM sender will be saved as owner"),
     }
     info!("relays: {}", nostr_config.relays.join(", "));
     info!(
@@ -93,6 +358,9 @@ async fn main() -> Result<()> {
         let Some(message) = messenger.next_message(Duration::from_secs(3600)).await? else {
             continue;
         };
+        if !accept_or_claim_owner(&worker_env, &mut owner_peer_hex, &message) {
+            continue;
+        }
 
         let worker_key = message.sender_pubkey_hex.clone();
         let sender = peer_workers
@@ -1275,9 +1543,8 @@ async fn report_codex_error(
     Err(())
 }
 
-fn nostr_config_from_env() -> Result<NostrConfig> {
-    let secret_key = env::var("NOSTR_SECRET_KEY")
-        .context("NOSTR_SECRET_KEY must contain the server nsec/secret key")?;
+fn nostr_config_from_env(worker_env: &WorkerEnvFile) -> Result<NostrConfig> {
+    let secret_key = ensure_worker_secret(worker_env)?;
     let peer_pubkey = env::var("NOSTR_PEER_PUBKEY")
         .or_else(|_| env::var("NOSTR_MOBILE_PUBKEY"))
         .ok()
@@ -1332,6 +1599,42 @@ mod tests {
             classify_request("fix the Android voice recording path"),
             RequestClass::Coding
         );
+    }
+
+    #[test]
+    fn parses_worker_env_assignments() {
+        assert_eq!(
+            parse_env_assignment("NOSTR_SECRET_KEY='nsec123'"),
+            Some(("NOSTR_SECRET_KEY".to_string(), "nsec123".to_string()))
+        );
+        assert_eq!(
+            parse_env_assignment("export CODEX_BIN=\"/tmp/codex\""),
+            Some(("CODEX_BIN".to_string(), "/tmp/codex".to_string()))
+        );
+        assert_eq!(parse_env_assignment("# comment"), None);
+        assert_eq!(parse_env_assignment("1BAD=value"), None);
+    }
+
+    #[test]
+    fn upserts_worker_env_values_without_dropping_existing_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let env_file = temp_dir.path().join(".env.server");
+        fs::write(&env_file, "CODEX_BIN='/tmp/codex'\nNOSTR_SECRET_KEY=old\n").unwrap();
+
+        upsert_env_file_values(
+            &env_file,
+            &[
+                ("NOSTR_SECRET_KEY", "new"),
+                ("NOSTR_PEER_PUBKEY", "npub123"),
+            ],
+        )
+        .unwrap();
+
+        let raw = fs::read_to_string(env_file).unwrap();
+        assert!(raw.contains("CODEX_BIN='/tmp/codex'"));
+        assert!(raw.contains("NOSTR_SECRET_KEY=new"));
+        assert!(raw.contains("NOSTR_PEER_PUBKEY=npub123"));
+        assert!(!raw.contains("NOSTR_SECRET_KEY=old"));
     }
 
     #[test]
