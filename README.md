@@ -85,19 +85,21 @@ pubkey plus relay list, so the same mobile key can quickly switch between
 separate repo services. Each repo service has its own Nostr identity and
 therefore its own npub. The phone sends DMs to the selected target only.
 
-From any repo folder, start a foreground worker by downloading the release
-binary only if a local worker executable is not already present:
+From any repo folder, start a foreground worker with one command:
 
 ```bash
-worker=./nostr-codex-worker-linux-x64; ca="${CODEX_ARGS:-}"; ta="${TRANSCRIBE_ARGS:-}"; if [ -z "$ca" ]; then ca='--ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=medium exec --skip-git-repo-check'; fi; if [ -z "$ta" ]; then ta='-m /home/tom/code/phone/models/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/transcript -nt'; fi; if [ ! -x "$worker" ] && [ ! -x ./nostr-codex-worker ]; then curl -fsSL -o "$worker" https://github.com/tidley/nostr-codex-phone/releases/latest/download/nostr-codex-worker-linux-x64 && chmod +x "$worker"; fi; if [ ! -x "$worker" ] && [ -x ./nostr-codex-worker ]; then worker=./nostr-codex-worker; fi; if [ -x "$worker" ]; then RUST_LOG="${RUST_LOG:-info,nostr_codex_server=debug,nostr_sdk=info,nostr=info}" NOSTR_RELAYS="${NOSTR_RELAYS:-wss://relay.damus.io,wss://nos.lol,wss://nostr.mom}" NOSTR_CODEX_ENV_FILE="${NOSTR_CODEX_ENV_FILE:-$PWD/.env.server}" CODEX_WORKDIR="$PWD" CODEX_MEMORY_DB="${CODEX_MEMORY_DB:-$PWD/.nostr-codex-memory.sqlite3}" CODEX_BIN="${CODEX_BIN:-/home/tom/.nvm/versions/node/v24.12.0/bin/codex}" CODEX_ARGS="$ca" TRANSCRIBE_BIN="${TRANSCRIBE_BIN:-/home/tom/.local/bin/whisper-cpp}" TRANSCRIBE_ARGS="$ta" "$worker"; else echo 'Nostr Codex worker executable not found after download.' >&2; exit 1; fi
+curl -fsSL https://raw.githubusercontent.com/tidley/nostr-codex-phone/main/scripts/bootstrap-worker.sh | bash
 ```
 
-The worker writes `.env.server` in that repo if needed, generates and saves a
-repo-local `NOSTR_SECRET_KEY` when one is not already configured, prints/saves
-the QR target, and listens for DMs. If `NOSTR_PEER_PUBKEY` is not configured,
-the first phone key that sends a DM becomes the saved owner for that worker.
-Set `NOSTR_PEER_PUBKEY=npub...` before the command when you want to pre-lock a
-worker to a specific phone.
+The bootstrap script checks for `./nostr-codex-worker-linux-x64` or
+`./nostr-codex-worker` first. If neither exists, it downloads
+`nostr-codex-worker-linux-x64` from the latest GitHub release, makes it
+executable, and starts it. The worker writes `.env.server` in that repo if
+needed, generates and saves a repo-local `NOSTR_SECRET_KEY` when one is not
+already configured, prints/saves the QR target, and listens for DMs. If
+`NOSTR_PEER_PUBKEY` is not configured, the first phone key that sends a DM
+becomes the saved owner for that worker. Set `NOSTR_PEER_PUBKEY=npub...` before
+the command when you want to pre-lock a worker to a specific phone.
 
 Generate a fresh server key for a repo service:
 
