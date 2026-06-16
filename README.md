@@ -82,8 +82,22 @@ event delivered by multiple relays is only processed once per session.
 
 The phone can store multiple repo targets. Each target is a named Nostr peer
 pubkey plus relay list, so the same mobile key can quickly switch between
-separate repo services. Each repo service should have its own `NOSTR_SECRET_KEY`
-and therefore its own npub. The phone sends DMs to the selected target only.
+separate repo services. Each repo service has its own Nostr identity and
+therefore its own npub. The phone sends DMs to the selected target only.
+
+From any repo folder, start a foreground worker by downloading the release
+binary only if a local worker executable is not already present:
+
+```bash
+worker=./nostr-codex-worker-linux-x64; ca="${CODEX_ARGS:-}"; ta="${TRANSCRIBE_ARGS:-}"; if [ -z "$ca" ]; then ca='--ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=medium exec --skip-git-repo-check'; fi; if [ -z "$ta" ]; then ta='-m /home/tom/code/phone/models/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/transcript -nt'; fi; if [ ! -x "$worker" ] && [ ! -x ./nostr-codex-worker ]; then curl -fsSL -o "$worker" https://github.com/tidley/nostr-codex-phone/releases/latest/download/nostr-codex-worker-linux-x64 && chmod +x "$worker"; fi; if [ ! -x "$worker" ] && [ -x ./nostr-codex-worker ]; then worker=./nostr-codex-worker; fi; if [ -x "$worker" ]; then RUST_LOG="${RUST_LOG:-info,nostr_codex_server=debug,nostr_sdk=info,nostr=info}" NOSTR_RELAYS="${NOSTR_RELAYS:-wss://relay.damus.io,wss://nos.lol,wss://nostr.mom}" NOSTR_CODEX_ENV_FILE="${NOSTR_CODEX_ENV_FILE:-$PWD/.env.server}" CODEX_WORKDIR="$PWD" CODEX_MEMORY_DB="${CODEX_MEMORY_DB:-$PWD/.nostr-codex-memory.sqlite3}" CODEX_BIN="${CODEX_BIN:-/home/tom/.nvm/versions/node/v24.12.0/bin/codex}" CODEX_ARGS="$ca" TRANSCRIBE_BIN="${TRANSCRIBE_BIN:-/home/tom/.local/bin/whisper-cpp}" TRANSCRIBE_ARGS="$ta" "$worker"; else echo 'Nostr Codex worker executable not found after download.' >&2; exit 1; fi
+```
+
+The worker writes `.env.server` in that repo if needed, generates and saves a
+repo-local `NOSTR_SECRET_KEY` when one is not already configured, prints/saves
+the QR target, and listens for DMs. If `NOSTR_PEER_PUBKEY` is not configured,
+the first phone key that sends a DM becomes the saved owner for that worker.
+Set `NOSTR_PEER_PUBKEY=npub...` before the command when you want to pre-lock a
+worker to a specific phone.
 
 Generate a fresh server key for a repo service:
 
@@ -94,8 +108,8 @@ cargo run --manifest-path /home/tom/code/phone/rust/Cargo.toml --bin nostr-keyge
 Create a per-repo env file such as `/path/to/repo/.env.server`:
 
 ```bash
-NOSTR_SECRET_KEY='nsec...from nostr-keygen...'
-NOSTR_PEER_PUBKEY='npub...mobile public key...'
+NOSTR_SECRET_KEY='nsec...from nostr-keygen, optional...'
+NOSTR_PEER_PUBKEY='npub...mobile public key, optional...'
 NOSTR_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://nostr.mom'
 CODEX_BIN='/home/tom/.nvm/versions/node/v24.12.0/bin/codex'
 CODEX_ARGS='--ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=medium exec --skip-git-repo-check'
@@ -112,7 +126,9 @@ Install a user systemd service for that repo:
 The installer uses this project’s `nostr-codex-server` binary, sets
 `CODEX_WORKDIR` to the target repo, enables user lingering, and enables the
 service at boot. The service npub printed in `journalctl --user -u
-nostr-codex-myrepo` is the pubkey to add as a target in the phone app.
+nostr-codex-myrepo` is the pubkey to add as a target in the phone app. If the
+env file is empty or missing, the service creates it and saves its generated
+Nostr identity there on first start.
 
 On startup each repo service also prints a QR code and saves an SVG target card
 to `.nostr-codex-target.svg` in its `CODEX_WORKDIR`. The QR payload is plain
@@ -140,17 +156,18 @@ Codex session whose `session_meta.payload.cwd` matches `CODEX_WORKDIR`. This
 uses the same session files as `~/code/tooling/codex-sessions.sh`. Disable it
 with `CODEX_RESUME_LATEST_BY_WORKDIR=0`.
 
-Required environment:
+Manual environment:
 
 ```bash
-export NOSTR_SECRET_KEY='nsec...'
-export NOSTR_PEER_PUBKEY='npub...' # mobile public key
+export NOSTR_SECRET_KEY='nsec...' # optional; generated and saved if omitted
+export NOSTR_PEER_PUBKEY='npub...' # optional; first DM sender is saved if omitted
 export NOSTR_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://nostr.mom'
 ```
 
 `NOSTR_PEER_PUBKEY` is optional for the server. If omitted, the server subscribes
-to its own GiftWrap inbox and replies to the sender of each valid query. Set it
-when you want to restrict processing to one phone key:
+to its own GiftWrap inbox and saves the first valid DM sender as the owner in
+`NOSTR_CODEX_ENV_FILE` or `.env.server`. Set it when you want to restrict
+processing to one phone key before first contact:
 
 ```bash
 export NOSTR_PEER_PUBKEY='npub...'
