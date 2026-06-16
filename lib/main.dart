@@ -257,6 +257,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _ttsRateStorageKey = 'tts_rate';
   static const _ttsPitchStorageKey = 'tts_pitch';
   static const _ttsVolumeStorageKey = 'tts_volume';
+  static const _conversationHistoryStorageKey = 'conversation_history_v1';
+  static const _recentMessagesWindow = Duration(hours: 1);
+  static const _maxConversationMessages = 200;
 
   final _secretKeyController = TextEditingController();
   final _targetNameController = TextEditingController();
@@ -278,7 +281,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _sendingAudio = false;
   bool _autoSpeak = true;
   bool _speaking = false;
-  bool _connectionExpanded = true;
   bool _wavRetryRequested = false;
   List<_RepoTarget> _repoTargets = const [];
   String? _selectedRepoTargetId;
@@ -307,6 +309,27 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   List<ConversationMessage> get _messages =>
       _messagesByTarget.putIfAbsent(_activeConversationKey, () => []);
+
+  List<ConversationMessage> get _recentMessagesForActiveConversation {
+    final now = DateTime.now();
+    final cutoff = now.subtract(_recentMessagesWindow);
+    return _messages
+        .where(
+          (message) =>
+              message.timestamp.isAfter(cutoff) ||
+              message.timestamp.isAtSameMomentAs(cutoff),
+        )
+        .toList();
+  }
+
+  Future<void> _loadConversationHistoryForActiveSession() async {
+    final activeKey = _activeConversationKey;
+    final loaded = await _readConversationHistory(activeKey);
+    if (!mounted || _activeConversationKey != activeKey) return;
+    setState(() {
+      _messagesByTarget[activeKey] = loaded;
+    });
+  }
 
   @override
   void initState() {
@@ -384,6 +407,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _ttsVolume = _storedDouble(ttsVolume, _ttsVolume, 0.0, 1.0);
       _loadingSettings = false;
     });
+    await _loadConversationHistoryForActiveSession();
     _refreshOwnPubkey();
     await _applyTtsSettings();
     unawaited(_loadTtsOptions());
@@ -515,6 +539,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return;
     }
     await _saveSettings();
+    await _loadConversationHistoryForActiveSession();
     if (!mounted) return;
     setState(() => _status = 'Saved target ${_activeTargetName()}');
   }
@@ -535,9 +560,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _relayController.text = defaultRelays;
       _seenIncomingEventIds.clear();
       _wavRetryRequested = false;
+      _messagesByTarget['default'] = [];
       _status = 'New repo target';
-      _connectionExpanded = true;
     });
+    await _deleteConversationHistoryForKey('default');
   }
 
   Future<void> _scanRepoTargetQr() async {
@@ -581,12 +607,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _repoTargets = targets;
       _applyRepoTargetFields(savedTarget);
+      _messagesByTarget[savedTarget.id] = [];
       _seenIncomingEventIds.clear();
       _wavRetryRequested = false;
-      _connectionExpanded = true;
       _status = 'Scanned target ${savedTarget.displayName}';
     });
     await _saveSettings();
+    await _loadConversationHistoryForActiveSession();
   }
 
   _RepoTarget? _repoTargetFromQrPayload(String raw) {
@@ -677,13 +704,21 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _repoTargets = nextTargets;
       _applyRepoTargetFields(nextTarget);
+      if (nextTarget == null) {
+        _messagesByTarget['default'] = [];
+      } else {
+        _messagesByTarget[nextTarget.id] = [];
+      }
+      _messagesByTarget.remove(selectedId);
       _seenIncomingEventIds.clear();
       _wavRetryRequested = false;
       _status = nextTarget == null
           ? 'Deleted target'
           : 'Deleted target, selected ${nextTarget.displayName}';
     });
+    await _deleteConversationHistoryForKey(selectedId);
     await _saveSettings();
+    await _loadConversationHistoryForActiveSession();
   }
 
   Future<void> _selectRepoTarget(String targetId) async {
@@ -699,13 +734,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       await _disconnect(expand: false);
     }
     if (!mounted) return;
+    final targetKey = target.id;
     setState(() {
       _applyRepoTargetFields(target);
+      _messagesByTarget[targetKey] = [];
       _seenIncomingEventIds.clear();
       _wavRetryRequested = false;
       _status = 'Selected ${target.displayName}';
     });
     await _saveSettings();
+    await _loadConversationHistoryForActiveSession();
     if (reconnect && mounted) {
       await _connect();
     }
@@ -727,6 +765,186 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final peer = _peerPubkeyController.text.trim();
     if (peer.isNotEmpty) return _defaultTargetName(peer);
     return 'No target';
+  }
+
+  Future<Map<String, dynamic>> _readConversationHistoryStore() async {
+    final raw = await _storage.read(key: _conversationHistoryStorageKey);
+    if (raw == null || raw.trim().isEmpty) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return {};
+      return decoded.cast<String, dynamic>();
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<List<ConversationMessage>> _readConversationHistory(
+    String conversationKey,
+  ) async {
+    final store = await _readConversationHistoryStore();
+    final rawMessages = store[conversationKey];
+    if (rawMessages is! List) return [];
+
+    final messages = <ConversationMessage>[];
+    for (final item in rawMessages) {
+      final conversationMessage = ConversationMessage.fromJson(item);
+      if (conversationMessage != null) {
+        messages.add(conversationMessage);
+      }
+    }
+    messages.sort((left, right) => right.timestamp.compareTo(left.timestamp));
+    return messages;
+  }
+
+  Future<void> _writeConversationHistoryStore(
+    Map<String, dynamic> store,
+  ) async {
+    await _storage.write(
+      key: _conversationHistoryStorageKey,
+      value: jsonEncode(store),
+    );
+  }
+
+  Future<void> _saveConversationHistoryForKey(String conversationKey) async {
+    final messages = _messagesByTarget[conversationKey];
+    if (messages == null) return;
+    final trimmed = messages.take(_maxConversationMessages).toList();
+    final store = await _readConversationHistoryStore();
+    store[conversationKey] = trimmed.map((item) => item.toJson()).toList();
+    await _writeConversationHistoryStore(store);
+  }
+
+  Future<void> _deleteConversationHistoryForKey(String conversationKey) async {
+    final store = await _readConversationHistoryStore();
+    if (!store.remove(conversationKey)) return;
+    await _writeConversationHistoryStore(store);
+  }
+
+  void _appendMessageForActiveConversation(ConversationMessage message) {
+    _messages.insert(0, message);
+    final key = _activeConversationKey;
+    unawaited(_saveConversationHistoryForKey(key));
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => _SettingsPage(
+          repoTargets: _repoTargets,
+          selectedRepoTargetId: _selectedRepoTargetId,
+          activeTargetName: _activeTargetName(),
+          targetNameController: _targetNameController,
+          secretKeyController: _secretKeyController,
+          peerPubkeyController: _peerPubkeyController,
+          relayController: _relayController,
+          blossomServerController: _blossomServerController,
+          blossomPresets: _blossomPresets,
+          ownPubkey: _ownPubkey,
+          connected: _connected,
+          connecting: _connecting,
+          speaking: _speaking,
+          hasReplay: _lastSpokenText?.trim().isNotEmpty ?? false,
+          autoSpeak: _autoSpeak,
+          language: _ttsLanguage,
+          languages: _ttsLanguages,
+          engine: _ttsEngine,
+          engines: _ttsEngines,
+          rate: _ttsRate,
+          pitch: _ttsPitch,
+          volume: _ttsVolume,
+          onTargetChanged: (value) {
+            if (value != null) unawaited(_selectRepoTarget(value));
+          },
+          onSaveTarget: () => unawaited(_saveCurrentRepoTarget()),
+          onNewTarget: () => unawaited(_createRepoTarget()),
+          onScanTarget: () => unawaited(_scanRepoTargetQr()),
+          onDeleteTarget: _selectedRepoTargetId == null
+              ? null
+              : () => unawaited(_deleteSelectedRepoTarget()),
+          onGenerateKey: _generateKey,
+          onSecretChanged: (_) => _refreshOwnPubkey(),
+          onConnect: _connect,
+          onDisconnect: _disconnect,
+          onStop: _stopSpeaking,
+          onReplay: _replayLastSpoken,
+          onAutoSpeakChanged: (value) {
+            if (value) _clearAutoSpeakSuppression();
+            setState(() => _autoSpeak = value);
+            if (!value) unawaited(_stopSpeaking());
+          },
+          onLanguageChanged: _setTtsLanguage,
+          onEngineChanged: _setTtsEngine,
+          onRateChanged: _setTtsRate,
+          onPitchChanged: _setTtsPitch,
+          onVolumeChanged: _setTtsVolume,
+          onSliderChangeEnd: _commitTtsSettings,
+          onTest: _testTtsSettings,
+          messagesInActiveConversation:
+              _recentMessagesForActiveConversation.length,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _renameRepoTarget(_RepoTarget target) async {
+    final controller = TextEditingController(text: target.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Rename session'),
+          content: TextField(
+            controller: controller,
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
+              labelText: 'Session name',
+            ),
+            autofocus: true,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () =>
+                  Navigator.of(context).pop(controller.text.trim()),
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (!mounted || newName == null) return;
+    final cleaned = newName.trim();
+    if (cleaned.isEmpty) {
+      _showError('Session name cannot be empty');
+      return;
+    }
+
+    final targets = [..._repoTargets];
+    final index = targets.indexWhere((item) => item.id == target.id);
+    if (index == -1) {
+      _showError('Session no longer exists');
+      return;
+    }
+
+    targets[index] = _RepoTarget(
+      id: target.id,
+      name: cleaned,
+      pubkey: target.pubkey,
+      relays: target.relays,
+    );
+    setState(() {
+      _repoTargets = targets;
+      if (_selectedRepoTargetId == target.id) {
+        _targetNameController.text = cleaned;
+      }
+      _status = 'Renamed session';
+    });
+    await _saveSettings();
   }
 
   Future<void> _saveTtsSettings() async {
@@ -946,7 +1164,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       setState(() {
         _connected = true;
         _connecting = false;
-        _connectionExpanded = false;
         _ownPubkey = status.publicKey;
         _status = 'Connected to ${status.relayCount} relays';
       });
@@ -956,7 +1173,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       setState(() {
         _connecting = false;
         _connected = false;
-        _connectionExpanded = true;
         _status = 'Connection failed';
       });
       _showError('Connection failed: $error');
@@ -969,7 +1185,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!mounted) return;
     setState(() {
       _connected = false;
-      _connectionExpanded = expand;
       _status = 'Disconnected';
     });
   }
@@ -1009,7 +1224,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
     final audioRetryRequested = message.kind == 'audio_retry';
     setState(() {
-      _messages.insert(0, conversationMessage);
+      _appendMessageForActiveConversation(conversationMessage);
       if (audioRetryRequested) {
         _wavRetryRequested = true;
         _status = 'Server requested WAV retry';
@@ -1112,8 +1327,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       final eventId = await nostrSendQuery(query: query);
       if (!mounted) return;
       setState(() {
-        _messages.insert(
-          0,
+        _appendMessageForActiveConversation(
           ConversationMessage(
             direction: MessageDirection.outgoing,
             kind: 'query',
@@ -1192,8 +1406,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       final eventId = await nostrSendQuery(query: query);
       if (!mounted) return;
       setState(() {
-        _messages.insert(
-          0,
+        _appendMessageForActiveConversation(
           ConversationMessage(
             direction: MessageDirection.outgoing,
             kind: 'query',
@@ -1222,8 +1435,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       final eventId = await nostrSendAudio(audio: audio);
       if (!mounted) return;
       setState(() {
-        _messages.insert(
-          0,
+        _appendMessageForActiveConversation(
           ConversationMessage(
             direction: MessageDirection.outgoing,
             kind: 'audio',
@@ -1355,8 +1567,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         if (recordingFormat.format == _VoiceFormat.wav) {
           _wavRetryRequested = false;
         }
-        _messages.insert(
-          0,
+        _appendMessageForActiveConversation(
           ConversationMessage(
             direction: MessageDirection.outgoing,
             kind: 'audio',
@@ -1522,81 +1733,124 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
+    final theme = Theme.of(context);
+    final selectedTarget =
+        _selectedRepoTargetId != null &&
+            _repoTargets.any((target) => target.id == _selectedRepoTargetId)
+        ? _selectedRepoTargetId
+        : _repoTargets.isNotEmpty
+        ? _repoTargets.first.id
+        : null;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Nostr Codex'),
+        leading: Builder(
+          builder: (context) => IconButton(
+            tooltip: 'Conversations',
+            icon: const Icon(Icons.menu),
+            onPressed: () => Scaffold.of(context).openDrawer(),
+          ),
+        ),
+        title: _repoTargets.isEmpty
+            ? Text(
+                _activeTargetName(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              )
+            : DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  value: selectedTarget,
+                  isDense: true,
+                  isExpanded: true,
+                  icon: const Icon(Icons.expand_more),
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    color: theme.colorScheme.onSurface,
+                  ),
+                  items: [
+                    for (final target in _repoTargets)
+                      DropdownMenuItem(
+                        value: target.id,
+                        child: Text(
+                          target.displayName,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      unawaited(_selectRepoTarget(value));
+                    }
+                  },
+                ),
+              ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(0),
+          child: const SizedBox.shrink(),
+        ),
         actions: [
           IconButton(
-            tooltip: _connected ? 'Disconnect' : 'Connect',
-            onPressed: _connecting
-                ? null
-                : _connected
-                ? _disconnect
-                : _connect,
-            icon: Icon(_connected ? Icons.link_off : Icons.link),
+            tooltip: 'Settings',
+            icon: const Icon(Icons.settings),
+            onPressed: () => unawaited(_openSettings()),
           ),
         ],
       ),
+      drawer: _SessionDrawer(
+        targets: _repoTargets,
+        selectedTargetId: _selectedRepoTargetId,
+        onSelectTarget: (targetId) => unawaited(_selectRepoTarget(targetId)),
+        onNewTarget: () => unawaited(_createRepoTarget()),
+        onRenameTarget: (target) => unawaited(_renameRepoTarget(target)),
+        onDeleteTarget: (targetId) {
+          unawaited(() async {
+            final target = _targetById(_repoTargets, targetId);
+            if (target == null) return;
+            if (target.id == _selectedRepoTargetId) {
+              await _deleteSelectedRepoTarget();
+            } else {
+              setState(() {
+                _repoTargets = _repoTargets
+                    .where((item) => item.id != target.id)
+                    .toList();
+                _messagesByTarget.remove(target.id);
+                _status = 'Deleted session ${target.displayName}';
+              });
+              await _deleteConversationHistoryForKey(target.id);
+              await _saveSettings();
+            }
+          }());
+        },
+      ),
       body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(16),
+        child: Column(
           children: [
-            _ConnectionPanel(
-              repoTargets: _repoTargets,
-              selectedRepoTargetId: _selectedRepoTargetId,
-              activeTargetName: _activeTargetName(),
-              targetNameController: _targetNameController,
-              secretKeyController: _secretKeyController,
-              peerPubkeyController: _peerPubkeyController,
-              relayController: _relayController,
-              blossomServerController: _blossomServerController,
-              blossomPresets: _blossomPresets,
-              ownPubkey: _ownPubkey,
-              connected: _connected,
-              connecting: _connecting,
-              speaking: _speaking,
-              hasReplay: _lastSpokenText?.trim().isNotEmpty ?? false,
-              autoSpeak: _autoSpeak,
-              language: _ttsLanguage,
-              languages: _ttsLanguages,
-              engine: _ttsEngine,
-              engines: _ttsEngines,
-              rate: _ttsRate,
-              pitch: _ttsPitch,
-              volume: _ttsVolume,
-              expanded: _connectionExpanded,
-              onTargetChanged: (value) {
-                if (value != null) unawaited(_selectRepoTarget(value));
-              },
-              onSaveTarget: () => unawaited(_saveCurrentRepoTarget()),
-              onNewTarget: () => unawaited(_createRepoTarget()),
-              onScanTarget: () => unawaited(_scanRepoTargetQr()),
-              onDeleteTarget: _selectedRepoTargetId == null
-                  ? null
-                  : () => unawaited(_deleteSelectedRepoTarget()),
-              onGenerateKey: _generateKey,
-              onSecretChanged: (_) => _refreshOwnPubkey(),
-              onConnect: _connect,
-              onDisconnect: _disconnect,
-              onStop: _stopSpeaking,
-              onReplay: _replayLastSpoken,
-              onAutoSpeakChanged: (value) {
-                if (value) _clearAutoSpeakSuppression();
-                setState(() => _autoSpeak = value);
-                if (!value) unawaited(_stopSpeaking());
-              },
-              onLanguageChanged: _setTtsLanguage,
-              onEngineChanged: _setTtsEngine,
-              onRateChanged: _setTtsRate,
-              onPitchChanged: _setTtsPitch,
-              onVolumeChanged: _setTtsVolume,
-              onSliderChangeEnd: _commitTtsSettings,
-              onTest: _testTtsSettings,
-              onExpandedChanged: (value) {
-                setState(() => _connectionExpanded = value);
-              },
+            if (_status != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: Text(_status!, style: theme.textTheme.bodySmall),
+              ),
+            Expanded(
+              child: _recentMessagesForActiveConversation.isEmpty
+                  ? const Center(child: Text('No messages in last hour'))
+                  : ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                      itemCount: _recentMessagesForActiveConversation.length,
+                      itemBuilder: (context, index) {
+                        final message =
+                            _recentMessagesForActiveConversation[index];
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: _MessageTile(
+                            message: message,
+                            showResend: _isResendableMessage(message),
+                            onResend: _canResendMessage(message)
+                                ? () => _resendMessage(message)
+                                : null,
+                          ),
+                        );
+                      },
+                    ),
             ),
-            const SizedBox(height: 16),
             _Composer(
               controller: _queryController,
               connected: _connected,
@@ -1609,25 +1863,307 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               onSendPressed: () => _sendQuery(),
             ),
             const SizedBox(height: 12),
-            if (_status != null)
-              Text(_status!, style: Theme.of(context).textTheme.bodySmall),
-            const SizedBox(height: 16),
-            Text('Messages', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            if (_messages.isEmpty)
-              const Text('No messages yet')
-            else
-              ..._messages.map(
-                (message) => _MessageTile(
-                  message: message,
-                  showResend: _isResendableMessage(message),
-                  onResend: _canResendMessage(message)
-                      ? () => _resendMessage(message)
-                      : null,
-                ),
-              ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _SessionDrawer extends StatelessWidget {
+  const _SessionDrawer({
+    required this.targets,
+    required this.selectedTargetId,
+    required this.onSelectTarget,
+    required this.onNewTarget,
+    required this.onRenameTarget,
+    required this.onDeleteTarget,
+  });
+
+  final List<_RepoTarget> targets;
+  final String? selectedTargetId;
+  final ValueChanged<String> onSelectTarget;
+  final VoidCallback onNewTarget;
+  final ValueChanged<_RepoTarget> onRenameTarget;
+  final ValueChanged<String> onDeleteTarget;
+
+  @override
+  Widget build(BuildContext context) {
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.record_voice_over),
+              title: const Text('Sessions'),
+              subtitle: Text('${targets.length} sessions'),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.add),
+              title: const Text('New session'),
+              onTap: () {
+                Navigator.of(context).pop();
+                onNewTarget();
+              },
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.only(top: 8),
+                children: [
+                  for (final target in targets)
+                    ListTile(
+                      selected: target.id == selectedTargetId,
+                      leading: const Icon(Icons.chat_bubble_outline),
+                      title: Text(
+                        target.displayName,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(_compactIdentifier(target.pubkey)),
+                      trailing: PopupMenuButton<_SessionDrawerAction>(
+                        onSelected: (action) async {
+                          if (action == _SessionDrawerAction.rename) {
+                            onRenameTarget(target);
+                          } else if (action == _SessionDrawerAction.delete) {
+                            final shouldDelete = await _confirmDelete(
+                              context,
+                              target,
+                            );
+                            if (shouldDelete && context.mounted) {
+                              onDeleteTarget(target.id);
+                            }
+                          }
+                        },
+                        itemBuilder: (context) => [
+                          const PopupMenuItem(
+                            value: _SessionDrawerAction.rename,
+                            child: ListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.edit),
+                              title: Text('Rename'),
+                            ),
+                          ),
+                          const PopupMenuItem(
+                            value: _SessionDrawerAction.delete,
+                            child: ListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.delete_outline),
+                              title: Text('Delete'),
+                            ),
+                          ),
+                        ],
+                      ),
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        onSelectTarget(target.id);
+                      },
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<bool> _confirmDelete(BuildContext context, _RepoTarget target) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Delete session?'),
+            content: Text('Delete ${target.displayName}?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Delete'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+}
+
+enum _SessionDrawerAction { rename, delete }
+
+class _SettingsPage extends StatelessWidget {
+  const _SettingsPage({
+    required this.repoTargets,
+    required this.selectedRepoTargetId,
+    required this.activeTargetName,
+    required this.targetNameController,
+    required this.secretKeyController,
+    required this.peerPubkeyController,
+    required this.relayController,
+    required this.blossomServerController,
+    required this.blossomPresets,
+    required this.ownPubkey,
+    required this.connected,
+    required this.connecting,
+    required this.speaking,
+    required this.hasReplay,
+    required this.autoSpeak,
+    required this.language,
+    required this.languages,
+    required this.engine,
+    required this.engines,
+    required this.rate,
+    required this.pitch,
+    required this.volume,
+    required this.messagesInActiveConversation,
+    required this.onTargetChanged,
+    required this.onSaveTarget,
+    required this.onNewTarget,
+    required this.onScanTarget,
+    required this.onDeleteTarget,
+    required this.onGenerateKey,
+    required this.onSecretChanged,
+    required this.onConnect,
+    required this.onDisconnect,
+    required this.onStop,
+    required this.onReplay,
+    required this.onAutoSpeakChanged,
+    required this.onLanguageChanged,
+    required this.onEngineChanged,
+    required this.onRateChanged,
+    required this.onPitchChanged,
+    required this.onVolumeChanged,
+    required this.onSliderChangeEnd,
+    required this.onTest,
+  });
+
+  final List<_RepoTarget> repoTargets;
+  final String? selectedRepoTargetId;
+  final String activeTargetName;
+  final TextEditingController targetNameController;
+  final TextEditingController secretKeyController;
+  final TextEditingController peerPubkeyController;
+  final TextEditingController relayController;
+  final TextEditingController blossomServerController;
+  final List<_BlossomPreset> blossomPresets;
+  final String? ownPubkey;
+  final bool connected;
+  final bool connecting;
+  final bool speaking;
+  final bool hasReplay;
+  final bool autoSpeak;
+  final String language;
+  final List<String> languages;
+  final String? engine;
+  final List<String> engines;
+  final double rate;
+  final double pitch;
+  final double volume;
+  final int messagesInActiveConversation;
+  final ValueChanged<String?> onTargetChanged;
+  final VoidCallback onSaveTarget;
+  final VoidCallback onNewTarget;
+  final VoidCallback onScanTarget;
+  final VoidCallback? onDeleteTarget;
+  final VoidCallback onGenerateKey;
+  final ValueChanged<String> onSecretChanged;
+  final VoidCallback onConnect;
+  final VoidCallback onDisconnect;
+  final VoidCallback onStop;
+  final VoidCallback onReplay;
+  final ValueChanged<bool> onAutoSpeakChanged;
+  final ValueChanged<String> onLanguageChanged;
+  final ValueChanged<String?> onEngineChanged;
+  final ValueChanged<double> onRateChanged;
+  final ValueChanged<double> onPitchChanged;
+  final ValueChanged<double> onVolumeChanged;
+  final ValueChanged<double> onSliderChangeEnd;
+  final VoidCallback onTest;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Session & speech')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _ConnectionPanel(
+            repoTargets: repoTargets,
+            selectedRepoTargetId: selectedRepoTargetId,
+            activeTargetName: activeTargetName,
+            targetNameController: targetNameController,
+            secretKeyController: secretKeyController,
+            peerPubkeyController: peerPubkeyController,
+            relayController: relayController,
+            blossomServerController: blossomServerController,
+            blossomPresets: blossomPresets,
+            ownPubkey: ownPubkey,
+            connected: connected,
+            connecting: connecting,
+            speaking: speaking,
+            hasReplay: hasReplay,
+            autoSpeak: autoSpeak,
+            language: language,
+            languages: languages,
+            engine: engine,
+            engines: engines,
+            rate: rate,
+            pitch: pitch,
+            volume: volume,
+            expanded: true,
+            onTargetChanged: onTargetChanged,
+            onSaveTarget: onSaveTarget,
+            onNewTarget: onNewTarget,
+            onScanTarget: onScanTarget,
+            onDeleteTarget: onDeleteTarget,
+            onGenerateKey: onGenerateKey,
+            onSecretChanged: onSecretChanged,
+            onConnect: onConnect,
+            onDisconnect: onDisconnect,
+            onStop: onStop,
+            onReplay: onReplay,
+            onAutoSpeakChanged: onAutoSpeakChanged,
+            onLanguageChanged: onLanguageChanged,
+            onEngineChanged: onEngineChanged,
+            onRateChanged: onRateChanged,
+            onPitchChanged: onPitchChanged,
+            onVolumeChanged: onVolumeChanged,
+            onSliderChangeEnd: onSliderChangeEnd,
+            onTest: onTest,
+            onExpandedChanged: (_) {},
+          ),
+          const SizedBox(height: 16),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('App info', style: theme.textTheme.titleMedium),
+                  const SizedBox(height: 8),
+                  Text('Active session: $activeTargetName'),
+                  Text('Messages: $messagesInActiveConversation'),
+                  Text(
+                    connected
+                        ? 'Status: connected'
+                        : connecting
+                        ? 'Status: connecting'
+                        : 'Status: disconnected',
+                  ),
+                  if (ownPubkey != null && ownPubkey!.isNotEmpty)
+                    Text('Local pubkey: ${_compactIdentifier(ownPubkey!)}'),
+                  if (ownPubkey == null || ownPubkey!.isEmpty)
+                    const Text('Local pubkey not available'),
+                  Text('Total saved sessions: ${repoTargets.length}'),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -2455,21 +2991,24 @@ class _ComposerState extends State<_Composer>
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return Card(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 12),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           children: [
             TextField(
               controller: widget.controller,
-              minLines: 2,
-              maxLines: 5,
+              minLines: 1,
+              maxLines: 4,
               decoration: const InputDecoration(
                 border: OutlineInputBorder(),
                 labelText: 'Query',
+                hintText: 'Type a message, or record',
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: widget.controller,
               builder: (context, value, _) {
@@ -2483,11 +3022,14 @@ class _ComposerState extends State<_Composer>
                     ? widget.onSendPressed
                     : widget.onMicPressed;
                 final icon = busy
-                    ? const SizedBox.square(
+                    ? SizedBox.square(
                         dimension: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: theme.colorScheme.onPrimary,
+                        ),
                       )
-                    : widget.recording || hasText
+                    : hasText
                     ? const Icon(Icons.send)
                     : Icon(
                         widget.wavRetryRequested
@@ -2495,10 +3037,10 @@ class _ComposerState extends State<_Composer>
                             : Icons.mic,
                       );
                 final label = widget.sendingAudio
-                    ? 'Sending voice...'
+                    ? 'Sending'
                     : widget.sending
-                    ? 'Sending...'
-                    : widget.recording || hasText
+                    ? 'Sending'
+                    : hasText
                     ? 'Send'
                     : widget.wavRetryRequested
                     ? 'Record WAV'
@@ -2506,40 +3048,44 @@ class _ComposerState extends State<_Composer>
                 final tooltip = widget.recording
                     ? 'Send recording'
                     : hasText
-                    ? 'Send query'
+                    ? 'Send text'
                     : widget.wavRetryRequested
                     ? 'Record WAV retry'
                     : 'Record voice query';
                 final mainButton = Tooltip(
                   message: tooltip,
                   child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(112, 48),
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                    ),
                     onPressed: onMainPressed,
                     icon: icon,
                     label: Text(label),
                   ),
                 );
+                final actionButton = widget.recording
+                    ? _BreathingRecordButton(
+                        animation: _breathe,
+                        child: mainButton,
+                      )
+                    : mainButton;
 
                 return Row(
                   children: [
                     if (widget.recording) ...[
-                      IconButton.outlined(
+                      IconButton.filledTonal(
                         tooltip: 'Cancel recording',
                         onPressed: busy ? null : widget.onCancelRecording,
                         style: IconButton.styleFrom(
-                          foregroundColor: Theme.of(context).colorScheme.error,
+                          foregroundColor: theme.colorScheme.error,
+                          minimumSize: const Size(48, 48),
                         ),
                         icon: const Icon(Icons.close),
                       ),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 10),
                     ],
-                    Expanded(
-                      child: widget.recording
-                          ? _BreathingRecordButton(
-                              animation: _breathe,
-                              child: mainButton,
-                            )
-                          : mainButton,
-                    ),
+                    Expanded(child: actionButton),
                   ],
                 );
               },
@@ -2713,4 +3259,120 @@ class ConversationMessage {
   final String eventId;
   final DateTime timestamp;
   final BridgeAudioReference? audio;
+
+  Map<String, dynamic> toJson() => {
+    'direction': direction == MessageDirection.incoming
+        ? 'incoming'
+        : 'outgoing',
+    'kind': kind,
+    'text': text,
+    'eventId': eventId,
+    'timestamp': timestamp.toIso8601String(),
+    if (audio != null) 'audio': _serializeBridgeAudioReference(audio!),
+  };
+
+  static ConversationMessage? fromJson(dynamic raw) {
+    if (raw is! Map) return null;
+    final direction = _decodeDirection(raw['direction']);
+    final kind = raw['kind']?.toString().trim();
+    final text = raw['text']?.toString() ?? '';
+    final eventId = raw['eventId']?.toString() ?? '';
+    final timestampRaw = raw['timestamp']?.toString() ?? '';
+    final timestamp = DateTime.tryParse(timestampRaw);
+    if (kind == null || kind.isEmpty) return null;
+    return ConversationMessage(
+      direction: direction,
+      kind: kind,
+      text: text,
+      eventId: eventId,
+      timestamp: timestamp ?? DateTime.now(),
+      audio: _deserializeBridgeAudioReference(raw['audio']),
+    );
+  }
+
+  static MessageDirection _decodeDirection(dynamic raw) {
+    final direction = raw?.toString();
+    if (direction == 'incoming') return MessageDirection.incoming;
+    return MessageDirection.outgoing;
+  }
+}
+
+Map<String, dynamic>? _serializeBridgeAudioReference(
+  BridgeAudioReference audio,
+) {
+  return {
+    'url': audio.url,
+    'sha256': audio.sha256,
+    'size': audio.size.toString(),
+    'mediaType': audio.mediaType,
+    if (audio.name != null) 'name': audio.name,
+    if (audio.encryption != null)
+      'encryption': {
+        'algorithm': audio.encryption!.algorithm,
+        'key': audio.encryption!.key,
+        'nonce': audio.encryption!.nonce,
+        'plaintextSha256': audio.encryption!.plaintextSha256,
+        'plaintextSize': audio.encryption!.plaintextSize.toString(),
+        'plaintextMediaType': audio.encryption!.plaintextMediaType,
+      },
+  };
+}
+
+BridgeAudioReference? _deserializeBridgeAudioReference(dynamic raw) {
+  if (raw is! Map) return null;
+  final url = raw['url']?.toString();
+  final sha256 = raw['sha256']?.toString();
+  final sizeRaw = raw['size']?.toString();
+  final mediaType = raw['mediaType']?.toString();
+  if (url == null || sha256 == null || sizeRaw == null || mediaType == null) {
+    return null;
+  }
+
+  final encryptionRaw = raw['encryption'];
+  final encryption = encryptionRaw is Map
+      ? _deserializeBridgeAudioEncryption(encryptionRaw)
+      : null;
+  final size = BigInt.tryParse(sizeRaw);
+  if (size == null) return null;
+
+  return BridgeAudioReference(
+    url: url,
+    sha256: sha256,
+    size: size,
+    mediaType: mediaType,
+    name: raw['name']?.toString(),
+    encryption: encryption,
+  );
+}
+
+BridgeAudioEncryption? _deserializeBridgeAudioEncryption(Map encryptionRaw) {
+  final algorithm = encryptionRaw['algorithm']?.toString();
+  final key = encryptionRaw['key']?.toString();
+  final nonce = encryptionRaw['nonce']?.toString();
+  final plaintextSha256 = encryptionRaw['plaintextSha256']?.toString();
+  final plaintextSizeRaw = encryptionRaw['plaintextSize']?.toString();
+  final plaintextMediaType = encryptionRaw['plaintextMediaType']?.toString();
+  final plaintextSize = BigInt.tryParse(plaintextSizeRaw ?? '');
+  if (algorithm == null ||
+      algorithm.isEmpty ||
+      key == null ||
+      key.isEmpty ||
+      nonce == null ||
+      nonce.isEmpty ||
+      plaintextSha256 == null ||
+      plaintextSha256.isEmpty ||
+      plaintextSize == null ||
+      plaintextMediaType == null ||
+      plaintextMediaType.isEmpty) {
+    return null;
+  }
+
+  return BridgeAudioEncryption(
+    algorithm: algorithm,
+    key: key,
+    nonce: nonce,
+    plaintextSha256: plaintextSha256,
+    plaintextSize: plaintextSize,
+    plaintextMediaType: plaintextMediaType,
+  );
 }
