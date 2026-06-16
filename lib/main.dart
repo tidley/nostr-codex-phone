@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
 import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
@@ -99,6 +100,20 @@ class _RepoTarget {
     if (id.isEmpty || pubkey.isEmpty || relays.isEmpty) return null;
     return _RepoTarget(id: id, name: name, pubkey: pubkey, relays: relays);
   }
+}
+
+enum _MediaSource { camera, photoPicker, filePicker }
+
+class _MediaSelection {
+  const _MediaSelection({
+    required this.path,
+    required this.fileName,
+    required this.extension,
+  });
+
+  final String path;
+  final String fileName;
+  final String? extension;
 }
 
 enum _VoiceFormat { opus, wav }
@@ -1400,27 +1415,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return;
     }
 
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.any,
-      allowMultiple: false,
-      allowCompression: true,
-      withData: false,
-    );
-    if (result == null || result.files.isEmpty) return;
-
-    final selected = result.files.first;
-    final path = selected.path?.trim();
+    final selected = await _pickMediaAttachment();
+    final path = selected?.path.trim();
     if (path == null || path.isEmpty) {
-      _showError('Could not read selected file');
       return;
     }
 
     final queryText = _queryController.text.trim();
-    final fileName =
-        (selected.name.trim().isNotEmpty
-                ? selected.name
-                : path.split(Platform.pathSeparator).last)
-            .trim();
+    final fileName = selected!.fileName;
     final contentType = _inferContentType(fileName, selected.extension);
 
     setState(() {
@@ -1469,6 +1471,98 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         setState(() => _sendingMedia = false);
       }
     }
+  }
+
+  Future<_MediaSelection?> _pickMediaAttachment() async {
+    final source = await _chooseMediaSource();
+    if (source == null) return null;
+
+    try {
+      if (source == _MediaSource.filePicker) {
+        final result = await FilePicker.platform.pickFiles(
+          type: FileType.any,
+          allowMultiple: false,
+          allowCompression: true,
+          withData: false,
+        );
+        if (result == null || result.files.isEmpty) return null;
+
+        final file = result.files.first;
+        final path = file.path?.trim();
+        if (path == null || path.isEmpty) {
+          _showError('Could not read selected file');
+          return null;
+        }
+        return _MediaSelection(
+          path: path,
+          fileName: _normalizeName(file.name, path),
+          extension: file.extension,
+        );
+      }
+
+      final picker = ImagePicker();
+      final image = await (source == _MediaSource.camera
+          ? picker.pickImage(source: ImageSource.camera)
+          : picker.pickImage(source: ImageSource.gallery));
+      if (image == null) return null;
+
+      final imagePath = image.path;
+      return _MediaSelection(
+        path: imagePath,
+        fileName: _normalizeName(
+          imagePath.split(Platform.pathSeparator).last,
+          imagePath,
+        ),
+        extension: _pathExtension(imagePath),
+      );
+    } catch (error) {
+      _showError('Media picker failed: $error');
+      return null;
+    }
+  }
+
+  Future<_MediaSource?> _chooseMediaSource() async {
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      return _MediaSource.filePicker;
+    }
+
+    final source = await showModalBottomSheet<_MediaSource>(
+      context: context,
+      builder: (context) {
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_camera),
+                title: const Text('Take photo'),
+                onTap: () => Navigator.of(context).pop(_MediaSource.camera),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: const Text('Choose photo'),
+                onTap: () =>
+                    Navigator.of(context).pop(_MediaSource.photoPicker),
+              ),
+              ListTile(
+                leading: const Icon(Icons.attach_file),
+                title: const Text('Choose file'),
+                onTap: () => Navigator.of(context).pop(_MediaSource.filePicker),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    return source;
+  }
+
+  String _normalizeName(String name, String path) {
+    final trimmedName = name.trim();
+    if (trimmedName.isNotEmpty) return trimmedName;
+    return path.split(Platform.pathSeparator).last;
   }
 
   Future<void> _resendTextMessage(
@@ -2921,8 +3015,22 @@ class _ComposerState extends State<_Composer>
                 final disconnectedTooltip = widget.connecting
                     ? 'Connecting'
                     : 'Connect to relay';
-                final canAttach =
-                    !busy && !widget.connecting && !widget.recording;
+                final canAttach = !busy && !widget.connecting;
+                final attachIcon = widget.recording
+                    ? const Icon(Icons.close)
+                    : const Icon(Icons.attach_file);
+                final attachAction = widget.recording
+                    ? widget.onCancelRecording
+                    : widget.onAttachMedia;
+                final attachTooltip = widget.recording
+                    ? 'Cancel recording'
+                    : 'Attach photo or file';
+                final attachStyle = widget.recording
+                    ? IconButton.styleFrom(
+                        foregroundColor: theme.colorScheme.error,
+                        minimumSize: const Size(48, 48),
+                      )
+                    : IconButton.styleFrom(minimumSize: const Size(48, 48));
 
                 final icon = !widget.connected
                     ? const Icon(Icons.cloud_off)
@@ -2935,7 +3043,7 @@ class _ComposerState extends State<_Composer>
                         ),
                       )
                     : widget.recording
-                    ? const Icon(Icons.stop)
+                    ? const Icon(Icons.send)
                     : hasText
                     ? const Icon(Icons.send)
                     : Icon(
@@ -2947,6 +3055,8 @@ class _ComposerState extends State<_Composer>
                     ? 'Sending'
                     : !widget.connected
                     ? disconnectedLabel
+                    : widget.recording
+                    ? 'Send'
                     : hasText
                     ? 'Send'
                     : widget.wavRetryRequested
@@ -2983,26 +3093,12 @@ class _ComposerState extends State<_Composer>
                 return Row(
                   children: [
                     IconButton.filledTonal(
-                      tooltip: 'Attach photo or file',
-                      onPressed: canAttach ? widget.onAttachMedia : null,
-                      style: IconButton.styleFrom(
-                        minimumSize: const Size(48, 48),
-                      ),
-                      icon: const Icon(Icons.attach_file),
+                      tooltip: attachTooltip,
+                      onPressed: canAttach ? attachAction : null,
+                      style: attachStyle,
+                      icon: attachIcon,
                     ),
                     const SizedBox(width: 10),
-                    if (widget.recording) ...[
-                      IconButton.filledTonal(
-                        tooltip: 'Cancel recording',
-                        onPressed: busy ? null : widget.onCancelRecording,
-                        style: IconButton.styleFrom(
-                          foregroundColor: theme.colorScheme.error,
-                          minimumSize: const Size(48, 48),
-                        ),
-                        icon: const Icon(Icons.close),
-                      ),
-                      const SizedBox(width: 10),
-                    ],
                     Expanded(child: actionButton),
                   ],
                 );
