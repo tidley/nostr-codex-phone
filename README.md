@@ -114,6 +114,32 @@ The installer uses this project’s `nostr-codex-server` binary, sets
 service at boot. The service npub printed in `journalctl --user -u
 nostr-codex-myrepo` is the pubkey to add as a target in the phone app.
 
+On startup each repo service also prints a QR code and saves an SVG target card
+to `.nostr-codex-target.svg` in its `CODEX_WORKDIR`. The QR payload is plain
+JSON:
+
+```json
+{
+  "type": "nostr_codex_target",
+  "version": 1,
+  "name": "repo-folder",
+  "pubkey": "npub...",
+  "pubkey_hex": "hex...",
+  "workdir": "/path/to/repo",
+  "relays": ["wss://relay.damus.io"]
+}
+```
+
+Set `NOSTR_CODEX_QR_PRINT=0` to stop printing the terminal QR, set
+`NOSTR_CODEX_QR_PATH=/path/to/target.svg` to change where it is saved, or set
+`NOSTR_CODEX_QR_OPEN=1` to best-effort open the SVG with `xdg-open`.
+
+If the phone has no stored Codex session for a repo service yet, the server
+looks in `CODEX_SESSIONS_DIR` or `~/.codex/sessions` and adopts the newest
+Codex session whose `session_meta.payload.cwd` matches `CODEX_WORKDIR`. This
+uses the same session files as `~/code/tooling/codex-sessions.sh`. Disable it
+with `CODEX_RESUME_LATEST_BY_WORKDIR=0`.
+
 Required environment:
 
 ```bash
@@ -224,6 +250,10 @@ connected disconnects from the current repo service, reconnects to the selected
 one, and keeps on-screen message history separated per target for the current
 app session.
 
+When adding a repo target, tap `Scan` and point the camera at the worker QR
+printed or saved by the repo service. The app imports the service pubkey, relays,
+and folder-derived target name.
+
 The mic button records an Opus/Ogg file by default, encrypts it locally, uploads
 the ciphertext with a Nostr-signed BUD-11 authorization token, and sends the
 returned URL/hash plus decryption metadata over an encrypted Nostr DM. If the
@@ -283,7 +313,7 @@ public key into each repo service's `NOSTR_PEER_PUBKEY`, add each service npub
 as a named repo target in the app, and use the same relay list on both sides of
 each target.
 
-Android permissions include internet and microphone access.
+Android permissions include internet, microphone, and camera access.
 
 ## Verification
 
