@@ -1506,11 +1506,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     BridgeAudioReference attachment;
     try {
-      attachment = await _uploadAudioToBlossom(
-        path,
-        fileName,
-        'application/octet-stream',
-      );
+      attachment = await _uploadAudioToBlossom(path, fileName, contentType);
     } catch (error) {
       if (!mounted) return;
       setState(() => _sendingMedia = false);
@@ -1974,17 +1970,28 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     required BridgeAudioReference attachment,
     required String caption,
   }) {
+    final encryption = attachment.encryption;
+    final attachmentPayload = {
+      'name': attachment.name ?? 'media',
+      'url': attachment.url,
+      'sha256': attachment.sha256,
+      'content_type': _pendingMediaTypeForAnalysis,
+      if (encryption != null)
+        'encryption': {
+          'algorithm': encryption.algorithm,
+          'key': encryption.key,
+          'nonce': encryption.nonce,
+          'plaintext_sha256': encryption.plaintextSha256,
+          'plaintext_size': encryption.plaintextSize,
+          'plaintext_type': encryption.plaintextMediaType,
+        },
+    };
     final payload = {
       'type': 'media_analysis_request',
       'version': 1,
       'task': 'analyze_attachment',
       'user_caption': caption.trim(),
-      'attachment': {
-        'name': attachment.name ?? 'media',
-        'url': attachment.url,
-        'sha256': attachment.sha256,
-        'content_type': _pendingMediaTypeForAnalysis,
-      },
+      'attachment': attachmentPayload,
     };
     const encoder = JsonEncoder.withIndent('  ');
     return 'Please process this media analysis request using only the structured data:\n'

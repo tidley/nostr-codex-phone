@@ -53,15 +53,20 @@ Both peers send NIP-17/NIP-59 GiftWrapped private direct messages whose decrypte
 
 Malformed JSON from the trusted peer is surfaced as an `invalid` message on mobile and answered by the server with `{ "error": "..." }`.
 
-Audio DMs contain a Blossom blob reference only. New mobile uploads encrypt the
-audio payload with XChaCha20-Poly1305 before upload. The Blossom `sha256` and
-`size` fields refer to the ciphertext; the random decryption key and nonce are
-inside the encrypted Nostr DM only. The server downloads the URL, verifies the
-ciphertext hash, decrypts and verifies the plaintext hash, transcribes the audio
-locally, sends the transcript back as a non-spoken `transcript` DM, then treats
-the transcript like a text query. If compressed audio cannot be decoded or
-transcribed after all server-side fallbacks, the server sends `audio_retry` and
-the phone records the next voice note as WAV.
+All JSON messages are inside encrypted GiftWrapped DMs. Relays should not see
+query text, transcripts, responses, attachment URLs, or blob decryption keys.
+Blossom uploads are public blobs, so mobile uploads encrypt the payload with
+XChaCha20-Poly1305 before upload and use `application/octet-stream` as the
+upload content type. The Blossom `sha256` and `size` fields refer to the
+ciphertext; the original MIME type, random decryption key, nonce, plaintext
+hash, and plaintext size are inside the encrypted Nostr DM only.
+
+Audio DMs contain a Blossom blob reference only. The server downloads the URL,
+verifies the ciphertext hash, decrypts and verifies the plaintext hash,
+transcribes the audio locally, sends the transcript back as a non-spoken
+`transcript` DM, then treats the transcript like a text query. If compressed
+audio cannot be decoded or transcribed after all server-side fallbacks, the
+server sends `audio_retry` and the phone records the next voice note as WAV.
 
 GrapheneOS/Android local speech-to-text is not required and is not the primary
 path. The phone records push-to-talk audio, encrypts it, uploads it to Blossom,
