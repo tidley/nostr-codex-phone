@@ -15,6 +15,7 @@ use crate::protocol::AudioReference;
 
 const BLOSSOM_AUTH_KIND: u16 = 24_242;
 const ENCRYPTED_BLOB_CONTENT_TYPE: &str = "application/octet-stream";
+const BLOSSOM_UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Clone)]
 pub struct BlossomUploadConfig {
@@ -49,7 +50,13 @@ pub async fn upload_audio(config: BlossomUploadConfig) -> Result<AudioReference>
     let upload_url = upload_url(&config.server_url)?;
     let auth = blossom_upload_auth(&config.secret_key, &upload_url, &sha256)?;
 
-    let response = Client::new()
+    let client = Client::builder()
+        .timeout(BLOSSOM_UPLOAD_TIMEOUT)
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+        .context("failed to build Blossom client")?;
+
+    let response = client
         .put(upload_url.clone())
         .header(CONTENT_TYPE, ENCRYPTED_BLOB_CONTENT_TYPE)
         .header(CONTENT_LENGTH, upload_len.to_string())

@@ -46,6 +46,7 @@ const _autoBlossomUploadServers = <String>[
 ];
 
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
+const _blossomUploadTimeout = Duration(minutes: 2);
 
 class _BlossomPreset {
   const _BlossomPreset({
@@ -1893,6 +1894,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             contentType: contentType,
             fileName: fileName,
           ),
+        ).timeout(
+          _blossomUploadTimeout,
+          onTimeout: () {
+            throw Exception(
+              'Blossom upload timed out after ${_blossomUploadTimeout.inSeconds}s on $server',
+            );
+          },
         );
       } catch (error) {
         lastError = error;
