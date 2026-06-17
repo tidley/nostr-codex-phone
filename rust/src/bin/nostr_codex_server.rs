@@ -663,6 +663,14 @@ async fn process_text_turn(
     request: &str,
     codex_config: &CodexConfig,
 ) {
+    if is_long_running_request(request) {
+        send_status(
+            messenger,
+            peer_pubkey,
+            "Understood — starting work on this request.",
+        );
+    }
+
     let session_id = load_codex_session(memory, peer_pubkey, &codex_config.working_dir);
     let memory_context = if session_id.is_none() {
         memory_context(memory, peer_pubkey, recorded_id, request)
@@ -687,6 +695,42 @@ async fn process_text_turn(
 
     send_response_and_remember(messenger, memory, peer_pubkey, response).await;
     spawn_compaction_if_needed(memory, peer_pubkey, codex_config);
+}
+
+fn is_long_running_request(request: &str) -> bool {
+    let normalized = normalize_transcript(request);
+    if normalized.starts_with('/') {
+        return false;
+    }
+
+    if normalized.len() > 180 {
+        return true;
+    }
+
+    matches!(
+        normalized.as_str(),
+        "build the apk"
+            | "build the android apk"
+            | "build android apk"
+            | "build an apk"
+            | "build apk"
+            | "investigate this issue"
+            | "investigate this problem"
+            | "investigate issue"
+    ) || (
+        normalized.contains("build")
+            && (normalized.contains("apk") || normalized.contains("release"))
+    ) || (
+        normalized.contains("investigate")
+            || normalized.contains("analysis")
+            || normalized.contains("investigation")
+            || normalized.contains("debug")
+            || normalized.contains("trace")
+            || normalized.contains("diagnose")
+            || normalized.contains("root cause")
+            || normalized.contains("refactor")
+            || normalized.contains("large")
+    )
 }
 
 async fn transcribe_or_load_cached(
@@ -1403,6 +1447,16 @@ fn audio_cache_key(audio: &AudioReference) -> String {
 async fn send_response(messenger: &NostrMessenger, receiver_pubkey: &str, response: String) {
     if let Err(err) = messenger.send_response_to(receiver_pubkey, response).await {
         error!("failed to send response DM: {err:#}");
+    }
+}
+
+fn send_status(messenger: &NostrMessenger, receiver_pubkey: &str, status: &str) {
+    let status = status.trim();
+    if status.is_empty() {
+        return;
+    }
+    if let Err(err) = messenger.send_wire_to_pubkey(receiver_pubkey, WireMessage::status(status)) {
+        warn!("failed to send status DM: {err:#}");
     }
 }
 

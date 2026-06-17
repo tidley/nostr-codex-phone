@@ -13,6 +13,7 @@ pub enum WireMessage {
     Audio { audio: AudioReference },
     AudioRetry { audio_retry: AudioRetryRequest },
     Transcript { transcript: String },
+    Status { status: String },
     Response { response: String },
     Error { error: String },
 }
@@ -79,6 +80,12 @@ impl WireMessage {
         }
     }
 
+    pub fn status<S: Into<String>>(status: S) -> Self {
+        Self::Status {
+            status: status.into(),
+        }
+    }
+
     pub fn error<S: Into<String>>(error: S) -> Self {
         Self::Error {
             error: error.into(),
@@ -91,6 +98,7 @@ impl WireMessage {
             Self::Audio { .. } => "audio",
             Self::AudioRetry { .. } => "audio_retry",
             Self::Transcript { .. } => "transcript",
+            Self::Status { .. } => "status",
             Self::Response { .. } => "response",
             Self::Error { .. } => "error",
         }
@@ -102,6 +110,7 @@ impl WireMessage {
             Self::Audio { audio } => &audio.url,
             Self::AudioRetry { audio_retry } => &audio_retry.reason,
             Self::Transcript { transcript } => transcript,
+            Self::Status { status } => status,
             Self::Response { response } => response,
             Self::Error { error } => error,
         }
@@ -120,6 +129,7 @@ impl WireMessage {
             Self::Audio { audio } => json!({ "audio": audio }),
             Self::AudioRetry { audio_retry } => json!({ "audio_retry": audio_retry }),
             Self::Transcript { transcript } => json!({ "transcript": transcript }),
+            Self::Status { status } => json!({ "status": status }),
             Self::Response { response } => json!({ "response": response }),
             Self::Error { error } => json!({ "error": error }),
         };
@@ -172,6 +182,13 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
             .ok_or_else(|| anyhow!("field `transcript` must be a string"));
     }
 
+    if let Some(status) = object.get("status") {
+        return status
+            .as_str()
+            .map(WireMessage::status)
+            .ok_or_else(|| anyhow!("field `status` must be a string"));
+    }
+
     if let Some(error) = object.get("error") {
         return error
             .as_str()
@@ -180,7 +197,7 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `transcript`, `response`, `error`, object `audio`, or object `audio_retry` field"
+        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, or object `audio_retry` field"
     ))
 }
 
@@ -280,6 +297,22 @@ mod tests {
         assert_eq!(
             WireMessage::response("done").to_json().unwrap(),
             r#"{"response":"done"}"#
+        );
+    }
+
+    #[test]
+    fn parses_status_contract() {
+        let parsed = parse_wire_message(r#"{ "status": "working" }"#).unwrap();
+        assert_eq!(parsed, WireMessage::status("working"));
+        assert_eq!(parsed.kind(), "status");
+        assert_eq!(parsed.text(), "working");
+    }
+
+    #[test]
+    fn serializes_status_contract() {
+        assert_eq!(
+            WireMessage::status("working").to_json().unwrap(),
+            r#"{"status":"working"}"#
         );
     }
 

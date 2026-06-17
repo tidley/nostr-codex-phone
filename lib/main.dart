@@ -1254,11 +1254,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
     final audioRetryRequested = message.kind == 'audio_retry';
     setState(() {
-      _appendMessageForActiveConversation(conversationMessage);
+      if (message.kind != 'status') {
+        _appendMessageForActiveConversation(conversationMessage);
+      } else {
+        final statusText = message.text.trim();
+        _status = statusText.isEmpty ? 'Received status update' : 'Server: $statusText';
+      }
+
       if (audioRetryRequested) {
         _wavRetryRequested = true;
         _status = 'Server requested WAV retry';
-      } else {
+      } else if (message.kind != 'status') {
         _status = 'Received ${message.kind}';
       }
     });
