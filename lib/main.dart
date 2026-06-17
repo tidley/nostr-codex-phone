@@ -1267,6 +1267,67 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
+  BridgeNostrConfig _activeNostrConfig() {
+    final secret = _secretKeyController.text.trim();
+    final peer = _peerPubkeyController.text.trim();
+    final relays = _relayLines();
+    if (secret.isEmpty || peer.isEmpty || relays.isEmpty) {
+      throw StateError('Secret key, peer pubkey, and relays are required');
+    }
+    return BridgeNostrConfig(
+      secretKey: secret,
+      peerPubkey: peer,
+      relays: relays,
+    );
+  }
+
+  bool _isRecoverableNostrSendError(Object error) {
+    final message = error.toString().toLowerCase();
+    return message.contains('no relay accepted') ||
+        message.contains('relay not connected') ||
+        message.contains('timed out sending giftwrapped dm') ||
+        message.contains('failed to send giftwrapped dm');
+  }
+
+  Future<void> _restartNostrForSendRecovery() async {
+    final config = _activeNostrConfig();
+    _polling = false;
+    if (mounted) {
+      setState(() {
+        _connecting = true;
+        _status = 'Reconnecting to relays...';
+      });
+    }
+
+    try {
+      await nostrStop();
+    } catch (_) {
+      // A broken session should not prevent rebuilding a fresh one.
+    }
+
+    try {
+      final status = await nostrStart(config: config);
+      if (!mounted) return;
+      setState(() {
+        _connected = true;
+        _connecting = false;
+        _ownPubkey = status.publicKey;
+        _status = 'Reconnected to ${status.relayCount} relays';
+      });
+      _startPolling();
+      await Future<void>.delayed(const Duration(milliseconds: 900));
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _connected = false;
+          _connecting = false;
+          _status = 'Reconnect failed';
+        });
+      }
+      rethrow;
+    }
+  }
+
   Future<void> _disconnect({bool expand = true}) async {
     _polling = false;
     await nostrStop();
@@ -1275,6 +1336,40 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _connected = false;
       _status = 'Disconnected';
     });
+  }
+
+  Future<String> _sendWithAutoRecovery({
+    required String label,
+    required Future<String> Function() sender,
+  }) async {
+    try {
+      return await sender();
+    } catch (firstError) {
+      if (!_isRecoverableNostrSendError(firstError)) {
+        rethrow;
+      }
+      if (!mounted) {
+        rethrow;
+      }
+      setState(() => _status = '$label relay issue, retrying...');
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+        return await sender();
+      } catch (secondError) {
+        if (!_isRecoverableNostrSendError(secondError)) {
+          rethrow;
+        }
+        if (!mounted) {
+          rethrow;
+        }
+        setState(() => _status = '$label relay issue, reconnecting...');
+        await _restartNostrForSendRecovery();
+        if (!mounted) {
+          rethrow;
+        }
+        return await sender();
+      }
+    }
   }
 
   void _startPolling() {
@@ -1433,7 +1528,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     });
 
     try {
-      final eventId = await nostrSendQuery(query: query);
+      final eventId = await _sendWithAutoRecovery(
+        label: 'query send',
+        sender: () => nostrSendQuery(query: query),
+      );
       if (!mounted) return;
       setState(() {
         _appendMessageForActiveConversation(
@@ -1486,7 +1584,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
 
     try {
-      final eventId = await nostrSendQuery(query: analysisQuery);
+      final eventId = await _sendWithAutoRecovery(
+        label: 'attachment send',
+        sender: () => nostrSendQuery(query: analysisQuery),
+      );
       if (!mounted) return;
       setState(() {
         _appendPendingTranscriptionMessage(
@@ -1763,7 +1864,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     });
 
     try {
-      final eventId = await nostrSendQuery(query: query);
+      final eventId = await _sendWithAutoRecovery(
+        label: 'resend query',
+        sender: () => nostrSendQuery(query: query),
+      );
       if (!mounted) return;
       setState(() {
         _appendMessageForActiveConversation(
@@ -1792,7 +1896,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     });
 
     try {
-      final eventId = await nostrSendAudio(audio: audio);
+      final eventId = await _sendWithAutoRecovery(
+        label: 'resend voice note',
+        sender: () => nostrSendAudio(audio: audio),
+      );
       if (!mounted) return;
       setState(() {
         _appendPendingTranscriptionMessage(
@@ -1918,7 +2025,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (!mounted) return;
       setState(() => _status = 'Sending Blossom audio reference...');
 
-      final eventId = await nostrSendAudio(audio: audio);
+      final eventId = await _sendWithAutoRecovery(
+        label: 'voice note send',
+        sender: () => nostrSendAudio(audio: audio),
+      );
       if (!mounted) return;
       setState(() {
         if (recordingFormat.format == _VoiceFormat.wav) {
