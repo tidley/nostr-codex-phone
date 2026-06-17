@@ -346,13 +346,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   List<String> _ttsLanguages = const ['en-US'];
   List<String> _ttsEngines = const [];
   int _speechGeneration = 0;
+  String? _speakingMessageEventId;
   DateTime? _autoSpeakSuppressedUntil;
   String? _lastSpokenText;
   String? _recordingPath;
   _VoiceRecordingFormat? _activeRecordingFormat;
   String? _ownPubkey;
   String? _status;
-  BridgeAudioReference? _pendingMediaAttachment;
+  _MediaSelection? _pendingMediaAttachment;
   String? _pendingMediaFileName;
 
   bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
@@ -501,13 +502,28 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (mounted) setState(() => _speaking = true);
     });
     _tts.setCompletionHandler(() {
-      if (mounted) setState(() => _speaking = false);
+      if (mounted) {
+        setState(() {
+          _speaking = false;
+          _speakingMessageEventId = null;
+        });
+      }
     });
     _tts.setCancelHandler(() {
-      if (mounted) setState(() => _speaking = false);
+      if (mounted) {
+        setState(() {
+          _speaking = false;
+          _speakingMessageEventId = null;
+        });
+      }
     });
     _tts.setErrorHandler((_) {
-      if (mounted) setState(() => _speaking = false);
+      if (mounted) {
+        setState(() {
+          _speaking = false;
+          _speakingMessageEventId = null;
+        });
+      }
     });
   }
 
@@ -1531,7 +1547,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             message.kind == 'audio_retry' ||
             message.kind == 'error' ||
             message.kind == 'invalid')) {
-      unawaited(_speak(message.text, remember: true, manual: false));
+      unawaited(
+        _speak(
+          message.text,
+          remember: true,
+          manual: false,
+          messageEventId: message.eventId,
+        ),
+      );
     }
   }
 
@@ -1539,6 +1562,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     String text, {
     bool remember = false,
     bool manual = true,
+    String? messageEventId,
   }) async {
     if (!manual && _autoSpeakSuppressed) return;
     if (manual) _clearAutoSpeakSuppression();
@@ -1553,6 +1577,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (mounted) {
         setState(() {
           _speaking = true;
+          _speakingMessageEventId = messageEventId;
           if (remember) _lastSpokenText = text;
         });
       }
@@ -1561,6 +1586,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (!mounted) return;
       setState(() {
         _speaking = false;
+        _speakingMessageEventId = null;
         _status = 'Text-to-speech error: $error';
       });
     }
@@ -1572,6 +1598,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (mounted) {
       setState(() {
         _speaking = false;
+        _speakingMessageEventId = null;
         _status = 'Stopping speech...';
       });
     }
@@ -1588,6 +1615,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (mounted && generation == _speechGeneration) {
         setState(() {
           _speaking = false;
+          _speakingMessageEventId = null;
           _status = 'Speech stopped';
         });
       }
@@ -1652,8 +1680,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   Future<void> _sendPendingMediaAttachment() async {
-    final attachment = _pendingMediaAttachment;
-    if (attachment == null) return;
+    final selected = _pendingMediaAttachment;
+    if (selected == null) return;
     if (_sendingMedia || _sending || _sendingAudio || _recording) return;
     if (!_connected) {
       _showError('Connect before sending media');
@@ -1661,17 +1689,36 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
 
     final caption = _queryController.text.trim();
+    _mediaUploadCancelled = false;
+    _mediaUploadCancelCompleter = Completer<void>();
+    final uploadSessionId = ++_mediaUploadSessionId;
+
     setState(() {
-      _sending = true;
-      _status = 'Sending attachment request...';
+      _sendingMedia = true;
+      _status = 'Uploading encrypted attachment to Blossom...';
     });
 
-    final analysisQuery = _buildMediaBundlePayload(
-      attachment: attachment,
-      caption: caption,
-    );
-
     try {
+      final attachment = await _uploadAudioToBlossom(
+        selected.path,
+        selected.fileName,
+        selected.contentType,
+        mediaUploadSessionId: uploadSessionId,
+      );
+      if (!mounted) return;
+      if (_mediaUploadCancelled || uploadSessionId != _mediaUploadSessionId) {
+        return;
+      }
+
+      setState(() {
+        _mediaUploadCancelCompleter = null;
+        _status = 'Sending attachment reference...';
+      });
+
+      final analysisQuery = _buildMediaBundlePayload(
+        attachment: attachment,
+        caption: caption,
+      );
       final eventId = await _sendWithAutoRecovery(
         label: 'attachment send',
         sender: () => nostrSendQuery(query: analysisQuery),
@@ -1695,10 +1742,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _status = 'Attachment sent';
       });
     } catch (error) {
+      if (!mounted) return;
+      if (error is _MediaUploadCancelledException) {
+        setState(() {
+          _status = 'Attachment upload cancelled';
+        });
+        return;
+      }
       _showError('Attachment message failed: $error');
     } finally {
       if (mounted) {
-        setState(() => _sending = false);
+        setState(() {
+          _sendingMedia = false;
+          _mediaUploadCancelCompleter = null;
+        });
       }
     }
   }
@@ -1769,63 +1826,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
 
     final fileName = selected!.fileName;
-    final contentType = selected.contentType;
-
-    _mediaUploadCancelled = false;
-    _mediaUploadCancelCompleter = Completer<void>();
-    final uploadSessionId = ++_mediaUploadSessionId;
 
     setState(() {
       _clearPendingMediaAttachmentInMemory();
-      _sendingMedia = true;
-      _status = 'Uploading attachment to Blossom...';
-    });
-
-    BridgeAudioReference attachment;
-    try {
-      attachment = await _uploadAudioToBlossom(
-        path,
-        fileName,
-        contentType,
-        mediaUploadSessionId: uploadSessionId,
-      );
-    } catch (error) {
-      if (!_sendingMedia) {
-        return;
-      }
-      if (!mounted) return;
-      if (error is _MediaUploadCancelledException) {
-        setState(() {
-          _sendingMedia = false;
-          _mediaUploadCancelCompleter = null;
-          _status = 'Attachment upload cancelled';
-        });
-        return;
-      }
-
-      _showError('Attachment upload failed: $error');
-      setState(() {
-        _sendingMedia = false;
-        _mediaUploadCancelCompleter = null;
-      });
-      return;
-    }
-
-    if (!mounted) return;
-    if (_mediaUploadCancelled || uploadSessionId != _mediaUploadSessionId) {
-      setState(() {
-        _sendingMedia = false;
-        _mediaUploadCancelCompleter = null;
-      });
-      return;
-    }
-
-    setState(() {
-      _pendingMediaAttachment = attachment;
+      _pendingMediaAttachment = selected;
       _pendingMediaFileName = fileName;
       _status = 'Attachment ready. Press Send.';
-      _sendingMedia = false;
-      _mediaUploadCancelCompleter = null;
     });
   }
 
@@ -2549,6 +2555,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
                           child: _MessageTile(
                             message: message,
                             showResend: _isResendableMessage(message),
+                            speaking:
+                                _speaking &&
+                                message.eventId == _speakingMessageEventId,
                             stopSpeakingOnTap:
                                 _speaking &&
                                 message.direction == MessageDirection.incoming,
@@ -3599,20 +3608,76 @@ class _RecordingButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
     return DecoratedBox(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(28),
-        color: Colors.orange.shade700,
+        color: const Color(0xffd38b42),
       ),
       child: FilledButtonTheme(
         data: FilledButtonThemeData(
           style: FilledButton.styleFrom(
             backgroundColor: Colors.transparent,
-            foregroundColor: colorScheme.onPrimaryContainer,
+            foregroundColor: const Color(0xff1b140f),
           ),
         ),
         child: child,
+      ),
+    );
+  }
+}
+
+class _SpeakingEqualizer extends StatelessWidget {
+  const _SpeakingEqualizer({required this.animation, required this.color});
+
+  final Animation<double> animation;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 34,
+      height: 16,
+      child: AnimatedBuilder(
+        animation: animation,
+        builder: (context, _) {
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              for (var index = 0; index < 5; index++)
+                _EqualizerBar(
+                  color: color,
+                  height: _barHeight(animation.value, index),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  double _barHeight(double value, int index) {
+    final phase = (value + (index * 0.17)) % 1.0;
+    final rise = 1 - ((phase - 0.5).abs() * 2);
+    return 4 + (10 * rise.clamp(0, 1));
+  }
+}
+
+class _EqualizerBar extends StatelessWidget {
+  const _EqualizerBar({required this.color, required this.height});
+
+  final Color color;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 120),
+      width: 3,
+      height: height,
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.74),
+        borderRadius: BorderRadius.circular(2),
       ),
     );
   }
@@ -3622,6 +3687,7 @@ class _MessageTile extends StatefulWidget {
   const _MessageTile({
     required this.message,
     required this.showResend,
+    required this.speaking,
     required this.stopSpeakingOnTap,
     required this.onStopSpeaking,
     required this.onResend,
@@ -3629,6 +3695,7 @@ class _MessageTile extends StatefulWidget {
 
   final ConversationMessage message;
   final bool showResend;
+  final bool speaking;
   final bool stopSpeakingOnTap;
   final VoidCallback? onStopSpeaking;
   final VoidCallback? onResend;
@@ -3637,8 +3704,43 @@ class _MessageTile extends StatefulWidget {
   State<_MessageTile> createState() => _MessageTileState();
 }
 
-class _MessageTileState extends State<_MessageTile> {
+class _MessageTileState extends State<_MessageTile>
+    with SingleTickerProviderStateMixin {
   bool _flash = false;
+  late final AnimationController _equalizerController;
+
+  @override
+  void initState() {
+    super.initState();
+    _equalizerController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 780),
+    );
+    _syncEqualizer();
+  }
+
+  @override
+  void didUpdateWidget(covariant _MessageTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.speaking != widget.speaking) {
+      _syncEqualizer();
+    }
+  }
+
+  @override
+  void dispose() {
+    _equalizerController.dispose();
+    super.dispose();
+  }
+
+  void _syncEqualizer() {
+    if (widget.speaking) {
+      _equalizerController.repeat();
+    } else {
+      _equalizerController.stop();
+      _equalizerController.value = 0;
+    }
+  }
 
   void _handleTap() {
     if (widget.stopSpeakingOnTap) {
@@ -3681,10 +3783,25 @@ class _MessageTileState extends State<_MessageTile> {
               ),
               const SizedBox(width: 8),
               Expanded(
-                child: Text(
-                  _messageTitle(widget.message.kind),
-                  style: Theme.of(context).textTheme.titleSmall,
-                  overflow: TextOverflow.ellipsis,
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        _messageTitle(widget.message.kind),
+                        style: Theme.of(context).textTheme.titleSmall,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (widget.speaking) ...[
+                      const SizedBox(width: 10),
+                      _SpeakingEqualizer(
+                        animation: _equalizerController,
+                        color: userSide
+                            ? colorScheme.onPrimaryContainer
+                            : colorScheme.primary,
+                      ),
+                    ],
+                  ],
                 ),
               ),
               Text(
