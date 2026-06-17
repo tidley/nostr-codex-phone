@@ -316,6 +316,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _mediaUploadCancelled = false;
   int _mediaUploadSessionId = 0;
   Completer<void>? _mediaUploadCancelCompleter;
+  String? _pendingTranscriptionEventId;
   bool _autoSpeak = true;
   bool _speaking = false;
   bool _wavRetryRequested = false;
@@ -870,6 +871,50 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     unawaited(_saveConversationHistoryForKey(key));
   }
 
+  void _appendPendingTranscriptionMessage({
+    required String eventId,
+    required String label,
+  }) {
+    _pendingTranscriptionEventId = eventId;
+    _appendMessageForActiveConversation(
+      ConversationMessage(
+        direction: MessageDirection.outgoing,
+        kind: 'transcribing',
+        text: label,
+        eventId: eventId,
+        timestamp: DateTime.now(),
+      ),
+    );
+  }
+
+  bool _tryCompleteTranscription(String transcript) {
+    final placeholderEventId = _pendingTranscriptionEventId;
+    if (placeholderEventId == null) return false;
+
+    final index = _messages.indexWhere(
+      (message) =>
+          message.kind == 'transcribing' &&
+          message.direction == MessageDirection.outgoing &&
+          message.eventId == placeholderEventId,
+    );
+    if (index < 0) {
+      _pendingTranscriptionEventId = null;
+      return false;
+    }
+
+    _messages[index] = ConversationMessage(
+      direction: MessageDirection.outgoing,
+      kind: 'transcript',
+      text: transcript,
+      eventId: placeholderEventId,
+      timestamp: DateTime.now(),
+      audio: _messages[index].audio,
+    );
+    _pendingTranscriptionEventId = null;
+    unawaited(_saveConversationHistoryForKey(_activeConversationKey));
+    return true;
+  }
+
   Future<void> _openSettings() async {
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
@@ -1258,6 +1303,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return;
     }
 
+    if (message.kind == 'transcript' &&
+        _tryCompleteTranscription(message.text)) {
+      setState(() {
+        _status = 'Transcription received';
+      });
+      return;
+    }
+
     final conversationMessage = ConversationMessage(
       direction: MessageDirection.incoming,
       kind: message.kind,
@@ -1267,6 +1320,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
     final audioRetryRequested = message.kind == 'audio_retry';
     setState(() {
+      if (_pendingTranscriptionEventId != null &&
+          message.kind != 'status' &&
+          message.kind != 'transcript') {
+        _pendingTranscriptionEventId = null;
+      }
       if (message.kind != 'status') {
         _appendMessageForActiveConversation(conversationMessage);
       } else {
@@ -1431,14 +1489,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       final eventId = await nostrSendQuery(query: analysisQuery);
       if (!mounted) return;
       setState(() {
-        _appendMessageForActiveConversation(
-          ConversationMessage(
-            direction: MessageDirection.outgoing,
-            kind: 'query',
-            text: analysisQuery,
-            eventId: eventId,
-            timestamp: DateTime.now(),
-          ),
+        _appendPendingTranscriptionMessage(
+          eventId: eventId,
+          label: 'Transcribing message...',
         );
         _queryController.clear();
         _clearPendingMediaAttachment();
@@ -1466,9 +1519,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         message.text.trim().isNotEmpty) {
       return true;
     }
-    if (message.kind == 'transcript' &&
-        message.direction == MessageDirection.incoming &&
-        message.text.trim().isNotEmpty) {
+    if (message.kind == 'transcript' && message.text.trim().isNotEmpty) {
       return true;
     }
     return message.kind == 'audio' &&
@@ -1744,15 +1795,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       final eventId = await nostrSendAudio(audio: audio);
       if (!mounted) return;
       setState(() {
-        _appendMessageForActiveConversation(
-          ConversationMessage(
-            direction: MessageDirection.outgoing,
-            kind: 'audio',
-            text: _audioSummary(audio),
-            eventId: eventId,
-            timestamp: DateTime.now(),
-            audio: audio,
-          ),
+        _appendPendingTranscriptionMessage(
+          eventId: eventId,
+          label: 'Resending voice transcript...',
         );
         _status = 'Voice note resent';
       });
@@ -1879,15 +1924,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         if (recordingFormat.format == _VoiceFormat.wav) {
           _wavRetryRequested = false;
         }
-        _appendMessageForActiveConversation(
-          ConversationMessage(
-            direction: MessageDirection.outgoing,
-            kind: 'audio',
-            text: _audioSummary(audio),
-            eventId: eventId,
-            timestamp: DateTime.now(),
-            audio: audio,
-          ),
+        _appendPendingTranscriptionMessage(
+          eventId: eventId,
+          label: 'Transcribing voice...',
         );
         _status = 'Voice query sent';
       });
@@ -2142,16 +2181,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         await file.delete();
       }
     } catch (_) {}
-  }
-
-  String _audioSummary(BridgeAudioReference audio) {
-    final shortHash = audio.sha256.length >= 12
-        ? audio.sha256.substring(0, 12)
-        : audio.sha256;
-    final privacy = audio.encryption == null
-        ? 'unencrypted payload'
-        : 'encrypted payload';
-    return '${audio.name ?? 'voice note'}\n${audio.url}\n$privacy\ncipher sha256: $shortHash...';
   }
 
   List<String> _relayLines() {
@@ -3309,13 +3338,23 @@ class _ComposerState extends State<_Composer>
                     : widget.wavRetryRequested
                     ? 'Record WAV retry'
                     : 'Record voice query';
+                final mainButtonStyle = FilledButton.styleFrom(
+                  minimumSize: const Size(112, 48),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                );
                 final mainButton = Tooltip(
                   message: tooltip,
                   child: FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size(112, 48),
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                    ),
+                    style: widget.recording
+                        ? mainButtonStyle.copyWith(
+                            backgroundColor: const WidgetStatePropertyAll(
+                              Colors.transparent,
+                            ),
+                            foregroundColor: WidgetStatePropertyAll(
+                              theme.colorScheme.onPrimaryContainer,
+                            ),
+                          )
+                        : mainButtonStyle,
                     onPressed: onMainPressed,
                     icon: icon,
                     label: Text(label),
@@ -3367,6 +3406,11 @@ class _BreathingRecordButton extends StatelessWidget {
       child: child,
       builder: (context, child) {
         final pulse = animation.value;
+        final fill = Color.lerp(
+          Colors.yellow.shade700,
+          Colors.green.shade600,
+          pulse,
+        )!;
         final glow = Color.lerp(
           Colors.yellow.shade600,
           Colors.green.shade500,
@@ -3375,6 +3419,7 @@ class _BreathingRecordButton extends StatelessWidget {
         return DecoratedBox(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(28),
+            color: fill,
             boxShadow: [
               BoxShadow(
                 color: glow.withValues(alpha: 0.32 * pulse + 0.03),
@@ -3386,16 +3431,21 @@ class _BreathingRecordButton extends StatelessWidget {
               color: glow.withValues(alpha: 0.55 + (0.35 * pulse)),
               width: 1 + (1.5 * pulse),
             ),
-            gradient: LinearGradient(
-              colors: [
-                glow.withValues(alpha: 0.35),
-                colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
-              ],
-            ),
           ),
           child: Padding(
             padding: EdgeInsets.all(2.0 * pulse),
-            child: Transform.scale(scale: 1 + (0.025 * pulse), child: child),
+            child: Transform.scale(
+              scale: 1 + (0.025 * pulse),
+              child: FilledButtonTheme(
+                data: FilledButtonThemeData(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.transparent,
+                    foregroundColor: colorScheme.onPrimaryContainer,
+                  ),
+                ),
+                child: child ?? const SizedBox.shrink(),
+              ),
+            ),
           ),
         );
       },
@@ -3418,6 +3468,7 @@ class _MessageTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final incoming = message.direction == MessageDirection.incoming;
     final transcript = message.kind == 'transcript';
+    final processing = message.kind == 'transcribing';
     final userSide = !incoming || transcript;
     final colorScheme = Theme.of(context).colorScheme;
     return Card(
@@ -3432,7 +3483,11 @@ class _MessageTile extends StatelessWidget {
             Row(
               children: [
                 Icon(
-                  _messageIcon(incoming: incoming, transcript: transcript),
+                  _messageIcon(
+                    incoming: incoming,
+                    transcript: transcript,
+                    processing: processing,
+                  ),
                   color: userSide
                       ? colorScheme.onPrimaryContainer
                       : colorScheme.onSurface,
@@ -3440,7 +3495,7 @@ class _MessageTile extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    message.kind,
+                    _messageTitle(message.kind),
                     style: Theme.of(context).textTheme.titleSmall,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -3478,15 +3533,42 @@ class _MessageTile extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 8),
-            MarkdownBody(
-              data: message.text,
-              selectable: true,
-              softLineBreak: true,
-            ),
+            if (processing)
+              Row(
+                children: [
+                  SizedBox(
+                    height: 18,
+                    width: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: colorScheme.onPrimaryContainer,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: MarkdownBody(
+                      data: message.text,
+                      selectable: true,
+                      softLineBreak: true,
+                    ),
+                  ),
+                ],
+              )
+            else
+              MarkdownBody(
+                data: message.text,
+                selectable: true,
+                softLineBreak: true,
+              ),
           ],
         ),
       ),
     );
+  }
+
+  String _messageTitle(String kind) {
+    if (kind == 'transcribing') return 'transcribing';
+    return kind;
   }
 
   String _resendTooltip() {
@@ -3503,7 +3585,12 @@ class _MessageTile extends StatelessWidget {
       ..showSnackBar(const SnackBar(content: Text('Copied')));
   }
 
-  IconData _messageIcon({required bool incoming, required bool transcript}) {
+  IconData _messageIcon({
+    required bool incoming,
+    required bool transcript,
+    required bool processing,
+  }) {
+    if (processing) return Icons.sync;
     if (transcript) return Icons.notes;
     return incoming ? Icons.call_received : Icons.call_made;
   }
