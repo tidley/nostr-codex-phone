@@ -304,6 +304,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   final _tts = FlutterTts();
   final _messagesByTarget = <String, List<ConversationMessage>>{};
   final _seenIncomingEventIds = <String>{};
+  final ScrollController _chatScrollController = ScrollController();
 
   bool _loadingSettings = true;
   bool _connecting = false;
@@ -372,6 +373,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _messagesByTarget[activeKey] = loaded;
     });
+    _scrollToLatestMessage();
+  }
+
+  void _scrollToLatestMessage() {
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_chatScrollController.hasClients) return;
+      _chatScrollController.animateTo(
+        _chatScrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
+    });
   }
 
   @override
@@ -390,6 +404,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       unawaited(_deleteTempAudio(recordingPath));
     }
     _tts.stop();
+    _chatScrollController.dispose();
     _secretKeyController.dispose();
     _targetNameController.dispose();
     _peerPubkeyController.dispose();
@@ -869,6 +884,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     _messages.insert(0, message);
     final key = _activeConversationKey;
     unawaited(_saveConversationHistoryForKey(key));
+    _scrollToLatestMessage();
   }
 
   void _appendPendingTranscriptionMessage({
@@ -2412,6 +2428,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               child: _recentMessagesForActiveConversation.isEmpty
                   ? const Center(child: Text('No messages in last hour'))
                   : ListView.builder(
+                      controller: _chatScrollController,
                       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                       itemCount: _recentMessagesForActiveConversation.length,
                       itemBuilder: (context, index) {
@@ -3517,45 +3534,24 @@ class _BreathingRecordButton extends StatelessWidget {
       builder: (context, child) {
         final pulse = animation.value;
         final fill = Color.lerp(
+          colorScheme.primary,
           Colors.orange.shade700,
-          Colors.yellow.shade600,
           pulse,
         )!;
-        final glow = Color.lerp(
-          Colors.yellow.shade600,
-          Colors.orange.shade500,
-          pulse,
-        )!;
-        return DecoratedBox(
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(28),
             color: fill,
-            boxShadow: [
-              BoxShadow(
-                color: glow.withValues(alpha: 0.32 * pulse + 0.03),
-                blurRadius: 16 + (12 * pulse),
-                spreadRadius: 1 + (2.5 * pulse),
-              ),
-            ],
-            border: Border.all(
-              color: glow.withValues(alpha: 0.55 + (0.35 * pulse)),
-              width: 1 + (1.5 * pulse),
-            ),
           ),
-          child: Padding(
-            padding: EdgeInsets.all(2.0 * pulse),
-            child: Transform.scale(
-              scale: 1 + (0.025 * pulse),
-              child: FilledButtonTheme(
-                data: FilledButtonThemeData(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Colors.transparent,
-                    foregroundColor: colorScheme.onPrimaryContainer,
-                  ),
-                ),
-                child: child ?? const SizedBox.shrink(),
+          child: FilledButtonTheme(
+            data: FilledButtonThemeData(
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.transparent,
+                foregroundColor: colorScheme.onPrimaryContainer,
               ),
             ),
+            child: child ?? const SizedBox.shrink(),
           ),
         );
       },
