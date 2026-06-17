@@ -148,11 +148,17 @@ fn upload_url(server_url: &str) -> Result<Url> {
 }
 
 fn clean_content_type(value: &str) -> String {
-    let value = value.trim();
-    if value.starts_with("audio/") {
-        value.to_string()
+    let value = value.trim().to_ascii_lowercase();
+    let base = value
+        .split(';')
+        .next()
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .unwrap_or("");
+    if base.contains('/') {
+        base.to_string()
     } else {
-        "audio/mp4".to_string()
+        "application/octet-stream".to_string()
     }
 }
 
@@ -199,5 +205,17 @@ mod tests {
             upload_url("https://example.com/").unwrap().as_str(),
             "https://example.com/upload"
         );
+    }
+
+    #[test]
+    fn normalizes_content_type() {
+        assert_eq!(clean_content_type("image/jpeg"), "image/jpeg");
+        assert_eq!(
+            clean_content_type("Image/JPEG; charset=utf-8"),
+            "image/jpeg"
+        );
+        assert_eq!(clean_content_type("audio/ogg"), "audio/ogg");
+        assert_eq!(clean_content_type(""), "application/octet-stream");
+        assert_eq!(clean_content_type("audio"), "application/octet-stream");
     }
 }

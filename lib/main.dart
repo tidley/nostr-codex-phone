@@ -315,6 +315,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   _VoiceRecordingFormat? _activeRecordingFormat;
   String? _ownPubkey;
   String? _status;
+  BridgeAudioReference? _pendingMediaAttachment;
+  String? _pendingMediaFileName;
+
+  bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
 
   String get _activeConversationKey {
     final selected = _selectedRepoTargetId;
@@ -754,6 +758,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!mounted) return;
     final targetKey = target.id;
     setState(() {
+      _clearPendingMediaAttachment();
       _applyRepoTargetFields(target);
       _messagesByTarget[targetKey] = [];
       _seenIncomingEventIds.clear();
@@ -1366,6 +1371,67 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
+  Future<void> _sendMediaOrText() async {
+    if (_hasPendingMediaAttachment) {
+      await _sendPendingMediaAttachment();
+      return;
+    }
+    await _sendQuery();
+  }
+
+  Future<void> _sendPendingMediaAttachment() async {
+    final attachment = _pendingMediaAttachment;
+    if (attachment == null) return;
+    if (_sendingMedia || _sending || _sendingAudio || _recording) return;
+    if (!_connected) {
+      _showError('Connect before sending media');
+      return;
+    }
+
+    final caption = _queryController.text.trim();
+    setState(() {
+      _sendingMedia = true;
+      _status = 'Sending attachment request...';
+    });
+
+    final analysisQuery = _buildMediaAnalysisQuery(
+      attachment: attachment,
+      caption: caption,
+    );
+
+    try {
+      final eventId = await nostrSendQuery(query: analysisQuery);
+      if (!mounted) return;
+      setState(() {
+        _appendMessageForActiveConversation(
+          ConversationMessage(
+            direction: MessageDirection.outgoing,
+            kind: 'query',
+            text: analysisQuery,
+            eventId: eventId,
+            timestamp: DateTime.now(),
+          ),
+        );
+        _queryController.clear();
+        _clearPendingMediaAttachment();
+        _status = 'Attachment sent';
+      });
+    } catch (error) {
+      _showError('Attachment message failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _sendingMedia = false);
+      }
+    }
+  }
+
+  void _clearPendingMediaAttachment() {
+    setState(() {
+      _pendingMediaAttachment = null;
+      _pendingMediaFileName = null;
+    });
+  }
+
   bool _isResendableMessage(ConversationMessage message) {
     if (message.kind == 'query' &&
         message.direction == MessageDirection.outgoing &&
@@ -1422,11 +1488,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return;
     }
 
-    final queryText = _queryController.text.trim();
     final fileName = selected!.fileName;
     final contentType = _inferContentType(fileName, selected.extension);
 
     setState(() {
+      _clearPendingMediaAttachment();
       _sendingMedia = true;
       _status = 'Uploading attachment to Blossom...';
     });
@@ -1441,37 +1507,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return;
     }
 
-    final analysisQuery = _buildMediaAnalysisQuery(
-      attachment: attachment,
-      caption: queryText,
-    );
-
     if (!mounted) return;
-    setState(() => _status = 'Sending attachment request...');
-
-    try {
-      final eventId = await nostrSendQuery(query: analysisQuery);
-      if (!mounted) return;
-      setState(() {
-        _appendMessageForActiveConversation(
-          ConversationMessage(
-            direction: MessageDirection.outgoing,
-            kind: 'query',
-            text: analysisQuery,
-            eventId: eventId,
-            timestamp: DateTime.now(),
-          ),
-        );
-        _queryController.clear();
-        _status = 'Attachment sent';
-      });
-    } catch (error) {
-      _showError('Attachment message failed: $error');
-    } finally {
-      if (mounted) {
-        setState(() => _sendingMedia = false);
-      }
-    }
+    setState(() {
+      _pendingMediaAttachment = attachment;
+      _pendingMediaFileName = fileName;
+      _status = 'Attachment ready. Press Send.';
+      _sendingMedia = false;
+    });
   }
 
   Future<_MediaSelection?> _pickMediaAttachment() async {
@@ -2119,11 +2161,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               sendingMedia: _sendingMedia,
               recording: _recording,
               wavRetryRequested: _wavRetryRequested,
+              hasPendingMedia: _hasPendingMediaAttachment,
+              pendingMediaName: _pendingMediaFileName,
               onMicPressed: _toggleRecording,
               onConnectPressed: _connect,
               onAttachMedia: _attachAndSendMedia,
               onCancelRecording: _cancelRecording,
-              onSendPressed: () => _sendQuery(),
+              onClearPendingMedia: _clearPendingMediaAttachment,
+              onSendPressed: () => _sendMediaOrText(),
             ),
             const SizedBox(height: 12),
           ],
@@ -2901,10 +2946,13 @@ class _Composer extends StatefulWidget {
     required this.sendingMedia,
     required this.recording,
     required this.wavRetryRequested,
+    required this.hasPendingMedia,
+    required this.pendingMediaName,
     required this.onMicPressed,
     required this.onConnectPressed,
     required this.onAttachMedia,
     required this.onCancelRecording,
+    required this.onClearPendingMedia,
     required this.onSendPressed,
   });
 
@@ -2916,10 +2964,13 @@ class _Composer extends StatefulWidget {
   final bool sendingMedia;
   final bool recording;
   final bool wavRetryRequested;
+  final bool hasPendingMedia;
+  final String? pendingMediaName;
   final VoidCallback onMicPressed;
   final VoidCallback onConnectPressed;
   final VoidCallback onAttachMedia;
   final VoidCallback onCancelRecording;
+  final VoidCallback onClearPendingMedia;
   final VoidCallback onSendPressed;
 
   @override
@@ -2971,12 +3022,48 @@ class _ComposerState extends State<_Composer>
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final canClearPendingAttachment =
+        !widget.sending &&
+        !widget.sendingAudio &&
+        !widget.sendingMedia &&
+        !widget.connecting;
     return Card(
       margin: const EdgeInsets.fromLTRB(12, 8, 12, 12),
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Column(
           children: [
+            if (widget.hasPendingMedia && widget.pendingMediaName != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.attachment,
+                      size: 20,
+                      color: theme.colorScheme.primary,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Attached: ${widget.pendingMediaName}',
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ),
+                    Tooltip(
+                      message: 'Clear attachment',
+                      child: IconButton(
+                        onPressed: canClearPendingAttachment
+                            ? widget.onClearPendingMedia
+                            : null,
+                        icon: const Icon(Icons.close),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             TextField(
               controller: widget.controller,
               minLines: 1,
@@ -2992,6 +3079,7 @@ class _ComposerState extends State<_Composer>
               valueListenable: widget.controller,
               builder: (context, value, _) {
                 final hasText = value.text.trim().isNotEmpty;
+                final canSendFromInput = hasText || widget.hasPendingMedia;
                 final busy =
                     widget.sending ||
                     widget.sendingAudio ||
@@ -3001,7 +3089,7 @@ class _ComposerState extends State<_Composer>
                     ? widget.connected
                           ? widget.recording
                                 ? widget.onMicPressed
-                                : hasText
+                                : canSendFromInput
                                 ? widget.onSendPressed
                                 : widget.onMicPressed
                           : widget.onConnectPressed
@@ -3042,7 +3130,7 @@ class _ComposerState extends State<_Composer>
                       )
                     : widget.recording
                     ? const Icon(Icons.send)
-                    : hasText
+                    : canSendFromInput
                     ? const Icon(Icons.send)
                     : Icon(
                         widget.wavRetryRequested
@@ -3055,7 +3143,7 @@ class _ComposerState extends State<_Composer>
                     ? disconnectedLabel
                     : widget.recording
                     ? 'Send'
-                    : hasText
+                    : canSendFromInput
                     ? 'Send'
                     : widget.wavRetryRequested
                     ? 'Record WAV'
@@ -3064,8 +3152,10 @@ class _ComposerState extends State<_Composer>
                     ? 'Send recording'
                     : !widget.connected
                     ? disconnectedTooltip
-                    : hasText
-                    ? 'Send text'
+                    : canSendFromInput
+                    ? widget.hasPendingMedia
+                          ? 'Send attachment'
+                          : 'Send text'
                     : widget.wavRetryRequested
                     ? 'Record WAV retry'
                     : 'Record voice query';
