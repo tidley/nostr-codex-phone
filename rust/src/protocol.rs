@@ -11,6 +11,7 @@ pub const AUDIO_ENCRYPTION_ALGORITHM: &str = "xchacha20poly1305";
 pub enum WireMessage {
     Query { query: String },
     Audio { audio: AudioReference },
+    MediaBundle { media_bundle: MediaBundle },
     AudioRetry { audio_retry: AudioRetryRequest },
     Transcript { transcript: String },
     Status { status: String },
@@ -20,6 +21,27 @@ pub enum WireMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioReference {
+    pub url: String,
+    pub sha256: String,
+    pub size: u64,
+    #[serde(rename = "type")]
+    pub media_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<AudioEncryption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaBundle {
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<MediaReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaReference {
     pub url: String,
     pub sha256: String,
     pub size: u64,
@@ -59,6 +81,10 @@ impl WireMessage {
         Self::Audio { audio }
     }
 
+    pub fn media_bundle(media_bundle: MediaBundle) -> Self {
+        Self::MediaBundle { media_bundle }
+    }
+
     pub fn audio_retry(format: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::AudioRetry {
             audio_retry: AudioRetryRequest {
@@ -96,6 +122,7 @@ impl WireMessage {
         match self {
             Self::Query { .. } => "query",
             Self::Audio { .. } => "audio",
+            Self::MediaBundle { .. } => "media_bundle",
             Self::AudioRetry { .. } => "audio_retry",
             Self::Transcript { .. } => "transcript",
             Self::Status { .. } => "status",
@@ -108,6 +135,9 @@ impl WireMessage {
         match self {
             Self::Query { query } => query,
             Self::Audio { audio } => &audio.url,
+            Self::MediaBundle { media_bundle } => {
+                media_bundle.query.as_deref().unwrap_or("[media bundle]")
+            }
             Self::AudioRetry { audio_retry } => &audio_retry.reason,
             Self::Transcript { transcript } => transcript,
             Self::Status { status } => status,
@@ -123,10 +153,20 @@ impl WireMessage {
         }
     }
 
+    pub fn media_bundle_ref(&self) -> Option<&MediaBundle> {
+        match self {
+            Self::MediaBundle { media_bundle } => Some(media_bundle),
+            _ => None,
+        }
+    }
+
     pub fn to_json(&self) -> Result<String> {
         let value = match self {
             Self::Query { query } => json!({ "query": query }),
             Self::Audio { audio } => json!({ "audio": audio }),
+            Self::MediaBundle { media_bundle } => {
+                json!({ "media_bundle": media_bundle })
+            }
             Self::AudioRetry { audio_retry } => json!({ "audio_retry": audio_retry }),
             Self::Transcript { transcript } => json!({ "transcript": transcript }),
             Self::Status { status } => json!({ "status": status }),
@@ -143,6 +183,13 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     let object = value
         .as_object()
         .ok_or_else(|| anyhow!("message must be a JSON object"))?;
+
+    if let Some(media_bundle) = object.get("media_bundle") {
+        let media_bundle: MediaBundle = serde_json::from_value(media_bundle.clone())
+            .map_err(|err| anyhow!("field `media_bundle` is invalid: {err}"))?;
+        validate_media_bundle(&media_bundle)?;
+        return Ok(WireMessage::media_bundle(media_bundle));
+    }
 
     if let Some(query) = object.get("query") {
         return query
@@ -197,8 +244,34 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, or object `audio_retry` field"
+        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, or object `media_bundle` field"
     ))
+}
+
+pub fn parse_media_bundle_query(content: &str) -> Result<MediaBundle> {
+    let value: Value = serde_json::from_str(content)
+        .map_err(|err| anyhow!("media bundle must be valid JSON: {err}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("media bundle request must be a JSON object"))?;
+
+    let raw_bundle = if object.contains_key("media_bundle") {
+        object
+            .get("media_bundle")
+            .ok_or_else(|| anyhow!("media bundle request is missing `media_bundle`"))?
+            .clone()
+    } else if object.contains_key("attachments") {
+        value
+    } else {
+        return Err(anyhow!(
+            "media bundle request must either include `media_bundle` or `attachments`"
+        ));
+    };
+
+    let media_bundle: MediaBundle = serde_json::from_value(raw_bundle)
+        .map_err(|err| anyhow!("media_bundle is invalid: {err}"))?;
+    validate_media_bundle(&media_bundle)?;
+    Ok(media_bundle)
 }
 
 fn validate_audio_reference(audio: &AudioReference) -> Result<()> {
@@ -222,7 +295,58 @@ fn validate_audio_reference(audio: &AudioReference) -> Result<()> {
     Ok(())
 }
 
+fn validate_media_bundle(media_bundle: &MediaBundle) -> Result<()> {
+    if media_bundle.query.is_none() && media_bundle.attachments.is_empty() {
+        return Err(anyhow!(
+            "media_bundle must include `query` and/or `attachments`"
+        ));
+    }
+
+    for attachment in &media_bundle.attachments {
+        validate_media_reference(attachment)?;
+    }
+
+    Ok(())
+}
+
+fn validate_media_reference(reference: &MediaReference) -> Result<()> {
+    if !(reference.url.starts_with("https://") || reference.url.starts_with("http://")) {
+        return Err(anyhow!(
+            "field `media.reference.url` must be an HTTP(S) URL"
+        ));
+    }
+    if reference.sha256.len() != 64 || !reference.sha256.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "field `media.reference.sha256` must be a 64-character hex SHA-256"
+        ));
+    }
+    if reference.size == 0 {
+        return Err(anyhow!(
+            "field `media.reference.size` must be greater than zero"
+        ));
+    }
+    if !reference.media_type.contains('/') {
+        return Err(anyhow!(
+            "field `media.reference.type` must be a MIME type such as `image/jpeg`"
+        ));
+    }
+    if let Some(encryption) = &reference.encryption {
+        validate_media_encryption(encryption)?;
+    }
+    Ok(())
+}
+
 fn validate_audio_encryption(encryption: &AudioEncryption) -> Result<()> {
+    validate_media_encryption(encryption)?;
+    if !encryption.plaintext_media_type.starts_with("audio/") {
+        return Err(anyhow!(
+            "field `audio.encryption.plaintext_type` must be an audio MIME type"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_media_encryption(encryption: &AudioEncryption) -> Result<()> {
     if encryption.algorithm != AUDIO_ENCRYPTION_ALGORITHM {
         return Err(anyhow!(
             "field `audio.encryption.algorithm` must be `{AUDIO_ENCRYPTION_ALGORITHM}`"
@@ -245,9 +369,9 @@ fn validate_audio_encryption(encryption: &AudioEncryption) -> Result<()> {
             "field `audio.encryption.plaintext_size` must be greater than zero"
         ));
     }
-    if !encryption.plaintext_media_type.starts_with("audio/") {
+    if !encryption.plaintext_media_type.contains('/') {
         return Err(anyhow!(
-            "field `audio.encryption.plaintext_type` must be an audio MIME type"
+            "field `audio.encryption.plaintext_type` must be a MIME type such as `audio/wav`"
         ));
     }
     Ok(())
@@ -290,6 +414,34 @@ mod tests {
         assert_eq!(parsed, WireMessage::query("hello"));
         assert_eq!(parsed.kind(), "query");
         assert_eq!(parsed.text(), "hello");
+    }
+
+    #[test]
+    fn parses_media_bundle_payload() {
+        let parsed = parse_wire_message(
+            r#"{
+                "media_bundle": {
+                    "query": "review this image",
+                    "attachments": [
+                        {
+                            "url": "https://cdn.example.com/photo.jpg",
+                            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                            "size": 123,
+                            "type": "image/jpeg",
+                            "name": "photo.jpg"
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.kind(), "media_bundle");
+        assert_eq!(
+            parsed
+                .media_bundle_ref()
+                .and_then(|bundle| bundle.query.clone()),
+            Some("review this image".to_string())
+        );
     }
 
     #[test]

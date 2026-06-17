@@ -22,9 +22,13 @@ use rust_lib_nostr_codex_phone::codex::{
 use rust_lib_nostr_codex_phone::nostr_client::{
     default_relays, IncomingMessage, NostrConfig, NostrMessenger,
 };
-use rust_lib_nostr_codex_phone::protocol::{parse_wire_message, AudioReference, WireMessage};
+use rust_lib_nostr_codex_phone::protocol::{
+    parse_media_bundle_query, parse_wire_message, AudioReference, MediaBundle, MediaReference,
+    WireMessage,
+};
 use rust_lib_nostr_codex_phone::transcribe::{
-    download_blossom_audio, transcribe_audio, AudioConfig, TranscribeConfig,
+    download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
+    TranscribeConfig,
 };
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -495,6 +499,21 @@ async fn process_message(
                 message.event_id, message.sender_pubkey
             );
 
+            if let Ok(media_bundle) = parse_media_bundle_query(&message.text) {
+                process_media_bundle_turn(
+                    messenger,
+                    memory,
+                    &message.sender_pubkey_hex,
+                    &message,
+                    media_bundle,
+                    &audio_config,
+                    transcribe_config,
+                    codex_config,
+                )
+                .await;
+                return;
+            }
+
             if let Some(response) = handle_local_request(
                 memory,
                 &message.sender_pubkey_hex,
@@ -528,6 +547,40 @@ async fn process_message(
                 codex_config,
             )
             .await;
+        }
+        "media_bundle" => {
+            info!(
+                "received media_bundle event {} from {}",
+                message.event_id, message.sender_pubkey
+            );
+            let from_json = parse_wire_message(&message.raw_json)
+                .ok()
+                .and_then(|message| message.media_bundle_ref().cloned());
+            if let Some(media_bundle) =
+                from_json.or_else(|| parse_media_bundle_query(&message.text).ok())
+            {
+                process_media_bundle_turn(
+                    messenger,
+                    memory,
+                    &message.sender_pubkey_hex,
+                    &message,
+                    media_bundle,
+                    &audio_config,
+                    transcribe_config,
+                    codex_config,
+                )
+                .await;
+            } else {
+                if let Err(err) = messenger
+                    .send_error_to(
+                        &message.sender_pubkey_hex,
+                        "Malformed media_bundle request".to_string(),
+                    )
+                    .await
+                {
+                    error!("failed to send malformed media bundle error DM: {err:#}");
+                }
+            }
         }
         "audio" => {
             info!(
@@ -651,6 +704,356 @@ async fn process_message(
         }
         other => {
             info!("ignored `{other}` DM event {}", message.event_id);
+        }
+    }
+}
+
+async fn process_media_bundle_turn(
+    messenger: &NostrMessenger,
+    memory: &mut Option<MemoryStore>,
+    peer_pubkey: &str,
+    message: &IncomingMessage,
+    bundle: MediaBundle,
+    audio_config: &AudioConfig,
+    transcribe_config: &TranscribeConfig,
+    codex_config: &CodexConfig,
+) {
+    let user_query = bundle.query.as_deref().map(str::trim).unwrap_or_default();
+
+    if bundle.attachments.is_empty() && user_query.is_empty() {
+        if let Err(err) = messenger
+            .send_error_to(peer_pubkey, "Media bundle is empty".to_string())
+            .await
+        {
+            error!("failed to send empty media-bundle error DM: {err:#}");
+        }
+        return;
+    }
+
+    let Some(recorded_bundle) = remember_incoming(
+        memory,
+        peer_pubkey,
+        &message.event_id,
+        "media_bundle",
+        &message.text,
+    ) else {
+        return;
+    };
+    if !recorded_bundle.inserted {
+        info!(
+            "ignored already-persisted media_bundle event {}",
+            message.event_id
+        );
+        return;
+    }
+    let recorded_bundle_id = recorded_bundle.id;
+
+    let mut request_parts = Vec::new();
+    if !user_query.is_empty() {
+        request_parts.push(format!("User request: {user_query}"));
+    }
+
+    let mut attachment_lines = Vec::new();
+    let mut transcripts = Vec::new();
+    let mut local_texts = Vec::new();
+
+    for (index, attachment) in bundle.attachments.iter().enumerate() {
+        let label = attachment
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("attachment-{}", index + 1));
+        attachment_lines.push(format!(
+            "- {label} ({}) => {}",
+            attachment.media_type, attachment.url
+        ));
+
+        if attachment.media_type.starts_with("audio/") {
+            let audio = media_reference_to_audio(attachment);
+            let transcript = match transcribe_or_load_cached(
+                memory,
+                recorded_bundle_id,
+                peer_pubkey,
+                &audio,
+                audio_config,
+                transcribe_config,
+                messenger,
+            )
+            .await
+            {
+                Some(transcript) => transcript,
+                None => continue,
+            };
+
+            transcripts.push(format!("{label}:\n{transcript}"));
+            local_texts.push(format!("{label}:\n{transcript}"));
+
+            if let Err(err) = messenger
+                .send_transcript_to(peer_pubkey, transcript.clone())
+                .await
+            {
+                warn!("failed to send transcript DM: {err:#}");
+            }
+            continue;
+        }
+
+        if is_text_media_type(&attachment.media_type) {
+            let extracted_text = match extract_local_text_attachment(
+                attachment,
+                memory,
+                recorded_bundle_id,
+                peer_pubkey,
+                audio_config,
+                messenger,
+            )
+            .await
+            {
+                Some(text) => text,
+                None => continue,
+            };
+
+            local_texts.push(format!("{label}:\n{extracted_text}"));
+        }
+    }
+
+    if !attachment_lines.is_empty() {
+        request_parts.push(format!("Attached files:\n{}", attachment_lines.join("\n")));
+    }
+
+    if !transcripts.is_empty() {
+        request_parts.push(format!(
+            "Attachment transcripts:\n{}",
+            transcripts.join("\n\n")
+        ));
+    }
+
+    if !local_texts.is_empty() {
+        request_parts.push(format!(
+            "Attachment text content:\n{}\n\nUse this content for the request.",
+            local_texts.join("\n\n")
+        ));
+    }
+
+    if request_parts.is_empty() {
+        request_parts.push("Process the attached media and answer the user's request.".to_string());
+    }
+
+    let request_text = request_parts.join("\n\n");
+
+    if let Some(response) = handle_local_request(
+        memory,
+        peer_pubkey,
+        &request_text,
+        &codex_config.working_dir,
+    ) {
+        send_response(messenger, peer_pubkey, response).await;
+        return;
+    }
+
+    process_text_turn(
+        messenger,
+        memory,
+        peer_pubkey,
+        recorded_bundle.id,
+        &request_text,
+        codex_config,
+    )
+    .await;
+}
+
+fn media_reference_to_audio(reference: &MediaReference) -> AudioReference {
+    AudioReference {
+        url: reference.url.clone(),
+        sha256: reference.sha256.clone(),
+        size: reference.size,
+        media_type: reference.media_type.clone(),
+        name: reference.name.clone(),
+        encryption: reference.encryption.clone(),
+    }
+}
+
+async fn extract_local_text_attachment(
+    attachment: &MediaReference,
+    memory: &mut Option<MemoryStore>,
+    recorded_id: i64,
+    receiver_pubkey: &str,
+    audio_config: &AudioConfig,
+    messenger: &NostrMessenger,
+) -> Option<String> {
+    let cache_key = text_attachment_cache_key(attachment);
+    if let Some(cached) = cached_text_attachment(memory, &cache_key) {
+        info!("used cached text attachment for blob hash {cache_key}");
+        return Some(cached);
+    }
+
+    let extension = text_attachment_extension(&attachment.media_type, attachment.name.as_deref());
+    let reference = media_reference_to_audio(attachment);
+    let downloaded = match download_blossom_attachment(&reference, &extension, audio_config).await {
+        Ok(downloaded) => downloaded,
+        Err(err) => {
+            error!("attachment download failed: {err:#}");
+            if let Err(send_err) = messenger
+                .send_error_to(
+                    receiver_pubkey,
+                    format!(
+                        "Could not download attachment \"{}\": {err:#}",
+                        attachment
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| attachment.url.clone())
+                    ),
+                )
+                .await
+            {
+                error!("failed to send attachment download error DM: {send_err:#}");
+            }
+            return None;
+        }
+    };
+
+    let bytes = match tokio::fs::read(&downloaded.path).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            error!(
+                "failed to read attachment content `{}`: {err:#}",
+                downloaded.path.display()
+            );
+            if let Err(send_err) = messenger
+                .send_error_to(
+                    receiver_pubkey,
+                    format!(
+                        "Failed to read attachment \"{}\": {err:#}",
+                        attachment
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| attachment.url.clone())
+                    ),
+                )
+                .await
+            {
+                error!("failed to send attachment read error DM: {send_err:#}");
+            }
+            return None;
+        }
+    };
+
+    let attachment_name = attachment
+        .name
+        .clone()
+        .unwrap_or_else(|| attachment.url.clone());
+    let extracted = String::from_utf8_lossy(&bytes).trim().to_string();
+    if extracted.is_empty() {
+        if let Some(memory) = memory.as_mut() {
+            if let Err(err) = memory.update_message(
+                recorded_id,
+                "text_attachment",
+                &format!("Attachment \"{attachment_name}\" was empty or binary."),
+            ) {
+                warn!("failed to record text attachment note: {err:#}");
+            }
+        }
+        return None;
+    }
+
+    let extracted = extracted.replace('\u{0000}', "");
+    let extracted = extracted.trim().to_string();
+    if extracted.is_empty() {
+        return None;
+    }
+
+    let extracted = if extracted.chars().count() > 20_000 {
+        extracted.chars().take(20_000).collect()
+    } else {
+        extracted
+    };
+
+    save_text_attachment_cache(memory, &cache_key, &extracted);
+    Some(extracted)
+}
+
+fn is_text_media_type(media_type: &str) -> bool {
+    let normalized = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    normalized.starts_with("text/")
+        || matches!(
+            normalized.as_str(),
+            "application/json"
+                | "application/xml"
+                | "text/x-markdown"
+                | "application/x-markdown"
+                | "text/x-python"
+                | "application/x-python-code"
+                | "application/javascript"
+                | "text/javascript"
+                | "text/csv"
+                | "text/css"
+                | "text/html"
+                | "application/yaml"
+                | "application/x-yaml"
+                | "text/x-yaml"
+                | "text/typescript"
+                | "application/typescript"
+                | "text/tsx"
+                | "text/x-go"
+                | "text/x-rust"
+        )
+}
+
+fn text_attachment_extension(media_type: &str, name: Option<&str>) -> String {
+    let normalized = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "text/markdown" | "text/x-markdown" | "application/x-markdown" => "md".to_string(),
+        "text/csv" => "csv".to_string(),
+        "text/javascript" | "application/javascript" | "text/x-javascript" => "js".to_string(),
+        "application/json" => "json".to_string(),
+        "application/xml" | "text/xml" => "xml".to_string(),
+        "text/html" => "html".to_string(),
+        "text/css" => "css".to_string(),
+        "text/x-yaml" | "application/yaml" | "application/x-yaml" => "yaml".to_string(),
+        "text/x-python" | "application/x-python-code" => "py".to_string(),
+        "text/typescript" | "application/typescript" | "text/tsx" => "ts".to_string(),
+        "text/x-rust" => "rs".to_string(),
+        "text/x-go" => "go".to_string(),
+        _ => name
+            .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext))
+            .filter(|ext| !ext.is_empty() && ext.len() <= 8)
+            .unwrap_or("txt")
+            .to_string(),
+    }
+}
+
+fn text_attachment_cache_key(attachment: &MediaReference) -> String {
+    attachment
+        .encryption
+        .as_ref()
+        .map(|encryption| encryption.plaintext_sha256.clone())
+        .unwrap_or_else(|| attachment.sha256.clone())
+}
+
+fn cached_text_attachment(memory: &Option<MemoryStore>, cache_key: &str) -> Option<String> {
+    memory
+        .as_ref()
+        .and_then(|memory| match memory.cached_transcript(cache_key) {
+            Ok(transcript) => transcript,
+            Err(err) => {
+                warn!("failed to load cached text attachment: {err:#}");
+                None
+            }
+        })
+}
+
+fn save_text_attachment_cache(memory: &mut Option<MemoryStore>, cache_key: &str, text: &str) {
+    if let Some(memory) = memory.as_mut() {
+        if let Err(err) = memory.save_transcript_cache(cache_key, text) {
+            warn!("failed to save text attachment cache: {err:#}");
         }
     }
 }

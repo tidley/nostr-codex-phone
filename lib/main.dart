@@ -337,12 +337,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   String? _status;
   BridgeAudioReference? _pendingMediaAttachment;
   String? _pendingMediaFileName;
-  String? _pendingMediaContentType;
 
   bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
-
-  String get _pendingMediaTypeForAnalysis =>
-      _pendingMediaContentType?.trim() ?? 'application/octet-stream';
 
   String get _activeConversationKey {
     final selected = _selectedRepoTargetId;
@@ -1426,7 +1422,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _status = 'Sending attachment request...';
     });
 
-    final analysisQuery = _buildMediaAnalysisQuery(
+    final analysisQuery = _buildMediaBundlePayload(
       attachment: attachment,
       caption: caption,
     );
@@ -1461,7 +1457,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _pendingMediaAttachment = null;
       _pendingMediaFileName = null;
-      _pendingMediaContentType = null;
     });
   }
 
@@ -1576,7 +1571,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _pendingMediaAttachment = attachment;
       _pendingMediaFileName = fileName;
-      _pendingMediaContentType = contentType;
       _status = 'Attachment ready. Press Send.';
       _sendingMedia = false;
       _mediaUploadCancelCompleter = null;
@@ -2086,7 +2080,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     return value.substring(dotIndex + 1);
   }
 
-  String _buildMediaAnalysisQuery({
+  String _buildMediaBundlePayload({
     required BridgeAudioReference attachment,
     required String caption,
   }) {
@@ -2095,7 +2089,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       'name': attachment.name ?? 'media',
       'url': attachment.url,
       'sha256': attachment.sha256,
-      'content_type': _pendingMediaTypeForAnalysis,
+      'size': attachment.size.toInt(),
+      'type': attachment.mediaType,
       if (encryption != null)
         'encryption': {
           'algorithm': encryption.algorithm,
@@ -2106,16 +2101,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           'plaintext_type': encryption.plaintextMediaType,
         },
     };
-    final payload = {
-      'type': 'media_analysis_request',
-      'version': 1,
-      'task': 'analyze_attachment',
-      'user_caption': caption.trim(),
-      'attachment': attachmentPayload,
+    final mediaBundle = <String, dynamic>{
+      'attachments': [attachmentPayload],
     };
+    final trimmedCaption = caption.trim();
+    if (trimmedCaption.isNotEmpty) {
+      mediaBundle['query'] = trimmedCaption;
+    }
+    final payload = {'media_bundle': mediaBundle};
     const encoder = JsonEncoder.withIndent('  ');
-    return 'Please process this media analysis request using only the structured data:\n'
-        '${encoder.convert(payload)}';
+    return encoder.convert(payload);
   }
 
   List<String> _selectedBlossomServers() {
@@ -3372,18 +3367,36 @@ class _BreathingRecordButton extends StatelessWidget {
       child: child,
       builder: (context, child) {
         final pulse = animation.value;
+        final glow = Color.lerp(
+          Colors.yellow.shade600,
+          Colors.green.shade500,
+          pulse,
+        )!;
         return DecoratedBox(
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(28),
             boxShadow: [
               BoxShadow(
-                color: colorScheme.primary.withValues(alpha: 0.16 * pulse),
-                blurRadius: 18 * pulse,
-                spreadRadius: 2 * pulse,
+                color: glow.withValues(alpha: 0.32 * pulse + 0.03),
+                blurRadius: 16 + (12 * pulse),
+                spreadRadius: 1 + (2.5 * pulse),
               ),
             ],
+            border: Border.all(
+              color: glow.withValues(alpha: 0.55 + (0.35 * pulse)),
+              width: 1 + (1.5 * pulse),
+            ),
+            gradient: LinearGradient(
+              colors: [
+                glow.withValues(alpha: 0.35),
+                colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+              ],
+            ),
           ),
-          child: Transform.scale(scale: 1 + (0.025 * pulse), child: child),
+          child: Padding(
+            padding: EdgeInsets.all(2.0 * pulse),
+            child: Transform.scale(scale: 1 + (0.025 * pulse), child: child),
+          ),
         );
       },
     );
