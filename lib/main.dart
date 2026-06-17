@@ -104,6 +104,18 @@ class _RepoTarget {
   }
 }
 
+enum _PendingMessageCompletion { transcript, response }
+
+class _PendingProcessingMessage {
+  const _PendingProcessingMessage({
+    required this.eventId,
+    required this.completion,
+  });
+
+  final String eventId;
+  final _PendingMessageCompletion completion;
+}
+
 class _MediaUploadCancelledException implements Exception {
   const _MediaUploadCancelledException({
     required this.server,
@@ -320,7 +332,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   Completer<void>? _mediaUploadCancelCompleter;
   DateTime? _recordingStartedAt;
   Timer? _recordingTimer;
-  String? _pendingTranscriptionEventId;
+  final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   bool _autoSpeak = true;
   bool _speaking = false;
   bool _wavRetryRequested = false;
@@ -630,6 +642,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _peerPubkeyController.text = '';
       _relayController.text = defaultRelays;
       _seenIncomingEventIds.clear();
+      _pendingProcessingMessages.clear();
       _wavRetryRequested = false;
       _messagesByTarget['default'] = [];
       _status = 'New repo target';
@@ -680,6 +693,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _applyRepoTargetFields(savedTarget);
       _messagesByTarget[savedTarget.id] = [];
       _seenIncomingEventIds.clear();
+      _pendingProcessingMessages.clear();
       _wavRetryRequested = false;
       _status = 'Scanned target ${savedTarget.displayName}';
     });
@@ -782,6 +796,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       }
       _messagesByTarget.remove(selectedId);
       _seenIncomingEventIds.clear();
+      _pendingProcessingMessages.clear();
       _wavRetryRequested = false;
       _status = nextTarget == null
           ? 'Deleted target'
@@ -811,6 +826,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _applyRepoTargetFields(target);
       _messagesByTarget[targetKey] = [];
       _seenIncomingEventIds.clear();
+      _pendingProcessingMessages.clear();
       _wavRetryRequested = false;
       _status = 'Selected ${target.displayName}';
     });
@@ -903,8 +919,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   void _appendPendingTranscriptionMessage({
     required String eventId,
     required String label,
+    _PendingMessageCompletion completion = _PendingMessageCompletion.transcript,
   }) {
-    _pendingTranscriptionEventId = eventId;
+    _pendingProcessingMessages.add(
+      _PendingProcessingMessage(eventId: eventId, completion: completion),
+    );
     _appendMessageForActiveConversation(
       ConversationMessage(
         direction: MessageDirection.outgoing,
@@ -917,32 +936,62 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   bool _tryCompleteTranscription(String transcript) {
-    final placeholderEventId = _pendingTranscriptionEventId;
-    if (placeholderEventId == null) return false;
+    while (true) {
+      final pending = _takePendingProcessingMessage(
+        _PendingMessageCompletion.transcript,
+      );
+      if (pending == null) return false;
 
-    final index = _messages.indexWhere(
+      final index = _pendingProcessingMessageIndex(pending.eventId);
+      if (index < 0) continue;
+
+      _messages[index] = ConversationMessage(
+        direction: MessageDirection.outgoing,
+        kind: 'transcript',
+        text: transcript,
+        eventId: pending.eventId,
+        timestamp: DateTime.now(),
+        audio: _messages[index].audio,
+      );
+      unawaited(_saveConversationHistoryForKey(_activeConversationKey));
+      _scrollToLatestMessage();
+      return true;
+    }
+  }
+
+  bool _dropPendingProcessingMessage({_PendingMessageCompletion? completion}) {
+    final pending = _takePendingProcessingMessage(completion);
+    if (pending == null) return false;
+
+    final index = _pendingProcessingMessageIndex(pending.eventId);
+    if (index >= 0) {
+      _messages.removeAt(index);
+      unawaited(_saveConversationHistoryForKey(_activeConversationKey));
+      _scrollToLatestMessage();
+    }
+    return true;
+  }
+
+  _PendingProcessingMessage? _takePendingProcessingMessage(
+    _PendingMessageCompletion? completion,
+  ) {
+    if (_pendingProcessingMessages.isEmpty) return null;
+    final index = completion == null
+        ? 0
+        : _pendingProcessingMessages.indexWhere(
+            (pending) => pending.completion == completion,
+          );
+    if (index < 0) return null;
+    return _pendingProcessingMessages.removeAt(index);
+  }
+
+  int _pendingProcessingMessageIndex(String eventId) {
+    return _messages.indexWhere(
       (message) =>
           message.kind == 'transcribing' &&
           message.direction == MessageDirection.outgoing &&
-          message.eventId == placeholderEventId,
+          message.eventId == eventId,
     );
-    if (index < 0) {
-      _pendingTranscriptionEventId = null;
-      return false;
-    }
-
-    _messages[index] = ConversationMessage(
-      direction: MessageDirection.outgoing,
-      kind: 'transcript',
-      text: transcript,
-      eventId: placeholderEventId,
-      timestamp: DateTime.now(),
-      audio: _messages[index].audio,
-    );
-    _pendingTranscriptionEventId = null;
-    unawaited(_saveConversationHistoryForKey(_activeConversationKey));
-    _scrollToLatestMessage();
-    return true;
   }
 
   Future<void> _openSettings() async {
@@ -1364,6 +1413,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!mounted) return;
     setState(() {
       _connected = false;
+      _pendingProcessingMessages.clear();
       _status = 'Disconnected';
     });
   }
@@ -1451,10 +1501,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
     final audioRetryRequested = message.kind == 'audio_retry';
     setState(() {
-      if (_pendingTranscriptionEventId != null &&
-          message.kind != 'status' &&
-          message.kind != 'transcript') {
-        _pendingTranscriptionEventId = null;
+      if (message.kind == 'response') {
+        _dropPendingProcessingMessage(
+          completion: _PendingMessageCompletion.response,
+        );
+      } else if (audioRetryRequested || message.kind == 'error') {
+        _dropPendingProcessingMessage();
       }
       if (message.kind != 'status') {
         _appendMessageForActiveConversation(conversationMessage);
@@ -1626,9 +1678,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       );
       if (!mounted) return;
       setState(() {
+        final expectsTranscript = attachment.mediaType.toLowerCase().startsWith(
+          'audio/',
+        );
         _appendPendingTranscriptionMessage(
           eventId: eventId,
-          label: 'Transcribing message...',
+          label: expectsTranscript
+              ? 'Transcribing message...'
+              : 'Processing attachment...',
+          completion: expectsTranscript
+              ? _PendingMessageCompletion.transcript
+              : _PendingMessageCompletion.response,
         );
         _queryController.clear();
         _clearPendingMediaAttachmentInMemory();
@@ -3558,7 +3618,7 @@ class _RecordingButton extends StatelessWidget {
   }
 }
 
-class _MessageTile extends StatelessWidget {
+class _MessageTile extends StatefulWidget {
   const _MessageTile({
     required this.message,
     required this.showResend,
@@ -3574,12 +3634,34 @@ class _MessageTile extends StatelessWidget {
   final VoidCallback? onResend;
 
   @override
+  State<_MessageTile> createState() => _MessageTileState();
+}
+
+class _MessageTileState extends State<_MessageTile> {
+  bool _flash = false;
+
+  void _handleTap() {
+    if (widget.stopSpeakingOnTap) {
+      widget.onStopSpeaking?.call();
+    }
+    setState(() => _flash = true);
+    Future<void>.delayed(const Duration(milliseconds: 170), () {
+      if (mounted) setState(() => _flash = false);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final incoming = message.direction == MessageDirection.incoming;
-    final transcript = message.kind == 'transcript';
-    final processing = message.kind == 'transcribing';
+    final incoming = widget.message.direction == MessageDirection.incoming;
+    final transcript = widget.message.kind == 'transcript';
+    final processing = widget.message.kind == 'transcribing';
     final userSide = !incoming || transcript;
+    final canFlashOnTap = widget.stopSpeakingOnTap;
     final colorScheme = Theme.of(context).colorScheme;
+    final baseColor = userSide
+        ? colorScheme.primaryContainer
+        : colorScheme.surfaceContainerHigh;
+    final flashColor = Color.lerp(baseColor, colorScheme.primary, 0.16)!;
     final tile = Padding(
       padding: const EdgeInsets.all(12),
       child: Column(
@@ -3600,16 +3682,16 @@ class _MessageTile extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  _messageTitle(message.kind),
+                  _messageTitle(widget.message.kind),
                   style: Theme.of(context).textTheme.titleSmall,
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
               Text(
-                _formatTime(message.timestamp),
+                _formatTime(widget.message.timestamp),
                 style: Theme.of(context).textTheme.labelSmall,
               ),
-              if (showResend) ...[
+              if (widget.showResend) ...[
                 const SizedBox(width: 4),
                 SizedBox.square(
                   dimension: 36,
@@ -3617,12 +3699,12 @@ class _MessageTile extends StatelessWidget {
                     tooltip: _resendTooltip(),
                     visualDensity: VisualDensity.compact,
                     iconSize: 18,
-                    onPressed: onResend,
+                    onPressed: widget.onResend,
                     icon: const Icon(Icons.refresh),
                   ),
                 ),
               ],
-              if (incoming && message.text.trim().isNotEmpty) ...[
+              if (incoming && widget.message.text.trim().isNotEmpty) ...[
                 const SizedBox(width: 4),
                 SizedBox.square(
                   dimension: 36,
@@ -3652,7 +3734,7 @@ class _MessageTile extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: MarkdownBody(
-                    data: message.text,
+                    data: widget.message.text,
                     selectable: true,
                     softLineBreak: true,
                   ),
@@ -3661,7 +3743,7 @@ class _MessageTile extends StatelessWidget {
             )
           else
             MarkdownBody(
-              data: message.text,
+              data: widget.message.text,
               selectable: true,
               softLineBreak: true,
             ),
@@ -3670,16 +3752,20 @@ class _MessageTile extends StatelessWidget {
     );
 
     return Card(
-      color: userSide
-          ? colorScheme.primaryContainer
-          : colorScheme.surfaceContainerHigh,
-      child: stopSpeakingOnTap
-          ? InkWell(
-              borderRadius: BorderRadius.circular(12),
-              onTap: onStopSpeaking,
-              child: tile,
-            )
-          : tile,
+      color: Colors.transparent,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 130),
+        curve: Curves.easeOut,
+        decoration: BoxDecoration(
+          color: _flash ? flashColor : baseColor,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: canFlashOnTap ? _handleTap : null,
+          child: tile,
+        ),
+      ),
     );
   }
 
@@ -3689,13 +3775,13 @@ class _MessageTile extends StatelessWidget {
   }
 
   String _resendTooltip() {
-    if (message.kind == 'audio') return 'Resend voice note';
-    if (message.kind == 'transcript') return 'Send transcript as query';
+    if (widget.message.kind == 'audio') return 'Resend voice note';
+    if (widget.message.kind == 'transcript') return 'Send transcript as query';
     return 'Resend query';
   }
 
   Future<void> _copyMessage(BuildContext context) async {
-    await Clipboard.setData(ClipboardData(text: message.text));
+    await Clipboard.setData(ClipboardData(text: widget.message.text));
     if (!context.mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
