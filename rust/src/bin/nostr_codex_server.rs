@@ -16,7 +16,9 @@ use qrcode::{Color, QrCode};
 #[path = "nostr_codex_server/memory.rs"]
 mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
-use rust_lib_nostr_codex_phone::codex::{run_codex, run_codex_session, CodexConfig};
+use rust_lib_nostr_codex_phone::codex::{
+    is_codex_usage_limit_error, run_codex, run_codex_session, CodexConfig, CodexRunResult,
+};
 use rust_lib_nostr_codex_phone::nostr_client::{
     default_relays, IncomingMessage, NostrConfig, NostrMessenger,
 };
@@ -334,6 +336,10 @@ async fn main() -> Result<()> {
         "persistent codex sessions: {}",
         codex_config.persist_sessions
     );
+    match &codex_config.usage_limit_fallback_model {
+        Some(model) => info!("codex usage-limit fallback model: {model}"),
+        None => info!("codex usage-limit fallback model: disabled"),
+    }
     info!(
         "transcribe command: {} {}",
         transcribe_config.bin,
@@ -1489,6 +1495,13 @@ async fn run_codex_and_report(
 ) -> std::result::Result<String, ()> {
     let result = match run_codex_session(prompt, codex_config, session_id).await {
         Ok(result) => result,
+        Err(err) if is_codex_usage_limit_error(&err) => {
+            match retry_codex_with_usage_limit_fallback(prompt, codex_config, session_id, err).await
+            {
+                Ok(result) => result,
+                Err(err) => return report_codex_error(messenger, receiver_pubkey, err).await,
+            }
+        }
         Err(err) if session_id.is_some() => {
             warn!("Codex resume failed; clearing session and retrying once: {err:#}");
             if let Some(memory) = memory.as_mut() {
@@ -1500,6 +1513,16 @@ async fn run_codex_and_report(
             }
             match run_codex_session(prompt, codex_config, None).await {
                 Ok(result) => result,
+                Err(err) if is_codex_usage_limit_error(&err) => {
+                    match retry_codex_with_usage_limit_fallback(prompt, codex_config, None, err)
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(err) => {
+                            return report_codex_error(messenger, receiver_pubkey, err).await
+                        }
+                    }
+                }
                 Err(err) => return report_codex_error(messenger, receiver_pubkey, err).await,
             }
         }
@@ -1526,6 +1549,31 @@ async fn run_codex_and_report(
     }
 
     Ok(result.response)
+}
+
+async fn retry_codex_with_usage_limit_fallback(
+    prompt: &str,
+    codex_config: &CodexConfig,
+    session_id: Option<&str>,
+    original_err: anyhow::Error,
+) -> Result<CodexRunResult> {
+    let Some(fallback_model) = codex_config.usage_limit_fallback_model.as_deref() else {
+        return Err(original_err);
+    };
+    let original = format!("{original_err:#}");
+    warn!(
+        "Codex usage limit hit; retrying turn with fallback model `{}`",
+        fallback_model
+    );
+    let fallback_config = codex_config.with_model_override(fallback_model);
+
+    run_codex_session(prompt, &fallback_config, session_id)
+        .await
+        .with_context(|| {
+            format!(
+                "Codex fallback model `{fallback_model}` failed after usage-limit error: {original}"
+            )
+        })
 }
 
 async fn report_codex_error(
