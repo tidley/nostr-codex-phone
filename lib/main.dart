@@ -3313,48 +3313,7 @@ class _Composer extends StatefulWidget {
   State<_Composer> createState() => _ComposerState();
 }
 
-class _ComposerState extends State<_Composer>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _breatheController;
-  late final Animation<double> _breathe;
-
-  @override
-  void initState() {
-    super.initState();
-    _breatheController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1150),
-    );
-    _breathe = CurvedAnimation(
-      parent: _breatheController,
-      curve: Curves.easeInOut,
-    );
-    _syncBreatheAnimation();
-  }
-
-  @override
-  void didUpdateWidget(covariant _Composer oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.recording != widget.recording) {
-      _syncBreatheAnimation();
-    }
-  }
-
-  @override
-  void dispose() {
-    _breatheController.dispose();
-    super.dispose();
-  }
-
-  void _syncBreatheAnimation() {
-    if (widget.recording) {
-      _breatheController.repeat(reverse: true);
-    } else {
-      _breatheController.stop();
-      _breatheController.value = 0;
-    }
-  }
-
+class _ComposerState extends State<_Composer> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -3529,10 +3488,7 @@ class _ComposerState extends State<_Composer>
                   ),
                 );
                 final actionButton = widget.recording
-                    ? _BreathingRecordButton(
-                        animation: _breathe,
-                        child: mainButton,
-                      )
+                    ? _RecordingButton(child: mainButton)
                     : mainButton;
 
                 return Row(
@@ -3560,42 +3516,28 @@ class _ComposerState extends State<_Composer>
   }
 }
 
-class _BreathingRecordButton extends StatelessWidget {
-  const _BreathingRecordButton({required this.animation, required this.child});
+class _RecordingButton extends StatelessWidget {
+  const _RecordingButton({required this.child});
 
-  final Animation<double> animation;
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    return AnimatedBuilder(
-      animation: animation,
-      child: child,
-      builder: (context, child) {
-        final pulse = animation.value;
-        final fill = Color.lerp(
-          colorScheme.primary,
-          Colors.orange.shade700,
-          pulse,
-        )!;
-        return AnimatedContainer(
-          duration: const Duration(milliseconds: 300),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(28),
-            color: fill,
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(28),
+        color: Colors.orange.shade700,
+      ),
+      child: FilledButtonTheme(
+        data: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            backgroundColor: Colors.transparent,
+            foregroundColor: colorScheme.onPrimaryContainer,
           ),
-          child: FilledButtonTheme(
-            data: FilledButtonThemeData(
-              style: FilledButton.styleFrom(
-                backgroundColor: Colors.transparent,
-                foregroundColor: colorScheme.onPrimaryContainer,
-              ),
-            ),
-            child: child ?? const SizedBox.shrink(),
-          ),
-        );
-      },
+        ),
+        child: child,
+      ),
     );
   }
 }
