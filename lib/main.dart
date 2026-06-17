@@ -3635,7 +3635,7 @@ class _SpeakingEqualizer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 34,
+      width: 68,
       height: 16,
       child: AnimatedBuilder(
         animation: animation,
@@ -3644,7 +3644,7 @@ class _SpeakingEqualizer extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              for (var index = 0; index < 5; index++)
+              for (var index = 0; index < 9; index++)
                 _EqualizerBar(
                   color: color,
                   height: _barHeight(animation.value, index),
@@ -3657,7 +3657,7 @@ class _SpeakingEqualizer extends StatelessWidget {
   }
 
   double _barHeight(double value, int index) {
-    final phase = (value + (index * 0.17)) % 1.0;
+    final phase = (value + (index * 0.1)) % 1.0;
     final rise = 1 - ((phase - 0.5).abs() * 2);
     return 4 + (10 * rise.clamp(0, 1));
   }
@@ -3844,11 +3844,19 @@ class _MessageTileState extends State<_MessageTile>
                         ),
                       ),
                       if (widget.speaking)
-                        _SpeakingEqualizer(
-                          animation: _equalizerController,
-                          color: userSide
-                              ? colorScheme.onPrimaryContainer
-                              : colorScheme.primary,
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Padding(
+                            padding: const EdgeInsets.only(right: 128),
+                            child: Center(
+                              child: _SpeakingEqualizer(
+                                animation: _equalizerController,
+                                color: userSide
+                                    ? colorScheme.onPrimaryContainer
+                                    : colorScheme.primary,
+                              ),
+                            ),
+                          ),
                         ),
                       Align(
                         alignment: Alignment.centerRight,
