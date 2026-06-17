@@ -183,6 +183,7 @@ export CODEX_ARGS='--ask-for-approval never --sandbox danger-full-access -c mode
 export CODEX_WORKDIR="$PWD"
 export CODEX_TIMEOUT_SECS=180
 export CODEX_PERSIST_SESSIONS=1
+export CODEX_USAGE_LIMIT_FALLBACK_MODEL='gpt-5.5'
 ```
 
 `danger-full-access` lets the DM-driven Codex session edit files, run builds,
@@ -195,7 +196,9 @@ Codex `thread_id` in SQLite per phone peer and workdir. Follow-up turns resume
 that session with `codex exec resume <thread_id>` instead of rebuilding the full
 prompt every time. If a stored session cannot be resumed, it is cleared and the
 turn is retried once as a fresh session. Existing `--ephemeral` entries in
-`CODEX_ARGS` are stripped for session-backed user turns.
+`CODEX_ARGS` are stripped for session-backed user turns. If Codex reports a
+model usage-limit error such as `Switch to another model now`, the same turn is
+retried with `CODEX_USAGE_LIMIT_FALLBACK_MODEL`, defaulting to `gpt-5.5`.
 
 Optional SQLite memory configuration:
 
