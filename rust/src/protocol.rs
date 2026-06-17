@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const AUDIO_ENCRYPTION_ALGORITHM: &str = "xchacha20poly1305";
+pub type AttachmentEncryption = AudioEncryption;
+pub type AttachmentReference = MediaReference;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -191,6 +193,13 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
         return Ok(WireMessage::media_bundle(media_bundle));
     }
 
+    if object.contains_key("attachments") {
+        let media_bundle: MediaBundle = serde_json::from_value(value.clone())
+            .map_err(|err| anyhow!("media_bundle is invalid: {err}"))?;
+        validate_media_bundle(&media_bundle)?;
+        return Ok(WireMessage::media_bundle(media_bundle));
+    }
+
     if let Some(query) = object.get("query") {
         return query
             .as_str()
@@ -244,7 +253,7 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, or object `media_bundle` field"
+        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `media_bundle`, or object `attachments` field"
     ))
 }
 
@@ -275,22 +284,69 @@ pub fn parse_media_bundle_query(content: &str) -> Result<MediaBundle> {
 }
 
 fn validate_audio_reference(audio: &AudioReference) -> Result<()> {
-    if !(audio.url.starts_with("https://") || audio.url.starts_with("http://")) {
-        return Err(anyhow!("field `audio.url` must be an HTTP(S) URL"));
-    }
-    if audio.sha256.len() != 64 || !audio.sha256.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err(anyhow!(
-            "field `audio.sha256` must be a 64-character hex SHA-256"
-        ));
-    }
-    if audio.size == 0 {
-        return Err(anyhow!("field `audio.size` must be greater than zero"));
-    }
+    validate_reference_fields(
+        "audio",
+        &audio.url,
+        &audio.sha256,
+        audio.size,
+        &audio.media_type,
+        audio.encryption.as_ref(),
+    )?;
     if !audio.media_type.starts_with("audio/") {
         return Err(anyhow!("field `audio.type` must be an audio MIME type"));
     }
     if let Some(encryption) = &audio.encryption {
-        validate_audio_encryption(encryption)?;
+        validate_attachment_encryption(encryption)?;
+        if !encryption.plaintext_media_type.starts_with("audio/") {
+            return Err(anyhow!(
+                "field `audio.encryption.plaintext_type` must be an audio MIME type"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_attachment_reference(reference: &AttachmentReference) -> Result<()> {
+    validate_reference_fields(
+        "media.reference",
+        &reference.url,
+        &reference.sha256,
+        reference.size,
+        &reference.media_type,
+        reference.encryption.as_ref(),
+    )
+}
+
+fn validate_media_reference(reference: &MediaReference) -> Result<()> {
+    validate_attachment_reference(reference)
+}
+
+fn validate_reference_fields(
+    label: &str,
+    url: &str,
+    sha256: &str,
+    size: u64,
+    media_type: &str,
+    encryption: Option<&AttachmentEncryption>,
+) -> Result<()> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(anyhow!("field `{label}.url` must be an HTTP(S) URL"));
+    }
+    if sha256.len() != 64 || !sha256.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "field `{label}.sha256` must be a 64-character hex SHA-256"
+        ));
+    }
+    if size == 0 {
+        return Err(anyhow!("field `{label}.size` must be greater than zero"));
+    }
+    if !media_type.contains('/') {
+        return Err(anyhow!(
+            "field `{label}.type` must be a MIME type such as `image/jpeg`"
+        ));
+    }
+    if let Some(encryption) = encryption {
+        validate_attachment_encryption(encryption)?;
     }
     Ok(())
 }
@@ -309,51 +365,14 @@ fn validate_media_bundle(media_bundle: &MediaBundle) -> Result<()> {
     Ok(())
 }
 
-fn validate_media_reference(reference: &MediaReference) -> Result<()> {
-    if !(reference.url.starts_with("https://") || reference.url.starts_with("http://")) {
-        return Err(anyhow!(
-            "field `media.reference.url` must be an HTTP(S) URL"
-        ));
-    }
-    if reference.sha256.len() != 64 || !reference.sha256.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return Err(anyhow!(
-            "field `media.reference.sha256` must be a 64-character hex SHA-256"
-        ));
-    }
-    if reference.size == 0 {
-        return Err(anyhow!(
-            "field `media.reference.size` must be greater than zero"
-        ));
-    }
-    if !reference.media_type.contains('/') {
-        return Err(anyhow!(
-            "field `media.reference.type` must be a MIME type such as `image/jpeg`"
-        ));
-    }
-    if let Some(encryption) = &reference.encryption {
-        validate_media_encryption(encryption)?;
-    }
-    Ok(())
-}
-
-fn validate_audio_encryption(encryption: &AudioEncryption) -> Result<()> {
-    validate_media_encryption(encryption)?;
-    if !encryption.plaintext_media_type.starts_with("audio/") {
-        return Err(anyhow!(
-            "field `audio.encryption.plaintext_type` must be an audio MIME type"
-        ));
-    }
-    Ok(())
-}
-
 fn validate_media_encryption(encryption: &AudioEncryption) -> Result<()> {
     if encryption.algorithm != AUDIO_ENCRYPTION_ALGORITHM {
         return Err(anyhow!(
-            "field `audio.encryption.algorithm` must be `{AUDIO_ENCRYPTION_ALGORITHM}`"
+            "field `media.encryption.algorithm` must be `{AUDIO_ENCRYPTION_ALGORITHM}`"
         ));
     }
-    validate_base64url_len("audio.encryption.key", &encryption.key, 32)?;
-    validate_base64url_len("audio.encryption.nonce", &encryption.nonce, 24)?;
+    validate_base64url_len("media.encryption.key", &encryption.key, 32)?;
+    validate_base64url_len("media.encryption.nonce", &encryption.nonce, 24)?;
     if encryption.plaintext_sha256.len() != 64
         || !encryption
             .plaintext_sha256
@@ -361,20 +380,24 @@ fn validate_media_encryption(encryption: &AudioEncryption) -> Result<()> {
             .all(|ch| ch.is_ascii_hexdigit())
     {
         return Err(anyhow!(
-            "field `audio.encryption.plaintext_sha256` must be a 64-character hex SHA-256"
+            "field `media.encryption.plaintext_sha256` must be a 64-character hex SHA-256"
         ));
     }
     if encryption.plaintext_size == 0 {
         return Err(anyhow!(
-            "field `audio.encryption.plaintext_size` must be greater than zero"
+            "field `media.encryption.plaintext_size` must be greater than zero"
         ));
     }
     if !encryption.plaintext_media_type.contains('/') {
         return Err(anyhow!(
-            "field `audio.encryption.plaintext_type` must be a MIME type such as `audio/wav`"
+            "field `media.encryption.plaintext_type` must be a MIME type such as `image/jpeg`"
         ));
     }
     Ok(())
+}
+
+fn validate_attachment_encryption(encryption: &AudioEncryption) -> Result<()> {
+    validate_media_encryption(encryption)
 }
 
 fn validate_audio_retry_request(request: &AudioRetryRequest) -> Result<()> {
@@ -442,6 +465,62 @@ mod tests {
                 .and_then(|bundle| bundle.query.clone()),
             Some("review this image".to_string())
         );
+    }
+
+    #[test]
+    fn parses_media_bundle_payload_from_attachments_root() {
+        let parsed = parse_wire_message(
+            r#"{
+                "query": "analyze file",
+                "attachments": [
+                    {
+                        "url": "https://cdn.example.com/doc.pdf",
+                        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "size": 1234,
+                        "type": "application/pdf",
+                        "name": "doc.pdf"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.kind(), "media_bundle");
+        assert_eq!(
+            parsed
+                .media_bundle_ref()
+                .and_then(|bundle| bundle.query.clone()),
+            Some("analyze file".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_non_audio_attachment_in_media_bundle() {
+        let parsed = parse_wire_message(
+            r#"{
+                "media_bundle": {
+                    "query": "read this pdf",
+                    "attachments": [
+                        {
+                            "url": "https://cdn.example.com/doc.pdf",
+                            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                            "size": 1234,
+                            "type": "application/pdf",
+                            "name": "doc.pdf",
+                            "encryption": {
+                                "algorithm": "xchacha20poly1305",
+                                "key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                "plaintext_sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                                "plaintext_size": 2048,
+                                "plaintext_type": "application/pdf"
+                            }
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.kind(), "media_bundle");
     }
 
     #[test]

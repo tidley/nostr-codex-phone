@@ -3407,13 +3407,13 @@ class _BreathingRecordButton extends StatelessWidget {
       builder: (context, child) {
         final pulse = animation.value;
         final fill = Color.lerp(
-          Colors.yellow.shade700,
-          Colors.green.shade600,
+          Colors.orange.shade700,
+          Colors.yellow.shade600,
           pulse,
         )!;
         final glow = Color.lerp(
           Colors.yellow.shade600,
-          Colors.green.shade500,
+          Colors.orange.shade500,
           pulse,
         )!;
         return DecoratedBox(
