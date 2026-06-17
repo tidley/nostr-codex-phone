@@ -103,6 +103,20 @@ class _RepoTarget {
   }
 }
 
+class _MediaUploadCancelledException implements Exception {
+  const _MediaUploadCancelledException({
+    required this.server,
+    required this.sessionId,
+  });
+
+  final String server;
+  final int sessionId;
+
+  @override
+  String toString() =>
+      'Media upload cancelled (session=$sessionId, server=$server)';
+}
+
 enum _MediaSource { camera, photoPicker, filePicker }
 
 class _MediaSelection {
@@ -299,6 +313,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _recording = false;
   bool _sendingAudio = false;
   bool _sendingMedia = false;
+  bool _mediaUploadCancelled = false;
+  int _mediaUploadSessionId = 0;
+  Completer<void>? _mediaUploadCancelCompleter;
   bool _autoSpeak = true;
   bool _speaking = false;
   bool _wavRetryRequested = false;
@@ -1258,7 +1275,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _appendMessageForActiveConversation(conversationMessage);
       } else {
         final statusText = message.text.trim();
-        _status = statusText.isEmpty ? 'Received status update' : 'Server: $statusText';
+        _status = statusText.isEmpty
+            ? 'Received status update'
+            : 'Server: $statusText';
       }
 
       if (audioRetryRequested) {
@@ -1505,6 +1524,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final fileName = selected!.fileName;
     final contentType = selected.contentType;
 
+    _mediaUploadCancelled = false;
+    _mediaUploadCancelCompleter = Completer<void>();
+    final uploadSessionId = ++_mediaUploadSessionId;
+
     setState(() {
       _clearPendingMediaAttachment();
       _sendingMedia = true;
@@ -1513,22 +1536,76 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     BridgeAudioReference attachment;
     try {
-      attachment = await _uploadAudioToBlossom(path, fileName, contentType);
+      attachment = await _uploadAudioToBlossom(
+        path,
+        fileName,
+        contentType,
+        mediaUploadSessionId: uploadSessionId,
+      );
     } catch (error) {
+      if (!_sendingMedia) {
+        return;
+      }
       if (!mounted) return;
-      setState(() => _sendingMedia = false);
+      if (error is _MediaUploadCancelledException) {
+        setState(() {
+          _sendingMedia = false;
+          _mediaUploadCancelCompleter = null;
+          _status = 'Attachment upload cancelled';
+        });
+        return;
+      }
+
       _showError('Attachment upload failed: $error');
+      setState(() {
+        _sendingMedia = false;
+        _mediaUploadCancelCompleter = null;
+      });
       return;
     }
 
     if (!mounted) return;
+    if (_mediaUploadCancelled || uploadSessionId != _mediaUploadSessionId) {
+      setState(() {
+        _sendingMedia = false;
+        _mediaUploadCancelCompleter = null;
+      });
+      return;
+    }
+
     setState(() {
       _pendingMediaAttachment = attachment;
       _pendingMediaFileName = fileName;
       _pendingMediaContentType = contentType;
       _status = 'Attachment ready. Press Send.';
       _sendingMedia = false;
+      _mediaUploadCancelCompleter = null;
     });
+  }
+
+  void _cancelMediaUpload() {
+    if (!_sendingMedia || _mediaUploadSessionId == 0) return;
+    if (_mediaUploadCancelCompleter?.isCompleted ?? true) return;
+
+    _mediaUploadCancelled = true;
+    _mediaUploadCancelCompleter!.complete();
+    if (!mounted) return;
+    setState(() {
+      _sendingMedia = false;
+      _mediaUploadCancelCompleter = null;
+      _status = 'Attachment upload cancelled';
+      _clearPendingMediaAttachment();
+    });
+  }
+
+  Future<void> _cancelCurrentAction() async {
+    if (_recording) {
+      await _cancelRecording();
+      return;
+    }
+    if (_sendingMedia) {
+      _cancelMediaUpload();
+    }
   }
 
   Future<_MediaSelection?> _pickMediaAttachment() async {
@@ -1879,12 +1956,21 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   Future<BridgeAudioReference> _uploadAudioToBlossom(
     String path,
     String fileName,
-    String contentType,
-  ) async {
+    String contentType, {
+    int mediaUploadSessionId = 0,
+  }) async {
     final servers = _selectedBlossomServers();
     Object? lastError;
+    final activeSecret = _secretKeyController.text.trim();
 
     for (final server in servers) {
+      if (mediaUploadSessionId != 0 &&
+          mediaUploadSessionId != _mediaUploadSessionId) {
+        throw _MediaUploadCancelledException(
+          server: server,
+          sessionId: mediaUploadSessionId,
+        );
+      }
       if (mounted) {
         setState(
           () => _status = 'Uploading attachment to ${_serverLabel(server)}...',
@@ -1892,23 +1978,43 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       }
 
       try {
-        return await blossomUploadAudio(
-          config: BridgeBlossomUploadConfig(
-            secretKey: _secretKeyController.text.trim(),
-            serverUrl: server,
-            filePath: path,
-            contentType: contentType,
-            fileName: fileName,
-          ),
-        ).timeout(
-          _blossomUploadTimeout,
-          onTimeout: () {
-            throw Exception(
-              'Blossom upload timed out after ${_blossomUploadTimeout.inSeconds}s on $server',
+        final uploadFuture =
+            blossomUploadAudio(
+              config: BridgeBlossomUploadConfig(
+                secretKey: activeSecret,
+                serverUrl: server,
+                filePath: path,
+                contentType: contentType,
+                fileName: fileName,
+              ),
+            ).timeout(
+              _blossomUploadTimeout,
+              onTimeout: () {
+                throw Exception(
+                  'Blossom upload timed out after ${_blossomUploadTimeout.inSeconds}s on $server',
+                );
+              },
             );
-          },
+        unawaited(uploadFuture.then((_) {}).catchError((_) {}));
+
+        final cancelCompleter = _mediaUploadCancelCompleter;
+        if (cancelCompleter == null) {
+          return await uploadFuture;
+        }
+
+        final cancelMessage = _MediaUploadCancelledException(
+          server: server,
+          sessionId: mediaUploadSessionId,
         );
+        return await Future.any([
+          uploadFuture,
+          cancelCompleter.future.then((_) => throw cancelMessage),
+        ]);
       } catch (error) {
+        if (error is _MediaUploadCancelledException) {
+          _mediaUploadCancelled = true;
+          rethrow;
+        }
         lastError = error;
       }
     }
@@ -2204,7 +2310,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               onMicPressed: _toggleRecording,
               onConnectPressed: _connect,
               onAttachMedia: _attachAndSendMedia,
-              onCancelRecording: _cancelRecording,
+              onCancelRecording: () => unawaited(_cancelCurrentAction()),
               onClearPendingMedia: _clearPendingMediaAttachment,
               onSendPressed: () => _sendMediaOrText(),
             ),
@@ -3142,14 +3248,25 @@ class _ComposerState extends State<_Composer>
                 final canAttach = !busy && !widget.connecting;
                 final attachIcon = widget.recording
                     ? const Icon(Icons.close)
+                    : widget.sendingMedia
+                    ? const Icon(Icons.close)
                     : const Icon(Icons.attach_file);
                 final attachAction = widget.recording
+                    ? widget.onCancelRecording
+                    : widget.sendingMedia
                     ? widget.onCancelRecording
                     : widget.onAttachMedia;
                 final attachTooltip = widget.recording
                     ? 'Cancel recording'
+                    : widget.sendingMedia
+                    ? 'Cancel attachment send'
                     : 'Attach photo or file';
                 final attachStyle = widget.recording
+                    ? IconButton.styleFrom(
+                        foregroundColor: theme.colorScheme.error,
+                        minimumSize: const Size(48, 48),
+                      )
+                    : widget.sendingMedia
                     ? IconButton.styleFrom(
                         foregroundColor: theme.colorScheme.error,
                         minimumSize: const Size(48, 48),
@@ -3220,7 +3337,11 @@ class _ComposerState extends State<_Composer>
                   children: [
                     IconButton.filledTonal(
                       tooltip: attachTooltip,
-                      onPressed: canAttach ? attachAction : null,
+                      onPressed: (widget.recording || widget.sendingMedia)
+                          ? attachAction
+                          : canAttach
+                          ? attachAction
+                          : null,
                       style: attachStyle,
                       icon: attachIcon,
                     ),
