@@ -47,6 +47,7 @@ const _autoBlossomUploadServers = <String>[
 
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
+const _nostrSendTimeout = Duration(seconds: 15);
 
 class _BlossomPreset {
   const _BlossomPreset({
@@ -1370,8 +1371,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     required String label,
     required Future<String> Function() sender,
   }) async {
+    Future<String> attemptSend() => sender().timeout(
+      _nostrSendTimeout,
+      onTimeout: () =>
+          throw TimeoutException('$label timed out', _nostrSendTimeout),
+    );
+
     try {
-      return await sender();
+      return await attemptSend();
     } catch (firstError) {
       if (!_isRecoverableNostrSendError(firstError)) {
         rethrow;
@@ -1382,7 +1389,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       setState(() => _status = '$label relay issue, retrying...');
       try {
         await Future<void>.delayed(const Duration(milliseconds: 350));
-        return await sender();
+        return await attemptSend();
       } catch (secondError) {
         if (!_isRecoverableNostrSendError(secondError)) {
           rethrow;
@@ -1395,7 +1402,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         if (!mounted) {
           rethrow;
         }
-        return await sender();
+        return await attemptSend();
       }
     }
   }
@@ -1602,7 +1609,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     final caption = _queryController.text.trim();
     setState(() {
-      _sendingMedia = true;
+      _sending = true;
       _status = 'Sending attachment request...';
     });
 
@@ -1623,23 +1630,27 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           label: 'Transcribing message...',
         );
         _queryController.clear();
-        _clearPendingMediaAttachment();
+        _clearPendingMediaAttachmentInMemory();
         _status = 'Attachment sent';
       });
     } catch (error) {
       _showError('Attachment message failed: $error');
     } finally {
       if (mounted) {
-        setState(() => _sendingMedia = false);
+        setState(() => _sending = false);
       }
     }
   }
 
   void _clearPendingMediaAttachment() {
     setState(() {
-      _pendingMediaAttachment = null;
-      _pendingMediaFileName = null;
+      _clearPendingMediaAttachmentInMemory();
     });
+  }
+
+  void _clearPendingMediaAttachmentInMemory() {
+    _pendingMediaAttachment = null;
+    _pendingMediaFileName = null;
   }
 
   bool _isResendableMessage(ConversationMessage message) {
@@ -1704,7 +1715,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final uploadSessionId = ++_mediaUploadSessionId;
 
     setState(() {
-      _clearPendingMediaAttachment();
+      _clearPendingMediaAttachmentInMemory();
       _sendingMedia = true;
       _status = 'Uploading attachment to Blossom...';
     });
@@ -1768,7 +1779,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _sendingMedia = false;
       _mediaUploadCancelCompleter = null;
       _status = 'Attachment upload cancelled';
-      _clearPendingMediaAttachment();
+      _clearPendingMediaAttachmentInMemory();
     });
   }
 
