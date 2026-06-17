@@ -109,11 +109,13 @@ class _MediaSelection {
     required this.path,
     required this.fileName,
     required this.extension,
+    required this.contentType,
   });
 
   final String path;
   final String fileName;
   final String? extension;
+  final String contentType;
 }
 
 enum _VoiceFormat { opus, wav }
@@ -317,8 +319,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   String? _status;
   BridgeAudioReference? _pendingMediaAttachment;
   String? _pendingMediaFileName;
+  String? _pendingMediaContentType;
 
   bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
+
+  String get _pendingMediaTypeForAnalysis =>
+      _pendingMediaContentType?.trim() ?? 'application/octet-stream';
 
   String get _activeConversationKey {
     final selected = _selectedRepoTargetId;
@@ -1429,6 +1435,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _pendingMediaAttachment = null;
       _pendingMediaFileName = null;
+      _pendingMediaContentType = null;
     });
   }
 
@@ -1489,7 +1496,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
 
     final fileName = selected!.fileName;
-    final contentType = _inferContentType(fileName, selected.extension);
+    final contentType = selected.contentType;
 
     setState(() {
       _clearPendingMediaAttachment();
@@ -1499,7 +1506,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     BridgeAudioReference attachment;
     try {
-      attachment = await _uploadAudioToBlossom(path, fileName, contentType);
+      attachment = await _uploadAudioToBlossom(
+        path,
+        fileName,
+        'application/octet-stream',
+      );
     } catch (error) {
       if (!mounted) return;
       setState(() => _sendingMedia = false);
@@ -1511,6 +1522,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _pendingMediaAttachment = attachment;
       _pendingMediaFileName = fileName;
+      _pendingMediaContentType = contentType;
       _status = 'Attachment ready. Press Send.';
       _sendingMedia = false;
     });
@@ -1540,6 +1552,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           path: path,
           fileName: _normalizeName(file.name, path),
           extension: file.extension,
+          contentType: _inferContentType(file.name, file.extension),
         );
       }
 
@@ -1557,6 +1570,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           imagePath,
         ),
         extension: _pathExtension(imagePath),
+        contentType: _inferContentType(
+          imagePath.split(Platform.pathSeparator).last,
+          _pathExtension(imagePath),
+        ),
       );
     } catch (error) {
       _showError('Media picker failed: $error');
@@ -1966,7 +1983,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         'name': attachment.name ?? 'media',
         'url': attachment.url,
         'sha256': attachment.sha256,
-        'content_type': attachment.mediaType,
+        'content_type': _pendingMediaTypeForAnalysis,
       },
     };
     const encoder = JsonEncoder.withIndent('  ');
