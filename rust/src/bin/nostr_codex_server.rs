@@ -668,7 +668,8 @@ async fn process_text_turn(
             messenger,
             peer_pubkey,
             "Understood — starting work on this request.",
-        );
+        )
+        .await;
     }
 
     let session_id = load_codex_session(memory, peer_pubkey, &codex_config.working_dir);
@@ -1450,12 +1451,15 @@ async fn send_response(messenger: &NostrMessenger, receiver_pubkey: &str, respon
     }
 }
 
-fn send_status(messenger: &NostrMessenger, receiver_pubkey: &str, status: &str) {
+async fn send_status(messenger: &NostrMessenger, receiver_pubkey: &str, status: &str) {
     let status = status.trim();
     if status.is_empty() {
         return;
     }
-    if let Err(err) = messenger.send_wire_to_pubkey(receiver_pubkey, WireMessage::status(status)) {
+    if let Err(err) = messenger
+        .send_wire_to_pubkey(receiver_pubkey, WireMessage::status(status))
+        .await
+    {
         warn!("failed to send status DM: {err:#}");
     }
 }
