@@ -941,6 +941,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
     _pendingTranscriptionEventId = null;
     unawaited(_saveConversationHistoryForKey(_activeConversationKey));
+    _scrollToLatestMessage();
     return true;
   }
 
@@ -2488,6 +2489,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
                           child: _MessageTile(
                             message: message,
                             showResend: _isResendableMessage(message),
+                            stopSpeakingOnTap:
+                                _speaking &&
+                                message.direction == MessageDirection.incoming,
+                            onStopSpeaking: _stopSpeaking,
                             onResend: _canResendMessage(message)
                                 ? () => _resendMessage(message)
                                 : null,
@@ -3557,11 +3562,15 @@ class _MessageTile extends StatelessWidget {
   const _MessageTile({
     required this.message,
     required this.showResend,
+    required this.stopSpeakingOnTap,
+    required this.onStopSpeaking,
     required this.onResend,
   });
 
   final ConversationMessage message;
   final bool showResend;
+  final bool stopSpeakingOnTap;
+  final VoidCallback? onStopSpeaking;
   final VoidCallback? onResend;
 
   @override
@@ -3571,98 +3580,106 @@ class _MessageTile extends StatelessWidget {
     final processing = message.kind == 'transcribing';
     final userSide = !incoming || transcript;
     final colorScheme = Theme.of(context).colorScheme;
+    final tile = Padding(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                _messageIcon(
+                  incoming: incoming,
+                  transcript: transcript,
+                  processing: processing,
+                ),
+                color: userSide
+                    ? colorScheme.onPrimaryContainer
+                    : colorScheme.onSurface,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _messageTitle(message.kind),
+                  style: Theme.of(context).textTheme.titleSmall,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Text(
+                _formatTime(message.timestamp),
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+              if (showResend) ...[
+                const SizedBox(width: 4),
+                SizedBox.square(
+                  dimension: 36,
+                  child: IconButton(
+                    tooltip: _resendTooltip(),
+                    visualDensity: VisualDensity.compact,
+                    iconSize: 18,
+                    onPressed: onResend,
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ),
+              ],
+              if (incoming && message.text.trim().isNotEmpty) ...[
+                const SizedBox(width: 4),
+                SizedBox.square(
+                  dimension: 36,
+                  child: IconButton(
+                    tooltip: 'Copy full message',
+                    visualDensity: VisualDensity.compact,
+                    iconSize: 18,
+                    onPressed: () => _copyMessage(context),
+                    icon: const Icon(Icons.content_copy),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (processing)
+            Row(
+              children: [
+                SizedBox(
+                  height: 18,
+                  width: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: colorScheme.onPrimaryContainer,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: MarkdownBody(
+                    data: message.text,
+                    selectable: true,
+                    softLineBreak: true,
+                  ),
+                ),
+              ],
+            )
+          else
+            MarkdownBody(
+              data: message.text,
+              selectable: true,
+              softLineBreak: true,
+            ),
+        ],
+      ),
+    );
+
     return Card(
       color: userSide
           ? colorScheme.primaryContainer
           : colorScheme.surfaceContainerHigh,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  _messageIcon(
-                    incoming: incoming,
-                    transcript: transcript,
-                    processing: processing,
-                  ),
-                  color: userSide
-                      ? colorScheme.onPrimaryContainer
-                      : colorScheme.onSurface,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _messageTitle(message.kind),
-                    style: Theme.of(context).textTheme.titleSmall,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                Text(
-                  _formatTime(message.timestamp),
-                  style: Theme.of(context).textTheme.labelSmall,
-                ),
-                if (showResend) ...[
-                  const SizedBox(width: 4),
-                  SizedBox.square(
-                    dimension: 36,
-                    child: IconButton(
-                      tooltip: _resendTooltip(),
-                      visualDensity: VisualDensity.compact,
-                      iconSize: 18,
-                      onPressed: onResend,
-                      icon: const Icon(Icons.refresh),
-                    ),
-                  ),
-                ],
-                if (incoming && message.text.trim().isNotEmpty) ...[
-                  const SizedBox(width: 4),
-                  SizedBox.square(
-                    dimension: 36,
-                    child: IconButton(
-                      tooltip: 'Copy full message',
-                      visualDensity: VisualDensity.compact,
-                      iconSize: 18,
-                      onPressed: () => _copyMessage(context),
-                      icon: const Icon(Icons.content_copy),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 8),
-            if (processing)
-              Row(
-                children: [
-                  SizedBox(
-                    height: 18,
-                    width: 18,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: colorScheme.onPrimaryContainer,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: MarkdownBody(
-                      data: message.text,
-                      selectable: true,
-                      softLineBreak: true,
-                    ),
-                  ),
-                ],
-              )
-            else
-              MarkdownBody(
-                data: message.text,
-                selectable: true,
-                softLineBreak: true,
-              ),
-          ],
-        ),
-      ),
+      child: stopSpeakingOnTap
+          ? InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: onStopSpeaking,
+              child: tile,
+            )
+          : tile,
     );
   }
 
