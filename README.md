@@ -12,6 +12,31 @@ Both peers send NIP-17/NIP-59 GiftWrapped private direct messages whose decrypte
 
 ```json
 {
+  "media_bundle": {
+    "query": "analyze this file",
+    "attachments": [
+      {
+        "url": "https://blossom.example/sha256.bin",
+        "sha256": "ciphertext-sha256-hex",
+        "size": 12345,
+        "type": "application/pdf",
+        "name": "notes.pdf",
+        "encryption": {
+          "algorithm": "xchacha20poly1305",
+          "key": "base64url-32-byte-key",
+          "nonce": "base64url-24-byte-nonce",
+          "plaintext_sha256": "plaintext-sha256-hex",
+          "plaintext_size": 11895,
+          "plaintext_type": "application/pdf"
+        }
+      }
+    ]
+  }
+}
+```
+
+```json
+{
   "audio": {
     "url": "https://blossom.example/sha256.ogg",
     "sha256": "ciphertext-sha256-hex",
@@ -75,8 +100,9 @@ optional fast path, but server-side STT is the reliable default.
 
 ## Server
 
-The server listens for `{ "query": "..." }` and `{ "audio": { ... } }`, runs
-Codex non-interactively, and replies with `{ "response": "..." }` or
+The server listens for `{ "query": "..." }`, `{ "audio": { ... } }`, and
+`{ "media_bundle": { ... } }` (one or more encrypted attachments),
+runs Codex non-interactively, and replies with `{ "response": "..." }` or
 `{ "error": "..." }`. For compressed audio transcription failures, it can also
 reply with `{ "audio_retry": { "format": "wav", "reason": "..." } }`.
 
