@@ -95,52 +95,61 @@ pub async fn download_blossom_audio(
     audio: &AudioReference,
     config: &AudioConfig,
 ) -> Result<DownloadedAudio> {
-    if audio.size > config.max_bytes {
+    let extension = audio_extension(audio);
+    download_blossom_attachment(audio, &extension, config).await
+}
+
+pub async fn download_blossom_attachment(
+    attachment: &AudioReference,
+    extension: &str,
+    config: &AudioConfig,
+) -> Result<DownloadedAudio> {
+    if attachment.size > config.max_bytes {
         return Err(anyhow!(
-            "audio blob is too large: {} bytes > {} byte limit",
-            audio.size,
+            "attachment blob is too large: {} bytes > {} byte limit",
+            attachment.size,
             config.max_bytes
         ));
     }
 
     let response = Client::new()
-        .get(&audio.url)
+        .get(&attachment.url)
         .send()
         .await
-        .with_context(|| format!("failed to download audio blob `{}`", audio.url))?;
+        .with_context(|| format!("failed to download attachment `{}`", attachment.url))?;
     let status = response.status();
     if !status.is_success() {
         return Err(anyhow!(
-            "failed to download audio blob `{}`: HTTP {status}",
-            audio.url
+            "failed to download attachment blob `{}`: HTTP {status}",
+            attachment.url
         ));
     }
 
     let bytes = response
         .bytes()
         .await
-        .with_context(|| format!("failed to read audio blob `{}`", audio.url))?;
+        .with_context(|| format!("failed to read attachment blob `{}`", attachment.url))?;
     if bytes.len() as u64 > config.max_bytes {
         return Err(anyhow!(
-            "downloaded audio blob is too large: {} bytes > {} byte limit",
+            "downloaded attachment blob is too large: {} bytes > {} byte limit",
             bytes.len(),
             config.max_bytes
         ));
     }
 
     let actual_hash = sha256_hex(&bytes);
-    if actual_hash != audio.sha256.to_lowercase() {
+    if actual_hash != attachment.sha256.to_lowercase() {
         return Err(anyhow!(
-            "audio blob sha256 mismatch: expected {}, got {actual_hash}",
-            audio.sha256
+            "attachment blob sha256 mismatch: expected {}, got {actual_hash}",
+            attachment.sha256
         ));
     }
 
-    let (audio_bytes, audio_hash) = if let Some(encryption) = &audio.encryption {
+    let (attachment_bytes, attachment_hash) = if let Some(encryption) = &attachment.encryption {
         let plaintext = decrypt_audio_payload(&bytes, encryption)?;
         if plaintext.len() as u64 > config.max_bytes {
             return Err(anyhow!(
-                "decrypted audio is too large: {} bytes > {} byte limit",
+                "decrypted attachment is too large: {} bytes > {} byte limit",
                 plaintext.len(),
                 config.max_bytes
             ));
@@ -150,12 +159,23 @@ pub async fn download_blossom_audio(
         (bytes.to_vec(), actual_hash)
     };
 
-    let temp_dir = tempfile::tempdir().context("failed to create audio temp directory")?;
-    let extension = audio_extension(audio);
-    let path = temp_dir.path().join(format!("{audio_hash}.{extension}"));
-    tokio::fs::write(&path, &audio_bytes)
+    let temp_dir = tempfile::tempdir().context("failed to create attachment temp directory")?;
+    let extension = if extension.trim().is_empty() {
+        "bin"
+    } else {
+        extension.trim()
+    };
+    let path = temp_dir
+        .path()
+        .join(format!("{attachment_hash}.{extension}"));
+    tokio::fs::write(&path, &attachment_bytes)
         .await
-        .with_context(|| format!("failed to write downloaded audio to `{}`", path.display()))?;
+        .with_context(|| {
+            format!(
+                "failed to write downloaded attachment to `{}`",
+                path.display()
+            )
+        })?;
 
     Ok(DownloadedAudio {
         _temp_dir: temp_dir,
