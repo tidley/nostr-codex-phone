@@ -3562,8 +3562,8 @@ class _ComposerState extends State<_Composer> {
                             backgroundColor: const WidgetStatePropertyAll(
                               Colors.transparent,
                             ),
-                            foregroundColor: WidgetStatePropertyAll(
-                              theme.colorScheme.onPrimaryContainer,
+                            foregroundColor: const WidgetStatePropertyAll(
+                              Color(0xff1b140f),
                             ),
                           )
                         : mainButtonStyle,
@@ -3611,7 +3611,7 @@ class _RecordingButton extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(28),
-        color: const Color(0xffd38b42),
+        color: const Color(0xffdfa257),
       ),
       child: FilledButtonTheme(
         data: FilledButtonThemeData(
@@ -3782,58 +3782,70 @@ class _MessageTileState extends State<_MessageTile>
                     : colorScheme.onSurface,
               ),
               const SizedBox(width: 8),
+              Flexible(
+                fit: FlexFit.loose,
+                child: Text(
+                  _messageTitle(widget.message.kind),
+                  style: Theme.of(context).textTheme.titleSmall,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
               Expanded(
-                child: Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        _messageTitle(widget.message.kind),
-                        style: Theme.of(context).textTheme.titleSmall,
-                        overflow: TextOverflow.ellipsis,
+                child: Center(
+                  child: widget.speaking
+                      ? _SpeakingEqualizer(
+                          animation: _equalizerController,
+                          color: userSide
+                              ? colorScheme.onPrimaryContainer
+                              : colorScheme.primary,
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _formatTime(widget.message.timestamp),
+                    style: Theme.of(context).textTheme.labelSmall,
+                  ),
+                  if (widget.showResend) ...[
+                    const SizedBox(width: 4),
+                    SizedBox.square(
+                      dimension: 36,
+                      child: IconButton(
+                        tooltip: _resendTooltip(),
+                        visualDensity: VisualDensity.compact,
+                        iconSize: 18,
+                        onPressed: widget.onResend,
+                        icon: const Icon(Icons.refresh),
                       ),
                     ),
-                    if (widget.speaking) ...[
-                      const SizedBox(width: 10),
-                      _SpeakingEqualizer(
-                        animation: _equalizerController,
-                        color: userSide
-                            ? colorScheme.onPrimaryContainer
-                            : colorScheme.primary,
-                      ),
-                    ],
                   ],
-                ),
+                  if (incoming && widget.message.text.trim().isNotEmpty) ...[
+                    const SizedBox(width: 4),
+                    SizedBox.square(
+                      dimension: 36,
+                      child: IconButton(
+                        tooltip: widget.speaking
+                            ? 'Stop speaking'
+                            : 'Copy full message',
+                        visualDensity: VisualDensity.compact,
+                        iconSize: 18,
+                        onPressed: widget.speaking
+                            ? widget.onStopSpeaking
+                            : () => _copyMessage(context),
+                        icon: Icon(
+                          widget.speaking
+                              ? Icons.stop_circle_outlined
+                              : Icons.content_copy,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
               ),
-              Text(
-                _formatTime(widget.message.timestamp),
-                style: Theme.of(context).textTheme.labelSmall,
-              ),
-              if (widget.showResend) ...[
-                const SizedBox(width: 4),
-                SizedBox.square(
-                  dimension: 36,
-                  child: IconButton(
-                    tooltip: _resendTooltip(),
-                    visualDensity: VisualDensity.compact,
-                    iconSize: 18,
-                    onPressed: widget.onResend,
-                    icon: const Icon(Icons.refresh),
-                  ),
-                ),
-              ],
-              if (incoming && widget.message.text.trim().isNotEmpty) ...[
-                const SizedBox(width: 4),
-                SizedBox.square(
-                  dimension: 36,
-                  child: IconButton(
-                    tooltip: 'Copy full message',
-                    visualDensity: VisualDensity.compact,
-                    iconSize: 18,
-                    onPressed: () => _copyMessage(context),
-                    icon: const Icon(Icons.content_copy),
-                  ),
-                ),
-              ],
             ],
           ),
           const SizedBox(height: 8),
@@ -3852,7 +3864,7 @@ class _MessageTileState extends State<_MessageTile>
                 Expanded(
                   child: MarkdownBody(
                     data: widget.message.text,
-                    selectable: true,
+                    selectable: !widget.stopSpeakingOnTap,
                     softLineBreak: true,
                   ),
                 ),
@@ -3861,7 +3873,7 @@ class _MessageTileState extends State<_MessageTile>
           else
             MarkdownBody(
               data: widget.message.text,
-              selectable: true,
+              selectable: !widget.stopSpeakingOnTap,
               softLineBreak: true,
             ),
         ],
