@@ -3764,6 +3764,48 @@ class _MessageTileState extends State<_MessageTile>
         ? colorScheme.primaryContainer
         : colorScheme.surfaceContainerHigh;
     final flashColor = Color.lerp(baseColor, colorScheme.primary, 0.16)!;
+    final title = _messageTitle(widget.message.kind);
+    final headerActions = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          _formatTime(widget.message.timestamp),
+          style: Theme.of(context).textTheme.labelSmall,
+        ),
+        if (widget.showResend) ...[
+          const SizedBox(width: 4),
+          SizedBox.square(
+            dimension: 36,
+            child: IconButton(
+              tooltip: _resendTooltip(),
+              visualDensity: VisualDensity.compact,
+              iconSize: 18,
+              onPressed: widget.onResend,
+              icon: const Icon(Icons.refresh),
+            ),
+          ),
+        ],
+        if (incoming && widget.message.text.trim().isNotEmpty) ...[
+          const SizedBox(width: 4),
+          SizedBox.square(
+            dimension: 36,
+            child: IconButton(
+              tooltip: widget.speaking ? 'Stop speaking' : 'Copy full message',
+              visualDensity: VisualDensity.compact,
+              iconSize: 18,
+              onPressed: widget.speaking
+                  ? widget.onStopSpeaking
+                  : () => _copyMessage(context),
+              icon: Icon(
+                widget.speaking
+                    ? Icons.stop_circle_outlined
+                    : Icons.content_copy,
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
     final tile = Padding(
       padding: const EdgeInsets.all(12),
       child: Column(
@@ -3782,69 +3824,39 @@ class _MessageTileState extends State<_MessageTile>
                     : colorScheme.onSurface,
               ),
               const SizedBox(width: 8),
-              Flexible(
-                fit: FlexFit.loose,
-                child: Text(
-                  _messageTitle(widget.message.kind),
-                  style: Theme.of(context).textTheme.titleSmall,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
               Expanded(
-                child: Center(
-                  child: widget.speaking
-                      ? _SpeakingEqualizer(
+                child: SizedBox(
+                  height: 36,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Padding(
+                          padding: const EdgeInsets.only(right: 128),
+                          child: title.isEmpty
+                              ? const SizedBox.shrink()
+                              : Text(
+                                  title,
+                                  style: Theme.of(context).textTheme.titleSmall,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                        ),
+                      ),
+                      if (widget.speaking)
+                        _SpeakingEqualizer(
                           animation: _equalizerController,
                           color: userSide
                               ? colorScheme.onPrimaryContainer
                               : colorScheme.primary,
-                        )
-                      : const SizedBox.shrink(),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _formatTime(widget.message.timestamp),
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
-                  if (widget.showResend) ...[
-                    const SizedBox(width: 4),
-                    SizedBox.square(
-                      dimension: 36,
-                      child: IconButton(
-                        tooltip: _resendTooltip(),
-                        visualDensity: VisualDensity.compact,
-                        iconSize: 18,
-                        onPressed: widget.onResend,
-                        icon: const Icon(Icons.refresh),
-                      ),
-                    ),
-                  ],
-                  if (incoming && widget.message.text.trim().isNotEmpty) ...[
-                    const SizedBox(width: 4),
-                    SizedBox.square(
-                      dimension: 36,
-                      child: IconButton(
-                        tooltip: widget.speaking
-                            ? 'Stop speaking'
-                            : 'Copy full message',
-                        visualDensity: VisualDensity.compact,
-                        iconSize: 18,
-                        onPressed: widget.speaking
-                            ? widget.onStopSpeaking
-                            : () => _copyMessage(context),
-                        icon: Icon(
-                          widget.speaking
-                              ? Icons.stop_circle_outlined
-                              : Icons.content_copy,
                         ),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: headerActions,
                       ),
-                    ),
-                  ],
-                ],
+                    ],
+                  ),
+                ),
               ),
             ],
           ),
@@ -3899,7 +3911,9 @@ class _MessageTileState extends State<_MessageTile>
   }
 
   String _messageTitle(String kind) {
-    if (kind == 'transcribing') return 'transcribing';
+    if (kind == 'response' || kind == 'transcript' || kind == 'transcribing') {
+      return '';
+    }
     return kind;
   }
 
