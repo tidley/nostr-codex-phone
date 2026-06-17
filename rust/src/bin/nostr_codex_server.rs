@@ -718,11 +718,9 @@ fn is_long_running_request(request: &str) -> bool {
             | "investigate this issue"
             | "investigate this problem"
             | "investigate issue"
-    ) || (
-        normalized.contains("build")
-            && (normalized.contains("apk") || normalized.contains("release"))
-    ) || (
-        normalized.contains("investigate")
+    ) || (normalized.contains("build")
+        && (normalized.contains("apk") || normalized.contains("release")))
+        || (normalized.contains("investigate")
             || normalized.contains("analysis")
             || normalized.contains("investigation")
             || normalized.contains("debug")
@@ -730,8 +728,7 @@ fn is_long_running_request(request: &str) -> bool {
             || normalized.contains("diagnose")
             || normalized.contains("root cause")
             || normalized.contains("refactor")
-            || normalized.contains("large")
-    )
+            || normalized.contains("large"))
 }
 
 async fn transcribe_or_load_cached(
