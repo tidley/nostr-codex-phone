@@ -317,6 +317,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _mediaUploadCancelled = false;
   int _mediaUploadSessionId = 0;
   Completer<void>? _mediaUploadCancelCompleter;
+  DateTime? _recordingStartedAt;
+  Timer? _recordingTimer;
   String? _pendingTranscriptionEventId;
   bool _autoSpeak = true;
   bool _speaking = false;
@@ -341,6 +343,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   String? _pendingMediaFileName;
 
   bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
+
+  String get _recordingDurationLabel {
+    if (_recordingStartedAt == null) return '00:00';
+    final elapsed = DateTime.now().difference(_recordingStartedAt!);
+    final totalSeconds = elapsed.inSeconds;
+    final minutes = totalSeconds ~/ 60;
+    final seconds = totalSeconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  }
 
   String get _activeConversationKey {
     final selected = _selectedRepoTargetId;
@@ -403,6 +414,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (recordingPath != null) {
       unawaited(_deleteTempAudio(recordingPath));
     }
+    _recordingTimer?.cancel();
     _tts.stop();
     _chatScrollController.dispose();
     _secretKeyController.dispose();
@@ -1980,10 +1992,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _recording = true;
         _recordingPath = path;
         _activeRecordingFormat = recordingFormat;
+        _recordingStartedAt = DateTime.now();
         _status = recordingFormat.format == _VoiceFormat.wav
             ? 'Recording WAV retry...'
             : 'Recording voice query...';
       });
+      _startRecordingTimer();
     } catch (error) {
       if (path != null) unawaited(_deleteTempAudio(path));
       if (!mounted) return;
@@ -1991,6 +2005,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _recording = false;
         _recordingPath = null;
         _activeRecordingFormat = null;
+        _recordingStartedAt = null;
+        _stopRecordingTimer();
       });
       _showError('Recording failed: $error');
     }
@@ -2009,6 +2025,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           _recording = false;
           _recordingPath = null;
           _activeRecordingFormat = null;
+          _recordingStartedAt = null;
+          _stopRecordingTimer();
         });
         _showError('Stop recording failed: $error');
       }
@@ -2020,6 +2038,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _recording = false;
       _recordingPath = null;
       _activeRecordingFormat = null;
+      _recordingStartedAt = null;
+      _stopRecordingTimer();
       _sendingAudio = true;
       _status = 'Uploading voice note to Blossom...';
     });
@@ -2088,6 +2108,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _recording = false;
       _recordingPath = null;
       _activeRecordingFormat = null;
+      _recordingStartedAt = null;
+      _stopRecordingTimer();
       _status = stopError == null
           ? 'Recording cancelled'
           : 'Cancel recording failed: $stopError';
@@ -2110,6 +2132,22 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return cleanedFallback;
     }
     return null;
+  }
+
+  void _startRecordingTimer() {
+    _recordingTimer?.cancel();
+    _recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!_recording || !mounted) {
+        _stopRecordingTimer();
+        return;
+      }
+      setState(() {});
+    });
+  }
+
+  void _stopRecordingTimer() {
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
   }
 
   Future<BridgeAudioReference> _uploadAudioToBlossom(
@@ -2455,6 +2493,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               sendingAudio: _sendingAudio,
               sendingMedia: _sendingMedia,
               recording: _recording,
+              recordingDurationLabel: _recordingDurationLabel,
               wavRetryRequested: _wavRetryRequested,
               hasPendingMedia: _hasPendingMediaAttachment,
               pendingMediaName: _pendingMediaFileName,
@@ -3240,6 +3279,7 @@ class _Composer extends StatefulWidget {
     required this.sendingAudio,
     required this.sendingMedia,
     required this.recording,
+    required this.recordingDurationLabel,
     required this.wavRetryRequested,
     required this.hasPendingMedia,
     required this.pendingMediaName,
@@ -3258,6 +3298,7 @@ class _Composer extends StatefulWidget {
   final bool sendingAudio;
   final bool sendingMedia;
   final bool recording;
+  final String recordingDurationLabel;
   final bool wavRetryRequested;
   final bool hasPendingMedia;
   final String? pendingMediaName;
@@ -3448,7 +3489,7 @@ class _ComposerState extends State<_Composer>
                     : !widget.connected
                     ? disconnectedLabel
                     : widget.recording
-                    ? 'Send'
+                    ? 'Recording... ${widget.recordingDurationLabel}'
                     : canSendFromInput
                     ? 'Send'
                     : widget.wavRetryRequested
