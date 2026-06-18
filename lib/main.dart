@@ -243,6 +243,17 @@ String cleanTextForSpeech(String text) {
   return cleaned.trim();
 }
 
+int bridgeUIntToJsonInt(BigInt value) {
+  if (value.isNegative) {
+    throw ArgumentError.value(value, 'value', 'integer must be non-negative');
+  }
+  final converted = value.toInt();
+  if (BigInt.from(converted) != value) {
+    throw ArgumentError.value(value, 'value', 'integer is too large for JSON');
+  }
+  return converted;
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
@@ -2370,7 +2381,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       'name': attachment.name ?? 'media',
       'url': attachment.url,
       'sha256': attachment.sha256,
-      'size': attachment.size.toInt(),
+      'size': bridgeUIntToJsonInt(attachment.size),
       'type': attachment.mediaType,
       if (encryption != null)
         'encryption': {
@@ -2378,7 +2389,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           'key': encryption.key,
           'nonce': encryption.nonce,
           'plaintext_sha256': encryption.plaintextSha256,
-          'plaintext_size': encryption.plaintextSize,
+          'plaintext_size': bridgeUIntToJsonInt(encryption.plaintextSize),
           'plaintext_type': encryption.plaintextMediaType,
         },
     };

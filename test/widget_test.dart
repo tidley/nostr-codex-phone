@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -27,5 +29,18 @@ Use [the docs](https://example.com).
     expect(spoken, contains('first item'));
     expect(spoken, contains('second item'));
     expect(spoken, contains('the docs'));
+  });
+
+  test('converts bridge unsigned integers before json encoding', () {
+    final converted = bridgeUIntToJsonInt(BigInt.from(90281152));
+
+    expect(converted, 90281152);
+    expect(jsonEncode({'size': converted}), '{"size":90281152}');
+  });
+
+  test('rejects negative bridge unsigned integers', () {
+    final negative = BigInt.from(-1);
+
+    expect(() => bridgeUIntToJsonInt(negative), throwsArgumentError);
   });
 }
