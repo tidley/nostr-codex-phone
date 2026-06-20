@@ -16,6 +16,7 @@ pub enum WireMessage {
     MediaBundle { media_bundle: MediaBundle },
     AudioRetry { audio_retry: AudioRetryRequest },
     TargetInvite { target_invite: TargetInvite },
+    RepoList { repo_list: RepoList },
     Transcript { transcript: String },
     Status { status: String },
     Response { response: String },
@@ -88,6 +89,27 @@ pub struct TargetInvite {
     pub relays: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoList {
+    #[serde(default)]
+    pub roots: Vec<RepoListRoot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoListRoot {
+    pub root: String,
+    #[serde(default)]
+    pub repos: Vec<RepoListEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoListEntry {
+    pub name: String,
+    pub path: String,
+    pub relative_path: String,
+    pub is_git_repo: bool,
+}
+
 impl WireMessage {
     pub fn query<S: Into<String>>(query: S) -> Self {
         Self::Query {
@@ -114,6 +136,10 @@ impl WireMessage {
 
     pub fn target_invite(target_invite: TargetInvite) -> Self {
         Self::TargetInvite { target_invite }
+    }
+
+    pub fn repo_list(repo_list: RepoList) -> Self {
+        Self::RepoList { repo_list }
     }
 
     pub fn response<S: Into<String>>(response: S) -> Self {
@@ -147,6 +173,7 @@ impl WireMessage {
             Self::MediaBundle { .. } => "media_bundle",
             Self::AudioRetry { .. } => "audio_retry",
             Self::TargetInvite { .. } => "target_invite",
+            Self::RepoList { .. } => "repo_list",
             Self::Transcript { .. } => "transcript",
             Self::Status { .. } => "status",
             Self::Response { .. } => "response",
@@ -163,6 +190,7 @@ impl WireMessage {
             }
             Self::AudioRetry { audio_retry } => &audio_retry.reason,
             Self::TargetInvite { target_invite } => &target_invite.name,
+            Self::RepoList { .. } => "repo list",
             Self::Transcript { transcript } => transcript,
             Self::Status { status } => status,
             Self::Response { response } => response,
@@ -193,6 +221,7 @@ impl WireMessage {
             }
             Self::AudioRetry { audio_retry } => json!({ "audio_retry": audio_retry }),
             Self::TargetInvite { target_invite } => json!({ "target_invite": target_invite }),
+            Self::RepoList { repo_list } => json!({ "repo_list": repo_list }),
             Self::Transcript { transcript } => json!({ "transcript": transcript }),
             Self::Status { status } => json!({ "status": status }),
             Self::Response { response } => json!({ "response": response }),
@@ -254,6 +283,13 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
         return Ok(WireMessage::target_invite(target_invite));
     }
 
+    if let Some(repo_list) = object.get("repo_list") {
+        let repo_list: RepoList = serde_json::from_value(repo_list.clone())
+            .map_err(|err| anyhow!("field `repo_list` is invalid: {err}"))?;
+        validate_repo_list(&repo_list)?;
+        return Ok(WireMessage::repo_list(repo_list));
+    }
+
     if let Some(response) = object.get("response") {
         return response
             .as_str()
@@ -283,7 +319,7 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `media_bundle`, or object `attachments` field"
+        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `repo_list`, object `media_bundle`, or object `attachments` field"
     ))
 }
 
@@ -464,6 +500,32 @@ fn validate_target_invite(invite: &TargetInvite) -> Result<()> {
         return Err(anyhow!(
             "field `target_invite.relays` must contain at least one relay"
         ));
+    }
+    Ok(())
+}
+
+fn validate_repo_list(repo_list: &RepoList) -> Result<()> {
+    for root in &repo_list.roots {
+        if root.root.trim().is_empty() {
+            return Err(anyhow!("field `repo_list.roots[].root` must be non-empty"));
+        }
+        for repo in &root.repos {
+            if repo.name.trim().is_empty() {
+                return Err(anyhow!(
+                    "field `repo_list.roots[].repos[].name` must be non-empty"
+                ));
+            }
+            if repo.path.trim().is_empty() {
+                return Err(anyhow!(
+                    "field `repo_list.roots[].repos[].path` must be non-empty"
+                ));
+            }
+            if repo.relative_path.trim().is_empty() {
+                return Err(anyhow!(
+                    "field `repo_list.roots[].repos[].relative_path` must be non-empty"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -688,6 +750,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_repo_list_contract() {
+        let parsed = parse_wire_message(
+            r#"{
+                "repo_list": {
+                    "roots": [
+                        {
+                            "root": "/home/tom/code",
+                            "repos": [
+                                {
+                                    "name": "phone",
+                                    "path": "/home/tom/code/phone",
+                                    "relative_path": "phone",
+                                    "is_git_repo": true
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.kind(), "repo_list");
+        assert_eq!(parsed.text(), "repo list");
+        assert_eq!(
+            parsed.to_json().unwrap(),
+            r#"{"repo_list":{"roots":[{"repos":[{"is_git_repo":true,"name":"phone","path":"/home/tom/code/phone","relative_path":"phone"}],"root":"/home/tom/code"}]}}"#
+        );
+    }
+
+    #[test]
     fn rejects_malformed_payloads() {
         assert!(parse_wire_message(r#"{ "query": 42 }"#).is_err());
         assert!(parse_wire_message(r#"{ "message": "hello" }"#).is_err());
@@ -705,6 +798,10 @@ mod tests {
                 .is_err()
         );
         assert!(parse_wire_message(r#"{ "target_invite": { "type": "nostr_codex_target", "version": 1, "name": "repo", "pubkey": "npub123", "relays": [] } }"#).is_err());
+        assert!(parse_wire_message(
+            r#"{ "repo_list": { "roots": [ { "root": "", "repos": [] } ] } }"#
+        )
+        .is_err());
         assert!(parse_wire_message("hello").is_err());
     }
 }
