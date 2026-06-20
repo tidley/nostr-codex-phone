@@ -42,6 +42,12 @@ Future<String> nostrSendError({required String error}) =>
 Future<BridgeIncomingMessage?> nostrNextMessage({required BigInt timeoutMs}) =>
     RustLib.instance.api.crateApiNostrNostrNextMessage(timeoutMs: timeoutMs);
 
+Future<List<BridgeIncomingMessage>> nostrFetchRecentMessages({
+  required BigInt lookbackSecs,
+}) => RustLib.instance.api.crateApiNostrNostrFetchRecentMessages(
+  lookbackSecs: lookbackSecs,
+);
+
 Future<bool> nostrIsStarted() =>
     RustLib.instance.api.crateApiNostrNostrIsStarted();
 
@@ -225,17 +231,22 @@ class BridgeKeyPair {
 class BridgeNostrConfig {
   final String secretKey;
   final String peerPubkey;
+  final List<String> receivePubkeys;
   final List<String> relays;
 
   const BridgeNostrConfig({
     required this.secretKey,
     required this.peerPubkey,
+    required this.receivePubkeys,
     required this.relays,
   });
 
   @override
   int get hashCode =>
-      secretKey.hashCode ^ peerPubkey.hashCode ^ relays.hashCode;
+      secretKey.hashCode ^
+      peerPubkey.hashCode ^
+      receivePubkeys.hashCode ^
+      relays.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -244,6 +255,7 @@ class BridgeNostrConfig {
           runtimeType == other.runtimeType &&
           secretKey == other.secretKey &&
           peerPubkey == other.peerPubkey &&
+          receivePubkeys == other.receivePubkeys &&
           relays == other.relays;
 }
 

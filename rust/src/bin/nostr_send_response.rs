@@ -64,6 +64,7 @@ fn nostr_config_from_env() -> Result<NostrConfig> {
 
     Ok(NostrConfig {
         secret_key,
+        receive_pubkeys: peer_pubkey.iter().cloned().collect(),
         peer_pubkey,
         relays,
     })

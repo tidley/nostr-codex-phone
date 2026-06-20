@@ -16,6 +16,7 @@ static SESSION: Lazy<Mutex<Option<Arc<NostrMessenger>>>> = Lazy::new(|| Mutex::n
 pub struct BridgeNostrConfig {
     pub secret_key: String,
     pub peer_pubkey: String,
+    pub receive_pubkeys: Vec<String>,
     pub relays: Vec<String>,
 }
 
@@ -104,6 +105,7 @@ pub async fn nostr_start(config: BridgeNostrConfig) -> Result<BridgeSessionStatu
         NostrMessenger::connect(NostrConfig {
             secret_key: config.secret_key,
             peer_pubkey: Some(config.peer_pubkey),
+            receive_pubkeys: config.receive_pubkeys,
             relays: relays.clone(),
         })
         .await?,
@@ -173,6 +175,19 @@ pub async fn nostr_next_message(timeout_ms: u64) -> Result<Option<BridgeIncoming
         .next_message(timeout)
         .await
         .map(|message| message.map(BridgeIncomingMessage::from))
+}
+
+pub async fn nostr_fetch_recent_messages(lookback_secs: u64) -> Result<Vec<BridgeIncomingMessage>> {
+    active_session()
+        .await?
+        .fetch_recent_messages(Duration::from_secs(lookback_secs.max(60)))
+        .await
+        .map(|messages| {
+            messages
+                .into_iter()
+                .map(BridgeIncomingMessage::from)
+                .collect()
+        })
 }
 
 pub async fn nostr_is_started() -> Result<bool> {

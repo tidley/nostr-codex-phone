@@ -128,6 +128,27 @@ class _RepoChoice {
   final bool isGitRepo;
 
   String get displayName => relativePath.isEmpty ? name : relativePath;
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'path': path,
+    'relative_path': relativePath,
+    'is_git_repo': isGitRepo,
+  };
+
+  static _RepoChoice? fromJson(dynamic raw) {
+    if (raw is! Map) return null;
+    final name = raw['name']?.toString().trim() ?? '';
+    final path = raw['path']?.toString().trim() ?? '';
+    final relativePath = raw['relative_path']?.toString().trim() ?? '';
+    if (name.isEmpty || path.isEmpty || relativePath.isEmpty) return null;
+    return _RepoChoice(
+      name: name,
+      path: path,
+      relativePath: relativePath,
+      isGitRepo: raw['is_git_repo'] == true,
+    );
+  }
 }
 
 enum _PendingMessageCompletion { transcript, response }
@@ -341,8 +362,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _ttsPitchStorageKey = 'tts_pitch';
   static const _ttsVolumeStorageKey = 'tts_volume';
   static const _conversationHistoryStorageKey = 'conversation_history_v1';
+  static const _seenIncomingEventIdsStorageKey = 'seen_incoming_event_ids_v1';
+  static const _unreadCountsStorageKey = 'unread_counts_v1';
+  static const _repoChoicesStorageKey = 'repo_choices_v1';
   static const _recentMessagesWindow = Duration(hours: 1);
   static const _maxConversationMessages = 200;
+  static const _maxSeenIncomingEventIds = 5000;
+  static const _catchUpLookback = Duration(days: 4);
 
   final _secretKeyController = TextEditingController();
   final _targetNameController = TextEditingController();
@@ -354,6 +380,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   final _tts = FlutterTts();
   final _messagesByTarget = <String, List<ConversationMessage>>{};
   final _seenIncomingEventIds = <String>{};
+  final _unreadCountsByTarget = <String, int>{};
   final ScrollController _chatScrollController = ScrollController();
 
   bool _loadingSettings = true;
@@ -371,6 +398,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   Timer? _recordingTimer;
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   Completer<List<_RepoChoice>>? _pendingRepoListCompleter;
+  List<_RepoChoice> _cachedRepoChoices = const [];
   bool _autoSpeak = true;
   bool _speaking = false;
   bool _wavRetryRequested = false;
@@ -494,6 +522,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final ttsRate = await _storage.read(key: _ttsRateStorageKey);
     final ttsPitch = await _storage.read(key: _ttsPitchStorageKey);
     final ttsVolume = await _storage.read(key: _ttsVolumeStorageKey);
+    final seenEventIds = await _storage.read(
+      key: _seenIncomingEventIdsStorageKey,
+    );
+    final unreadCounts = await _storage.read(key: _unreadCountsStorageKey);
+    final repoChoices = await _storage.read(key: _repoChoicesStorageKey);
 
     final migratedRelays = relays?.replaceAll(',', '\n') ?? defaultRelays;
     final targets = _decodeRepoTargets(repoTargets);
@@ -527,6 +560,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _ttsRate = _storedDouble(ttsRate, _ttsRate, 0.1, 1.0);
       _ttsPitch = _storedDouble(ttsPitch, _ttsPitch, 0.5, 2.0);
       _ttsVolume = _storedDouble(ttsVolume, _ttsVolume, 0.0, 1.0);
+      _seenIncomingEventIds
+        ..clear()
+        ..addAll(_decodeSeenEventIds(seenEventIds));
+      _unreadCountsByTarget
+        ..clear()
+        ..addAll(_decodeUnreadCounts(unreadCounts));
+      _cachedRepoChoices = _decodeRepoChoicesCache(repoChoices);
       _loadingSettings = false;
     });
     await _loadConversationHistoryForActiveSession();
@@ -617,6 +657,84 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
+  List<String> _decodeSeenEventIds(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return decoded
+          .map((item) => item.toString().trim())
+          .where((item) => item.isNotEmpty)
+          .take(_maxSeenIncomingEventIds)
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Map<String, int> _decodeUnreadCounts(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return {};
+      final counts = <String, int>{};
+      for (final entry in decoded.entries) {
+        final key = entry.key.toString().trim();
+        final value = entry.value;
+        final count = value is num ? value.toInt() : int.tryParse('$value');
+        if (key.isNotEmpty && count != null && count > 0) {
+          counts[key] = count;
+        }
+      }
+      return counts;
+    } catch (_) {
+      return {};
+    }
+  }
+
+  List<_RepoChoice> _decodeRepoChoicesCache(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      final choices = decoded
+          .map(_RepoChoice.fromJson)
+          .whereType<_RepoChoice>()
+          .toList();
+      choices.sort(
+        (left, right) => left.relativePath.toLowerCase().compareTo(
+          right.relativePath.toLowerCase(),
+        ),
+      );
+      return choices;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<void> _saveSeenIncomingEventIds() async {
+    await _storage.write(
+      key: _seenIncomingEventIdsStorageKey,
+      value: jsonEncode(_seenIncomingEventIds.toList()),
+    );
+  }
+
+  Future<void> _saveUnreadCounts() async {
+    await _storage.write(
+      key: _unreadCountsStorageKey,
+      value: jsonEncode(_unreadCountsByTarget),
+    );
+  }
+
+  Future<void> _saveRepoChoicesCache() async {
+    await _storage.write(
+      key: _repoChoicesStorageKey,
+      value: jsonEncode(
+        _cachedRepoChoices.map((item) => item.toJson()).toList(),
+      ),
+    );
+  }
+
   _RepoTarget? _targetById(List<_RepoTarget> targets, String? id) {
     final cleaned = _cleanStoredString(id);
     if (cleaned == null) return null;
@@ -697,7 +815,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _targetNameController.text = '';
       _peerPubkeyController.text = '';
       _relayController.text = defaultRelays;
-      _seenIncomingEventIds.clear();
       _pendingProcessingMessages.clear();
       _wavRetryRequested = false;
       _messagesByTarget['default'] = [];
@@ -749,7 +866,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _repoTargets = targets;
       _applyRepoTargetFields(savedTarget);
       _messagesByTarget[savedTarget.id] = [];
-      _seenIncomingEventIds.clear();
       _pendingProcessingMessages.clear();
       _wavRetryRequested = false;
       _status = 'Scanned target ${savedTarget.displayName}';
@@ -946,7 +1062,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _repoTargets = targets;
       _applyRepoTargetFields(savedTarget);
       _messagesByTarget[savedTarget.id] = [];
-      _seenIncomingEventIds.clear();
       _pendingProcessingMessages.clear();
       _wavRetryRequested = false;
       _status = '$status: ${savedTarget.displayName}';
@@ -1001,7 +1116,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _messagesByTarget[nextTarget.id] = [];
       }
       _messagesByTarget.remove(selectedId);
-      _seenIncomingEventIds.clear();
+      _unreadCountsByTarget.remove(selectedId);
       _pendingProcessingMessages.clear();
       _wavRetryRequested = false;
       _status = nextTarget == null
@@ -1009,6 +1124,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           : 'Deleted target, selected ${nextTarget.displayName}';
     });
     await _deleteConversationHistoryForKey(selectedId);
+    await _saveUnreadCounts();
     await _saveSettings();
     await _loadConversationHistoryForActiveSession();
   }
@@ -1031,12 +1147,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _clearPendingMediaAttachment();
       _applyRepoTargetFields(target);
       _messagesByTarget[targetKey] = [];
-      _seenIncomingEventIds.clear();
       _pendingProcessingMessages.clear();
       _wavRetryRequested = false;
+      _unreadCountsByTarget.remove(targetKey);
       _status = 'Selected ${target.displayName}';
     });
     await _saveSettings();
+    await _saveUnreadCounts();
     await _loadConversationHistoryForActiveSession();
     if (reconnect && mounted) {
       await _connect();
@@ -1116,10 +1233,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   void _appendMessageForActiveConversation(ConversationMessage message) {
-    _messages.insert(0, message);
-    final key = _activeConversationKey;
-    unawaited(_saveConversationHistoryForKey(key));
-    _scrollToLatestMessage();
+    _appendMessageForConversation(_activeConversationKey, message);
+  }
+
+  void _appendMessageForConversation(
+    String conversationKey,
+    ConversationMessage message,
+  ) {
+    final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
+    messages.insert(0, message);
+    unawaited(_saveConversationHistoryForKey(conversationKey));
+    if (conversationKey == _activeConversationKey) {
+      _scrollToLatestMessage();
+    }
   }
 
   void _appendPendingTranscriptionMessage({
@@ -1531,6 +1657,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         config: BridgeNostrConfig(
           secretKey: secret,
           peerPubkey: peer,
+          receivePubkeys: _receivePubkeysForInbox(peer),
           relays: relays,
         ),
       );
@@ -1542,6 +1669,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _status = 'Connected to ${status.relayCount} relays';
       });
       _startPolling();
+      unawaited(_fetchRecentInboxMessages());
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -1563,8 +1691,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     return BridgeNostrConfig(
       secretKey: secret,
       peerPubkey: peer,
+      receivePubkeys: _receivePubkeysForInbox(peer),
       relays: relays,
     );
+  }
+
+  List<String> _receivePubkeysForInbox(String selectedPeer) {
+    final pubkeys = <String>{};
+    final cleanedSelected = selectedPeer.trim();
+    if (cleanedSelected.isNotEmpty) pubkeys.add(cleanedSelected);
+    for (final target in _repoTargets) {
+      final pubkey = target.pubkey.trim();
+      if (pubkey.isNotEmpty) pubkeys.add(pubkey);
+    }
+    return pubkeys.toList()..sort();
   }
 
   bool _isRecoverableNostrSendError(Object error) {
@@ -1601,6 +1741,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _status = 'Reconnected to ${status.relayCount} relays';
       });
       _startPolling();
+      unawaited(_fetchRecentInboxMessages());
       await Future<void>.delayed(const Duration(milliseconds: 900));
     } catch (error) {
       if (mounted) {
@@ -1685,10 +1826,34 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
-  void _receiveMessage(BridgeIncomingMessage message) {
+  Future<void> _fetchRecentInboxMessages() async {
+    try {
+      final messages = await nostrFetchRecentMessages(
+        lookbackSecs: BigInt.from(_catchUpLookback.inSeconds),
+      );
+      if (!mounted || messages.isEmpty) return;
+      var accepted = 0;
+      for (final message in messages) {
+        if (_receiveMessage(message, fromCatchUp: true)) {
+          accepted += 1;
+        }
+      }
+      if (mounted && accepted > 0) {
+        setState(() => _status = 'Fetched $accepted recent message(s)');
+      }
+    } catch (error) {
+      if (mounted) setState(() => _status = 'Recent message fetch failed');
+      debugPrint('recent message fetch failed: $error');
+    }
+  }
+
+  bool _receiveMessage(
+    BridgeIncomingMessage message, {
+    bool fromCatchUp = false,
+  }) {
     final eventId = message.eventId.trim();
-    if (eventId.isNotEmpty && !_seenIncomingEventIds.add(eventId)) {
-      return;
+    if (eventId.isNotEmpty && !_rememberIncomingEventId(eventId)) {
+      return false;
     }
 
     if (message.kind == 'transcript' &&
@@ -1696,34 +1861,37 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       setState(() {
         _status = 'Transcription received';
       });
-      return;
+      return true;
     }
 
     if (message.kind == 'target_invite') {
       final target = _repoTargetFromInvitePayload(message.rawJson);
       if (target == null) {
         _showError('Received malformed session request');
-        return;
+        return true;
       }
       setState(() => _status = 'Received session request');
       unawaited(_offerTargetInvite(target));
-      return;
+      return true;
     }
 
     if (message.kind == 'repo_list') {
       final choices = _repoChoicesFromRepoListPayload(message.rawJson);
       if (choices == null) {
         _showError('Received malformed repo list');
-        return;
+        return true;
       }
       final pending = _pendingRepoListCompleter;
       if (pending != null && !pending.isCompleted) {
         pending.complete(choices);
       }
+      _cacheRepoChoices(choices);
       setState(() => _status = 'Loaded ${choices.length} repo folders');
-      return;
+      return true;
     }
 
+    final targetKey = _conversationKeyForIncoming(message);
+    final isActiveConversation = targetKey == _activeConversationKey;
     final conversationMessage = ConversationMessage(
       direction: MessageDirection.incoming,
       kind: message.kind,
@@ -1733,15 +1901,21 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
     final audioRetryRequested = message.kind == 'audio_retry';
     setState(() {
-      if (message.kind == 'response') {
+      if (isActiveConversation && message.kind == 'response') {
         _dropPendingProcessingMessage(
           completion: _PendingMessageCompletion.response,
         );
-      } else if (audioRetryRequested || message.kind == 'error') {
+      } else if (isActiveConversation &&
+          (audioRetryRequested || message.kind == 'error')) {
         _dropPendingProcessingMessage();
       }
       if (message.kind != 'status') {
-        _appendMessageForActiveConversation(conversationMessage);
+        _appendMessageForConversation(targetKey, conversationMessage);
+        if (!isActiveConversation) {
+          _unreadCountsByTarget[targetKey] =
+              (_unreadCountsByTarget[targetKey] ?? 0) + 1;
+          unawaited(_saveUnreadCounts());
+        }
       } else {
         final statusText = message.text.trim();
         _status = statusText.isEmpty
@@ -1753,7 +1927,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _wavRetryRequested = true;
         _status = 'Server requested WAV retry';
       } else if (message.kind != 'status') {
-        _status = 'Received ${message.kind}';
+        _status = fromCatchUp
+            ? 'Fetched ${message.kind}'
+            : 'Received ${message.kind}';
       }
     });
 
@@ -1772,6 +1948,42 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         ),
       );
     }
+    return true;
+  }
+
+  bool _rememberIncomingEventId(String eventId) {
+    if (_seenIncomingEventIds.contains(eventId)) return false;
+    _seenIncomingEventIds.add(eventId);
+    while (_seenIncomingEventIds.length > _maxSeenIncomingEventIds) {
+      _seenIncomingEventIds.remove(_seenIncomingEventIds.first);
+    }
+    unawaited(_saveSeenIncomingEventIds());
+    return true;
+  }
+
+  String _conversationKeyForIncoming(BridgeIncomingMessage message) {
+    for (final target in _repoTargets) {
+      if (target.pubkey == message.senderPubkey ||
+          target.pubkey == message.senderPubkeyHex) {
+        return target.id;
+      }
+    }
+    return message.senderPubkey.isNotEmpty ? message.senderPubkey : 'default';
+  }
+
+  void _cacheRepoChoices(List<_RepoChoice> choices) {
+    final byRelativePath = <String, _RepoChoice>{};
+    for (final choice in choices) {
+      byRelativePath[choice.relativePath] = choice;
+    }
+    final next = byRelativePath.values.toList()
+      ..sort(
+        (left, right) => left.relativePath.toLowerCase().compareTo(
+          right.relativePath.toLowerCase(),
+        ),
+      );
+    _cachedRepoChoices = next;
+    unawaited(_saveRepoChoicesCache());
   }
 
   Future<void> _speak(
@@ -1894,8 +2106,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
     final request = await showDialog<_SpawnSessionRequest>(
       context: context,
-      builder: (context) =>
-          _SpawnSessionDialog(onLoadRepos: _requestRepoChoices),
+      builder: (context) => _SpawnSessionDialog(
+        initialRepoChoices: _cachedRepoChoices,
+        onLoadRepos: _requestRepoChoices,
+      ),
     );
     if (request == null || !mounted) return;
 
@@ -2817,6 +3031,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       drawer: _SessionDrawer(
         targets: _repoTargets,
         selectedTargetId: _selectedRepoTargetId,
+        unreadCountsByTarget: _unreadCountsByTarget,
         onSelectTarget: (targetId) => unawaited(_selectRepoTarget(targetId)),
         onNewTarget: () => unawaited(_createRepoTarget()),
         onSpawnSession: () => unawaited(_requestSpawnSession()),
@@ -2833,9 +3048,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
                     .where((item) => item.id != target.id)
                     .toList();
                 _messagesByTarget.remove(target.id);
+                _unreadCountsByTarget.remove(target.id);
                 _status = 'Deleted session ${target.displayName}';
               });
               await _deleteConversationHistoryForKey(target.id);
+              await _saveUnreadCounts();
               await _saveSettings();
             }
           }());
@@ -2905,6 +3122,7 @@ class _SessionDrawer extends StatelessWidget {
   const _SessionDrawer({
     required this.targets,
     required this.selectedTargetId,
+    required this.unreadCountsByTarget,
     required this.onSelectTarget,
     required this.onNewTarget,
     required this.onSpawnSession,
@@ -2914,6 +3132,7 @@ class _SessionDrawer extends StatelessWidget {
 
   final List<_RepoTarget> targets;
   final String? selectedTargetId;
+  final Map<String, int> unreadCountsByTarget;
   final ValueChanged<String> onSelectTarget;
   final VoidCallback onNewTarget;
   final VoidCallback onSpawnSession;
@@ -2968,38 +3187,53 @@ class _SessionDrawer extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      trailing: PopupMenuButton<_SessionDrawerAction>(
-                        onSelected: (action) async {
-                          if (action == _SessionDrawerAction.rename) {
-                            onRenameTarget(target);
-                          } else if (action == _SessionDrawerAction.delete) {
-                            final shouldDelete = await _confirmDelete(
-                              context,
-                              target,
-                            );
-                            if (shouldDelete && context.mounted) {
-                              onDeleteTarget(target.id);
-                            }
-                          }
-                        },
-                        itemBuilder: (context) => [
-                          const PopupMenuItem(
-                            value: _SessionDrawerAction.rename,
-                            child: ListTile(
-                              dense: true,
-                              contentPadding: EdgeInsets.zero,
-                              leading: Icon(Icons.edit),
-                              title: Text('Rename'),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if ((unreadCountsByTarget[target.id] ?? 0) > 0)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 8),
+                              child: Badge(
+                                label: Text(
+                                  '${unreadCountsByTarget[target.id]}',
+                                ),
+                              ),
                             ),
-                          ),
-                          const PopupMenuItem(
-                            value: _SessionDrawerAction.delete,
-                            child: ListTile(
-                              dense: true,
-                              contentPadding: EdgeInsets.zero,
-                              leading: Icon(Icons.delete_outline),
-                              title: Text('Delete'),
-                            ),
+                          PopupMenuButton<_SessionDrawerAction>(
+                            onSelected: (action) async {
+                              if (action == _SessionDrawerAction.rename) {
+                                onRenameTarget(target);
+                              } else if (action ==
+                                  _SessionDrawerAction.delete) {
+                                final shouldDelete = await _confirmDelete(
+                                  context,
+                                  target,
+                                );
+                                if (shouldDelete && context.mounted) {
+                                  onDeleteTarget(target.id);
+                                }
+                              }
+                            },
+                            itemBuilder: (context) => [
+                              const PopupMenuItem(
+                                value: _SessionDrawerAction.rename,
+                                child: ListTile(
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: Icon(Icons.edit),
+                                  title: Text('Rename'),
+                                ),
+                              ),
+                              const PopupMenuItem(
+                                value: _SessionDrawerAction.delete,
+                                child: ListTile(
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: Icon(Icons.delete_outline),
+                                  title: Text('Delete'),
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
@@ -3049,8 +3283,12 @@ class _SpawnSessionRequest {
 }
 
 class _SpawnSessionDialog extends StatefulWidget {
-  const _SpawnSessionDialog({required this.onLoadRepos});
+  const _SpawnSessionDialog({
+    required this.initialRepoChoices,
+    required this.onLoadRepos,
+  });
 
+  final List<_RepoChoice> initialRepoChoices;
   final Future<List<_RepoChoice>> Function() onLoadRepos;
 
   @override
@@ -3062,6 +3300,12 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
   bool _create = true;
   bool _loadingRepos = false;
   List<_RepoChoice> _repoChoices = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _repoChoices = widget.initialRepoChoices;
+  }
 
   @override
   void dispose() {
@@ -3161,8 +3405,8 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
                         dimension: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Icon(Icons.folder_open),
-                label: const Text('Load repos'),
+                    : const Icon(Icons.refresh),
+                label: Text(_repoChoices.isEmpty ? 'Get folders' : 'Refresh'),
               ),
             ),
             if (_repoChoices.isNotEmpty) ...[
