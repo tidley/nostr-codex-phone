@@ -3173,73 +3173,68 @@ class _SessionDrawer extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 8),
                 children: [
                   for (final target in targets)
-                    ListTile(
-                      selected: target.id == selectedTargetId,
-                      leading: const Icon(Icons.chat_bubble_outline),
-                      title: Text(
-                        target.displayName,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: Text(
-                        target.workdir?.trim().isNotEmpty == true
-                            ? target.workdir!
-                            : _compactIdentifier(target.pubkey),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if ((unreadCountsByTarget[target.id] ?? 0) > 0)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: Badge(
-                                label: Text(
-                                  '${unreadCountsByTarget[target.id]}',
-                                ),
+                    Builder(
+                      builder: (context) {
+                        final unreadCount =
+                            unreadCountsByTarget[target.id] ?? 0;
+                        final menu = PopupMenuButton<_SessionDrawerAction>(
+                          onSelected: (action) async {
+                            if (action == _SessionDrawerAction.rename) {
+                              onRenameTarget(target);
+                            } else if (action == _SessionDrawerAction.delete) {
+                              final shouldDelete = await _confirmDelete(
+                                context,
+                                target,
+                              );
+                              if (shouldDelete && context.mounted) {
+                                onDeleteTarget(target.id);
+                              }
+                            }
+                          },
+                          itemBuilder: (context) => [
+                            const PopupMenuItem(
+                              value: _SessionDrawerAction.rename,
+                              child: ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.edit),
+                                title: Text('Rename'),
                               ),
                             ),
-                          PopupMenuButton<_SessionDrawerAction>(
-                            onSelected: (action) async {
-                              if (action == _SessionDrawerAction.rename) {
-                                onRenameTarget(target);
-                              } else if (action ==
-                                  _SessionDrawerAction.delete) {
-                                final shouldDelete = await _confirmDelete(
-                                  context,
-                                  target,
-                                );
-                                if (shouldDelete && context.mounted) {
-                                  onDeleteTarget(target.id);
-                                }
-                              }
-                            },
-                            itemBuilder: (context) => [
-                              const PopupMenuItem(
-                                value: _SessionDrawerAction.rename,
-                                child: ListTile(
-                                  dense: true,
-                                  contentPadding: EdgeInsets.zero,
-                                  leading: Icon(Icons.edit),
-                                  title: Text('Rename'),
-                                ),
+                            const PopupMenuItem(
+                              value: _SessionDrawerAction.delete,
+                              child: ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.delete_outline),
+                                title: Text('Delete'),
                               ),
-                              const PopupMenuItem(
-                                value: _SessionDrawerAction.delete,
-                                child: ListTile(
-                                  dense: true,
-                                  contentPadding: EdgeInsets.zero,
-                                  leading: Icon(Icons.delete_outline),
-                                  title: Text('Delete'),
-                                ),
-                              ),
-                            ],
+                            ),
+                          ],
+                        );
+                        return ListTile(
+                          selected: target.id == selectedTargetId,
+                          leading: const Icon(Icons.chat_bubble_outline),
+                          title: Text(
+                            target.displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                        ],
-                      ),
-                      onTap: () {
-                        Navigator.of(context).pop();
-                        onSelectTarget(target.id);
+                          subtitle: Text(
+                            target.workdir?.trim().isNotEmpty == true
+                                ? target.workdir!
+                                : _compactIdentifier(target.pubkey),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: unreadCount > 0
+                              ? Badge(label: Text('$unreadCount'), child: menu)
+                              : menu,
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            onSelectTarget(target.id);
+                          },
+                        );
                       },
                     ),
                 ],
@@ -3358,87 +3353,102 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final dialogWidth = (MediaQuery.sizeOf(context).width - 64).clamp(
+      280.0,
+      480.0,
+    );
+
     return AlertDialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
       title: const Text('Spawn session'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SegmentedButton<bool>(
-            segments: const [
-              ButtonSegment(
-                value: true,
-                icon: Icon(Icons.create_new_folder_outlined),
-                label: Text('Create'),
+      content: SizedBox(
+        width: dialogWidth,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(
+                    value: true,
+                    icon: Icon(Icons.create_new_folder_outlined),
+                    label: Text('Create'),
+                  ),
+                  ButtonSegment(
+                    value: false,
+                    icon: Icon(Icons.folder_open),
+                    label: Text('Open'),
+                  ),
+                ],
+                selected: {_create},
+                onSelectionChanged: (selection) {
+                  setState(() => _create = selection.first);
+                },
               ),
-              ButtonSegment(
-                value: false,
-                icon: Icon(Icons.folder_open),
-                label: Text('Open'),
-              ),
-            ],
-            selected: {_create},
-            onSelectionChanged: (selection) {
-              setState(() => _create = selection.first);
-            },
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: _pathController,
-            autofocus: true,
-            textInputAction: TextInputAction.done,
-            onSubmitted: (_) => _submit(),
-            decoration: InputDecoration(
-              border: const OutlineInputBorder(),
-              prefixText: '/home/tom/code/',
-              labelText: _create ? 'New folder' : 'Folder',
-              hintText: _create ? 'my-new-project' : 'phone',
-            ),
-          ),
-          if (!_create) ...[
-            const SizedBox(height: 12),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: OutlinedButton.icon(
-                onPressed: _loadingRepos ? null : _loadRepos,
-                icon: _loadingRepos
-                    ? const SizedBox.square(
-                        dimension: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.refresh),
-                label: Text(_repoChoices.isEmpty ? 'Get folders' : 'Refresh'),
-              ),
-            ),
-            if (_repoChoices.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 240),
-                child: ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: _repoChoices.length,
-                  itemBuilder: (context, index) {
-                    final choice = _repoChoices[index];
-                    return ListTile(
-                      dense: true,
-                      leading: Icon(
-                        choice.isGitRepo
-                            ? Icons.account_tree_outlined
-                            : Icons.folder_outlined,
-                      ),
-                      title: Text(
-                        choice.displayName,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      onTap: () {
-                        _pathController.text = choice.relativePath;
-                      },
-                    );
-                  },
+              const SizedBox(height: 16),
+              TextField(
+                controller: _pathController,
+                autofocus: true,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _submit(),
+                decoration: InputDecoration(
+                  border: const OutlineInputBorder(),
+                  helperText: 'Under /home/tom/code',
+                  labelText: _create ? 'New folder' : 'Folder',
+                  hintText: _create ? 'my-new-project' : 'phone',
                 ),
               ),
+              if (!_create) ...[
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: OutlinedButton.icon(
+                    onPressed: _loadingRepos ? null : _loadRepos,
+                    icon: _loadingRepos
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.refresh),
+                    label: Text(
+                      _repoChoices.isEmpty ? 'Get folders' : 'Refresh',
+                    ),
+                  ),
+                ),
+                if (_repoChoices.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 240),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: _repoChoices.length,
+                      itemBuilder: (context, index) {
+                        final choice = _repoChoices[index];
+                        return ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(
+                            choice.isGitRepo
+                                ? Icons.account_tree_outlined
+                                : Icons.folder_outlined,
+                          ),
+                          title: Text(
+                            choice.displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          onTap: () {
+                            _pathController.text = choice.relativePath;
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ],
             ],
-          ],
-        ],
+          ),
+        ),
       ),
       actions: [
         TextButton(
