@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,14 +24,17 @@ use rust_lib_nostr_codex_phone::nostr_client::{
 };
 use rust_lib_nostr_codex_phone::protocol::{
     parse_media_bundle_query, parse_wire_message, AudioReference, MediaBundle, MediaReference,
-    WireMessage,
+    TargetInvite, WireMessage,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
     TranscribeConfig,
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+
+const WORKER_REGISTRY_FILE: &str = ".nostr-codex-workers.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestClass {
@@ -40,6 +43,29 @@ enum RequestClass {
     Clarification,
     MemoryLookup,
     NoOp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpawnWorkerRequest {
+    workdir: String,
+    create: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerRegistry {
+    #[serde(default)]
+    workers: Vec<WorkerRegistryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerRegistryEntry {
+    name: String,
+    pubkey: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pubkey_hex: Option<String>,
+    workdir: String,
+    pid: u32,
+    relays: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,23 +81,40 @@ impl WorkerEnvFile {
         Self { path }
     }
 
+    fn default_for_workdir(workdir: &Path) -> Self {
+        Self {
+            path: workdir.join(".env.server"),
+        }
+    }
+
     fn load_missing(&self) -> Result<()> {
         if !self.path.is_file() {
             return Ok(());
         }
 
-        let raw = fs::read_to_string(&self.path)
-            .with_context(|| format!("failed to read worker env file `{}`", self.path.display()))?;
-        for line in raw.lines() {
-            let Some((key, value)) = parse_env_assignment(line) else {
-                continue;
-            };
+        for (key, value) in self.read_values()? {
             if env::var_os(&key).is_none() {
                 env::set_var(key, value);
             }
         }
 
         Ok(())
+    }
+
+    fn read_values(&self) -> Result<HashMap<String, String>> {
+        let mut values = HashMap::new();
+        if !self.path.is_file() {
+            return Ok(values);
+        }
+
+        let raw = fs::read_to_string(&self.path)
+            .with_context(|| format!("failed to read worker env file `{}`", self.path.display()))?;
+        for line in raw.lines() {
+            if let Some((key, value)) = parse_env_assignment(line) {
+                values.insert(key, value);
+            }
+        }
+        Ok(values)
     }
 }
 
@@ -222,6 +265,14 @@ fn upsert_env_file_values(path: &Path, values: &[(&str, &str)]) -> Result<()> {
     set_private_file_permissions(path);
 
     Ok(())
+}
+
+fn upsert_env_file_owned(path: &Path, values: &[(String, String)]) -> Result<()> {
+    let borrowed = values
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    upsert_env_file_values(path, &borrowed)
 }
 
 fn format_env_value(value: &str) -> String {
@@ -383,6 +434,7 @@ async fn main() -> Result<()> {
                     codex_config.clone(),
                     audio_config.clone(),
                     transcribe_config.clone(),
+                    nostr_config.relays.clone(),
                 )
             })
             .clone();
@@ -398,6 +450,7 @@ async fn main() -> Result<()> {
                 codex_config.clone(),
                 audio_config.clone(),
                 transcribe_config.clone(),
+                nostr_config.relays.clone(),
             );
             if sender.send(message).await.is_err() {
                 error!("restarted peer worker for {worker_key} stopped; dropping incoming message");
@@ -415,6 +468,7 @@ fn spawn_peer_worker(
     codex_config: CodexConfig,
     audio_config: AudioConfig,
     transcribe_config: TranscribeConfig,
+    relays: Vec<String>,
 ) -> mpsc::Sender<IncomingMessage> {
     let (tx, rx) = mpsc::channel(32);
     tokio::spawn(peer_worker(
@@ -425,6 +479,7 @@ fn spawn_peer_worker(
         codex_config,
         audio_config,
         transcribe_config,
+        relays,
     ));
     tx
 }
@@ -437,6 +492,7 @@ async fn peer_worker(
     codex_config: CodexConfig,
     audio_config: AudioConfig,
     transcribe_config: TranscribeConfig,
+    relays: Vec<String>,
 ) {
     let mut memory = open_memory_store(memory_config);
     info!("started worker for peer {peer_pubkey}");
@@ -452,6 +508,7 @@ async fn peer_worker(
             &codex_config,
             &audio_config,
             &transcribe_config,
+            &relays,
         ))
         .catch_unwind()
         .await;
@@ -491,6 +548,7 @@ async fn process_message(
     codex_config: &CodexConfig,
     audio_config: &AudioConfig,
     transcribe_config: &TranscribeConfig,
+    relays: &[String],
 ) {
     match message.kind.as_str() {
         "query" => {
@@ -508,6 +566,30 @@ async fn process_message(
                     media_bundle,
                     &audio_config,
                     transcribe_config,
+                    codex_config,
+                )
+                .await;
+                return;
+            }
+
+            if is_shutdown_request(&message.text) {
+                send_response(
+                    messenger,
+                    &message.sender_pubkey_hex,
+                    "Shutting down this Nostr Codex worker.".to_string(),
+                )
+                .await;
+                info!("owner requested worker shutdown");
+                std::process::exit(0);
+            }
+
+            if let Some(spawn_request) = parse_spawn_worker_request(&message.text) {
+                process_spawn_worker_request(
+                    messenger,
+                    &message.sender_pubkey,
+                    &message.sender_pubkey_hex,
+                    &spawn_request,
+                    relays,
                     codex_config,
                 )
                 .await;
@@ -858,6 +940,356 @@ async fn process_media_bundle_turn(
         codex_config,
     )
     .await;
+}
+
+async fn process_spawn_worker_request(
+    messenger: &NostrMessenger,
+    owner_pubkey: &str,
+    owner_pubkey_hex: &str,
+    request: &SpawnWorkerRequest,
+    relays: &[String],
+    codex_config: &CodexConfig,
+) {
+    match spawn_repo_worker(
+        request,
+        owner_pubkey,
+        owner_pubkey_hex,
+        relays,
+        &codex_config.working_dir,
+    ) {
+        Ok((target, pid)) => {
+            match messenger
+                .send_wire_to_pubkey(owner_pubkey_hex, WireMessage::target_invite(target.clone()))
+                .await
+            {
+                Ok(_) => {
+                    send_response(
+                        messenger,
+                        owner_pubkey_hex,
+                        format!(
+                            "Started a new Nostr Codex worker for `{}`.\n\nIt has its own npub and I sent this phone a target invite DM. Open the session switcher to select `{}`.",
+                            target.workdir.as_deref().unwrap_or("unknown"),
+                            target.name
+                        ),
+                    )
+                    .await;
+                    info!(
+                        "spawned child worker pid {pid} for {} ({})",
+                        target.name,
+                        target.workdir.as_deref().unwrap_or("unknown")
+                    );
+                }
+                Err(err) => {
+                    send_response(
+                        messenger,
+                        owner_pubkey_hex,
+                        format!(
+                            "Started a new worker for `{}` as `{}`, but sending the phone target invite failed: {err:#}",
+                            target.workdir.as_deref().unwrap_or("unknown"),
+                            target.pubkey
+                        ),
+                    )
+                    .await;
+                }
+            }
+        }
+        Err(err) => {
+            send_response(
+                messenger,
+                owner_pubkey_hex,
+                format!(
+                    "Could not spawn a worker for `{}`: {err:#}",
+                    request.workdir
+                ),
+            )
+            .await;
+        }
+    }
+}
+
+fn spawn_repo_worker(
+    request: &SpawnWorkerRequest,
+    owner_pubkey: &str,
+    owner_pubkey_hex: &str,
+    relays: &[String],
+    current_workdir: &Path,
+) -> Result<(TargetInvite, u32)> {
+    let workdir = resolve_spawn_workdir(request, current_workdir)?;
+    let env_file = WorkerEnvFile::default_for_workdir(&workdir);
+    let secret_key = ensure_child_worker_secret(&env_file)?;
+    let keys = Keys::parse(secret_key.trim()).context("invalid child worker secret key")?;
+    let public_key = keys.public_key().to_bech32()?;
+    let public_key_hex = keys.public_key().to_hex();
+    let relay_list = if relays.is_empty() {
+        default_relays()
+    } else {
+        relays.to_vec()
+    };
+    let relay_csv = relay_list.join(",");
+    let memory_db = workdir.join(".nostr-codex-memory.sqlite3");
+
+    let mut env_values = vec![
+        ("NOSTR_SECRET_KEY".to_string(), secret_key.clone()),
+        ("NOSTR_PUBLIC_KEY".to_string(), public_key.clone()),
+        ("NOSTR_PUBLIC_KEY_HEX".to_string(), public_key_hex.clone()),
+        ("NOSTR_PEER_PUBKEY".to_string(), owner_pubkey.to_string()),
+        (
+            "NOSTR_PEER_PUBKEY_HEX".to_string(),
+            owner_pubkey_hex.to_string(),
+        ),
+        ("NOSTR_RELAYS".to_string(), relay_csv.clone()),
+        (
+            "CODEX_WORKDIR".to_string(),
+            workdir.to_string_lossy().to_string(),
+        ),
+        (
+            "CODEX_MEMORY_DB".to_string(),
+            memory_db.to_string_lossy().to_string(),
+        ),
+    ];
+    for key in [
+        "CODEX_BIN",
+        "CODEX_ARGS",
+        "TRANSCRIBE_BIN",
+        "TRANSCRIBE_ARGS",
+        "TRANSCRIBE_TIMEOUT_SECS",
+        "FFMPEG_BIN",
+        "AUDIO_MAX_BYTES",
+    ] {
+        if let Some(value) = env_nonempty(key) {
+            env_values.push((key.to_string(), value));
+        }
+    }
+    upsert_env_file_owned(&env_file.path, &env_values)?;
+
+    let child = StdCommand::new(env::current_exe().context("failed to locate worker executable")?)
+        .current_dir(&workdir)
+        .env("NOSTR_CODEX_ENV_FILE", &env_file.path)
+        .env("CODEX_WORKDIR", &workdir)
+        .env("CODEX_MEMORY_DB", &memory_db)
+        .env("NOSTR_PEER_PUBKEY", owner_pubkey)
+        .env("NOSTR_PEER_PUBKEY_HEX", owner_pubkey_hex)
+        .env("NOSTR_RELAYS", &relay_csv)
+        .env("NOSTR_CODEX_QR_PRINT", "false")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to start worker in `{}`", workdir.display()))?;
+    let pid = child.id();
+    let target = TargetInvite {
+        target_type: "nostr_codex_target".to_string(),
+        version: 1,
+        name: worker_target_name(&workdir),
+        pubkey: public_key,
+        pubkey_hex: Some(public_key_hex),
+        workdir: Some(workdir.to_string_lossy().to_string()),
+        relays: relay_list,
+    };
+    if let Err(err) = upsert_worker_registry(current_workdir, &target, pid) {
+        warn!("failed to update worker registry: {err:#}");
+    }
+
+    Ok((target, pid))
+}
+
+fn ensure_child_worker_secret(env_file: &WorkerEnvFile) -> Result<String> {
+    if let Some(secret_key) = env_file
+        .read_values()?
+        .get("NOSTR_SECRET_KEY")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(secret_key);
+    }
+
+    let keys = Keys::generate();
+    let secret_key = keys.secret_key().to_bech32()?;
+    let public_key = keys.public_key().to_bech32()?;
+    let public_key_hex = keys.public_key().to_hex();
+    upsert_env_file_values(
+        &env_file.path,
+        &[
+            ("NOSTR_SECRET_KEY", secret_key.as_str()),
+            ("NOSTR_PUBLIC_KEY", public_key.as_str()),
+            ("NOSTR_PUBLIC_KEY_HEX", public_key_hex.as_str()),
+        ],
+    )?;
+    Ok(secret_key)
+}
+
+fn resolve_spawn_workdir(request: &SpawnWorkerRequest, current_workdir: &Path) -> Result<PathBuf> {
+    let requested = expand_home_path(clean_path_argument(&request.workdir));
+    let path = if requested.is_absolute() {
+        requested
+    } else {
+        current_workdir.join(requested)
+    };
+    if request.create && !path.exists() {
+        ensure_spawn_create_allowed(&path)?;
+        fs::create_dir_all(&path)
+            .with_context(|| format!("failed to create `{}`", path.display()))?;
+    }
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve `{}`", path.display()))?;
+    if !canonical.is_dir() {
+        anyhow::bail!("`{}` is not a directory", canonical.display());
+    }
+    ensure_spawn_existing_allowed(&canonical)?;
+    Ok(canonical)
+}
+
+fn ensure_spawn_existing_allowed(path: &Path) -> Result<()> {
+    let home = canonical_home_dir()?;
+    if path == home || path.starts_with(&home) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "`{}` is outside the allowed folders (`{}` and folders inside it)",
+        path.display(),
+        home.display()
+    )
+}
+
+fn ensure_spawn_create_allowed(path: &Path) -> Result<()> {
+    let code = canonical_code_dir()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("new folder path must have a parent"))?
+        .canonicalize()
+        .with_context(|| format!("failed to resolve parent of `{}`", path.display()))?;
+    if parent == code || parent.starts_with(&code) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "new folders may only be created inside `{}`",
+        code.display()
+    )
+}
+
+fn canonical_home_dir() -> Result<PathBuf> {
+    let home = env::var("HOME").context("HOME is not set")?;
+    PathBuf::from(home)
+        .canonicalize()
+        .context("failed to resolve HOME")
+}
+
+fn canonical_code_dir() -> Result<PathBuf> {
+    let code = canonical_home_dir()?.join("code");
+    code.canonicalize()
+        .with_context(|| format!("failed to resolve `{}`", code.display()))
+}
+
+fn expand_home_path(path: &str) -> PathBuf {
+    if path == "~" {
+        return env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(path));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn parse_spawn_worker_request(request: &str) -> Option<SpawnWorkerRequest> {
+    let trimmed = request.trim();
+    if let Some(parsed) = parse_spawn_worker_json_request(trimmed) {
+        return Some(parsed);
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    for (prefix, create) in [
+        ("/spawn --create", true),
+        ("/spawn -c", true),
+        ("/spawn-create", true),
+        ("/create-worker", true),
+        ("/spawn", false),
+        ("/spawn-worker", false),
+        ("/start-worker", false),
+    ] {
+        if lowered == prefix {
+            return None;
+        }
+        if lowered.starts_with(&format!("{prefix} ")) {
+            return parse_spawn_path_argument(&trimmed[prefix.len()..])
+                .map(|workdir| SpawnWorkerRequest { workdir, create });
+        }
+    }
+    for (marker, create) in [
+        ("create worker in ", true),
+        ("create service in ", true),
+        ("create a worker in ", true),
+        ("create a service in ", true),
+        ("spawn new worker in ", true),
+        ("spawn new service in ", true),
+        ("spawn worker in ", false),
+        ("spawn service in ", false),
+        ("start worker in ", false),
+        ("start service in ", false),
+        ("start a worker in ", false),
+        ("start a service in ", false),
+    ] {
+        if lowered.starts_with(marker) {
+            return parse_spawn_path_argument(&trimmed[marker.len()..])
+                .map(|workdir| SpawnWorkerRequest { workdir, create });
+        }
+    }
+    None
+}
+
+fn parse_spawn_worker_json_request(request: &str) -> Option<SpawnWorkerRequest> {
+    let value: serde_json::Value = serde_json::from_str(request).ok()?;
+    let object = value.as_object()?;
+    let raw = object
+        .get("spawn_session")
+        .or_else(|| object.get("spawn_worker"))?;
+    let raw_object = raw.as_object()?;
+    let workdir = raw_object
+        .get("workdir")
+        .or_else(|| raw_object.get("path"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let create = raw_object
+        .get("create")
+        .or_else(|| raw_object.get("create_folder"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    Some(SpawnWorkerRequest { workdir, create })
+}
+
+fn is_shutdown_request(request: &str) -> bool {
+    let command = request.trim().to_ascii_lowercase();
+    if matches!(command.as_str(), "/shutdown" | "/quit" | "/exit") {
+        return true;
+    }
+    matches!(
+        normalize_transcript(request).as_str(),
+        "shutdown" | "quit" | "exit"
+    )
+}
+
+fn parse_spawn_path_argument(raw: &str) -> Option<String> {
+    let cleaned = raw.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    if let Ok(parts) = shell_words::split(cleaned) {
+        if parts.len() == 1 && !parts[0].trim().is_empty() {
+            return Some(parts[0].trim().to_string());
+        }
+    }
+    Some(clean_path_argument(cleaned).to_string())
+}
+
+fn clean_path_argument(raw: &str) -> &str {
+    raw.trim()
+        .trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`')
+        .trim()
 }
 
 fn media_reference_to_audio(reference: &MediaReference) -> AudioReference {
@@ -1396,6 +1828,9 @@ fn handle_local_request(
                 None => "Memory is disabled.".to_string(),
             });
         }
+        "/workers" | "/sessions" => {
+            return Some(worker_registry_status_text(workdir));
+        }
         _ => {}
     }
 
@@ -1509,6 +1944,69 @@ fn repo_status_text(workdir: &Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("unknown");
     format!("Repo/workdir: {repo}\nPath: {}", workdir.display())
+}
+
+fn registry_path(workdir: &Path) -> PathBuf {
+    workdir.join(WORKER_REGISTRY_FILE)
+}
+
+fn read_worker_registry(workdir: &Path) -> Result<WorkerRegistry> {
+    let path = registry_path(workdir);
+    if !path.is_file() {
+        return Ok(WorkerRegistry { workers: vec![] });
+    }
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read worker registry `{}`", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse worker registry `{}`", path.display()))
+}
+
+fn write_worker_registry(workdir: &Path, registry: &WorkerRegistry) -> Result<()> {
+    let path = registry_path(workdir);
+    let raw = serde_json::to_string_pretty(registry)?;
+    fs::write(&path, format!("{raw}\n"))
+        .with_context(|| format!("failed to write worker registry `{}`", path.display()))?;
+    Ok(())
+}
+
+fn upsert_worker_registry(workdir: &Path, target: &TargetInvite, pid: u32) -> Result<()> {
+    let mut registry = read_worker_registry(workdir)?;
+    let entry = WorkerRegistryEntry {
+        name: target.name.clone(),
+        pubkey: target.pubkey.clone(),
+        pubkey_hex: target.pubkey_hex.clone(),
+        workdir: target.workdir.clone().unwrap_or_default(),
+        pid,
+        relays: target.relays.clone(),
+    };
+    if let Some(existing) = registry
+        .workers
+        .iter_mut()
+        .find(|item| item.workdir == entry.workdir || item.pubkey == entry.pubkey)
+    {
+        *existing = entry;
+    } else {
+        registry.workers.push(entry);
+    }
+    write_worker_registry(workdir, &registry)
+}
+
+fn worker_registry_status_text(workdir: &Path) -> String {
+    let registry = match read_worker_registry(workdir) {
+        Ok(registry) => registry,
+        Err(err) => return format!("Worker registry failed: {err:#}"),
+    };
+    if registry.workers.is_empty() {
+        return "No spawned workers are registered.".to_string();
+    }
+    let mut lines = vec!["Spawned workers:".to_string()];
+    for worker in registry.workers {
+        lines.push(format!(
+            "- {} pid={} pubkey={} path={}",
+            worker.name, worker.pid, worker.pubkey, worker.workdir
+        ));
+    }
+    lines.join("\n")
 }
 
 fn write_worker_target_qr(pubkey: &str, pubkey_hex: &str, workdir: &Path, relays: &[String]) {
@@ -2105,6 +2603,49 @@ mod tests {
             classify_request("fix the Android voice recording path"),
             RequestClass::Coding
         );
+    }
+
+    #[test]
+    fn parses_spawn_worker_requests() {
+        assert_eq!(
+            parse_spawn_worker_request("/spawn /home/tom/code/repo"),
+            Some(SpawnWorkerRequest {
+                workdir: "/home/tom/code/repo".to_string(),
+                create: false
+            })
+        );
+        assert_eq!(
+            parse_spawn_worker_request("/spawn '/home/tom/code/repo with spaces'"),
+            Some(SpawnWorkerRequest {
+                workdir: "/home/tom/code/repo with spaces".to_string(),
+                create: false
+            })
+        );
+        assert_eq!(
+            parse_spawn_worker_request("start worker in ~/code/repo"),
+            Some(SpawnWorkerRequest {
+                workdir: "~/code/repo".to_string(),
+                create: false
+            })
+        );
+        assert_eq!(
+            parse_spawn_worker_request(
+                r#"{"spawn_session":{"workdir":"/home/tom/code/new","create":true}}"#
+            ),
+            Some(SpawnWorkerRequest {
+                workdir: "/home/tom/code/new".to_string(),
+                create: true
+            })
+        );
+        assert_eq!(
+            parse_spawn_worker_request("/spawn --create new-repo"),
+            Some(SpawnWorkerRequest {
+                workdir: "new-repo".to_string(),
+                create: true
+            })
+        );
+        assert_eq!(parse_spawn_worker_request("/spawn"), None);
+        assert_eq!(parse_spawn_worker_request("spawn a repo"), None);
     }
 
     #[test]

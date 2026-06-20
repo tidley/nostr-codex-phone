@@ -15,6 +15,7 @@ pub enum WireMessage {
     Audio { audio: AudioReference },
     MediaBundle { media_bundle: MediaBundle },
     AudioRetry { audio_retry: AudioRetryRequest },
+    TargetInvite { target_invite: TargetInvite },
     Transcript { transcript: String },
     Status { status: String },
     Response { response: String },
@@ -72,6 +73,21 @@ pub struct AudioRetryRequest {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetInvite {
+    #[serde(rename = "type")]
+    pub target_type: String,
+    pub version: u64,
+    pub name: String,
+    pub pubkey: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pubkey_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+    #[serde(default)]
+    pub relays: Vec<String>,
+}
+
 impl WireMessage {
     pub fn query<S: Into<String>>(query: S) -> Self {
         Self::Query {
@@ -94,6 +110,10 @@ impl WireMessage {
                 reason: reason.into(),
             },
         }
+    }
+
+    pub fn target_invite(target_invite: TargetInvite) -> Self {
+        Self::TargetInvite { target_invite }
     }
 
     pub fn response<S: Into<String>>(response: S) -> Self {
@@ -126,6 +146,7 @@ impl WireMessage {
             Self::Audio { .. } => "audio",
             Self::MediaBundle { .. } => "media_bundle",
             Self::AudioRetry { .. } => "audio_retry",
+            Self::TargetInvite { .. } => "target_invite",
             Self::Transcript { .. } => "transcript",
             Self::Status { .. } => "status",
             Self::Response { .. } => "response",
@@ -141,6 +162,7 @@ impl WireMessage {
                 media_bundle.query.as_deref().unwrap_or("[media bundle]")
             }
             Self::AudioRetry { audio_retry } => &audio_retry.reason,
+            Self::TargetInvite { target_invite } => &target_invite.name,
             Self::Transcript { transcript } => transcript,
             Self::Status { status } => status,
             Self::Response { response } => response,
@@ -170,6 +192,7 @@ impl WireMessage {
                 json!({ "media_bundle": media_bundle })
             }
             Self::AudioRetry { audio_retry } => json!({ "audio_retry": audio_retry }),
+            Self::TargetInvite { target_invite } => json!({ "target_invite": target_invite }),
             Self::Transcript { transcript } => json!({ "transcript": transcript }),
             Self::Status { status } => json!({ "status": status }),
             Self::Response { response } => json!({ "response": response }),
@@ -224,6 +247,13 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
         ));
     }
 
+    if let Some(target_invite) = object.get("target_invite") {
+        let target_invite: TargetInvite = serde_json::from_value(target_invite.clone())
+            .map_err(|err| anyhow!("field `target_invite` is invalid: {err}"))?;
+        validate_target_invite(&target_invite)?;
+        return Ok(WireMessage::target_invite(target_invite));
+    }
+
     if let Some(response) = object.get("response") {
         return response
             .as_str()
@@ -253,7 +283,7 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `media_bundle`, or object `attachments` field"
+        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `media_bundle`, or object `attachments` field"
     ))
 }
 
@@ -409,6 +439,30 @@ fn validate_audio_retry_request(request: &AudioRetryRequest) -> Result<()> {
     if request.reason.trim().is_empty() {
         return Err(anyhow!(
             "field `audio_retry.reason` must be a non-empty string"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_target_invite(invite: &TargetInvite) -> Result<()> {
+    if invite.target_type != "nostr_codex_target" && invite.target_type != "nostr-codex-target" {
+        return Err(anyhow!(
+            "field `target_invite.type` must be `nostr_codex_target`"
+        ));
+    }
+    if invite.version == 0 {
+        return Err(anyhow!(
+            "field `target_invite.version` must be greater than zero"
+        ));
+    }
+    if invite.pubkey.trim().is_empty() {
+        return Err(anyhow!(
+            "field `target_invite.pubkey` must be a non-empty string"
+        ));
+    }
+    if invite.relays.iter().all(|relay| relay.trim().is_empty()) {
+        return Err(anyhow!(
+            "field `target_invite.relays` must contain at least one relay"
         ));
     }
     Ok(())
@@ -609,6 +663,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_target_invite_contract() {
+        let parsed = parse_wire_message(
+            r#"{
+                "target_invite": {
+                    "type": "nostr_codex_target",
+                    "version": 1,
+                    "name": "repo",
+                    "pubkey": "npub123",
+                    "pubkey_hex": "abc123",
+                    "workdir": "/home/tom/code/repo",
+                    "relays": ["wss://relay.damus.io", "wss://nos.lol"]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.kind(), "target_invite");
+        assert_eq!(parsed.text(), "repo");
+        assert_eq!(
+            parsed.to_json().unwrap(),
+            r#"{"target_invite":{"name":"repo","pubkey":"npub123","pubkey_hex":"abc123","relays":["wss://relay.damus.io","wss://nos.lol"],"type":"nostr_codex_target","version":1,"workdir":"/home/tom/code/repo"}}"#
+        );
+    }
+
+    #[test]
     fn rejects_malformed_payloads() {
         assert!(parse_wire_message(r#"{ "query": 42 }"#).is_err());
         assert!(parse_wire_message(r#"{ "message": "hello" }"#).is_err());
@@ -625,6 +704,7 @@ mod tests {
             parse_wire_message(r#"{ "audio_retry": { "format": "", "reason": "retry" } }"#)
                 .is_err()
         );
+        assert!(parse_wire_message(r#"{ "target_invite": { "type": "nostr_codex_target", "version": 1, "name": "repo", "pubkey": "npub123", "relays": [] } }"#).is_err());
         assert!(parse_wire_message("hello").is_err());
     }
 }

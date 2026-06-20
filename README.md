@@ -73,6 +73,20 @@ Both peers send NIP-17/NIP-59 GiftWrapped private direct messages whose decrypte
 ```
 
 ```json
+{
+  "target_invite": {
+    "type": "nostr_codex_target",
+    "version": 1,
+    "name": "repo-folder",
+    "pubkey": "npub...",
+    "pubkey_hex": "hex...",
+    "workdir": "/path/to/repo",
+    "relays": ["wss://relay.damus.io"]
+  }
+}
+```
+
+```json
 { "error": "text" }
 ```
 
@@ -104,7 +118,9 @@ The server listens for `{ "query": "..." }`, `{ "audio": { ... } }`, and
 `{ "media_bundle": { ... } }` (one or more encrypted attachments),
 runs Codex non-interactively, and replies with `{ "response": "..." }` or
 `{ "error": "..." }`. For compressed audio transcription failures, it can also
-reply with `{ "audio_retry": { "format": "wav", "reason": "..." } }`.
+reply with `{ "audio_retry": { "format": "wav", "reason": "..." } }`. When a
+parent worker starts another repo worker, it sends `{ "target_invite": { ... } }`
+so the phone can add the new worker as a selectable session.
 
 Both server and mobile dedupe incoming GiftWrapped DMs by event ID so the same
 event delivered by multiple relays is only processed once per session.
@@ -115,6 +131,27 @@ The phone can store multiple repo targets. Each target is a named Nostr peer
 pubkey plus relay list, so the same mobile key can quickly switch between
 separate repo services. Each repo service has its own Nostr identity and
 therefore its own npub. The phone sends DMs to the selected target only.
+
+The phone session drawer includes **Spawn on computer**. It sends a
+`spawn_session` request to the currently connected worker. In **Create** mode,
+the phone asks the worker to create a new folder under `/home/tom/code`; in
+**Open** mode, it asks the worker to start a service in an existing path. If the
+spawn succeeds, the parent worker starts a child worker, writes the child
+`.env.server`, sends a target invite DM back to the phone, and records the child
+in `.nostr-codex-workers.json`. Accepting the invite adds the child worker as a
+saved phone session.
+
+The same workflow can be driven by text:
+
+```text
+/spawn --create my-new-project
+/spawn /home/tom/code/existing-repo
+start worker in ~/code/existing-repo
+```
+
+Use `/workers` or `/sessions` to list spawned child workers known by the current
+parent worker. Use `/shutdown`, `/quit`, or `/exit` inside a child session to
+stop that worker process.
 
 From any repo folder, start a foreground worker with one command:
 

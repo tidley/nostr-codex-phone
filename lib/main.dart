@@ -67,12 +67,14 @@ class _RepoTarget {
     required this.name,
     required this.pubkey,
     required this.relays,
+    this.workdir,
   });
 
   final String id;
   final String name;
   final String pubkey;
   final List<String> relays;
+  final String? workdir;
 
   String get displayName {
     final cleaned = name.trim();
@@ -85,6 +87,7 @@ class _RepoTarget {
     'name': name,
     'pubkey': pubkey,
     'relays': relays,
+    if (workdir != null && workdir!.trim().isNotEmpty) 'workdir': workdir,
   };
 
   static _RepoTarget? fromJson(dynamic raw) {
@@ -92,6 +95,7 @@ class _RepoTarget {
     final id = raw['id']?.toString().trim() ?? '';
     final name = raw['name']?.toString().trim() ?? '';
     final pubkey = raw['pubkey']?.toString().trim() ?? '';
+    final workdir = raw['workdir']?.toString().trim();
     final rawRelays = raw['relays'];
     final relays = rawRelays is Iterable
         ? rawRelays
@@ -100,7 +104,13 @@ class _RepoTarget {
               .toList()
         : <String>[];
     if (id.isEmpty || pubkey.isEmpty || relays.isEmpty) return null;
-    return _RepoTarget(id: id, name: name, pubkey: pubkey, relays: relays);
+    return _RepoTarget(
+      id: id,
+      name: name,
+      pubkey: pubkey,
+      relays: relays,
+      workdir: workdir == null || workdir.isEmpty ? null : workdir,
+    );
   }
 }
 
@@ -619,11 +629,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (pubkey.isEmpty || relays.isEmpty) return null;
 
     final name = _targetNameController.text.trim();
+    final existing = _targetById(_repoTargets, _selectedRepoTargetId);
     return _RepoTarget(
       id: _selectedRepoTargetId ?? _newRepoTargetId(),
       name: name.isEmpty ? _defaultTargetName(pubkey) : name,
       pubkey: pubkey,
       relays: relays,
+      workdir: existing?.workdir,
     );
   }
 
@@ -708,6 +720,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             name: target.name,
             pubkey: target.pubkey,
             relays: target.relays,
+            workdir: target.workdir,
           );
     if (existingIndex == -1) {
       targets.add(savedTarget);
@@ -770,10 +783,119 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         name: name,
         pubkey: pubkey,
         relays: relays,
+        workdir: workdir == null || workdir.isEmpty ? null : workdir,
       );
     } catch (_) {
       return null;
     }
+  }
+
+  _RepoTarget? _repoTargetFromInvitePayload(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) return null;
+      final invite = decoded['target_invite'];
+      if (invite is! Map<String, dynamic>) return null;
+      final type = invite['type']?.toString();
+      if (type != 'nostr_codex_target' && type != 'nostr-codex-target') {
+        return null;
+      }
+      final pubkey = invite['pubkey']?.toString().trim() ?? '';
+      if (pubkey.isEmpty) return null;
+      final rawRelays = invite['relays'];
+      final relays = rawRelays is Iterable
+          ? rawRelays
+                .map((relay) => relay.toString().trim())
+                .where((relay) => relay.isNotEmpty)
+                .toList()
+          : _splitRelayText(rawRelays?.toString() ?? '');
+      if (relays.isEmpty) return null;
+      final workdir = invite['workdir']?.toString().trim();
+      final rawName = invite['name']?.toString().trim() ?? '';
+      final name = rawName.isNotEmpty
+          ? rawName
+          : _workdirTargetName(workdir) ?? _defaultTargetName(pubkey);
+      return _RepoTarget(
+        id: _newRepoTargetId(),
+        name: name,
+        pubkey: pubkey,
+        relays: relays,
+        workdir: workdir == null || workdir.isEmpty ? null : workdir,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _offerTargetInvite(_RepoTarget target) async {
+    if (!mounted) return;
+    final accept = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Session request'),
+        content: Text(
+          target.workdir == null || target.workdir!.isEmpty
+              ? 'Add ${target.displayName}?'
+              : 'Add ${target.displayName} at ${target.workdir}?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Ignore'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Accept'),
+          ),
+        ],
+      ),
+    );
+    if (accept != true || !mounted) return;
+    await _saveAndSelectRepoTarget(target, status: 'Accepted session request');
+  }
+
+  Future<void> _saveAndSelectRepoTarget(
+    _RepoTarget target, {
+    required String status,
+  }) async {
+    if (_recording) {
+      await _cancelRecording();
+    }
+    if (_connected || _connecting) {
+      await _disconnect(expand: false);
+    }
+    if (!mounted) return;
+
+    final targets = [..._repoTargets];
+    final existingIndex = targets.indexWhere(
+      (item) => item.pubkey == target.pubkey,
+    );
+    final savedTarget = existingIndex == -1
+        ? target
+        : _RepoTarget(
+            id: targets[existingIndex].id,
+            name: target.name,
+            pubkey: target.pubkey,
+            relays: target.relays,
+            workdir: target.workdir,
+          );
+    if (existingIndex == -1) {
+      targets.add(savedTarget);
+    } else {
+      targets[existingIndex] = savedTarget;
+    }
+
+    setState(() {
+      _repoTargets = targets;
+      _applyRepoTargetFields(savedTarget);
+      _messagesByTarget[savedTarget.id] = [];
+      _seenIncomingEventIds.clear();
+      _pendingProcessingMessages.clear();
+      _wavRetryRequested = false;
+      _status = '$status: ${savedTarget.displayName}';
+    });
+    await _saveSettings();
+    await _loadConversationHistoryForActiveSession();
   }
 
   String? _decodeTargetUriPayload(String payload) {
@@ -1130,6 +1252,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       name: cleaned,
       pubkey: target.pubkey,
       relays: target.relays,
+      workdir: target.workdir,
     );
     setState(() {
       _repoTargets = targets;
@@ -1519,6 +1642,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return;
     }
 
+    if (message.kind == 'target_invite') {
+      final target = _repoTargetFromInvitePayload(message.rawJson);
+      if (target == null) {
+        _showError('Received malformed session request');
+        return;
+      }
+      setState(() => _status = 'Received session request');
+      unawaited(_offerTargetInvite(target));
+      return;
+    }
+
     final conversationMessage = ConversationMessage(
       direction: MessageDirection.incoming,
       kind: message.kind,
@@ -1679,6 +1813,55 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (mounted) {
         setState(() => _sending = false);
       }
+    }
+  }
+
+  Future<void> _requestSpawnSession() async {
+    if (!_connected) {
+      _showError('Connect to the parent service first');
+      return;
+    }
+    final request = await showDialog<_SpawnSessionRequest>(
+      context: context,
+      builder: (context) => const _SpawnSessionDialog(),
+    );
+    if (request == null || !mounted) return;
+
+    final path = request.create
+        ? '/home/tom/code/${request.path}'
+        : request.path;
+    final payload = jsonEncode({
+      'spawn_session': {'workdir': path, 'create': request.create},
+    });
+
+    setState(() {
+      _sending = true;
+      _status = request.create
+          ? 'Requesting new project session...'
+          : 'Requesting session spawn...';
+    });
+    try {
+      final eventId = await _sendWithAutoRecovery(
+        label: 'spawn session request',
+        sender: () => nostrSendQuery(query: payload),
+      );
+      _appendMessageForActiveConversation(
+        ConversationMessage(
+          direction: MessageDirection.outgoing,
+          kind: 'query',
+          text: request.create
+              ? 'Create session in $path'
+              : 'Spawn session in $path',
+          eventId: eventId,
+          timestamp: DateTime.now(),
+        ),
+      );
+      if (!mounted) return;
+      setState(() => _status = 'Spawn request sent');
+    } catch (error) {
+      _showError('Spawn request failed: $error');
+    } finally {
+      if (mounted) setState(() => _sending = false);
     }
   }
 
@@ -2527,6 +2710,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         selectedTargetId: _selectedRepoTargetId,
         onSelectTarget: (targetId) => unawaited(_selectRepoTarget(targetId)),
         onNewTarget: () => unawaited(_createRepoTarget()),
+        onSpawnSession: () => unawaited(_requestSpawnSession()),
         onRenameTarget: (target) => unawaited(_renameRepoTarget(target)),
         onDeleteTarget: (targetId) {
           unawaited(() async {
@@ -2614,6 +2798,7 @@ class _SessionDrawer extends StatelessWidget {
     required this.selectedTargetId,
     required this.onSelectTarget,
     required this.onNewTarget,
+    required this.onSpawnSession,
     required this.onRenameTarget,
     required this.onDeleteTarget,
   });
@@ -2622,6 +2807,7 @@ class _SessionDrawer extends StatelessWidget {
   final String? selectedTargetId;
   final ValueChanged<String> onSelectTarget;
   final VoidCallback onNewTarget;
+  final VoidCallback onSpawnSession;
   final ValueChanged<_RepoTarget> onRenameTarget;
   final ValueChanged<String> onDeleteTarget;
 
@@ -2645,6 +2831,14 @@ class _SessionDrawer extends StatelessWidget {
                 onNewTarget();
               },
             ),
+            ListTile(
+              leading: const Icon(Icons.create_new_folder_outlined),
+              title: const Text('Spawn on computer'),
+              onTap: () {
+                Navigator.of(context).pop();
+                onSpawnSession();
+              },
+            ),
             const Divider(height: 1),
             Expanded(
               child: ListView(
@@ -2658,7 +2852,13 @@ class _SessionDrawer extends StatelessWidget {
                         target.displayName,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      subtitle: Text(_compactIdentifier(target.pubkey)),
+                      subtitle: Text(
+                        target.workdir?.trim().isNotEmpty == true
+                            ? target.workdir!
+                            : _compactIdentifier(target.pubkey),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                       trailing: PopupMenuButton<_SessionDrawerAction>(
                         onSelected: (action) async {
                           if (action == _SessionDrawerAction.rename) {
@@ -2731,6 +2931,113 @@ class _SessionDrawer extends StatelessWidget {
 }
 
 enum _SessionDrawerAction { rename, delete }
+
+class _SpawnSessionRequest {
+  const _SpawnSessionRequest({required this.path, required this.create});
+
+  final String path;
+  final bool create;
+}
+
+class _SpawnSessionDialog extends StatefulWidget {
+  const _SpawnSessionDialog();
+
+  @override
+  State<_SpawnSessionDialog> createState() => _SpawnSessionDialogState();
+}
+
+class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
+  final _pathController = TextEditingController();
+  bool _create = true;
+
+  @override
+  void dispose() {
+    _pathController.dispose();
+    super.dispose();
+  }
+
+  String? _validationError(String value) {
+    final cleaned = value.trim();
+    if (cleaned.isEmpty) return 'Path is required';
+    if (cleaned.contains('\x00')) return 'Path contains an invalid character';
+    if (_create) {
+      if (cleaned.startsWith('/') || cleaned.startsWith('~')) {
+        return 'Use a folder name under /home/tom/code';
+      }
+      if (cleaned.split('/').any((part) => part == '..')) {
+        return 'Folder name cannot contain ..';
+      }
+    }
+    return null;
+  }
+
+  void _submit() {
+    final cleaned = _pathController.text.trim();
+    final error = _validationError(cleaned);
+    if (error != null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
+    Navigator.of(
+      context,
+    ).pop(_SpawnSessionRequest(path: cleaned, create: _create));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Spawn session'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment(
+                value: true,
+                icon: Icon(Icons.create_new_folder_outlined),
+                label: Text('Create'),
+              ),
+              ButtonSegment(
+                value: false,
+                icon: Icon(Icons.folder_open),
+                label: Text('Open'),
+              ),
+            ],
+            selected: {_create},
+            onSelectionChanged: (selection) {
+              setState(() => _create = selection.first);
+            },
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _pathController,
+            autofocus: true,
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => _submit(),
+            decoration: InputDecoration(
+              border: const OutlineInputBorder(),
+              labelText: _create ? 'New folder under /home/tom/code' : 'Path',
+              hintText: _create ? 'my-new-project' : '/home/tom/code/repo',
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton.icon(
+          onPressed: _submit,
+          icon: const Icon(Icons.send),
+          label: const Text('Request'),
+        ),
+      ],
+    );
+  }
+}
 
 class _SettingsPage extends StatelessWidget {
   const _SettingsPage({
