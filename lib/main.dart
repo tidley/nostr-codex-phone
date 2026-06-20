@@ -114,6 +114,22 @@ class _RepoTarget {
   }
 }
 
+class _RepoChoice {
+  const _RepoChoice({
+    required this.name,
+    required this.path,
+    required this.relativePath,
+    required this.isGitRepo,
+  });
+
+  final String name;
+  final String path;
+  final String relativePath;
+  final bool isGitRepo;
+
+  String get displayName => relativePath.isEmpty ? name : relativePath;
+}
+
 enum _PendingMessageCompletion { transcript, response }
 
 class _PendingProcessingMessage {
@@ -354,6 +370,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   DateTime? _recordingStartedAt;
   Timer? _recordingTimer;
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
+  Completer<List<_RepoChoice>>? _pendingRepoListCompleter;
   bool _autoSpeak = true;
   bool _speaking = false;
   bool _wavRetryRequested = false;
@@ -822,6 +839,46 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         relays: relays,
         workdir: workdir == null || workdir.isEmpty ? null : workdir,
       );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  List<_RepoChoice>? _repoChoicesFromRepoListPayload(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) return null;
+      final repoList = decoded['repo_list'];
+      if (repoList is! Map<String, dynamic>) return null;
+      final roots = repoList['roots'];
+      if (roots is! Iterable) return const [];
+      final choices = <_RepoChoice>[];
+      for (final root in roots) {
+        if (root is! Map) continue;
+        final repos = root['repos'];
+        if (repos is! Iterable) continue;
+        for (final repo in repos) {
+          if (repo is! Map) continue;
+          final name = repo['name']?.toString().trim() ?? '';
+          final path = repo['path']?.toString().trim() ?? '';
+          final relativePath = repo['relative_path']?.toString().trim() ?? '';
+          if (name.isEmpty || path.isEmpty || relativePath.isEmpty) continue;
+          choices.add(
+            _RepoChoice(
+              name: name,
+              path: path,
+              relativePath: relativePath,
+              isGitRepo: repo['is_git_repo'] == true,
+            ),
+          );
+        }
+      }
+      choices.sort(
+        (left, right) => left.relativePath.toLowerCase().compareTo(
+          right.relativePath.toLowerCase(),
+        ),
+      );
+      return choices;
     } catch (_) {
       return null;
     }
@@ -1653,6 +1710,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return;
     }
 
+    if (message.kind == 'repo_list') {
+      final choices = _repoChoicesFromRepoListPayload(message.rawJson);
+      if (choices == null) {
+        _showError('Received malformed repo list');
+        return;
+      }
+      final pending = _pendingRepoListCompleter;
+      if (pending != null && !pending.isCompleted) {
+        pending.complete(choices);
+      }
+      setState(() => _status = 'Loaded ${choices.length} repo folders');
+      return;
+    }
+
     final conversationMessage = ConversationMessage(
       direction: MessageDirection.incoming,
       kind: message.kind,
@@ -1823,13 +1894,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
     final request = await showDialog<_SpawnSessionRequest>(
       context: context,
-      builder: (context) => const _SpawnSessionDialog(),
+      builder: (context) =>
+          _SpawnSessionDialog(onLoadRepos: _requestRepoChoices),
     );
     if (request == null || !mounted) return;
 
-    final path = request.create
-        ? '/home/tom/code/${request.path}'
-        : request.path;
+    final path = '/home/tom/code/${request.path}';
     final payload = jsonEncode({
       'spawn_session': {'workdir': path, 'create': request.create},
     });
@@ -1861,6 +1931,45 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     } catch (error) {
       _showError('Spawn request failed: $error');
     } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<List<_RepoChoice>> _requestRepoChoices() async {
+    if (!_connected) {
+      throw StateError('Connect to the parent service first');
+    }
+    final existing = _pendingRepoListCompleter;
+    if (existing != null && !existing.isCompleted) {
+      existing.completeError(StateError('Repo list request replaced'));
+    }
+    final completer = Completer<List<_RepoChoice>>();
+    _pendingRepoListCompleter = completer;
+
+    final payload = jsonEncode({
+      'repo_list_request': {
+        'roots': ['/home/tom/code', '/home/tom/code/pave'],
+      },
+    });
+
+    try {
+      setState(() {
+        _sending = true;
+        _status = 'Requesting repo folders...';
+      });
+      await _sendWithAutoRecovery(
+        label: 'repo folder list request',
+        sender: () => nostrSendQuery(query: payload),
+      );
+      if (mounted) setState(() => _status = 'Waiting for repo folders...');
+      return await completer.future.timeout(
+        const Duration(seconds: 15),
+        onTimeout: () => throw TimeoutException('Repo list request timed out'),
+      );
+    } finally {
+      if (identical(_pendingRepoListCompleter, completer)) {
+        _pendingRepoListCompleter = null;
+      }
       if (mounted) setState(() => _sending = false);
     }
   }
@@ -2940,7 +3049,9 @@ class _SpawnSessionRequest {
 }
 
 class _SpawnSessionDialog extends StatefulWidget {
-  const _SpawnSessionDialog();
+  const _SpawnSessionDialog({required this.onLoadRepos});
+
+  final Future<List<_RepoChoice>> Function() onLoadRepos;
 
   @override
   State<_SpawnSessionDialog> createState() => _SpawnSessionDialogState();
@@ -2949,6 +3060,8 @@ class _SpawnSessionDialog extends StatefulWidget {
 class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
   final _pathController = TextEditingController();
   bool _create = true;
+  bool _loadingRepos = false;
+  List<_RepoChoice> _repoChoices = const [];
 
   @override
   void dispose() {
@@ -2960,15 +3073,29 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
     final cleaned = value.trim();
     if (cleaned.isEmpty) return 'Path is required';
     if (cleaned.contains('\x00')) return 'Path contains an invalid character';
-    if (_create) {
-      if (cleaned.startsWith('/') || cleaned.startsWith('~')) {
-        return 'Use a folder name under /home/tom/code';
-      }
-      if (cleaned.split('/').any((part) => part == '..')) {
-        return 'Folder name cannot contain ..';
-      }
+    if (cleaned.startsWith('/') || cleaned.startsWith('~')) {
+      return 'Use a folder name under /home/tom/code';
+    }
+    if (cleaned.split('/').any((part) => part == '..')) {
+      return 'Folder name cannot contain ..';
     }
     return null;
+  }
+
+  Future<void> _loadRepos() async {
+    setState(() => _loadingRepos = true);
+    try {
+      final choices = await widget.onLoadRepos();
+      if (!mounted) return;
+      setState(() => _repoChoices = choices);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not load repos: $error')));
+    } finally {
+      if (mounted) setState(() => _loadingRepos = false);
+    }
   }
 
   void _submit() {
@@ -3018,10 +3145,55 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
             onSubmitted: (_) => _submit(),
             decoration: InputDecoration(
               border: const OutlineInputBorder(),
-              labelText: _create ? 'New folder under /home/tom/code' : 'Path',
-              hintText: _create ? 'my-new-project' : '/home/tom/code/repo',
+              prefixText: '/home/tom/code/',
+              labelText: _create ? 'New folder' : 'Folder',
+              hintText: _create ? 'my-new-project' : 'phone',
             ),
           ),
+          if (!_create) ...[
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: _loadingRepos ? null : _loadRepos,
+                icon: _loadingRepos
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.folder_open),
+                label: const Text('Load repos'),
+              ),
+            ),
+            if (_repoChoices.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 240),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: _repoChoices.length,
+                  itemBuilder: (context, index) {
+                    final choice = _repoChoices[index];
+                    return ListTile(
+                      dense: true,
+                      leading: Icon(
+                        choice.isGitRepo
+                            ? Icons.account_tree_outlined
+                            : Icons.folder_outlined,
+                      ),
+                      title: Text(
+                        choice.displayName,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () {
+                        _pathController.text = choice.relativePath;
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ],
         ],
       ),
       actions: [

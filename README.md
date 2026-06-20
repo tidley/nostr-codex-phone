@@ -133,12 +133,14 @@ separate repo services. Each repo service has its own Nostr identity and
 therefore its own npub. The phone sends DMs to the selected target only.
 
 The phone session drawer includes **Spawn on computer**. It sends a
-`spawn_session` request to the currently connected worker. In **Create** mode,
-the phone asks the worker to create a new folder under `/home/tom/code`; in
-**Open** mode, it asks the worker to start a service in an existing path. If the
-spawn succeeds, the parent worker starts a child worker, writes the child
-`.env.server`, sends a target invite DM back to the phone, and records the child
-in `.nostr-codex-workers.json`. Accepting the invite adds the child worker as a
+`spawn_session` request to the currently connected worker. The dialog treats
+`/home/tom/code` as the fixed base path, so Create and Open only need a folder
+name such as `my-new-project`, `phone`, or `pave/website`. In **Open** mode, the
+dialog can ask the worker for folders under `/home/tom/code` and
+`/home/tom/code/pave` and fill the field from that list. If the spawn succeeds,
+the parent worker starts a child worker, writes the child `.env.server`, sends a
+target invite DM back to the phone, and records the child in
+`.nostr-codex-workers.json`. Accepting the invite adds the child worker as a
 saved phone session.
 
 The same workflow can be driven by text:

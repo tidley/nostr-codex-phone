@@ -24,7 +24,7 @@ use rust_lib_nostr_codex_phone::nostr_client::{
 };
 use rust_lib_nostr_codex_phone::protocol::{
     parse_media_bundle_query, parse_wire_message, AudioReference, MediaBundle, MediaReference,
-    TargetInvite, WireMessage,
+    RepoList, RepoListEntry, RepoListRoot, TargetInvite, WireMessage,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
@@ -596,6 +596,11 @@ async fn process_message(
                 return;
             }
 
+            if is_repo_list_request(&message.text) {
+                process_repo_list_request(messenger, &message.sender_pubkey_hex).await;
+                return;
+            }
+
             if let Some(response) = handle_local_request(
                 memory,
                 &message.sender_pubkey_hex,
@@ -1007,6 +1012,27 @@ async fn process_spawn_worker_request(
     }
 }
 
+async fn process_repo_list_request(messenger: &NostrMessenger, owner_pubkey_hex: &str) {
+    match build_repo_list() {
+        Ok(repo_list) => {
+            if let Err(err) = messenger
+                .send_wire_to_pubkey(owner_pubkey_hex, WireMessage::repo_list(repo_list))
+                .await
+            {
+                error!("failed to send repo list DM: {err:#}");
+            }
+        }
+        Err(err) => {
+            send_response(
+                messenger,
+                owner_pubkey_hex,
+                format!("Could not list repo folders: {err:#}"),
+            )
+            .await;
+        }
+    }
+}
+
 fn spawn_repo_worker(
     request: &SpawnWorkerRequest,
     owner_pubkey: &str,
@@ -1091,6 +1117,69 @@ fn spawn_repo_worker(
     }
 
     Ok((target, pid))
+}
+
+fn is_repo_list_request(request: &str) -> bool {
+    let trimmed = request.trim();
+    if matches!(trimmed, "/repos" | "/repositories" | "/folders") {
+        return true;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return false;
+    };
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("repo_list_request"))
+}
+
+fn build_repo_list() -> Result<RepoList> {
+    let code = canonical_code_dir()?;
+    let roots = [code.clone(), code.join("pave")]
+        .into_iter()
+        .filter(|root| root.is_dir())
+        .map(|root| list_repo_root(&code, &root))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(RepoList { roots })
+}
+
+fn list_repo_root(code_root: &Path, root: &Path) -> Result<RepoListRoot> {
+    let mut repos = Vec::new();
+    for entry in fs::read_dir(root)
+        .with_context(|| format!("failed to read repo root `{}`", root.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to read entry in `{}`", root.display()))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        let relative_path = path
+            .strip_prefix(code_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
+        repos.push(RepoListEntry {
+            name: name.to_string(),
+            path: path.to_string_lossy().to_string(),
+            relative_path,
+            is_git_repo: path.join(".git").is_dir(),
+        });
+    }
+    repos.sort_by(|left, right| {
+        left.relative_path
+            .to_ascii_lowercase()
+            .cmp(&right.relative_path.to_ascii_lowercase())
+    });
+    Ok(RepoListRoot {
+        root: root.to_string_lossy().to_string(),
+        repos,
+    })
 }
 
 fn ensure_child_worker_secret(env_file: &WorkerEnvFile) -> Result<String> {
@@ -2646,6 +2735,16 @@ mod tests {
         );
         assert_eq!(parse_spawn_worker_request("/spawn"), None);
         assert_eq!(parse_spawn_worker_request("spawn a repo"), None);
+    }
+
+    #[test]
+    fn detects_repo_list_requests() {
+        assert!(is_repo_list_request("/repos"));
+        assert!(is_repo_list_request(
+            r#"{"repo_list_request":{"roots":["/home/tom/code"]}}"#
+        ));
+        assert!(!is_repo_list_request("/repo"));
+        assert!(!is_repo_list_request("list repos"));
     }
 
     #[test]
