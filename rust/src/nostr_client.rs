@@ -14,6 +14,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct NostrConfig {
     pub secret_key: String,
     pub peer_pubkey: Option<String>,
+    pub receive_pubkeys: Vec<String>,
     pub relays: Vec<String>,
 }
 
@@ -30,6 +31,7 @@ pub struct IncomingMessage {
 pub struct NostrMessenger {
     keys: Keys,
     peer: Option<PublicKey>,
+    receive_peers: Option<HashSet<PublicKey>>,
     client: Client,
     incoming: Mutex<mpsc::Receiver<IncomingMessage>>,
     listener: JoinHandle<()>,
@@ -51,6 +53,7 @@ impl NostrMessenger {
             .map(PublicKey::parse)
             .transpose()
             .context("invalid peer public key")?;
+        let receive_peers = parse_receive_peers(config.receive_pubkeys, peer)?;
         let client = Client::default();
 
         for relay in &config.relays {
@@ -74,7 +77,7 @@ impl NostrMessenger {
 
         let (tx, rx) = mpsc::channel(128);
         let listener_keys = keys.clone();
-        let listener_peer = peer;
+        let listener_receive_peers = receive_peers.clone();
         let listener = tokio::spawn(async move {
             let mut seen_event_ids = SeenEventIds::new(4096);
 
@@ -91,7 +94,7 @@ impl NostrMessenger {
                     continue;
                 }
 
-                match decode_gift_wrap(&listener_keys, listener_peer, &event) {
+                match decode_gift_wrap(&listener_keys, &listener_receive_peers, &event) {
                     Ok(Some(message)) => {
                         if tx.send(message).await.is_err() {
                             break;
@@ -106,6 +109,7 @@ impl NostrMessenger {
         Ok(Self {
             keys,
             peer,
+            receive_peers,
             client,
             incoming: Mutex::new(rx),
             listener,
@@ -247,9 +251,57 @@ impl NostrMessenger {
         }
     }
 
+    pub async fn fetch_recent_messages(&self, lookback: Duration) -> Result<Vec<IncomingMessage>> {
+        let now = Timestamp::now();
+        let since_secs = now.as_secs().saturating_sub(lookback.as_secs());
+        let filter = Filter::new()
+            .kind(Kind::GiftWrap)
+            .pubkey(self.keys.public_key())
+            .since(Timestamp::from(since_secs))
+            .limit(1000);
+        let events = self
+            .client
+            .fetch_events(filter)
+            .timeout(Duration::from_secs(12))
+            .await
+            .context("failed to fetch recent GiftWrap DMs")?;
+        let mut messages = Vec::new();
+        for event in events.into_iter() {
+            match decode_gift_wrap(&self.keys, &self.receive_peers, &event) {
+                Ok(Some(message)) => messages.push(message),
+                Ok(None) => {}
+                Err(err) => tracing::warn!("failed to decode fetched GiftWrap DM: {err:#}"),
+            }
+        }
+        messages.sort_by(|left, right| left.event_id.cmp(&right.event_id));
+        Ok(messages)
+    }
+
     pub async fn shutdown(&self) {
         self.listener.abort();
         self.client.shutdown().await;
+    }
+}
+
+fn parse_receive_peers(
+    raw_pubkeys: Vec<String>,
+    selected_peer: Option<PublicKey>,
+) -> Result<Option<HashSet<PublicKey>>> {
+    let mut peers = HashSet::new();
+    if let Some(peer) = selected_peer {
+        peers.insert(peer);
+    }
+    for raw in raw_pubkeys {
+        let cleaned = raw.trim();
+        if cleaned.is_empty() {
+            continue;
+        }
+        peers.insert(PublicKey::parse(cleaned).context("invalid receive peer public key")?);
+    }
+    if peers.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(peers))
     }
 }
 
@@ -288,13 +340,16 @@ impl SeenEventIds {
 
 fn decode_gift_wrap(
     keys: &Keys,
-    expected_peer: Option<PublicKey>,
+    expected_peers: &Option<HashSet<PublicKey>>,
     event: &Event,
 ) -> Result<Option<IncomingMessage>> {
     let UnwrappedGift { rumor, sender } =
         UnwrappedGift::from_gift_wrap(keys, event).context("failed to unwrap GiftWrap")?;
 
-    if expected_peer.is_some_and(|peer| sender != peer) {
+    if expected_peers
+        .as_ref()
+        .is_some_and(|peers| !peers.contains(&sender))
+    {
         return Ok(None);
     }
 
