@@ -1072,6 +1072,10 @@ fn spawn_repo_worker(
             "CODEX_MEMORY_DB".to_string(),
             memory_db.to_string_lossy().to_string(),
         ),
+        (
+            "CODEX_RESUME_LATEST_BY_WORKDIR".to_string(),
+            "0".to_string(),
+        ),
     ];
     for key in [
         "CODEX_BIN",

@@ -6,6 +6,7 @@
 .env*
 .nostr-codex-memory*.sqlite*
 .nostr-codex-target.svg
+.nostr-codex-workers.json
 nostr-codex-worker
 nostr-codex-worker-linux-x64
 .DS_Store
