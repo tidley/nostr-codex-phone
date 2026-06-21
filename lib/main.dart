@@ -1952,6 +1952,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           _dropIncomingProcessingPlaceholder();
         }
         _appendMessageForConversation(targetKey, conversationMessage);
+        if (isActiveConversation &&
+            !fromCatchUp &&
+            message.kind == 'transcript') {
+          _appendIncomingProcessingPlaceholder(message.eventId);
+        }
         if (!isActiveConversation) {
           _unreadCountsByTarget[targetKey] =
               (_unreadCountsByTarget[targetKey] ?? 0) + 1;
