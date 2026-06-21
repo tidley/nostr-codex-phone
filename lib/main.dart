@@ -48,6 +48,7 @@ const _autoBlossomUploadServers = <String>[
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
+const _audioReceivedAck = "Got it, I'm on it.";
 
 class _BlossomPreset {
   const _BlossomPreset({
@@ -399,6 +400,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   Completer<List<_RepoChoice>>? _pendingRepoListCompleter;
   List<_RepoChoice> _cachedRepoChoices = const [];
+  int _audioReceivedAckBacklog = 0;
   bool _autoSpeak = true;
   bool _speaking = false;
   bool _wavRetryRequested = false;
@@ -1248,23 +1250,27 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
-  void _appendPendingTranscriptionMessage({
+  bool _appendPendingTranscriptionMessage({
     required String eventId,
     required String label,
     _PendingMessageCompletion completion = _PendingMessageCompletion.transcript,
+    bool waitForServerAck = false,
   }) {
     _pendingProcessingMessages.add(
       _PendingProcessingMessage(eventId: eventId, completion: completion),
     );
+    final showTranscribingNow =
+        !waitForServerAck || _consumeAudioReceivedAckBacklog();
     _appendMessageForActiveConversation(
       ConversationMessage(
         direction: MessageDirection.outgoing,
-        kind: 'transcribing',
-        text: label,
+        kind: showTranscribingNow ? 'transcribing' : 'sending_audio',
+        text: showTranscribingNow ? label : 'Sending voice...',
         eventId: eventId,
         timestamp: DateTime.now(),
       ),
     );
+    return showTranscribingNow;
   }
 
   bool _tryCompleteTranscription(String transcript) {
@@ -1320,10 +1326,47 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   int _pendingProcessingMessageIndex(String eventId) {
     return _messages.indexWhere(
       (message) =>
-          message.kind == 'transcribing' &&
+          (message.kind == 'transcribing' || message.kind == 'sending_audio') &&
           message.direction == MessageDirection.outgoing &&
           message.eventId == eventId,
     );
+  }
+
+  bool _tryMarkAudioReceivedByServer() {
+    for (final pending in _pendingProcessingMessages) {
+      if (pending.completion != _PendingMessageCompletion.transcript) {
+        continue;
+      }
+      final index = _messages.indexWhere(
+        (message) =>
+            message.kind == 'sending_audio' &&
+            message.direction == MessageDirection.outgoing &&
+            message.eventId == pending.eventId,
+      );
+      if (index < 0) {
+        continue;
+      }
+
+      _messages[index] = ConversationMessage(
+        direction: MessageDirection.outgoing,
+        kind: 'transcribing',
+        text: 'Transcribing voice...',
+        eventId: pending.eventId,
+        timestamp: DateTime.now(),
+        audio: _messages[index].audio,
+      );
+      unawaited(_saveConversationHistoryForKey(_activeConversationKey));
+      _scrollToLatestMessage();
+      return true;
+    }
+    _audioReceivedAckBacklog += 1;
+    return false;
+  }
+
+  bool _consumeAudioReceivedAckBacklog() {
+    if (_audioReceivedAckBacklog <= 0) return false;
+    _audioReceivedAckBacklog -= 1;
+    return true;
   }
 
   Future<void> _openSettings() async {
@@ -1697,14 +1740,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   List<String> _receivePubkeysForInbox(String selectedPeer) {
-    final pubkeys = <String>{};
     final cleanedSelected = selectedPeer.trim();
-    if (cleanedSelected.isNotEmpty) pubkeys.add(cleanedSelected);
-    for (final target in _repoTargets) {
-      final pubkey = target.pubkey.trim();
-      if (pubkey.isNotEmpty) pubkeys.add(pubkey);
-    }
-    return pubkeys.toList()..sort();
+    if (cleanedSelected.isEmpty) return const [];
+    return [cleanedSelected];
   }
 
   bool _isRecoverableNostrSendError(Object error) {
@@ -1856,15 +1894,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return false;
     }
 
-    if (message.kind == 'transcript' &&
-        _tryCompleteTranscription(message.text)) {
-      setState(() {
-        _status = 'Transcription received';
-      });
-      return true;
-    }
-
     if (message.kind == 'target_invite') {
+      if (!_incomingFromActivePeer(message)) return false;
       final target = _repoTargetFromInvitePayload(message.rawJson);
       if (target == null) {
         _showError('Received malformed session request');
@@ -1876,6 +1907,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
 
     if (message.kind == 'repo_list') {
+      if (!_incomingFromActivePeer(message)) return false;
       final choices = _repoChoicesFromRepoListPayload(message.rawJson);
       if (choices == null) {
         _showError('Received malformed repo list');
@@ -1892,6 +1924,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     final targetKey = _conversationKeyForIncoming(message);
     final isActiveConversation = targetKey == _activeConversationKey;
+    if (!isActiveConversation) return false;
+
+    if (isActiveConversation &&
+        message.kind == 'transcript' &&
+        _tryCompleteTranscription(message.text)) {
+      setState(() {
+        _status = 'Transcription received';
+      });
+      return true;
+    }
+
     final conversationMessage = ConversationMessage(
       direction: MessageDirection.incoming,
       kind: message.kind,
@@ -1918,9 +1961,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         }
       } else {
         final statusText = message.text.trim();
-        _status = statusText.isEmpty
-            ? 'Received status update'
-            : 'Server: $statusText';
+        if (statusText == _audioReceivedAck) {
+          _tryMarkAudioReceivedByServer();
+          _status = 'Transcribing...';
+        } else {
+          _status = statusText.isEmpty
+              ? 'Received status update'
+              : 'Server: $statusText';
+        }
       }
 
       if (audioRetryRequested) {
@@ -1933,7 +1981,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       }
     });
 
-    if (_autoSpeak &&
+    if (isActiveConversation &&
+        _autoSpeak &&
         !_autoSpeakSuppressed &&
         (message.kind == 'response' ||
             message.kind == 'audio_retry' ||
@@ -1945,6 +1994,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           remember: true,
           manual: false,
           messageEventId: message.eventId,
+          conversationKey: targetKey,
         ),
       );
     }
@@ -1971,6 +2021,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     return message.senderPubkey.isNotEmpty ? message.senderPubkey : 'default';
   }
 
+  bool _incomingFromActivePeer(BridgeIncomingMessage message) {
+    final activePeer = _peerPubkeyController.text.trim();
+    if (activePeer.isEmpty) return false;
+    return message.senderPubkey == activePeer ||
+        message.senderPubkeyHex == activePeer;
+  }
+
   void _cacheRepoChoices(List<_RepoChoice> choices) {
     final byRelativePath = <String, _RepoChoice>{};
     for (final choice in choices) {
@@ -1991,8 +2048,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     bool remember = false,
     bool manual = true,
     String? messageEventId,
+    String? conversationKey,
   }) async {
     if (!manual && _autoSpeakSuppressed) return;
+    if (!manual &&
+        conversationKey != null &&
+        conversationKey != _activeConversationKey) {
+      return;
+    }
     if (manual) _clearAutoSpeakSuppression();
 
     final spoken = cleanTextForSpeech(text);
@@ -2002,6 +2065,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     try {
       await _tts.stop();
       if (generation != _speechGeneration) return;
+      if (!manual &&
+          conversationKey != null &&
+          conversationKey != _activeConversationKey) {
+        return;
+      }
       if (mounted) {
         setState(() {
           _speaking = true;
@@ -2564,11 +2632,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       );
       if (!mounted) return;
       setState(() {
-        _appendPendingTranscriptionMessage(
+        final transcribing = _appendPendingTranscriptionMessage(
           eventId: eventId,
           label: 'Resending voice transcript...',
+          waitForServerAck: true,
         );
-        _status = 'Voice note resent';
+        _status = transcribing ? 'Transcribing...' : 'Voice note sent';
       });
     } catch (error) {
       _showError('Voice resend failed: $error');
@@ -2704,11 +2773,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         if (recordingFormat.format == _VoiceFormat.wav) {
           _wavRetryRequested = false;
         }
-        _appendPendingTranscriptionMessage(
+        final transcribing = _appendPendingTranscriptionMessage(
           eventId: eventId,
           label: 'Transcribing voice...',
+          waitForServerAck: true,
         );
-        _status = 'Voice query sent';
+        _status = transcribing ? 'Transcribing...' : 'Voice query sent';
       });
     } catch (error) {
       _showError('Voice query failed: $error');
@@ -4556,7 +4626,9 @@ class _MessageTileState extends State<_MessageTile>
   Widget build(BuildContext context) {
     final incoming = widget.message.direction == MessageDirection.incoming;
     final transcript = widget.message.kind == 'transcript';
-    final processing = widget.message.kind == 'transcribing';
+    final processing =
+        widget.message.kind == 'transcribing' ||
+        widget.message.kind == 'sending_audio';
     final userSide = !incoming || transcript;
     final canFlashOnTap = widget.stopSpeakingOnTap;
     final colorScheme = Theme.of(context).colorScheme;
@@ -4722,6 +4794,7 @@ class _MessageTileState extends State<_MessageTile>
     if (kind == 'response' || kind == 'transcript' || kind == 'transcribing') {
       return '';
     }
+    if (kind == 'sending_audio') return 'Sending';
     return kind;
   }
 
