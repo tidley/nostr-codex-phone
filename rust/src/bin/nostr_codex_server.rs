@@ -35,6 +35,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 const WORKER_REGISTRY_FILE: &str = ".nostr-codex-workers.json";
+const WORKER_LOCK_FILE: &str = ".nostr-codex-worker.lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestClass {
@@ -71,6 +72,31 @@ struct WorkerRegistryEntry {
 #[derive(Debug, Clone)]
 struct WorkerEnvFile {
     path: PathBuf,
+}
+
+struct WorkerProcessLock {
+    path: PathBuf,
+}
+
+impl Drop for WorkerProcessLock {
+    fn drop(&mut self) {
+        match fs::read_to_string(&self.path) {
+            Ok(raw) if raw.trim() == std::process::id().to_string() => {
+                if let Err(err) = fs::remove_file(&self.path) {
+                    warn!(
+                        "failed to remove worker lock `{}`: {err:#}",
+                        self.path.display()
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => warn!(
+                "failed to inspect worker lock `{}` during cleanup: {err:#}",
+                self.path.display()
+            ),
+        }
+    }
 }
 
 impl WorkerEnvFile {
@@ -362,6 +388,7 @@ async fn main() -> Result<()> {
     if worker_env.path != initial_env.path {
         worker_env.load_missing()?;
     }
+    let _worker_lock = acquire_worker_process_lock(&codex_config.working_dir)?;
     let nostr_config = nostr_config_from_env(&worker_env)?;
     let audio_config = AudioConfig::from_env();
     let transcribe_config = TranscribeConfig::from_env()?;
@@ -709,6 +736,8 @@ async fn process_message(
                 }
             };
 
+            send_status(messenger, &message.sender_pubkey_hex, "Got it, I'm on it.").await;
+
             let transcript = match transcribe_or_load_cached(
                 memory,
                 recorded.id,
@@ -962,34 +991,52 @@ async fn process_spawn_worker_request(
         relays,
         &codex_config.working_dir,
     ) {
-        Ok((target, pid)) => {
+        Ok((target, pid, reused_existing)) => {
             match messenger
                 .send_wire_to_pubkey(owner_pubkey_hex, WireMessage::target_invite(target.clone()))
                 .await
             {
                 Ok(_) => {
+                    let action = if reused_existing {
+                        "Attached to the existing"
+                    } else {
+                        "Started a new"
+                    };
                     send_response(
                         messenger,
                         owner_pubkey_hex,
                         format!(
-                            "Started a new Nostr Codex worker for `{}`.\n\nIt has its own npub and I sent this phone a target invite DM. Open the session switcher to select `{}`.",
+                            "{action} Nostr Codex worker for `{}`.\n\nIt has its own npub and I sent this phone a target invite DM. Open the session switcher to select `{}`.",
                             target.workdir.as_deref().unwrap_or("unknown"),
                             target.name
                         ),
                     )
                     .await;
-                    info!(
-                        "spawned child worker pid {pid} for {} ({})",
-                        target.name,
-                        target.workdir.as_deref().unwrap_or("unknown")
-                    );
+                    if reused_existing {
+                        info!(
+                            "attached to existing child worker pid {pid} for {} ({})",
+                            target.name,
+                            target.workdir.as_deref().unwrap_or("unknown")
+                        );
+                    } else {
+                        info!(
+                            "spawned child worker pid {pid} for {} ({})",
+                            target.name,
+                            target.workdir.as_deref().unwrap_or("unknown")
+                        );
+                    }
                 }
                 Err(err) => {
+                    let action = if reused_existing {
+                        "Found an existing worker"
+                    } else {
+                        "Started a new worker"
+                    };
                     send_response(
                         messenger,
                         owner_pubkey_hex,
                         format!(
-                            "Started a new worker for `{}` as `{}`, but sending the phone target invite failed: {err:#}",
+                            "{action} for `{}` as `{}`, but sending the phone target invite failed: {err:#}",
                             target.workdir.as_deref().unwrap_or("unknown"),
                             target.pubkey
                         ),
@@ -1039,7 +1086,7 @@ fn spawn_repo_worker(
     owner_pubkey_hex: &str,
     relays: &[String],
     current_workdir: &Path,
-) -> Result<(TargetInvite, u32)> {
+) -> Result<(TargetInvite, u32, bool)> {
     let workdir = resolve_spawn_workdir(request, current_workdir)?;
     let env_file = WorkerEnvFile::default_for_workdir(&workdir);
     let secret_key = ensure_child_worker_secret(&env_file)?;
@@ -1092,9 +1139,35 @@ fn spawn_repo_worker(
     }
     upsert_env_file_owned(&env_file.path, &env_values)?;
 
+    let target = TargetInvite {
+        target_type: "nostr_codex_target".to_string(),
+        version: 1,
+        name: worker_target_name(&workdir),
+        pubkey: public_key.clone(),
+        pubkey_hex: Some(public_key_hex.clone()),
+        workdir: Some(workdir.to_string_lossy().to_string()),
+        relays: relay_list.clone(),
+    };
+
+    if let Some(pid) = find_running_worker_for_workdir(&workdir) {
+        if let Err(err) = upsert_worker_registry(current_workdir, &target, pid) {
+            warn!("failed to update worker registry for existing worker: {err:#}");
+        }
+        return Ok((target, pid, true));
+    }
+    if let Some(pid) = running_worker_lock_pid(&workdir)? {
+        if let Err(err) = upsert_worker_registry(current_workdir, &target, pid) {
+            warn!("failed to update worker registry for locked worker: {err:#}");
+        }
+        return Ok((target, pid, true));
+    }
+
     let child = StdCommand::new(env::current_exe().context("failed to locate worker executable")?)
         .current_dir(&workdir)
         .env("NOSTR_CODEX_ENV_FILE", &env_file.path)
+        .env("NOSTR_SECRET_KEY", &secret_key)
+        .env("NOSTR_PUBLIC_KEY", &public_key)
+        .env("NOSTR_PUBLIC_KEY_HEX", &public_key_hex)
         .env("CODEX_WORKDIR", &workdir)
         .env("CODEX_MEMORY_DB", &memory_db)
         .env("NOSTR_PEER_PUBKEY", owner_pubkey)
@@ -1107,20 +1180,131 @@ fn spawn_repo_worker(
         .spawn()
         .with_context(|| format!("failed to start worker in `{}`", workdir.display()))?;
     let pid = child.id();
-    let target = TargetInvite {
-        target_type: "nostr_codex_target".to_string(),
-        version: 1,
-        name: worker_target_name(&workdir),
-        pubkey: public_key,
-        pubkey_hex: Some(public_key_hex),
-        workdir: Some(workdir.to_string_lossy().to_string()),
-        relays: relay_list,
-    };
+
     if let Err(err) = upsert_worker_registry(current_workdir, &target, pid) {
         warn!("failed to update worker registry: {err:#}");
     }
 
-    Ok((target, pid))
+    Ok((target, pid, false))
+}
+
+fn acquire_worker_process_lock(workdir: &Path) -> Result<WorkerProcessLock> {
+    let path = workdir.join(WORKER_LOCK_FILE);
+    let pid = std::process::id().to_string();
+
+    loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                writeln!(file, "{pid}")
+                    .with_context(|| format!("failed to write worker lock `{}`", path.display()))?;
+                set_private_file_permissions(&path);
+                return Ok(WorkerProcessLock { path });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if worker_lock_is_stale(&path)? {
+                    fs::remove_file(&path).with_context(|| {
+                        format!("failed to remove stale worker lock `{}`", path.display())
+                    })?;
+                    continue;
+                }
+                anyhow::bail!(
+                    "another Nostr Codex worker is already running in `{}`; attach to that worker instead",
+                    workdir.display()
+                );
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to create worker lock `{}`", path.display()));
+            }
+        }
+    }
+}
+
+fn worker_lock_is_stale(path: &Path) -> Result<bool> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read worker lock `{}`", path.display()))?;
+    let Some(pid) = raw.trim().parse::<u32>().ok() else {
+        return Ok(true);
+    };
+    if pid == std::process::id() {
+        return Ok(true);
+    }
+    Ok(!process_is_running(pid))
+}
+
+fn running_worker_lock_pid(workdir: &Path) -> Result<Option<u32>> {
+    let path = workdir.join(WORKER_LOCK_FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    if worker_lock_is_stale(&path)? {
+        fs::remove_file(&path)
+            .with_context(|| format!("failed to remove stale worker lock `{}`", path.display()))?;
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read worker lock `{}`", path.display()))?;
+    Ok(raw.trim().parse::<u32>().ok())
+}
+
+#[cfg(target_family = "unix")]
+fn process_is_running(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(not(target_family = "unix"))]
+fn process_is_running(_pid: u32) -> bool {
+    true
+}
+
+fn find_running_worker_for_workdir(workdir: &Path) -> Option<u32> {
+    find_running_worker_for_workdir_impl(workdir)
+}
+
+#[cfg(target_family = "unix")]
+fn find_running_worker_for_workdir_impl(workdir: &Path) -> Option<u32> {
+    let current_pid = std::process::id();
+    let target_workdir = canonical_path_key(workdir);
+    let current_exe_name = env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_owned()));
+    let proc_dir = fs::read_dir("/proc").ok()?;
+    for entry in proc_dir.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == current_pid {
+            continue;
+        }
+        let process_dir = entry.path();
+        let Ok(cwd) = fs::read_link(process_dir.join("cwd")) else {
+            continue;
+        };
+        if canonical_path_key(&cwd) != target_workdir {
+            continue;
+        }
+        let Ok(exe) = fs::read_link(process_dir.join("exe")) else {
+            continue;
+        };
+        let same_executable_name = current_exe_name
+            .as_ref()
+            .zip(exe.file_name())
+            .is_some_and(|(current, candidate)| current == candidate);
+        if same_executable_name {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_family = "unix"))]
+fn find_running_worker_for_workdir_impl(_workdir: &Path) -> Option<u32> {
+    None
 }
 
 fn is_repo_list_request(request: &str) -> bool {
