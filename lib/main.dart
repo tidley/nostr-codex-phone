@@ -2675,8 +2675,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return;
     }
 
-    if (!_connected) {
-      _showError('Connect before recording a voice query');
+    if (!await _ensureConnectedForSend()) {
       return;
     }
     if (_sending || _sendingAudio) return;
