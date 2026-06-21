@@ -4686,6 +4686,7 @@ class _MessageTileState extends State<_MessageTile>
         widget.message.kind == 'transcribing' ||
         widget.message.kind == 'sending_audio' ||
         widget.message.kind == 'processing';
+    final processingPlaceholder = widget.message.kind == 'processing';
     final userSide = !incoming || transcript;
     final canFlashOnTap = widget.stopSpeakingOnTap;
     final colorScheme = Theme.of(context).colorScheme;
@@ -4693,6 +4694,30 @@ class _MessageTileState extends State<_MessageTile>
         ? colorScheme.primaryContainer
         : colorScheme.surfaceContainerHigh;
     final flashColor = Color.lerp(baseColor, colorScheme.primary, 0.16)!;
+
+    if (processingPlaceholder) {
+      return Card(
+        color: Colors.transparent,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 130),
+          curve: Curves.easeOut,
+          width: 58,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: baseColor,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: SizedBox.square(
+            dimension: 20,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: colorScheme.primary,
+            ),
+          ),
+        ),
+      );
+    }
+
     final title = _messageTitle(widget.message.kind);
     final headerActions = Row(
       mainAxisSize: MainAxisSize.min,
