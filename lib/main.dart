@@ -1740,9 +1740,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   List<String> _receivePubkeysForInbox(String selectedPeer) {
+    final pubkeys = <String>{};
     final cleanedSelected = selectedPeer.trim();
-    if (cleanedSelected.isEmpty) return const [];
-    return [cleanedSelected];
+    if (cleanedSelected.isNotEmpty) pubkeys.add(cleanedSelected);
+    for (final target in _repoTargets) {
+      final pubkey = target.pubkey.trim();
+      if (pubkey.isNotEmpty) pubkeys.add(pubkey);
+    }
+    return pubkeys.toList()..sort();
   }
 
   bool _isRecoverableNostrSendError(Object error) {
@@ -1924,7 +1929,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     final targetKey = _conversationKeyForIncoming(message);
     final isActiveConversation = targetKey == _activeConversationKey;
-    if (!isActiveConversation) return false;
+    if (!isActiveConversation && message.kind == 'status') return false;
 
     if (isActiveConversation &&
         message.kind == 'transcript' &&
@@ -3083,13 +3088,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         : _repoTargets.isNotEmpty
         ? _repoTargets.first.id
         : null;
+    final hasUnreadConversations = _unreadCountsByTarget.values.any(
+      (count) => count > 0,
+    );
 
     return Scaffold(
       appBar: AppBar(
         leading: Builder(
           builder: (context) => IconButton(
             tooltip: 'Conversations',
-            icon: const Icon(Icons.menu),
+            icon: Badge(
+              isLabelVisible: hasUnreadConversations,
+              smallSize: 9,
+              child: const Icon(Icons.menu),
+            ),
             onPressed: () => Scaffold.of(context).openDrawer(),
           ),
         ),
@@ -3340,7 +3352,11 @@ class _SessionDrawer extends StatelessWidget {
                         );
                         return ListTile(
                           selected: target.id == selectedTargetId,
-                          leading: const Icon(Icons.chat_bubble_outline),
+                          leading: Badge(
+                            isLabelVisible: unreadCount > 0,
+                            smallSize: 9,
+                            child: const Icon(Icons.chat_bubble_outline),
+                          ),
                           title: Text(
                             target.displayName,
                             maxLines: 1,
