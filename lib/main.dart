@@ -1292,6 +1292,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         audio: _messages[index].audio,
       );
       unawaited(_saveConversationHistoryForKey(_activeConversationKey));
+      _dropIncomingProcessingPlaceholder();
       _scrollToLatestMessage();
       return true;
     }
@@ -1361,6 +1362,39 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
     _audioReceivedAckBacklog += 1;
     return false;
+  }
+
+  void _appendIncomingProcessingPlaceholder(String eventId) {
+    final messages = _messages;
+    final alreadyVisible = messages.any(
+      (message) =>
+          message.kind == 'processing' &&
+          message.direction == MessageDirection.incoming,
+    );
+    if (alreadyVisible) return;
+
+    _appendMessageForActiveConversation(
+      ConversationMessage(
+        direction: MessageDirection.incoming,
+        kind: 'processing',
+        text: '',
+        eventId: eventId,
+        timestamp: DateTime.now(),
+      ),
+    );
+  }
+
+  bool _dropIncomingProcessingPlaceholder() {
+    final index = _messages.indexWhere(
+      (message) =>
+          message.kind == 'processing' &&
+          message.direction == MessageDirection.incoming,
+    );
+    if (index < 0) return false;
+    _messages.removeAt(index);
+    unawaited(_saveConversationHistoryForKey(_activeConversationKey));
+    _scrollToLatestMessage();
+    return true;
   }
 
   bool _consumeAudioReceivedAckBacklog() {
@@ -1958,6 +1992,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _dropPendingProcessingMessage();
       }
       if (message.kind != 'status') {
+        if (isActiveConversation) {
+          _dropIncomingProcessingPlaceholder();
+        }
         _appendMessageForConversation(targetKey, conversationMessage);
         if (!isActiveConversation) {
           _unreadCountsByTarget[targetKey] =
@@ -1967,8 +2004,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       } else {
         final statusText = message.text.trim();
         if (statusText == _audioReceivedAck) {
-          _tryMarkAudioReceivedByServer();
-          _status = 'Transcribing...';
+          if (!fromCatchUp) {
+            _tryMarkAudioReceivedByServer();
+            _appendIncomingProcessingPlaceholder(message.eventId);
+            _status = 'Transcribing...';
+          }
         } else {
           _status = statusText.isEmpty
               ? 'Received status update'
@@ -4644,7 +4684,8 @@ class _MessageTileState extends State<_MessageTile>
     final transcript = widget.message.kind == 'transcript';
     final processing =
         widget.message.kind == 'transcribing' ||
-        widget.message.kind == 'sending_audio';
+        widget.message.kind == 'sending_audio' ||
+        widget.message.kind == 'processing';
     final userSide = !incoming || transcript;
     final canFlashOnTap = widget.stopSpeakingOnTap;
     final colorScheme = Theme.of(context).colorScheme;
@@ -4765,7 +4806,9 @@ class _MessageTileState extends State<_MessageTile>
                   width: 18,
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
-                    color: colorScheme.onPrimaryContainer,
+                    color: userSide
+                        ? colorScheme.onPrimaryContainer
+                        : colorScheme.primary,
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -4807,7 +4850,10 @@ class _MessageTileState extends State<_MessageTile>
   }
 
   String _messageTitle(String kind) {
-    if (kind == 'response' || kind == 'transcript' || kind == 'transcribing') {
+    if (kind == 'response' ||
+        kind == 'transcript' ||
+        kind == 'transcribing' ||
+        kind == 'processing') {
       return '';
     }
     if (kind == 'sending_audio') return 'Sending';
