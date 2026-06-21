@@ -1292,7 +1292,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         audio: _messages[index].audio,
       );
       unawaited(_saveConversationHistoryForKey(_activeConversationKey));
-      _dropIncomingProcessingPlaceholder();
+      _appendIncomingProcessingPlaceholder(pending.eventId);
       _scrollToLatestMessage();
       return true;
     }
@@ -2006,7 +2006,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         if (statusText == _audioReceivedAck) {
           if (!fromCatchUp) {
             _tryMarkAudioReceivedByServer();
-            _appendIncomingProcessingPlaceholder(message.eventId);
             _status = 'Transcribing...';
           }
         } else {
