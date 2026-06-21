@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -161,6 +162,13 @@ class _PendingProcessingMessage {
 
   final String eventId;
   final _PendingMessageCompletion completion;
+}
+
+class _PendingSessionStart {
+  const _PendingSessionStart({required this.workdir, required this.completer});
+
+  final String workdir;
+  final Completer<_RepoTarget> completer;
 }
 
 class _MediaUploadCancelledException implements Exception {
@@ -399,6 +407,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   Timer? _recordingTimer;
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   Completer<List<_RepoChoice>>? _pendingRepoListCompleter;
+  _PendingSessionStart? _pendingSessionStart;
   List<_RepoChoice> _cachedRepoChoices = const [];
   bool _autoSpeak = true;
   bool _speaking = false;
@@ -1093,6 +1102,26 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     return parts.last;
   }
 
+  bool _sameWorkdir(String? left, String? right) {
+    final cleanedLeft = left?.trim();
+    final cleanedRight = right?.trim();
+    return cleanedLeft != null &&
+        cleanedLeft.isNotEmpty &&
+        cleanedRight != null &&
+        cleanedRight.isNotEmpty &&
+        cleanedLeft == cleanedRight;
+  }
+
+  Future<void> _acceptPendingSessionStart(
+    _RepoTarget target,
+    Completer<_RepoTarget> completer,
+  ) async {
+    await _saveAndSelectRepoTarget(target, status: 'Started session');
+    if (!completer.isCompleted) {
+      completer.complete(target);
+    }
+  }
+
   Future<void> _deleteSelectedRepoTarget() async {
     final selectedId = _selectedRepoTargetId;
     if (selectedId == null) return;
@@ -1723,9 +1752,95 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   Future<bool> _ensureConnectedForSend() async {
     if (_connected) return true;
     if (_connecting) return false;
+
+    final startedSession = await _startSelectedRepoTargetForSend();
+    if (startedSession != null) return startedSession;
+
     setState(() => _status = 'Connecting before send...');
     await _connect();
     return mounted && _connected;
+  }
+
+  Future<bool?> _startSelectedRepoTargetForSend() async {
+    final target = _targetById(_repoTargets, _selectedRepoTargetId);
+    final workdir = target?.workdir?.trim();
+    if (target == null || workdir == null || workdir.isEmpty) return null;
+
+    final parent = _parentRepoTargetFor(target);
+    if (parent == null) return null;
+
+    final completer = Completer<_RepoTarget>();
+    _pendingSessionStart = _PendingSessionStart(
+      workdir: workdir,
+      completer: completer,
+    );
+
+    try {
+      if (_connected || _connecting) {
+        await _disconnect(expand: false);
+      }
+      if (!mounted) return false;
+      setState(() {
+        _applyRepoTargetFields(parent);
+        _pendingProcessingMessages.clear();
+        _wavRetryRequested = false;
+        _status = 'Starting ${target.displayName}...';
+      });
+      await _saveSettings();
+
+      await _connect();
+      if (!mounted || !_connected) return false;
+
+      await _sendSpawnSessionRequest(
+        path: workdir,
+        create: false,
+        sendingStatus: 'Starting ${target.displayName}...',
+        outgoingText: 'Start session in $workdir',
+        sentStatus: 'Waiting for ${target.displayName}...',
+        recordOutgoing: false,
+      );
+      if (!mounted) return false;
+
+      await completer.future.timeout(const Duration(seconds: 30));
+      if (!mounted) return false;
+
+      await _connect();
+      return mounted && _connected;
+    } catch (error) {
+      if (mounted) {
+        _showError('Could not start ${target.displayName}: $error');
+      }
+      return false;
+    } finally {
+      if (identical(_pendingSessionStart?.completer, completer)) {
+        _pendingSessionStart = null;
+      }
+    }
+  }
+
+  _RepoTarget? _parentRepoTargetFor(_RepoTarget target) {
+    final targetWorkdir = target.workdir?.trim();
+    final candidates = _repoTargets.where((candidate) {
+      if (candidate.id == target.id) return false;
+      final workdir = candidate.workdir?.trim();
+      return workdir != null && workdir.isNotEmpty && workdir != targetWorkdir;
+    }).toList();
+    if (candidates.isEmpty) return null;
+
+    _RepoTarget? firstWhere(bool Function(_RepoTarget target) test) {
+      for (final candidate in candidates) {
+        if (test(candidate)) return candidate;
+      }
+      return null;
+    }
+
+    return firstWhere(
+          (candidate) => candidate.workdir == '/home/tom/code/phone',
+        ) ??
+        firstWhere(
+          (candidate) => candidate.displayName.toLowerCase().contains('phone'),
+        ) ??
+        candidates.first;
   }
 
   BridgeNostrConfig _activeNostrConfig() {
@@ -1908,6 +2023,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       final target = _repoTargetFromInvitePayload(message.rawJson);
       if (target == null) {
         _showError('Received malformed session request');
+        return true;
+      }
+      final pendingSessionStart = _pendingSessionStart;
+      if (pendingSessionStart != null &&
+          _sameWorkdir(target.workdir, pendingSessionStart.workdir)) {
+        unawaited(
+          _acceptPendingSessionStart(target, pendingSessionStart.completer),
+        );
         return true;
       }
       setState(() => _status = 'Received session request');
@@ -2242,6 +2365,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     required String sendingStatus,
     required String outgoingText,
     required String sentStatus,
+    bool recordOutgoing = true,
   }) async {
     final payload = jsonEncode({
       'spawn_session': {'workdir': path, 'create': create},
@@ -2256,15 +2380,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         label: 'spawn session request',
         sender: () => nostrSendQuery(query: payload),
       );
-      _appendMessageForActiveConversation(
-        ConversationMessage(
-          direction: MessageDirection.outgoing,
-          kind: 'query',
-          text: outgoingText,
-          eventId: eventId,
-          timestamp: DateTime.now(),
-        ),
-      );
+      if (recordOutgoing) {
+        _appendMessageForActiveConversation(
+          ConversationMessage(
+            direction: MessageDirection.outgoing,
+            kind: 'query',
+            text: outgoingText,
+            eventId: eventId,
+            timestamp: DateTime.now(),
+          ),
+        );
+      }
       if (!mounted) return;
       setState(() => _status = sentStatus);
     } catch (error) {
@@ -3410,19 +3536,23 @@ class _SessionDrawer extends StatelessWidget {
                               child: Stack(
                                 alignment: Alignment.center,
                                 children: [
-                                  Icon(
-                                    connected
-                                        ? Icons.cloud_done_outlined
-                                        : Icons.chat_bubble_outline,
-                                    color: statusColor,
-                                  ),
                                   if (pending)
                                     SizedBox.square(
                                       dimension: 28,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: statusColor ?? loadedColor,
+                                      child: Center(
+                                        child: _DigitalThinkingIndicator(
+                                          width: 28,
+                                          height: 16,
+                                          color: statusColor ?? loadedColor,
+                                        ),
                                       ),
+                                    )
+                                  else
+                                    Icon(
+                                      connected
+                                          ? Icons.cloud_done_outlined
+                                          : Icons.chat_bubble_outline,
+                                      color: statusColor,
                                     ),
                                 ],
                               ),
@@ -4597,6 +4727,123 @@ class _RecordingButton extends StatelessWidget {
   }
 }
 
+class _DigitalThinkingIndicator extends StatefulWidget {
+  const _DigitalThinkingIndicator({
+    required this.color,
+    this.width = 42,
+    this.height = 18,
+  });
+
+  final Color color;
+  final double width;
+  final double height;
+
+  @override
+  State<_DigitalThinkingIndicator> createState() =>
+      _DigitalThinkingIndicatorState();
+}
+
+class _DigitalThinkingIndicatorState extends State<_DigitalThinkingIndicator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1280),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: widget.width,
+      height: widget.height,
+      child: CustomPaint(
+        painter: _DigitalThinkingPainter(
+          animation: _controller,
+          color: widget.color,
+        ),
+      ),
+    );
+  }
+}
+
+class _DigitalThinkingPainter extends CustomPainter {
+  const _DigitalThinkingPainter({required this.animation, required this.color})
+    : super(repaint: animation);
+
+  final Animation<double> animation;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final t = animation.value;
+    final centerY = size.height / 2;
+    final count = size.width > 34 ? 7 : 5;
+    final step = size.width / (count - 1);
+    final points = <Offset>[];
+
+    for (var index = 0; index < count; index++) {
+      final phase = (t * math.pi * 2) + (index * 0.72);
+      final x = index * step;
+      final y = centerY + math.sin(phase) * size.height * 0.22;
+      points.add(Offset(x, y));
+    }
+
+    final linePaint = Paint()
+      ..color = color.withValues(alpha: 0.34)
+      ..strokeWidth = 1.4
+      ..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke;
+    final path = Path()..moveTo(points.first.dx, points.first.dy);
+    for (final point in points.skip(1)) {
+      path.lineTo(point.dx, point.dy);
+    }
+    canvas.drawPath(path, linePaint);
+
+    for (var index = 0; index < points.length; index++) {
+      final point = points[index];
+      final pulse = (math.sin((t * math.pi * 2) + (index * 0.95)) + 1) / 2;
+      final radius = 1.8 + (pulse * 1.5);
+      final nodePaint = Paint()
+        ..color = color.withValues(alpha: 0.42 + (pulse * 0.5))
+        ..style = PaintingStyle.fill;
+      canvas.drawCircle(point, radius, nodePaint);
+
+      if (index.isEven) {
+        final tickPaint = Paint()
+          ..color = color.withValues(alpha: 0.16 + (pulse * 0.22))
+          ..strokeWidth = 1
+          ..strokeCap = StrokeCap.round;
+        canvas.drawLine(
+          Offset(point.dx, centerY - size.height * 0.42),
+          Offset(point.dx, centerY - size.height * 0.32),
+          tickPaint,
+        );
+        canvas.drawLine(
+          Offset(point.dx, centerY + size.height * 0.32),
+          Offset(point.dx, centerY + size.height * 0.42),
+          tickPaint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DigitalThinkingPainter oldDelegate) {
+    return oldDelegate.animation != animation || oldDelegate.color != color;
+  }
+}
+
 class _SpeakingEqualizer extends StatelessWidget {
   const _SpeakingEqualizer({required this.animation, required this.color});
 
@@ -4748,12 +4995,10 @@ class _MessageTileState extends State<_MessageTile>
             color: baseColor,
             borderRadius: BorderRadius.circular(12),
           ),
-          child: SizedBox.square(
-            dimension: 20,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: colorScheme.primary,
-            ),
+          child: _DigitalThinkingIndicator(
+            width: 34,
+            height: 20,
+            color: colorScheme.primary,
           ),
         ),
       );
@@ -4858,15 +5103,12 @@ class _MessageTileState extends State<_MessageTile>
           if (processing)
             Row(
               children: [
-                SizedBox(
+                _DigitalThinkingIndicator(
+                  width: 42,
                   height: 18,
-                  width: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: userSide
-                        ? colorScheme.onPrimaryContainer
-                        : colorScheme.primary,
-                  ),
+                  color: userSide
+                      ? colorScheme.onPrimaryContainer
+                      : colorScheme.primary,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
