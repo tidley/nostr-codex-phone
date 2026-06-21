@@ -381,6 +381,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   final _messagesByTarget = <String, List<ConversationMessage>>{};
   final _seenIncomingEventIds = <String>{};
   final _unreadCountsByTarget = <String, int>{};
+  final _pendingReplyTargetIds = <String>{};
   final ScrollController _chatScrollController = ScrollController();
 
   bool _loadingSettings = true;
@@ -1117,6 +1118,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       }
       _messagesByTarget.remove(selectedId);
       _unreadCountsByTarget.remove(selectedId);
+      _pendingReplyTargetIds.remove(selectedId);
       _pendingProcessingMessages.clear();
       _wavRetryRequested = false;
       _status = nextTarget == null
@@ -1328,6 +1330,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   void _appendIncomingProcessingPlaceholder(String eventId) {
+    _pendingReplyTargetIds.add(_activeConversationKey);
     final alreadyVisible = _messages.any(
       (message) =>
           message.kind == 'processing' &&
@@ -1347,6 +1350,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   bool _dropIncomingProcessingPlaceholder() {
+    _pendingReplyTargetIds.remove(_activeConversationKey);
     final index = _messages.indexWhere(
       (message) =>
           message.kind == 'processing' &&
@@ -1670,6 +1674,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   Future<void> _connect() async {
+    if (_connected || _connecting) return;
+
     final secret = _secretKeyController.text.trim();
     final peer = _peerPubkeyController.text.trim();
     final relays = _relayLines();
@@ -1712,6 +1718,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       });
       _showError('Connection failed: $error');
     }
+  }
+
+  Future<bool> _ensureConnectedForSend() async {
+    if (_connected) return true;
+    if (_connecting) return false;
+    setState(() => _status = 'Connecting before send...');
+    await _connect();
+    return mounted && _connected;
   }
 
   BridgeNostrConfig _activeNostrConfig() {
@@ -1939,6 +1953,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
     final audioRetryRequested = message.kind == 'audio_retry';
     setState(() {
+      if (message.kind == 'response' ||
+          audioRetryRequested ||
+          message.kind == 'error' ||
+          message.kind == 'invalid') {
+        _pendingReplyTargetIds.remove(targetKey);
+      }
       if (isActiveConversation && message.kind == 'response') {
         _dropPendingProcessingMessage(
           completion: _PendingMessageCompletion.response,
@@ -2126,8 +2146,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final query = _queryController.text.trim();
     if (query.isEmpty) return;
     if (_sending) return;
-    if (!_connected) {
-      _showError('Connect before sending a query');
+    if (!await _ensureConnectedForSend()) {
       return;
     }
     _clearAutoSpeakSuppression();
@@ -2153,6 +2172,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             timestamp: DateTime.now(),
           ),
         );
+        _pendingReplyTargetIds.add(_activeConversationKey);
         _queryController.clear();
         _status = 'Query sent';
       });
@@ -2305,8 +2325,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final selected = _pendingMediaAttachment;
     if (selected == null) return;
     if (_sendingMedia || _sending || _sendingAudio || _recording) return;
-    if (!_connected) {
-      _showError('Connect before sending media');
+    if (!await _ensureConnectedForSend()) {
       return;
     }
 
@@ -2359,6 +2378,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               ? _PendingMessageCompletion.transcript
               : _PendingMessageCompletion.response,
         );
+        if (!expectsTranscript) {
+          _pendingReplyTargetIds.add(_activeConversationKey);
+        }
         _queryController.clear();
         _clearPendingMediaAttachmentInMemory();
         _status = 'Attachment sent';
@@ -2607,6 +2629,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             timestamp: DateTime.now(),
           ),
         );
+        _pendingReplyTargetIds.add(_activeConversationKey);
         _status = fromTranscript ? 'Transcript sent' : 'Query resent';
       });
     } catch (error) {
@@ -3143,7 +3166,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       drawer: _SessionDrawer(
         targets: _repoTargets,
         selectedTargetId: _selectedRepoTargetId,
+        connectedTargetId: _connected ? _selectedRepoTargetId : null,
         unreadCountsByTarget: _unreadCountsByTarget,
+        pendingReplyTargetIds: _pendingReplyTargetIds,
+        loadedTargetIds: _messagesByTarget.keys.toSet(),
         onSelectTarget: (targetId) => unawaited(_selectRepoTarget(targetId)),
         onNewTarget: () => unawaited(_createRepoTarget()),
         onSpawnSession: () => unawaited(_requestSpawnSession()),
@@ -3162,6 +3188,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
                     .toList();
                 _messagesByTarget.remove(target.id);
                 _unreadCountsByTarget.remove(target.id);
+                _pendingReplyTargetIds.remove(target.id);
                 _status = 'Deleted session ${target.displayName}';
               });
               await _deleteConversationHistoryForKey(target.id);
@@ -3235,7 +3262,10 @@ class _SessionDrawer extends StatelessWidget {
   const _SessionDrawer({
     required this.targets,
     required this.selectedTargetId,
+    required this.connectedTargetId,
     required this.unreadCountsByTarget,
+    required this.pendingReplyTargetIds,
+    required this.loadedTargetIds,
     required this.onSelectTarget,
     required this.onNewTarget,
     required this.onSpawnSession,
@@ -3246,7 +3276,10 @@ class _SessionDrawer extends StatelessWidget {
 
   final List<_RepoTarget> targets;
   final String? selectedTargetId;
+  final String? connectedTargetId;
   final Map<String, int> unreadCountsByTarget;
+  final Set<String> pendingReplyTargetIds;
+  final Set<String> loadedTargetIds;
   final ValueChanged<String> onSelectTarget;
   final VoidCallback onNewTarget;
   final VoidCallback onSpawnSession;
@@ -3290,10 +3323,34 @@ class _SessionDrawer extends StatelessWidget {
                   for (final target in targets)
                     Builder(
                       builder: (context) {
+                        final theme = Theme.of(context);
+                        final dark = theme.brightness == Brightness.dark;
+                        final activeColor = dark
+                            ? const Color(0xff81c784)
+                            : const Color(0xff2e7d32);
+                        final loadedColor = dark
+                            ? const Color(0xff90caf9)
+                            : const Color(0xff1565c0);
                         final unreadCount =
                             unreadCountsByTarget[target.id] ?? 0;
                         final hasWorkdir =
                             target.workdir?.trim().isNotEmpty == true;
+                        final selected = target.id == selectedTargetId;
+                        final connected = target.id == connectedTargetId;
+                        final loaded = loadedTargetIds.contains(target.id);
+                        final pending = pendingReplyTargetIds.contains(
+                          target.id,
+                        );
+                        final statusColor = selected
+                            ? activeColor
+                            : connected || loaded
+                            ? loadedColor
+                            : null;
+                        final tileColor = selected
+                            ? activeColor.withValues(alpha: 0.12)
+                            : connected || loaded
+                            ? loadedColor.withValues(alpha: 0.08)
+                            : null;
                         final menu = PopupMenuButton<_SessionDrawerAction>(
                           onSelected: (action) async {
                             if (action == _SessionDrawerAction.restart) {
@@ -3342,16 +3399,48 @@ class _SessionDrawer extends StatelessWidget {
                           ],
                         );
                         return ListTile(
-                          selected: target.id == selectedTargetId,
+                          selected: selected,
+                          selectedColor: activeColor,
+                          selectedTileColor: tileColor,
+                          tileColor: selected ? null : tileColor,
                           leading: Badge(
                             isLabelVisible: unreadCount > 0,
                             smallSize: 9,
-                            child: const Icon(Icons.chat_bubble_outline),
+                            child: SizedBox.square(
+                              dimension: 30,
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  Icon(
+                                    connected
+                                        ? Icons.cloud_done_outlined
+                                        : Icons.chat_bubble_outline,
+                                    color: statusColor,
+                                  ),
+                                  if (pending)
+                                    SizedBox.square(
+                                      dimension: 28,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: statusColor ?? loadedColor,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
                           ),
                           title: Text(
                             target.displayName,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
+                            style: statusColor == null
+                                ? null
+                                : TextStyle(
+                                    color: statusColor,
+                                    fontWeight: selected || connected
+                                        ? FontWeight.w700
+                                        : FontWeight.w600,
+                                  ),
                           ),
                           subtitle: Text(
                             target.workdir?.trim().isNotEmpty == true
@@ -4349,6 +4438,8 @@ class _ComposerState extends State<_Composer> {
                                 : canSendFromInput
                                 ? widget.onSendPressed
                                 : widget.onMicPressed
+                          : canSendFromInput
+                          ? widget.onSendPressed
                           : widget.onConnectPressed
                     : null;
 
@@ -4386,7 +4477,7 @@ class _ComposerState extends State<_Composer> {
                       )
                     : IconButton.styleFrom(minimumSize: const Size(48, 48));
 
-                final icon = !widget.connected
+                final icon = !widget.connected && !canSendFromInput
                     ? const Icon(Icons.cloud_off)
                     : busy
                     ? SizedBox.square(
@@ -4407,8 +4498,10 @@ class _ComposerState extends State<_Composer> {
                       );
                 final label = widget.sendingAudio || widget.sendingMedia
                     ? 'Sending'
-                    : !widget.connected
+                    : !widget.connected && !canSendFromInput
                     ? disconnectedLabel
+                    : !widget.connected
+                    ? 'Send'
                     : widget.recording
                     ? 'Recording... ${widget.recordingDurationLabel}'
                     : canSendFromInput
@@ -4418,8 +4511,10 @@ class _ComposerState extends State<_Composer> {
                     : 'Record';
                 final tooltip = widget.recording
                     ? 'Send recording'
-                    : !widget.connected
+                    : !widget.connected && !canSendFromInput
                     ? disconnectedTooltip
+                    : !widget.connected
+                    ? 'Connect and send'
                     : canSendFromInput
                     ? widget.hasPendingMedia
                           ? 'Send attachment'
@@ -4512,7 +4607,7 @@ class _SpeakingEqualizer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 68,
+      width: 136,
       height: 16,
       child: AnimatedBuilder(
         animation: animation,
@@ -4521,7 +4616,7 @@ class _SpeakingEqualizer extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              for (var index = 0; index < 9; index++)
+              for (var index = 0; index < 18; index++)
                 _EqualizerBar(
                   color: color,
                   height: _barHeight(animation.value, index),
@@ -4728,41 +4823,32 @@ class _MessageTileState extends State<_MessageTile>
               Expanded(
                 child: SizedBox(
                   height: 36,
-                  child: Stack(
-                    alignment: Alignment.center,
+                  child: Row(
                     children: [
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: Padding(
-                          padding: const EdgeInsets.only(right: 128),
-                          child: title.isEmpty
-                              ? const SizedBox.shrink()
-                              : Text(
-                                  title,
-                                  style: Theme.of(context).textTheme.titleSmall,
-                                  overflow: TextOverflow.ellipsis,
+                      Expanded(
+                        child: widget.speaking
+                            ? Center(
+                                child: _SpeakingEqualizer(
+                                  animation: _equalizerController,
+                                  color: userSide
+                                      ? colorScheme.onPrimaryContainer
+                                      : colorScheme.primary,
                                 ),
-                        ),
-                      ),
-                      if (widget.speaking)
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: Padding(
-                            padding: const EdgeInsets.only(right: 128),
-                            child: Center(
-                              child: _SpeakingEqualizer(
-                                animation: _equalizerController,
-                                color: userSide
-                                    ? colorScheme.onPrimaryContainer
-                                    : colorScheme.primary,
+                              )
+                            : Align(
+                                alignment: Alignment.centerLeft,
+                                child: title.isEmpty
+                                    ? const SizedBox.shrink()
+                                    : Text(
+                                        title,
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.titleSmall,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
                               ),
-                            ),
-                          ),
-                        ),
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: headerActions,
                       ),
+                      headerActions,
                     ],
                   ),
                 ),
