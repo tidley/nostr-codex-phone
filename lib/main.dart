@@ -1750,11 +1750,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   Future<bool> _ensureConnectedForSend() async {
-    if (_connected) return true;
-    if (_connecting) return false;
-
     final startedSession = await _startSelectedRepoTargetForSend();
     if (startedSession != null) return startedSession;
+
+    if (_connected) return true;
+    if (_connecting) return false;
 
     setState(() => _status = 'Connecting before send...');
     await _connect();
