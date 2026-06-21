@@ -48,7 +48,6 @@ const _autoBlossomUploadServers = <String>[
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
-const _audioReceivedAck = "Got it, I'm on it.";
 
 class _BlossomPreset {
   const _BlossomPreset({
@@ -400,7 +399,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   Completer<List<_RepoChoice>>? _pendingRepoListCompleter;
   List<_RepoChoice> _cachedRepoChoices = const [];
-  int _audioReceivedAckBacklog = 0;
   bool _autoSpeak = true;
   bool _speaking = false;
   bool _wavRetryRequested = false;
@@ -1250,27 +1248,23 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
-  bool _appendPendingTranscriptionMessage({
+  void _appendPendingTranscriptionMessage({
     required String eventId,
     required String label,
     _PendingMessageCompletion completion = _PendingMessageCompletion.transcript,
-    bool waitForServerAck = false,
   }) {
     _pendingProcessingMessages.add(
       _PendingProcessingMessage(eventId: eventId, completion: completion),
     );
-    final showTranscribingNow =
-        !waitForServerAck || _consumeAudioReceivedAckBacklog();
     _appendMessageForActiveConversation(
       ConversationMessage(
         direction: MessageDirection.outgoing,
-        kind: showTranscribingNow ? 'transcribing' : 'sending_audio',
-        text: showTranscribingNow ? label : 'Sending voice...',
+        kind: 'transcribing',
+        text: label,
         eventId: eventId,
         timestamp: DateTime.now(),
       ),
     );
-    return showTranscribingNow;
   }
 
   bool _tryCompleteTranscription(String transcript) {
@@ -1327,46 +1321,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   int _pendingProcessingMessageIndex(String eventId) {
     return _messages.indexWhere(
       (message) =>
-          (message.kind == 'transcribing' || message.kind == 'sending_audio') &&
+          message.kind == 'transcribing' &&
           message.direction == MessageDirection.outgoing &&
           message.eventId == eventId,
     );
   }
 
-  bool _tryMarkAudioReceivedByServer() {
-    for (final pending in _pendingProcessingMessages) {
-      if (pending.completion != _PendingMessageCompletion.transcript) {
-        continue;
-      }
-      final index = _messages.indexWhere(
-        (message) =>
-            message.kind == 'sending_audio' &&
-            message.direction == MessageDirection.outgoing &&
-            message.eventId == pending.eventId,
-      );
-      if (index < 0) {
-        continue;
-      }
-
-      _messages[index] = ConversationMessage(
-        direction: MessageDirection.outgoing,
-        kind: 'transcribing',
-        text: 'Transcribing voice...',
-        eventId: pending.eventId,
-        timestamp: DateTime.now(),
-        audio: _messages[index].audio,
-      );
-      unawaited(_saveConversationHistoryForKey(_activeConversationKey));
-      _scrollToLatestMessage();
-      return true;
-    }
-    _audioReceivedAckBacklog += 1;
-    return false;
-  }
-
   void _appendIncomingProcessingPlaceholder(String eventId) {
-    final messages = _messages;
-    final alreadyVisible = messages.any(
+    final alreadyVisible = _messages.any(
       (message) =>
           message.kind == 'processing' &&
           message.direction == MessageDirection.incoming,
@@ -1394,12 +1356,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     _messages.removeAt(index);
     unawaited(_saveConversationHistoryForKey(_activeConversationKey));
     _scrollToLatestMessage();
-    return true;
-  }
-
-  bool _consumeAudioReceivedAckBacklog() {
-    if (_audioReceivedAckBacklog <= 0) return false;
-    _audioReceivedAckBacklog -= 1;
     return true;
   }
 
@@ -2003,16 +1959,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         }
       } else {
         final statusText = message.text.trim();
-        if (statusText == _audioReceivedAck) {
-          if (!fromCatchUp) {
-            _tryMarkAudioReceivedByServer();
-            _status = 'Transcribing...';
-          }
-        } else {
-          _status = statusText.isEmpty
-              ? 'Received status update'
-              : 'Server: $statusText';
-        }
+        _status = statusText.isEmpty
+            ? 'Received status update'
+            : 'Server: $statusText';
       }
 
       if (audioRetryRequested) {
@@ -2676,12 +2625,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       );
       if (!mounted) return;
       setState(() {
-        final transcribing = _appendPendingTranscriptionMessage(
+        _appendPendingTranscriptionMessage(
           eventId: eventId,
           label: 'Resending voice transcript...',
-          waitForServerAck: true,
         );
-        _status = transcribing ? 'Transcribing...' : 'Voice note sent';
+        _status = 'Voice note resent';
       });
     } catch (error) {
       _showError('Voice resend failed: $error');
@@ -2817,12 +2765,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         if (recordingFormat.format == _VoiceFormat.wav) {
           _wavRetryRequested = false;
         }
-        final transcribing = _appendPendingTranscriptionMessage(
+        _appendPendingTranscriptionMessage(
           eventId: eventId,
           label: 'Transcribing voice...',
-          waitForServerAck: true,
         );
-        _status = transcribing ? 'Transcribing...' : 'Voice query sent';
+        _status = 'Voice query sent';
       });
     } catch (error) {
       _showError('Voice query failed: $error');
@@ -4681,11 +4628,7 @@ class _MessageTileState extends State<_MessageTile>
   Widget build(BuildContext context) {
     final incoming = widget.message.direction == MessageDirection.incoming;
     final transcript = widget.message.kind == 'transcript';
-    final processing =
-        widget.message.kind == 'transcribing' ||
-        widget.message.kind == 'sending_audio' ||
-        widget.message.kind == 'processing';
-    final processingPlaceholder = widget.message.kind == 'processing';
+    final processing = widget.message.kind == 'transcribing';
     final userSide = !incoming || transcript;
     final canFlashOnTap = widget.stopSpeakingOnTap;
     final colorScheme = Theme.of(context).colorScheme;
@@ -4694,7 +4637,7 @@ class _MessageTileState extends State<_MessageTile>
         : colorScheme.surfaceContainerHigh;
     final flashColor = Color.lerp(baseColor, colorScheme.primary, 0.16)!;
 
-    if (processingPlaceholder) {
+    if (widget.message.kind == 'processing') {
       return Card(
         color: Colors.transparent,
         child: AnimatedContainer(
@@ -4880,7 +4823,6 @@ class _MessageTileState extends State<_MessageTile>
         kind == 'processing') {
       return '';
     }
-    if (kind == 'sending_audio') return 'Sending';
     return kind;
   }
 

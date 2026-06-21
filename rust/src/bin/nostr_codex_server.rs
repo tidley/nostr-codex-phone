@@ -736,8 +736,6 @@ async fn process_message(
                 }
             };
 
-            send_status(messenger, &message.sender_pubkey_hex, "Got it, I'm on it.").await;
-
             let transcript = match transcribe_or_load_cached(
                 memory,
                 recorded.id,
