@@ -2114,15 +2114,56 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (request == null || !mounted) return;
 
     final path = '/home/tom/code/${request.path}';
+    await _sendSpawnSessionRequest(
+      path: path,
+      create: request.create,
+      sendingStatus: request.create
+          ? 'Requesting new project session...'
+          : 'Requesting session spawn...',
+      outgoingText: request.create
+          ? 'Create session in $path'
+          : 'Spawn session in $path',
+      sentStatus: 'Spawn request sent',
+    );
+  }
+
+  Future<void> _restartRepoTarget(_RepoTarget target) async {
+    final workdir = target.workdir?.trim();
+    if (workdir == null || workdir.isEmpty) {
+      _showError('This session does not have a saved folder path');
+      return;
+    }
+    if (!_connected) {
+      _showError('Connect to the parent service first');
+      return;
+    }
+    if (target.id == _selectedRepoTargetId) {
+      _showError('Select the parent service first, then restart this session');
+      return;
+    }
+    await _sendSpawnSessionRequest(
+      path: workdir,
+      create: false,
+      sendingStatus: 'Requesting session restart...',
+      outgoingText: 'Restart session in $workdir',
+      sentStatus: 'Restart request sent',
+    );
+  }
+
+  Future<void> _sendSpawnSessionRequest({
+    required String path,
+    required bool create,
+    required String sendingStatus,
+    required String outgoingText,
+    required String sentStatus,
+  }) async {
     final payload = jsonEncode({
-      'spawn_session': {'workdir': path, 'create': request.create},
+      'spawn_session': {'workdir': path, 'create': create},
     });
 
     setState(() {
       _sending = true;
-      _status = request.create
-          ? 'Requesting new project session...'
-          : 'Requesting session spawn...';
+      _status = sendingStatus;
     });
     try {
       final eventId = await _sendWithAutoRecovery(
@@ -2133,17 +2174,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         ConversationMessage(
           direction: MessageDirection.outgoing,
           kind: 'query',
-          text: request.create
-              ? 'Create session in $path'
-              : 'Spawn session in $path',
+          text: outgoingText,
           eventId: eventId,
           timestamp: DateTime.now(),
         ),
       );
       if (!mounted) return;
-      setState(() => _status = 'Spawn request sent');
+      setState(() => _status = sentStatus);
     } catch (error) {
-      _showError('Spawn request failed: $error');
+      _showError('Session request failed: $error');
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -3035,6 +3074,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         onSelectTarget: (targetId) => unawaited(_selectRepoTarget(targetId)),
         onNewTarget: () => unawaited(_createRepoTarget()),
         onSpawnSession: () => unawaited(_requestSpawnSession()),
+        onRestartTarget: (target) => unawaited(_restartRepoTarget(target)),
         onRenameTarget: (target) => unawaited(_renameRepoTarget(target)),
         onDeleteTarget: (targetId) {
           unawaited(() async {
@@ -3126,6 +3166,7 @@ class _SessionDrawer extends StatelessWidget {
     required this.onSelectTarget,
     required this.onNewTarget,
     required this.onSpawnSession,
+    required this.onRestartTarget,
     required this.onRenameTarget,
     required this.onDeleteTarget,
   });
@@ -3136,6 +3177,7 @@ class _SessionDrawer extends StatelessWidget {
   final ValueChanged<String> onSelectTarget;
   final VoidCallback onNewTarget;
   final VoidCallback onSpawnSession;
+  final ValueChanged<_RepoTarget> onRestartTarget;
   final ValueChanged<_RepoTarget> onRenameTarget;
   final ValueChanged<String> onDeleteTarget;
 
@@ -3177,9 +3219,13 @@ class _SessionDrawer extends StatelessWidget {
                       builder: (context) {
                         final unreadCount =
                             unreadCountsByTarget[target.id] ?? 0;
+                        final hasWorkdir =
+                            target.workdir?.trim().isNotEmpty == true;
                         final menu = PopupMenuButton<_SessionDrawerAction>(
                           onSelected: (action) async {
-                            if (action == _SessionDrawerAction.rename) {
+                            if (action == _SessionDrawerAction.restart) {
+                              onRestartTarget(target);
+                            } else if (action == _SessionDrawerAction.rename) {
                               onRenameTarget(target);
                             } else if (action == _SessionDrawerAction.delete) {
                               final shouldDelete = await _confirmDelete(
@@ -3192,6 +3238,16 @@ class _SessionDrawer extends StatelessWidget {
                             }
                           },
                           itemBuilder: (context) => [
+                            PopupMenuItem(
+                              value: _SessionDrawerAction.restart,
+                              enabled: hasWorkdir,
+                              child: const ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.restart_alt),
+                                title: Text('Restart'),
+                              ),
+                            ),
                             const PopupMenuItem(
                               value: _SessionDrawerAction.rename,
                               child: ListTile(
@@ -3268,7 +3324,7 @@ class _SessionDrawer extends StatelessWidget {
   }
 }
 
-enum _SessionDrawerAction { rename, delete }
+enum _SessionDrawerAction { restart, rename, delete }
 
 class _SpawnSessionRequest {
   const _SpawnSessionRequest({required this.path, required this.create});
