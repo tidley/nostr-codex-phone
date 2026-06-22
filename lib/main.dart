@@ -4636,6 +4636,51 @@ class _HapticFeedbackSettingsState extends State<_HapticFeedbackSettings> {
   }
 }
 
+class _AutoSpeakSwitch extends StatefulWidget {
+  const _AutoSpeakSwitch({
+    required this.initialEnabled,
+    required this.onChanged,
+  });
+
+  final bool initialEnabled;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  State<_AutoSpeakSwitch> createState() => _AutoSpeakSwitchState();
+}
+
+class _AutoSpeakSwitchState extends State<_AutoSpeakSwitch> {
+  late bool _enabled;
+
+  @override
+  void initState() {
+    super.initState();
+    _enabled = widget.initialEnabled;
+  }
+
+  @override
+  void didUpdateWidget(covariant _AutoSpeakSwitch oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initialEnabled != widget.initialEnabled) {
+      _enabled = widget.initialEnabled;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: _enabled ? 'Auto speak on' : 'Auto speak off',
+      child: Switch(
+        value: _enabled,
+        onChanged: (enabled) {
+          setState(() => _enabled = enabled);
+          widget.onChanged(enabled);
+        },
+      ),
+    );
+  }
+}
+
 class _ConnectionPanel extends StatelessWidget {
   const _ConnectionPanel({
     required this.repoTargets,
@@ -4905,12 +4950,9 @@ class _ConnectionPanel extends StatelessWidget {
                 Expanded(
                   child: Text('Speech', style: theme.textTheme.titleSmall),
                 ),
-                Tooltip(
-                  message: autoSpeak ? 'Auto speak on' : 'Auto speak off',
-                  child: Switch(
-                    value: autoSpeak,
-                    onChanged: onAutoSpeakChanged,
-                  ),
+                _AutoSpeakSwitch(
+                  initialEnabled: autoSpeak,
+                  onChanged: onAutoSpeakChanged,
                 ),
                 IconButton.filledTonal(
                   tooltip: 'Replay speech',
