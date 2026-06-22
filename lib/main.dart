@@ -2019,14 +2019,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (!mounted) return;
       setState(() {
         _connected = true;
-        _connecting = false;
         _connectedPeerPubkey = peer;
         _connectedRelays = relays;
         _ownPubkey = status.publicKey;
+        _status = 'Checking recent messages...';
+      });
+      await _fetchRecentInboxMessages(allowCatchUpSpeech: true);
+      if (!mounted) return;
+      setState(() {
+        _connecting = false;
         _status = 'Connected to ${status.relayCount} relays';
       });
       _startPolling();
-      unawaited(_fetchRecentInboxMessages());
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -2382,30 +2386,39 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
-  Future<void> _fetchRecentInboxMessages() async {
+  Future<int> _fetchRecentInboxMessages({
+    bool allowCatchUpSpeech = false,
+  }) async {
     try {
       final messages = await nostrFetchRecentMessages(
         lookbackSecs: BigInt.from(_catchUpLookback.inSeconds),
       );
-      if (!mounted || messages.isEmpty) return;
+      if (!mounted || messages.isEmpty) return 0;
       var accepted = 0;
       for (final message in messages) {
-        if (_receiveMessage(message, fromCatchUp: true)) {
+        if (_receiveMessage(
+          message,
+          fromCatchUp: true,
+          allowAutoSpeak: allowCatchUpSpeech,
+        )) {
           accepted += 1;
         }
       }
       if (mounted && accepted > 0) {
         setState(() => _status = 'Fetched $accepted recent message(s)');
       }
+      return accepted;
     } catch (error) {
       if (mounted) setState(() => _status = 'Recent message fetch failed');
       debugPrint('recent message fetch failed: $error');
+      return 0;
     }
   }
 
   bool _receiveMessage(
     BridgeIncomingMessage message, {
     bool fromCatchUp = false,
+    bool allowAutoSpeak = true,
   }) {
     final eventId = message.eventId.trim();
     if (eventId.isNotEmpty && !_rememberIncomingEventId(eventId)) {
@@ -2519,6 +2532,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (isActiveConversation &&
         _autoSpeak &&
         !_autoSpeakSuppressed &&
+        !_recording &&
+        !_sending &&
+        !_sendingAudio &&
+        !_sendingMedia &&
+        (!fromCatchUp || allowAutoSpeak) &&
         (message.kind == 'response' ||
             message.kind == 'audio_retry' ||
             message.kind == 'error' ||
