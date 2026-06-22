@@ -69,6 +69,10 @@ class _RepoTarget {
     required this.pubkey,
     required this.relays,
     this.workdir,
+    this.parentPubkey,
+    this.parentRelays,
+    this.parentWorkdir,
+    this.parentName,
   });
 
   final String id;
@@ -76,6 +80,10 @@ class _RepoTarget {
   final String pubkey;
   final List<String> relays;
   final String? workdir;
+  final String? parentPubkey;
+  final List<String>? parentRelays;
+  final String? parentWorkdir;
+  final String? parentName;
 
   String get displayName {
     final cleaned = name.trim();
@@ -89,6 +97,14 @@ class _RepoTarget {
     'pubkey': pubkey,
     'relays': relays,
     if (workdir != null && workdir!.trim().isNotEmpty) 'workdir': workdir,
+    if (parentPubkey != null && parentPubkey!.trim().isNotEmpty)
+      'parent_pubkey': parentPubkey,
+    if (parentRelays != null && parentRelays!.isNotEmpty)
+      'parent_relays': parentRelays,
+    if (parentWorkdir != null && parentWorkdir!.trim().isNotEmpty)
+      'parent_workdir': parentWorkdir,
+    if (parentName != null && parentName!.trim().isNotEmpty)
+      'parent_name': parentName,
   };
 
   static _RepoTarget? fromJson(dynamic raw) {
@@ -97,9 +113,19 @@ class _RepoTarget {
     final name = raw['name']?.toString().trim() ?? '';
     final pubkey = raw['pubkey']?.toString().trim() ?? '';
     final workdir = raw['workdir']?.toString().trim();
+    final parentPubkey = raw['parent_pubkey']?.toString().trim();
+    final parentWorkdir = raw['parent_workdir']?.toString().trim();
+    final parentName = raw['parent_name']?.toString().trim();
     final rawRelays = raw['relays'];
     final relays = rawRelays is Iterable
         ? rawRelays
+              .map((relay) => relay.toString().trim())
+              .where((relay) => relay.isNotEmpty)
+              .toList()
+        : <String>[];
+    final rawParentRelays = raw['parent_relays'];
+    final parentRelays = rawParentRelays is Iterable
+        ? rawParentRelays
               .map((relay) => relay.toString().trim())
               .where((relay) => relay.isNotEmpty)
               .toList()
@@ -111,6 +137,14 @@ class _RepoTarget {
       pubkey: pubkey,
       relays: relays,
       workdir: workdir == null || workdir.isEmpty ? null : workdir,
+      parentPubkey: parentPubkey == null || parentPubkey.isEmpty
+          ? null
+          : parentPubkey,
+      parentRelays: parentRelays.isEmpty ? null : parentRelays,
+      parentWorkdir: parentWorkdir == null || parentWorkdir.isEmpty
+          ? null
+          : parentWorkdir,
+      parentName: parentName == null || parentName.isEmpty ? null : parentName,
     );
   }
 }
@@ -813,6 +847,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       pubkey: pubkey,
       relays: relays,
       workdir: existing?.workdir,
+      parentPubkey: existing?.parentPubkey,
+      parentRelays: existing?.parentRelays,
+      parentWorkdir: existing?.parentWorkdir,
+      parentName: existing?.parentName,
     );
   }
 
@@ -897,6 +935,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             pubkey: target.pubkey,
             relays: target.relays,
             workdir: target.workdir,
+            parentPubkey: target.parentPubkey,
+            parentRelays: target.parentRelays,
+            parentWorkdir: target.parentWorkdir,
+            parentName: target.parentName,
           );
     if (existingIndex == -1) {
       targets.add(savedTarget);
@@ -949,6 +991,25 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (relays.isEmpty) return null;
 
       final workdir = decoded['workdir']?.toString().trim();
+      final parent = decoded['parent'];
+      final parentPubkey = parent is Map
+          ? parent['pubkey']?.toString().trim()
+          : decoded['parent_pubkey']?.toString().trim();
+      final rawParentRelays = parent is Map
+          ? parent['relays']
+          : decoded['parent_relays'];
+      final parentRelays = rawParentRelays is Iterable
+          ? rawParentRelays
+                .map((relay) => relay.toString().trim())
+                .where((relay) => relay.isNotEmpty)
+                .toList()
+          : _splitRelayText(rawParentRelays?.toString() ?? '');
+      final parentWorkdir = parent is Map
+          ? parent['workdir']?.toString().trim()
+          : decoded['parent_workdir']?.toString().trim();
+      final parentName = parent is Map
+          ? parent['name']?.toString().trim()
+          : decoded['parent_name']?.toString().trim();
       final rawName = decoded['name']?.toString().trim() ?? '';
       final name = rawName.isNotEmpty
           ? rawName
@@ -959,6 +1020,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         pubkey: pubkey,
         relays: relays,
         workdir: workdir == null || workdir.isEmpty ? null : workdir,
+        parentPubkey: parentPubkey == null || parentPubkey.isEmpty
+            ? null
+            : parentPubkey,
+        parentRelays: parentRelays.isEmpty ? null : parentRelays,
+        parentWorkdir: parentWorkdir == null || parentWorkdir.isEmpty
+            ? null
+            : parentWorkdir,
+        parentName: parentName == null || parentName.isEmpty
+            ? null
+            : parentName,
       );
     } catch (_) {
       return null;
@@ -986,6 +1057,25 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           : _splitRelayText(rawRelays?.toString() ?? '');
       if (relays.isEmpty) return null;
       final workdir = invite['workdir']?.toString().trim();
+      final parent = invite['parent'];
+      final parentPubkey = parent is Map
+          ? parent['pubkey']?.toString().trim()
+          : invite['parent_pubkey']?.toString().trim();
+      final rawParentRelays = parent is Map
+          ? parent['relays']
+          : invite['parent_relays'];
+      final parentRelays = rawParentRelays is Iterable
+          ? rawParentRelays
+                .map((relay) => relay.toString().trim())
+                .where((relay) => relay.isNotEmpty)
+                .toList()
+          : _splitRelayText(rawParentRelays?.toString() ?? '');
+      final parentWorkdir = parent is Map
+          ? parent['workdir']?.toString().trim()
+          : invite['parent_workdir']?.toString().trim();
+      final parentName = parent is Map
+          ? parent['name']?.toString().trim()
+          : invite['parent_name']?.toString().trim();
       final rawName = invite['name']?.toString().trim() ?? '';
       final name = rawName.isNotEmpty
           ? rawName
@@ -996,10 +1086,55 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         pubkey: pubkey,
         relays: relays,
         workdir: workdir == null || workdir.isEmpty ? null : workdir,
+        parentPubkey: parentPubkey == null || parentPubkey.isEmpty
+            ? null
+            : parentPubkey,
+        parentRelays: parentRelays.isEmpty ? null : parentRelays,
+        parentWorkdir: parentWorkdir == null || parentWorkdir.isEmpty
+            ? null
+            : parentWorkdir,
+        parentName: parentName == null || parentName.isEmpty
+            ? null
+            : parentName,
       );
     } catch (_) {
       return null;
     }
+  }
+
+  _RepoTarget _targetWithParentRouteFromMessage(
+    _RepoTarget target,
+    BridgeIncomingMessage message,
+  ) {
+    if (target.parentPubkey?.trim().isNotEmpty == true &&
+        target.parentRelays?.isNotEmpty == true) {
+      return target;
+    }
+
+    final parentPubkey = message.senderPubkey.trim().isNotEmpty
+        ? message.senderPubkey.trim()
+        : message.senderPubkeyHex.trim();
+    if (parentPubkey.isEmpty || parentPubkey == target.pubkey) {
+      return target;
+    }
+
+    final selectedParent = _targetById(_repoTargets, _selectedRepoTargetId);
+    final parentRelays = _relayLines().isNotEmpty
+        ? _relayLines()
+        : target.relays;
+    final parentName = selectedParent?.displayName ?? _activeTargetName();
+
+    return _RepoTarget(
+      id: target.id,
+      name: target.name,
+      pubkey: target.pubkey,
+      relays: target.relays,
+      workdir: target.workdir,
+      parentPubkey: parentPubkey,
+      parentRelays: parentRelays,
+      parentWorkdir: selectedParent?.workdir,
+      parentName: parentName,
+    );
   }
 
   List<_RepoChoice>? _repoChoicesFromRepoListPayload(String raw) {
@@ -1093,6 +1228,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             pubkey: target.pubkey,
             relays: target.relays,
             workdir: target.workdir,
+            parentPubkey: target.parentPubkey,
+            parentRelays: target.parentRelays,
+            parentWorkdir: target.parentWorkdir,
+            parentName: target.parentName,
           );
     if (existingIndex == -1) {
       targets.add(savedTarget);
@@ -1536,6 +1675,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       pubkey: target.pubkey,
       relays: target.relays,
       workdir: target.workdir,
+      parentPubkey: target.parentPubkey,
+      parentRelays: target.parentRelays,
+      parentWorkdir: target.parentWorkdir,
+      parentName: target.parentName,
     );
     setState(() {
       _repoTargets = targets;
@@ -1885,18 +2028,55 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   _RepoTarget? _parentRepoTargetFor(_RepoTarget target) {
+    final parentPubkey = target.parentPubkey?.trim();
+    final parentRelays = target.parentRelays;
+    if (parentPubkey != null &&
+        parentPubkey.isNotEmpty &&
+        parentRelays != null &&
+        parentRelays.isNotEmpty) {
+      return _RepoTarget(
+        id: 'parent-${target.id}',
+        name: target.parentName?.trim().isNotEmpty == true
+            ? target.parentName!.trim()
+            : 'phone',
+        pubkey: parentPubkey,
+        relays: parentRelays,
+        workdir: target.parentWorkdir,
+      );
+    }
+
     final targetWorkdir = target.workdir?.trim();
     final candidates = _repoTargets.where((candidate) {
       if (candidate.id == target.id) return false;
-      final workdir = candidate.workdir?.trim();
-      return workdir != null &&
-          workdir.isNotEmpty &&
-          workdir != targetWorkdir &&
-          _isParentRepoTarget(candidate);
+      return candidate.pubkey != target.pubkey;
     }).toList();
     if (candidates.isEmpty) return null;
 
-    return candidates.first;
+    _RepoTarget? firstWhere(bool Function(_RepoTarget target) test) {
+      for (final candidate in candidates) {
+        if (test(candidate)) return candidate;
+      }
+      return null;
+    }
+
+    return firstWhere((candidate) {
+          final workdir = candidate.workdir?.trim();
+          return workdir != null &&
+              workdir.isNotEmpty &&
+              workdir != targetWorkdir &&
+              workdir == '/home/tom/code/phone';
+        }) ??
+        firstWhere((candidate) {
+          final workdir = candidate.workdir?.trim();
+          return workdir != null &&
+              workdir.isNotEmpty &&
+              workdir != targetWorkdir &&
+              candidate.displayName.toLowerCase().contains('phone');
+        }) ??
+        firstWhere((candidate) {
+          final workdir = candidate.workdir?.trim();
+          return workdir == null || workdir.isEmpty;
+        });
   }
 
   BridgeNostrConfig _activeNostrConfig() {
@@ -2076,7 +2256,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     if (message.kind == 'target_invite') {
       if (!_incomingFromActivePeer(message)) return false;
-      final target = _repoTargetFromInvitePayload(message.rawJson);
+      final parsedTarget = _repoTargetFromInvitePayload(message.rawJson);
+      final target = parsedTarget == null
+          ? null
+          : _targetWithParentRouteFromMessage(parsedTarget, message);
       if (target == null) {
         _showError('Received malformed session request');
         return true;
