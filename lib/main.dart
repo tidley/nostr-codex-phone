@@ -4462,14 +4462,9 @@ class _SettingsPage extends StatelessWidget {
             onChanged: onWorkingAnimationChanged,
           ),
           const SizedBox(height: 16),
-          Card(
-            child: SwitchListTile(
-              secondary: const Icon(Icons.vibration),
-              title: const Text('Haptic feedback'),
-              subtitle: const Text('Record start and send taps'),
-              value: hapticFeedbackEnabled,
-              onChanged: onHapticFeedbackChanged,
-            ),
+          _HapticFeedbackSettings(
+            initialEnabled: hapticFeedbackEnabled,
+            onChanged: onHapticFeedbackChanged,
           ),
           const SizedBox(height: 16),
           Card(
@@ -4588,6 +4583,54 @@ class _WorkingAnimationSettingsState extends State<_WorkingAnimationSettings> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _HapticFeedbackSettings extends StatefulWidget {
+  const _HapticFeedbackSettings({
+    required this.initialEnabled,
+    required this.onChanged,
+  });
+
+  final bool initialEnabled;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  State<_HapticFeedbackSettings> createState() =>
+      _HapticFeedbackSettingsState();
+}
+
+class _HapticFeedbackSettingsState extends State<_HapticFeedbackSettings> {
+  late bool _enabled;
+
+  @override
+  void initState() {
+    super.initState();
+    _enabled = widget.initialEnabled;
+  }
+
+  @override
+  void didUpdateWidget(covariant _HapticFeedbackSettings oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initialEnabled != widget.initialEnabled) {
+      _enabled = widget.initialEnabled;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: SwitchListTile(
+        secondary: const Icon(Icons.vibration),
+        title: const Text('Haptic feedback'),
+        subtitle: const Text('Record start and send taps'),
+        value: _enabled,
+        onChanged: (enabled) {
+          setState(() => _enabled = enabled);
+          widget.onChanged(enabled);
+        },
       ),
     );
   }
