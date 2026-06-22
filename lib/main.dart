@@ -3369,7 +3369,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               hasPendingMedia: _hasPendingMediaAttachment,
               pendingMediaName: _pendingMediaFileName,
               onMicPressed: _toggleRecording,
-              onConnectPressed: _connect,
               onAttachMedia: _attachAndSendMedia,
               onCancelRecording: () => unawaited(_cancelCurrentAction()),
               onClearPendingMedia: _clearPendingMediaAttachment,
@@ -4464,7 +4463,6 @@ class _Composer extends StatefulWidget {
     required this.hasPendingMedia,
     required this.pendingMediaName,
     required this.onMicPressed,
-    required this.onConnectPressed,
     required this.onAttachMedia,
     required this.onCancelRecording,
     required this.onClearPendingMedia,
@@ -4483,7 +4481,6 @@ class _Composer extends StatefulWidget {
   final bool hasPendingMedia;
   final String? pendingMediaName;
   final VoidCallback onMicPressed;
-  final VoidCallback onConnectPressed;
   final VoidCallback onAttachMedia;
   final VoidCallback onCancelRecording;
   final VoidCallback onClearPendingMedia;
@@ -4569,15 +4566,9 @@ class _ComposerState extends State<_Composer> {
                                 : widget.onMicPressed
                           : canSendFromInput
                           ? widget.onSendPressed
-                          : widget.onConnectPressed
+                          : widget.onMicPressed
                     : null;
 
-                final disconnectedLabel = widget.connecting
-                    ? 'Connecting'
-                    : 'Connect';
-                final disconnectedTooltip = widget.connecting
-                    ? 'Connecting'
-                    : 'Connect to relay';
                 final canAttach = !busy && !widget.connecting;
                 final attachIcon = widget.recording
                     ? const Icon(Icons.close)
@@ -4606,9 +4597,7 @@ class _ComposerState extends State<_Composer> {
                       )
                     : IconButton.styleFrom(minimumSize: const Size(48, 48));
 
-                final icon = !widget.connected && !canSendFromInput
-                    ? const Icon(Icons.cloud_off)
-                    : busy
+                final icon = busy
                     ? SizedBox.square(
                         dimension: 18,
                         child: CircularProgressIndicator(
@@ -4627,9 +4616,7 @@ class _ComposerState extends State<_Composer> {
                       );
                 final label = widget.sendingAudio || widget.sendingMedia
                     ? 'Sending'
-                    : !widget.connected && !canSendFromInput
-                    ? disconnectedLabel
-                    : !widget.connected
+                    : !widget.connected && canSendFromInput
                     ? 'Send'
                     : widget.recording
                     ? 'Recording... ${widget.recordingDurationLabel}'
@@ -4640,10 +4627,10 @@ class _ComposerState extends State<_Composer> {
                     : 'Record';
                 final tooltip = widget.recording
                     ? 'Send recording'
-                    : !widget.connected && !canSendFromInput
-                    ? disconnectedTooltip
-                    : !widget.connected
+                    : !widget.connected && canSendFromInput
                     ? 'Connect and send'
+                    : !widget.connected
+                    ? 'Connect and record'
                     : canSendFromInput
                     ? widget.hasPendingMedia
                           ? 'Send attachment'
