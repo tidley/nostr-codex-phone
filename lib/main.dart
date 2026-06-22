@@ -2801,9 +2801,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return;
     }
 
-    if (!await _ensureConnectedForSend()) {
-      return;
-    }
     if (_sending || _sendingAudio) return;
     _clearAutoSpeakSuppression();
 
@@ -2899,6 +2896,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
 
     try {
+      setState(() => _status = 'Preparing voice session...');
+      if (!await _ensureConnectedForSend()) {
+        return;
+      }
+      if (!mounted) return;
+      setState(() => _status = 'Uploading voice note to Blossom...');
+
       final fileName = path.split(Platform.pathSeparator).last;
       final audio = await _uploadAudioToBlossom(
         path,
