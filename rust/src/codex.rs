@@ -49,7 +49,7 @@ impl CodexConfig {
         let persist_sessions = env::var("CODEX_PERSIST_SESSIONS")
             .ok()
             .map(|value| !is_falsey(&value))
-            .unwrap_or(true);
+            .unwrap_or(false);
         let usage_limit_fallback_model = env::var("CODEX_USAGE_LIMIT_FALLBACK_MODEL")
             .ok()
             .map(|value| value.trim().to_string())

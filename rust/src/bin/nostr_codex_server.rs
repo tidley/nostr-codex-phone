@@ -1162,13 +1162,18 @@ fn spawn_repo_worker(
             memory_db.to_string_lossy().to_string(),
         ),
         (
+            "CODEX_PERSIST_SESSIONS".to_string(),
+            env_nonempty("CODEX_PERSIST_SESSIONS").unwrap_or_else(|| "0".to_string()),
+        ),
+        (
             "CODEX_RESUME_LATEST_BY_WORKDIR".to_string(),
-            "0".to_string(),
+            env_nonempty("CODEX_RESUME_LATEST_BY_WORKDIR").unwrap_or_else(|| "0".to_string()),
         ),
     ];
     for key in [
         "CODEX_BIN",
         "CODEX_ARGS",
+        "CODEX_TIMEOUT_SECS",
         "TRANSCRIBE_BIN",
         "TRANSCRIBE_ARGS",
         "TRANSCRIBE_TIMEOUT_SECS",
@@ -1918,7 +1923,11 @@ async fn process_text_turn(
         .await;
     }
 
-    let session_id = load_codex_session(memory, peer_pubkey, &codex_config.working_dir);
+    let session_id = if codex_config.persist_sessions {
+        load_codex_session(memory, peer_pubkey, &codex_config.working_dir)
+    } else {
+        None
+    };
     let memory_context = if session_id.is_none() {
         memory_context(memory, peer_pubkey, recorded_id, request)
     } else {
@@ -2583,7 +2592,7 @@ fn load_codex_session(
         return stored;
     }
 
-    if !env_bool("CODEX_RESUME_LATEST_BY_WORKDIR", true) {
+    if !env_bool("CODEX_RESUME_LATEST_BY_WORKDIR", false) {
         return None;
     }
 
