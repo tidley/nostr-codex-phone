@@ -50,6 +50,7 @@ enum RequestClass {
 struct SpawnWorkerRequest {
     workdir: String,
     create: bool,
+    silent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1039,16 +1040,18 @@ async fn process_spawn_worker_request(
                     } else {
                         "Started a new"
                     };
-                    send_response(
-                        messenger,
-                        owner_pubkey_hex,
-                        format!(
-                            "{action} Nostr Codex worker for `{}`.\n\nIt has its own npub and I sent this phone a target invite DM. Open the session switcher to select `{}`.",
-                            target.workdir.as_deref().unwrap_or("unknown"),
-                            target.name
-                        ),
-                    )
-                    .await;
+                    if !request.silent {
+                        send_response(
+                            messenger,
+                            owner_pubkey_hex,
+                            format!(
+                                "{action} Nostr Codex worker for `{}`.\n\nIt has its own npub and I sent this phone a target invite DM. Open the session switcher to select `{}`.",
+                                target.workdir.as_deref().unwrap_or("unknown"),
+                                target.name
+                            ),
+                        )
+                        .await;
+                    }
                     if reused_existing {
                         info!(
                             "attached to existing child worker pid {pid} for {} ({})",
@@ -1537,8 +1540,13 @@ fn parse_spawn_worker_request(request: &str) -> Option<SpawnWorkerRequest> {
             return None;
         }
         if lowered.starts_with(&format!("{prefix} ")) {
-            return parse_spawn_path_argument(&trimmed[prefix.len()..])
-                .map(|workdir| SpawnWorkerRequest { workdir, create });
+            return parse_spawn_path_argument(&trimmed[prefix.len()..]).map(|workdir| {
+                SpawnWorkerRequest {
+                    workdir,
+                    create,
+                    silent: false,
+                }
+            });
         }
     }
     for (marker, create) in [
@@ -1556,8 +1564,13 @@ fn parse_spawn_worker_request(request: &str) -> Option<SpawnWorkerRequest> {
         ("start a service in ", false),
     ] {
         if lowered.starts_with(marker) {
-            return parse_spawn_path_argument(&trimmed[marker.len()..])
-                .map(|workdir| SpawnWorkerRequest { workdir, create });
+            return parse_spawn_path_argument(&trimmed[marker.len()..]).map(|workdir| {
+                SpawnWorkerRequest {
+                    workdir,
+                    create,
+                    silent: false,
+                }
+            });
         }
     }
     None
@@ -1582,7 +1595,16 @@ fn parse_spawn_worker_json_request(request: &str) -> Option<SpawnWorkerRequest> 
         .or_else(|| raw_object.get("create_folder"))
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
-    Some(SpawnWorkerRequest { workdir, create })
+    let silent = raw_object
+        .get("silent")
+        .or_else(|| raw_object.get("quiet"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    Some(SpawnWorkerRequest {
+        workdir,
+        create,
+        silent,
+    })
 }
 
 fn is_shutdown_request(request: &str) -> bool {
@@ -3001,37 +3023,42 @@ mod tests {
             parse_spawn_worker_request("/spawn /home/tom/code/repo"),
             Some(SpawnWorkerRequest {
                 workdir: "/home/tom/code/repo".to_string(),
-                create: false
+                create: false,
+                silent: false,
             })
         );
         assert_eq!(
             parse_spawn_worker_request("/spawn '/home/tom/code/repo with spaces'"),
             Some(SpawnWorkerRequest {
                 workdir: "/home/tom/code/repo with spaces".to_string(),
-                create: false
+                create: false,
+                silent: false,
             })
         );
         assert_eq!(
             parse_spawn_worker_request("start worker in ~/code/repo"),
             Some(SpawnWorkerRequest {
                 workdir: "~/code/repo".to_string(),
-                create: false
+                create: false,
+                silent: false,
             })
         );
         assert_eq!(
             parse_spawn_worker_request(
-                r#"{"spawn_session":{"workdir":"/home/tom/code/new","create":true}}"#
+                r#"{"spawn_session":{"workdir":"/home/tom/code/new","create":true,"silent":true}}"#
             ),
             Some(SpawnWorkerRequest {
                 workdir: "/home/tom/code/new".to_string(),
-                create: true
+                create: true,
+                silent: true,
             })
         );
         assert_eq!(
             parse_spawn_worker_request("/spawn --create new-repo"),
             Some(SpawnWorkerRequest {
                 workdir: "new-repo".to_string(),
-                create: true
+                create: true,
+                silent: false,
             })
         );
         assert_eq!(parse_spawn_worker_request("/spawn"), None);

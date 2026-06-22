@@ -2007,6 +2007,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         outgoingText: 'Start session in $workdir',
         sentStatus: 'Waiting for ${target.displayName}...',
         recordOutgoing: false,
+        silent: true,
       );
       if (!mounted) return false;
 
@@ -2605,9 +2606,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     required String outgoingText,
     required String sentStatus,
     bool recordOutgoing = true,
+    bool silent = false,
   }) async {
     final payload = jsonEncode({
-      'spawn_session': {'workdir': path, 'create': create},
+      'spawn_session': {
+        'workdir': path,
+        'create': create,
+        if (silent) 'silent': true,
+      },
     });
 
     setState(() {
