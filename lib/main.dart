@@ -1795,16 +1795,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     unawaited(_saveWorkingAnimationStyle());
   }
 
-  Future<void> _saveHapticFeedbackEnabled() async {
+  Future<void> _saveHapticFeedbackEnabled([bool? enabled]) async {
     await _storage.write(
       key: _hapticFeedbackStorageKey,
-      value: _hapticFeedbackEnabled.toString(),
+      value: (enabled ?? _hapticFeedbackEnabled).toString(),
     );
   }
 
   void _setHapticFeedbackEnabled(bool enabled) {
     setState(() => _hapticFeedbackEnabled = enabled);
-    unawaited(_saveHapticFeedbackEnabled());
+    unawaited(_saveHapticFeedbackEnabled(enabled));
+    if (enabled) {
+      unawaited(_performTapHapticFeedback());
+    }
   }
 
   Future<void> _loadTtsOptions() async {
