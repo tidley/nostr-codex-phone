@@ -87,6 +87,20 @@ pub struct TargetInvite {
     pub workdir: Option<String>,
     #[serde(default)]
     pub relays: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<TargetParent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetParent {
+    pub name: String,
+    pub pubkey: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pubkey_hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+    #[serde(default)]
+    pub relays: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

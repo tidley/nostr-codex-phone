@@ -24,7 +24,7 @@ use rust_lib_nostr_codex_phone::nostr_client::{
 };
 use rust_lib_nostr_codex_phone::protocol::{
     parse_media_bundle_query, parse_wire_message, AudioReference, MediaBundle, MediaReference,
-    RepoList, RepoListEntry, RepoListRoot, TargetInvite, WireMessage,
+    RepoList, RepoListEntry, RepoListRoot, TargetInvite, TargetParent, WireMessage,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
@@ -1007,12 +1007,26 @@ async fn process_spawn_worker_request(
     relays: &[String],
     codex_config: &CodexConfig,
 ) {
+    let parent_pubkey = match messenger.public_key_bech32() {
+        Ok(pubkey) => pubkey,
+        Err(err) => {
+            send_response(
+                messenger,
+                owner_pubkey_hex,
+                format!("Could not resolve parent bridge pubkey: {err:#}"),
+            )
+            .await;
+            return;
+        }
+    };
     match spawn_repo_worker(
         request,
         owner_pubkey,
         owner_pubkey_hex,
         relays,
         &codex_config.working_dir,
+        &parent_pubkey,
+        &messenger.public_key_hex(),
     ) {
         Ok((target, pid, reused_existing)) => {
             match messenger
@@ -1109,6 +1123,8 @@ fn spawn_repo_worker(
     owner_pubkey_hex: &str,
     relays: &[String],
     current_workdir: &Path,
+    parent_pubkey: &str,
+    parent_pubkey_hex: &str,
 ) -> Result<(TargetInvite, u32, bool)> {
     let workdir = resolve_spawn_workdir(request, current_workdir)?;
     let env_file = WorkerEnvFile::default_for_workdir(&workdir);
@@ -1170,6 +1186,13 @@ fn spawn_repo_worker(
         pubkey_hex: Some(public_key_hex.clone()),
         workdir: Some(workdir.to_string_lossy().to_string()),
         relays: relay_list.clone(),
+        parent: Some(TargetParent {
+            name: worker_target_name(current_workdir),
+            pubkey: parent_pubkey.to_string(),
+            pubkey_hex: Some(parent_pubkey_hex.to_string()),
+            workdir: Some(current_workdir.to_string_lossy().to_string()),
+            relays: relay_list.clone(),
+        }),
     };
 
     if let Some(pid) = find_running_worker_for_workdir(&workdir) {
