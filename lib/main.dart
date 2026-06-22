@@ -2665,10 +2665,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final query = _queryController.text.trim();
     if (query.isEmpty) return;
     if (_sending) return;
+    final conversationKey = _activeConversationKey;
     if (!await _ensureConnectedForSend()) {
       return;
     }
-    final conversationKey = _activeConversationKey;
     _clearAutoSpeakSuppression();
 
     setState(() {
@@ -2870,10 +2870,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final selected = _pendingMediaAttachment;
     if (selected == null) return;
     if (_sendingMedia || _sending || _sendingAudio || _recording) return;
+    final conversationKey = _activeConversationKey;
     if (!await _ensureConnectedForSend()) {
       return;
     }
-    final conversationKey = _activeConversationKey;
 
     final caption = _queryController.text.trim();
     _mediaUploadCancelled = false;
@@ -3305,6 +3305,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   Future<void> _stopAndSendRecording() async {
+    final conversationKey = _activeConversationKey;
     final fallbackPath = _recordingPath;
     final recordingFormat = _activeRecordingFormat ?? _opusVoiceFormat;
     String? path;
@@ -3333,7 +3334,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _recordingStartedAt = null;
       _stopRecordingTimer();
       _sendingAudio = true;
-      _sendingAudioConversationKey = _activeConversationKey;
+      _sendingAudioConversationKey = conversationKey;
       _status = 'Uploading voice note to Blossom...';
     });
 
@@ -3353,7 +3354,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (!await _ensureConnectedForSend()) {
         return;
       }
-      final conversationKey = _activeConversationKey;
       if (!mounted) return;
       setState(() {
         _sendingAudioConversationKey = conversationKey;
