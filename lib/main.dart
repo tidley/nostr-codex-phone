@@ -1750,8 +1750,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   Future<bool> _ensureConnectedForSend() async {
-    final startedSession = await _startSelectedRepoTargetForSend();
-    if (startedSession != null) return startedSession;
+    final target = _targetById(_repoTargets, _selectedRepoTargetId);
+    if (_shouldStartRepoTargetForSend(target)) {
+      final startedSession = await _startSelectedRepoTargetForSend(target!);
+      if (startedSession != null) return startedSession;
+      return false;
+    }
 
     if (_connected) return true;
     if (_connecting) return false;
@@ -1761,13 +1765,29 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     return mounted && _connected;
   }
 
-  Future<bool?> _startSelectedRepoTargetForSend() async {
-    final target = _targetById(_repoTargets, _selectedRepoTargetId);
-    final workdir = target?.workdir?.trim();
-    if (target == null || workdir == null || workdir.isEmpty) return null;
+  bool _shouldStartRepoTargetForSend(_RepoTarget? target) {
+    if (target == null || _isParentRepoTarget(target)) return false;
+    final workdir = target.workdir?.trim();
+    return workdir != null && workdir.isNotEmpty;
+  }
+
+  bool _isParentRepoTarget(_RepoTarget target) {
+    final workdir = target.workdir?.trim();
+    if (workdir == '/home/tom/code/phone') return true;
+    return target.displayName.toLowerCase().contains('phone');
+  }
+
+  Future<bool?> _startSelectedRepoTargetForSend(_RepoTarget target) async {
+    final workdir = target.workdir?.trim();
+    if (workdir == null || workdir.isEmpty) return null;
 
     final parent = _parentRepoTargetFor(target);
-    if (parent == null) return null;
+    if (parent == null) {
+      _showError(
+        'Could not start ${target.displayName}: parent phone session is not saved',
+      );
+      return null;
+    }
 
     final completer = Completer<_RepoTarget>();
     _pendingSessionStart = _PendingSessionStart(
@@ -1823,24 +1843,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final candidates = _repoTargets.where((candidate) {
       if (candidate.id == target.id) return false;
       final workdir = candidate.workdir?.trim();
-      return workdir != null && workdir.isNotEmpty && workdir != targetWorkdir;
+      return workdir != null &&
+          workdir.isNotEmpty &&
+          workdir != targetWorkdir &&
+          _isParentRepoTarget(candidate);
     }).toList();
     if (candidates.isEmpty) return null;
 
-    _RepoTarget? firstWhere(bool Function(_RepoTarget target) test) {
-      for (final candidate in candidates) {
-        if (test(candidate)) return candidate;
-      }
-      return null;
-    }
-
-    return firstWhere(
-          (candidate) => candidate.workdir == '/home/tom/code/phone',
-        ) ??
-        firstWhere(
-          (candidate) => candidate.displayName.toLowerCase().contains('phone'),
-        ) ??
-        candidates.first;
+    return candidates.first;
   }
 
   BridgeNostrConfig _activeNostrConfig() {

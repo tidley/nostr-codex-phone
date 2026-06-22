@@ -28,7 +28,7 @@ use rust_lib_nostr_codex_phone::protocol::{
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
-    TranscribeConfig,
+    DownloadedAudio, TranscribeConfig,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -870,6 +870,7 @@ async fn process_media_bundle_turn(
     let mut attachment_lines = Vec::new();
     let mut transcripts = Vec::new();
     let mut local_texts = Vec::new();
+    let mut local_attachments: Vec<DownloadedAudio> = Vec::new();
 
     for (index, attachment) in bundle.attachments.iter().enumerate() {
         let label = attachment
@@ -926,6 +927,28 @@ async fn process_media_bundle_turn(
             };
 
             local_texts.push(format!("{label}:\n{extracted_text}"));
+            continue;
+        }
+
+        if is_image_media_type(&attachment.media_type) {
+            let downloaded = match download_local_attachment(
+                attachment,
+                audio_config,
+                messenger,
+                peer_pubkey,
+                "image",
+            )
+            .await
+            {
+                Some(downloaded) => downloaded,
+                None => continue,
+            };
+            let local_path = downloaded.path.display().to_string();
+            attachment_lines.push(format!("  local decrypted image: {local_path}"));
+            local_texts.push(format!(
+                "{label}:\nLocal decrypted image file: {local_path}\nUse this local file when inspecting the image."
+            ));
+            local_attachments.push(downloaded);
         }
     }
 
@@ -972,6 +995,8 @@ async fn process_media_bundle_turn(
         codex_config,
     )
     .await;
+
+    drop(local_attachments);
 }
 
 async fn process_spawn_worker_request(
@@ -1677,6 +1702,39 @@ async fn extract_local_text_attachment(
     Some(extracted)
 }
 
+async fn download_local_attachment(
+    attachment: &MediaReference,
+    audio_config: &AudioConfig,
+    messenger: &NostrMessenger,
+    receiver_pubkey: &str,
+    kind: &str,
+) -> Option<DownloadedAudio> {
+    let extension = attachment_extension(&attachment.media_type, attachment.name.as_deref());
+    let reference = media_reference_to_audio(attachment);
+    match download_blossom_attachment(&reference, &extension, audio_config).await {
+        Ok(downloaded) => Some(downloaded),
+        Err(err) => {
+            error!("{kind} attachment download failed: {err:#}");
+            if let Err(send_err) = messenger
+                .send_error_to(
+                    receiver_pubkey,
+                    format!(
+                        "Could not download {kind} attachment \"{}\": {err:#}",
+                        attachment
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| attachment.url.clone())
+                    ),
+                )
+                .await
+            {
+                error!("failed to send attachment download error DM: {send_err:#}");
+            }
+            None
+        }
+    }
+}
+
 fn is_text_media_type(media_type: &str) -> bool {
     let normalized = media_type
         .split(';')
@@ -1707,6 +1765,39 @@ fn is_text_media_type(media_type: &str) -> bool {
                 | "text/x-go"
                 | "text/x-rust"
         )
+}
+
+fn is_image_media_type(media_type: &str) -> bool {
+    let normalized = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    normalized.starts_with("image/")
+}
+
+fn attachment_extension(media_type: &str, name: Option<&str>) -> String {
+    let normalized = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "image/jpeg" => "jpg".to_string(),
+        "image/png" => "png".to_string(),
+        "image/gif" => "gif".to_string(),
+        "image/webp" => "webp".to_string(),
+        "image/heic" => "heic".to_string(),
+        "image/heif" => "heif".to_string(),
+        "image/svg+xml" => "svg".to_string(),
+        _ => name
+            .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext))
+            .filter(|ext| !ext.is_empty() && ext.len() <= 8)
+            .unwrap_or("bin")
+            .to_string(),
+    }
 }
 
 fn text_attachment_extension(media_type: &str, name: Option<&str>) -> String {
