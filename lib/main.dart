@@ -189,6 +189,7 @@ class _RepoChoice {
 enum _PendingMessageCompletion { transcript, response }
 
 enum _WorkingAnimationStyle {
+  off('off', 'Off'),
   digitalFlow('digital_flow', 'Digital flow'),
   neuralLattice('neural_lattice', 'Neural lattice'),
   orbitSync('orbit_sync', 'Orbit sync'),
@@ -200,6 +201,7 @@ enum _WorkingAnimationStyle {
 
   final String storageValue;
   final String label;
+  bool get enabled => this != _WorkingAnimationStyle.off;
 
   static _WorkingAnimationStyle fromStorage(String? value) {
     final cleaned = value?.trim();
@@ -212,10 +214,12 @@ enum _WorkingAnimationStyle {
 
 class _PendingProcessingMessage {
   const _PendingProcessingMessage({
+    required this.conversationKey,
     required this.eventId,
     required this.completion,
   });
 
+  final String conversationKey;
   final String eventId;
   final _PendingMessageCompletion completion;
 }
@@ -426,6 +430,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _ttsPitchStorageKey = 'tts_pitch';
   static const _ttsVolumeStorageKey = 'tts_volume';
   static const _workingAnimationStorageKey = 'working_animation_style';
+  static const _hapticFeedbackStorageKey = 'haptic_feedback_enabled';
   static const _conversationHistoryStorageKey = 'conversation_history_v1';
   static const _seenIncomingEventIdsStorageKey = 'seen_incoming_event_ids_v1';
   static const _unreadCountsStorageKey = 'unread_counts_v1';
@@ -457,6 +462,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   bool _recording = false;
   bool _sendingAudio = false;
   bool _sendingMedia = false;
+  String? _sendingConversationKey;
+  String? _sendingAudioConversationKey;
+  String? _sendingMediaConversationKey;
   bool _mediaUploadCancelled = false;
   int _mediaUploadSessionId = 0;
   Completer<void>? _mediaUploadCancelCompleter;
@@ -476,6 +484,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   double _ttsVolume = 1.0;
   _WorkingAnimationStyle _workingAnimationStyle =
       _WorkingAnimationStyle.digitalFlow;
+  bool _hapticFeedbackEnabled = true;
   String _ttsLanguage = 'en-US';
   String? _ttsEngine;
   List<String> _ttsLanguages = const ['en-US'];
@@ -513,6 +522,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   List<ConversationMessage> get _messages =>
       _messagesByTarget.putIfAbsent(_activeConversationKey, () => []);
 
+  bool get _sendingInActiveConversation =>
+      _sending && _sendingConversationKey == _activeConversationKey;
+
+  bool get _sendingAudioInActiveConversation =>
+      _sendingAudio && _sendingAudioConversationKey == _activeConversationKey;
+
+  bool get _sendingMediaInActiveConversation =>
+      _sendingMedia && _sendingMediaConversationKey == _activeConversationKey;
+
   List<ConversationMessage> get _recentMessagesForActiveConversation {
     final now = DateTime.now();
     final cutoff = now.subtract(_recentMessagesWindow);
@@ -531,9 +549,29 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final loaded = await _readConversationHistory(activeKey);
     if (!mounted || _activeConversationKey != activeKey) return;
     setState(() {
-      _messagesByTarget[activeKey] = loaded;
+      _messagesByTarget[activeKey] = _mergeConversationMessages(
+        _messagesByTarget[activeKey] ?? const [],
+        loaded,
+      );
     });
     _scrollToLatestMessage();
+  }
+
+  List<ConversationMessage> _mergeConversationMessages(
+    List<ConversationMessage> current,
+    List<ConversationMessage> loaded,
+  ) {
+    final byKey = <String, ConversationMessage>{};
+    for (final message in loaded.reversed.followedBy(current.reversed)) {
+      final eventId = message.eventId.trim();
+      final key = eventId.isEmpty
+          ? '${message.direction.name}:${message.kind}:${message.timestamp.toIso8601String()}:${message.text}'
+          : eventId;
+      byKey[key] = message;
+    }
+    final merged = byKey.values.toList()
+      ..sort((left, right) => right.timestamp.compareTo(left.timestamp));
+    return merged.take(_maxConversationMessages).toList();
   }
 
   void _scrollToLatestMessage() {
@@ -594,6 +632,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final workingAnimation = await _storage.read(
       key: _workingAnimationStorageKey,
     );
+    final hapticFeedback = await _storage.read(key: _hapticFeedbackStorageKey);
     final seenEventIds = await _storage.read(
       key: _seenIncomingEventIdsStorageKey,
     );
@@ -635,6 +674,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _workingAnimationStyle = _WorkingAnimationStyle.fromStorage(
         workingAnimation,
       );
+      _hapticFeedbackEnabled = _storedBool(hapticFeedback, true);
       _seenIncomingEventIds
         ..clear()
         ..addAll(_decodeSeenEventIds(seenEventIds));
@@ -713,6 +753,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
     await _saveTtsSettings();
     await _saveWorkingAnimationStyle();
+    await _saveHapticFeedbackEnabled();
   }
 
   List<_RepoTarget> _decodeRepoTargets(String? raw) {
@@ -897,7 +938,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _relayController.text = defaultRelays;
       _pendingProcessingMessages.clear();
       _wavRetryRequested = false;
-      _messagesByTarget['default'] = [];
+      _messagesByTarget.putIfAbsent('default', () => []);
       _status = 'New repo target';
     });
     await _deleteConversationHistoryForKey('default');
@@ -949,8 +990,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _repoTargets = targets;
       _applyRepoTargetFields(savedTarget);
-      _messagesByTarget[savedTarget.id] = [];
-      _pendingProcessingMessages.clear();
+      _messagesByTarget.putIfAbsent(savedTarget.id, () => []);
       _wavRetryRequested = false;
       _status = 'Scanned target ${savedTarget.displayName}';
     });
@@ -1242,8 +1282,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _repoTargets = targets;
       _applyRepoTargetFields(savedTarget);
-      _messagesByTarget[savedTarget.id] = [];
-      _pendingProcessingMessages.clear();
+      _messagesByTarget.putIfAbsent(savedTarget.id, () => []);
       _wavRetryRequested = false;
       _status = '$status: ${savedTarget.displayName}';
     });
@@ -1348,8 +1387,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     setState(() {
       _clearPendingMediaAttachment();
       _applyRepoTargetFields(target);
-      _messagesByTarget[targetKey] = [];
-      _pendingProcessingMessages.clear();
+      _messagesByTarget.putIfAbsent(targetKey, () => []);
       _wavRetryRequested = false;
       _unreadCountsByTarget.remove(targetKey);
       _status = 'Selected ${target.displayName}';
@@ -1451,14 +1489,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   }
 
   void _appendPendingTranscriptionMessage({
+    required String conversationKey,
     required String eventId,
     required String label,
     _PendingMessageCompletion completion = _PendingMessageCompletion.transcript,
   }) {
     _pendingProcessingMessages.add(
-      _PendingProcessingMessage(eventId: eventId, completion: completion),
+      _PendingProcessingMessage(
+        conversationKey: conversationKey,
+        eventId: eventId,
+        completion: completion,
+      ),
     );
-    _appendMessageForActiveConversation(
+    _appendMessageForConversation(
+      conversationKey,
       ConversationMessage(
         direction: MessageDirection.outgoing,
         kind: 'transcribing',
@@ -1469,59 +1513,78 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
   }
 
-  bool _tryCompleteTranscription(String transcript) {
+  bool _tryCompleteTranscription(String conversationKey, String transcript) {
     while (true) {
       final pending = _takePendingProcessingMessage(
+        conversationKey,
         _PendingMessageCompletion.transcript,
       );
       if (pending == null) return false;
 
-      final index = _pendingProcessingMessageIndex(pending.eventId);
+      final index = _pendingProcessingMessageIndex(
+        conversationKey,
+        pending.eventId,
+      );
       if (index < 0) continue;
 
-      _messages[index] = ConversationMessage(
+      final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
+      messages[index] = ConversationMessage(
         direction: MessageDirection.outgoing,
         kind: 'transcript',
         text: transcript,
         eventId: pending.eventId,
         timestamp: DateTime.now(),
-        audio: _messages[index].audio,
+        audio: messages[index].audio,
       );
-      unawaited(_saveConversationHistoryForKey(_activeConversationKey));
-      _appendIncomingProcessingPlaceholder(pending.eventId);
-      _scrollToLatestMessage();
+      unawaited(_saveConversationHistoryForKey(conversationKey));
+      _appendIncomingProcessingPlaceholder(conversationKey, pending.eventId);
+      if (conversationKey == _activeConversationKey) {
+        _scrollToLatestMessage();
+      }
       return true;
     }
   }
 
-  bool _dropPendingProcessingMessage({_PendingMessageCompletion? completion}) {
-    final pending = _takePendingProcessingMessage(completion);
+  bool _dropPendingProcessingMessage(
+    String conversationKey, {
+    _PendingMessageCompletion? completion,
+  }) {
+    final pending = _takePendingProcessingMessage(conversationKey, completion);
     if (pending == null) return false;
 
-    final index = _pendingProcessingMessageIndex(pending.eventId);
+    final index = _pendingProcessingMessageIndex(
+      conversationKey,
+      pending.eventId,
+    );
     if (index >= 0) {
-      _messages.removeAt(index);
-      unawaited(_saveConversationHistoryForKey(_activeConversationKey));
-      _scrollToLatestMessage();
+      final messages = _messagesByTarget[conversationKey];
+      messages?.removeAt(index);
+      unawaited(_saveConversationHistoryForKey(conversationKey));
+      if (conversationKey == _activeConversationKey) {
+        _scrollToLatestMessage();
+      }
     }
     return true;
   }
 
   _PendingProcessingMessage? _takePendingProcessingMessage(
+    String conversationKey,
     _PendingMessageCompletion? completion,
   ) {
     if (_pendingProcessingMessages.isEmpty) return null;
-    final index = completion == null
-        ? 0
-        : _pendingProcessingMessages.indexWhere(
-            (pending) => pending.completion == completion,
-          );
+    final index = _pendingProcessingMessages.indexWhere(
+      (pending) =>
+          pending.conversationKey == conversationKey &&
+          (completion == null || pending.completion == completion),
+    );
     if (index < 0) return null;
     return _pendingProcessingMessages.removeAt(index);
   }
 
-  int _pendingProcessingMessageIndex(String eventId) {
-    return _messages.indexWhere(
+  int _pendingProcessingMessageIndex(String conversationKey, String eventId) {
+    final messages = _messagesByTarget[conversationKey];
+    if (messages == null) return -1;
+    return messages.indexWhere(
       (message) =>
           message.kind == 'transcribing' &&
           message.direction == MessageDirection.outgoing &&
@@ -1529,16 +1592,21 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
   }
 
-  void _appendIncomingProcessingPlaceholder(String eventId) {
-    _pendingReplyTargetIds.add(_activeConversationKey);
-    final alreadyVisible = _messages.any(
+  void _appendIncomingProcessingPlaceholder(
+    String conversationKey,
+    String eventId,
+  ) {
+    _pendingReplyTargetIds.add(conversationKey);
+    final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
+    final alreadyVisible = messages.any(
       (message) =>
           message.kind == 'processing' &&
           message.direction == MessageDirection.incoming,
     );
     if (alreadyVisible) return;
 
-    _appendMessageForActiveConversation(
+    _appendMessageForConversation(
+      conversationKey,
       ConversationMessage(
         direction: MessageDirection.incoming,
         kind: 'processing',
@@ -1549,17 +1617,21 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
   }
 
-  bool _dropIncomingProcessingPlaceholder() {
-    _pendingReplyTargetIds.remove(_activeConversationKey);
-    final index = _messages.indexWhere(
+  bool _dropIncomingProcessingPlaceholder(String conversationKey) {
+    _pendingReplyTargetIds.remove(conversationKey);
+    final messages = _messagesByTarget[conversationKey];
+    if (messages == null) return false;
+    final index = messages.indexWhere(
       (message) =>
           message.kind == 'processing' &&
           message.direction == MessageDirection.incoming,
     );
     if (index < 0) return false;
-    _messages.removeAt(index);
-    unawaited(_saveConversationHistoryForKey(_activeConversationKey));
-    _scrollToLatestMessage();
+    messages.removeAt(index);
+    unawaited(_saveConversationHistoryForKey(conversationKey));
+    if (conversationKey == _activeConversationKey) {
+      _scrollToLatestMessage();
+    }
     return true;
   }
 
@@ -1583,6 +1655,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           hasReplay: _lastSpokenText?.trim().isNotEmpty ?? false,
           autoSpeak: _autoSpeak,
           workingAnimationStyle: _workingAnimationStyle,
+          hapticFeedbackEnabled: _hapticFeedbackEnabled,
           language: _ttsLanguage,
           languages: _ttsLanguages,
           engine: _ttsEngine,
@@ -1611,6 +1684,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             if (!value) unawaited(_stopSpeaking());
           },
           onWorkingAnimationChanged: _setWorkingAnimationStyle,
+          onHapticFeedbackChanged: _setHapticFeedbackEnabled,
           onLanguageChanged: _setTtsLanguage,
           onEngineChanged: _setTtsEngine,
           onRateChanged: _setTtsRate,
@@ -1717,6 +1791,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   void _setWorkingAnimationStyle(_WorkingAnimationStyle style) {
     setState(() => _workingAnimationStyle = style);
     unawaited(_saveWorkingAnimationStyle());
+  }
+
+  Future<void> _saveHapticFeedbackEnabled() async {
+    await _storage.write(
+      key: _hapticFeedbackStorageKey,
+      value: _hapticFeedbackEnabled.toString(),
+    );
+  }
+
+  void _setHapticFeedbackEnabled(bool enabled) {
+    setState(() => _hapticFeedbackEnabled = enabled);
+    unawaited(_saveHapticFeedbackEnabled());
   }
 
   Future<void> _loadTtsOptions() async {
@@ -1842,6 +1928,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final parsed = double.tryParse(raw ?? '');
     if (parsed == null) return fallback;
     return parsed.clamp(min, max).toDouble();
+  }
+
+  bool _storedBool(String? raw, bool fallback) {
+    final cleaned = raw?.trim().toLowerCase();
+    if (cleaned == 'true') return true;
+    if (cleaned == 'false') return false;
+    return fallback;
   }
 
   List<String> _cleanStringList(dynamic raw) {
@@ -1991,7 +2084,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (!mounted) return false;
       setState(() {
         _applyRepoTargetFields(parent);
-        _pendingProcessingMessages.clear();
         _wavRetryRequested = false;
         _status = 'Starting ${target.displayName}...';
       });
@@ -2160,7 +2252,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!mounted) return;
     setState(() {
       _connected = false;
-      _pendingProcessingMessages.clear();
       _status = 'Disconnected';
     });
   }
@@ -2298,9 +2389,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final isActiveConversation = targetKey == _activeConversationKey;
     if (!isActiveConversation && message.kind == 'status') return false;
 
-    if (isActiveConversation &&
-        message.kind == 'transcript' &&
-        _tryCompleteTranscription(message.text)) {
+    if (message.kind == 'transcript' &&
+        _tryCompleteTranscription(targetKey, message.text)) {
       setState(() {
         _status = 'Transcription received';
       });
@@ -2324,21 +2414,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       }
       if (isActiveConversation && message.kind == 'response') {
         _dropPendingProcessingMessage(
+          targetKey,
           completion: _PendingMessageCompletion.response,
         );
-      } else if (isActiveConversation &&
-          (audioRetryRequested || message.kind == 'error')) {
-        _dropPendingProcessingMessage();
+      } else if (audioRetryRequested || message.kind == 'error') {
+        _dropPendingProcessingMessage(targetKey);
       }
       if (message.kind != 'status') {
-        if (isActiveConversation) {
-          _dropIncomingProcessingPlaceholder();
-        }
+        _dropIncomingProcessingPlaceholder(targetKey);
         _appendMessageForConversation(targetKey, conversationMessage);
         if (isActiveConversation &&
             !fromCatchUp &&
             message.kind == 'transcript') {
-          _appendIncomingProcessingPlaceholder(message.eventId);
+          _appendIncomingProcessingPlaceholder(targetKey, message.eventId);
         }
         if (!isActiveConversation) {
           _unreadCountsByTarget[targetKey] =
@@ -2512,10 +2600,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!await _ensureConnectedForSend()) {
       return;
     }
+    final conversationKey = _activeConversationKey;
     _clearAutoSpeakSuppression();
 
     setState(() {
       _sending = true;
+      _sendingConversationKey = conversationKey;
       _status = 'Sending query...';
     });
 
@@ -2526,7 +2616,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       );
       if (!mounted) return;
       setState(() {
-        _appendMessageForActiveConversation(
+        _appendMessageForConversation(
+          conversationKey,
           ConversationMessage(
             direction: MessageDirection.outgoing,
             kind: 'query',
@@ -2535,7 +2626,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             timestamp: DateTime.now(),
           ),
         );
-        _pendingReplyTargetIds.add(_activeConversationKey);
+        _pendingReplyTargetIds.add(conversationKey);
         _queryController.clear();
         _status = 'Query sent';
       });
@@ -2543,7 +2634,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _showError('Send failed: $error');
     } finally {
       if (mounted) {
-        setState(() => _sending = false);
+        setState(() {
+          _sending = false;
+          _sendingConversationKey = null;
+        });
       }
     }
   }
@@ -2618,6 +2712,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     setState(() {
       _sending = true;
+      _sendingConversationKey = _activeConversationKey;
       _status = sendingStatus;
     });
     try {
@@ -2641,7 +2736,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     } catch (error) {
       _showError('Session request failed: $error');
     } finally {
-      if (mounted) setState(() => _sending = false);
+      if (mounted) {
+        setState(() {
+          _sending = false;
+          _sendingConversationKey = null;
+        });
+      }
     }
   }
 
@@ -2665,6 +2765,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     try {
       setState(() {
         _sending = true;
+        _sendingConversationKey = _activeConversationKey;
         _status = 'Requesting repo folders...';
       });
       await _sendWithAutoRecovery(
@@ -2680,7 +2781,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (identical(_pendingRepoListCompleter, completer)) {
         _pendingRepoListCompleter = null;
       }
-      if (mounted) setState(() => _sending = false);
+      if (mounted) {
+        setState(() {
+          _sending = false;
+          _sendingConversationKey = null;
+        });
+      }
     }
   }
 
@@ -2699,6 +2805,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!await _ensureConnectedForSend()) {
       return;
     }
+    final conversationKey = _activeConversationKey;
 
     final caption = _queryController.text.trim();
     _mediaUploadCancelled = false;
@@ -2707,6 +2814,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     setState(() {
       _sendingMedia = true;
+      _sendingMediaConversationKey = conversationKey;
       _status = 'Uploading encrypted attachment to Blossom...';
     });
 
@@ -2741,6 +2849,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           'audio/',
         );
         _appendPendingTranscriptionMessage(
+          conversationKey: conversationKey,
           eventId: eventId,
           label: expectsTranscript
               ? 'Transcribing message...'
@@ -2750,7 +2859,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               : _PendingMessageCompletion.response,
         );
         if (!expectsTranscript) {
-          _pendingReplyTargetIds.add(_activeConversationKey);
+          _pendingReplyTargetIds.add(conversationKey);
         }
         _queryController.clear();
         _clearPendingMediaAttachmentInMemory();
@@ -2769,6 +2878,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (mounted) {
         setState(() {
           _sendingMedia = false;
+          _sendingMediaConversationKey = null;
           _mediaUploadCancelCompleter = null;
         });
       }
@@ -2859,6 +2969,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!mounted) return;
     setState(() {
       _sendingMedia = false;
+      _sendingMediaConversationKey = null;
       _mediaUploadCancelCompleter = null;
       _status = 'Attachment upload cancelled';
       _clearPendingMediaAttachmentInMemory();
@@ -2977,8 +3088,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     required bool fromTranscript,
   }) async {
     if (_sending) return;
+    final conversationKey = _activeConversationKey;
     setState(() {
       _sending = true;
+      _sendingConversationKey = conversationKey;
       _status = fromTranscript
           ? 'Sending transcript as query...'
           : 'Resending query...';
@@ -2991,7 +3104,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       );
       if (!mounted) return;
       setState(() {
-        _appendMessageForActiveConversation(
+        _appendMessageForConversation(
+          conversationKey,
           ConversationMessage(
             direction: MessageDirection.outgoing,
             kind: 'query',
@@ -3000,20 +3114,27 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             timestamp: DateTime.now(),
           ),
         );
-        _pendingReplyTargetIds.add(_activeConversationKey);
+        _pendingReplyTargetIds.add(conversationKey);
         _status = fromTranscript ? 'Transcript sent' : 'Query resent';
       });
     } catch (error) {
       _showError('Resend failed: $error');
     } finally {
-      if (mounted) setState(() => _sending = false);
+      if (mounted) {
+        setState(() {
+          _sending = false;
+          _sendingConversationKey = null;
+        });
+      }
     }
   }
 
   Future<void> _resendAudioMessage(BridgeAudioReference audio) async {
     if (_sendingAudio) return;
+    final conversationKey = _activeConversationKey;
     setState(() {
       _sendingAudio = true;
+      _sendingAudioConversationKey = conversationKey;
       _status = 'Resending voice note...';
     });
 
@@ -3025,6 +3146,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (!mounted) return;
       setState(() {
         _appendPendingTranscriptionMessage(
+          conversationKey: conversationKey,
           eventId: eventId,
           label: 'Resending voice transcript...',
         );
@@ -3033,7 +3155,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     } catch (error) {
       _showError('Voice resend failed: $error');
     } finally {
-      if (mounted) setState(() => _sendingAudio = false);
+      if (mounted) {
+        setState(() {
+          _sendingAudio = false;
+          _sendingAudioConversationKey = null;
+        });
+      }
     }
   }
 
@@ -3042,11 +3169,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       await _stopSpeaking();
     }
     if (_recording) {
+      _tapHapticFeedback();
       await _stopAndSendRecording();
       return;
     }
 
     if (_sending || _sendingAudio) return;
+    _tapHapticFeedback();
     _clearAutoSpeakSuppression();
 
     String? path;
@@ -3102,6 +3231,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
+  void _tapHapticFeedback() {
+    if (!_hapticFeedbackEnabled) return;
+    unawaited(HapticFeedback.lightImpact());
+  }
+
   Future<void> _stopAndSendRecording() async {
     final fallbackPath = _recordingPath;
     final recordingFormat = _activeRecordingFormat ?? _opusVoiceFormat;
@@ -3131,12 +3265,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _recordingStartedAt = null;
       _stopRecordingTimer();
       _sendingAudio = true;
+      _sendingAudioConversationKey = _activeConversationKey;
       _status = 'Uploading voice note to Blossom...';
     });
 
     if (path == null) {
       _showError('Recording did not produce an audio file');
-      if (mounted) setState(() => _sendingAudio = false);
+      if (mounted) {
+        setState(() {
+          _sendingAudio = false;
+          _sendingAudioConversationKey = null;
+        });
+      }
       return;
     }
 
@@ -3145,8 +3285,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       if (!await _ensureConnectedForSend()) {
         return;
       }
+      final conversationKey = _activeConversationKey;
       if (!mounted) return;
-      setState(() => _status = 'Uploading voice note to Blossom...');
+      setState(() {
+        _sendingAudioConversationKey = conversationKey;
+        _status = 'Uploading voice note to Blossom...';
+      });
 
       final fileName = path.split(Platform.pathSeparator).last;
       final audio = await _uploadAudioToBlossom(
@@ -3168,6 +3312,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           _wavRetryRequested = false;
         }
         _appendPendingTranscriptionMessage(
+          conversationKey: conversationKey,
           eventId: eventId,
           label: 'Transcribing voice...',
         );
@@ -3178,7 +3323,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     } finally {
       unawaited(_deleteTempAudio(path));
       if (mounted) {
-        setState(() => _sendingAudio = false);
+        setState(() {
+          _sendingAudio = false;
+          _sendingAudioConversationKey = null;
+        });
       }
     }
   }
@@ -3611,9 +3759,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               controller: _queryController,
               connected: _connected,
               connecting: _connecting,
-              sending: _sending,
-              sendingAudio: _sendingAudio,
-              sendingMedia: _sendingMedia,
+              sending: _sendingInActiveConversation,
+              sendingAudio: _sendingAudioInActiveConversation,
+              sendingMedia: _sendingMediaInActiveConversation,
               recording: _recording,
               recordingDurationLabel: _recordingDurationLabel,
               wavRetryRequested: _wavRetryRequested,
@@ -3792,12 +3940,20 @@ class _SessionDrawer extends StatelessWidget {
                                     SizedBox.square(
                                       dimension: 28,
                                       child: Center(
-                                        child: _DigitalThinkingIndicator(
-                                          width: 28,
-                                          height: 16,
-                                          color: statusColor ?? loadedColor,
-                                          style: workingAnimationStyle,
-                                        ),
+                                        child: workingAnimationStyle.enabled
+                                            ? _DigitalThinkingIndicator(
+                                                width: 28,
+                                                height: 16,
+                                                color:
+                                                    statusColor ?? loadedColor,
+                                                style: workingAnimationStyle,
+                                              )
+                                            : Icon(
+                                                connected
+                                                    ? Icons.cloud_done_outlined
+                                                    : Icons.chat_bubble_outline,
+                                                color: statusColor,
+                                              ),
                                       ),
                                     )
                                   else
@@ -4087,6 +4243,7 @@ class _SettingsPage extends StatelessWidget {
     required this.hasReplay,
     required this.autoSpeak,
     required this.workingAnimationStyle,
+    required this.hapticFeedbackEnabled,
     required this.language,
     required this.languages,
     required this.engine,
@@ -4108,6 +4265,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onReplay,
     required this.onAutoSpeakChanged,
     required this.onWorkingAnimationChanged,
+    required this.onHapticFeedbackChanged,
     required this.onLanguageChanged,
     required this.onEngineChanged,
     required this.onRateChanged,
@@ -4133,6 +4291,7 @@ class _SettingsPage extends StatelessWidget {
   final bool hasReplay;
   final bool autoSpeak;
   final _WorkingAnimationStyle workingAnimationStyle;
+  final bool hapticFeedbackEnabled;
   final String language;
   final List<String> languages;
   final String? engine;
@@ -4154,6 +4313,7 @@ class _SettingsPage extends StatelessWidget {
   final VoidCallback onReplay;
   final ValueChanged<bool> onAutoSpeakChanged;
   final ValueChanged<_WorkingAnimationStyle> onWorkingAnimationChanged;
+  final ValueChanged<bool> onHapticFeedbackChanged;
   final ValueChanged<String> onLanguageChanged;
   final ValueChanged<String?> onEngineChanged;
   final ValueChanged<double> onRateChanged;
@@ -4217,6 +4377,16 @@ class _SettingsPage extends StatelessWidget {
           _WorkingAnimationSettings(
             initialStyle: workingAnimationStyle,
             onChanged: onWorkingAnimationChanged,
+          ),
+          const SizedBox(height: 16),
+          Card(
+            child: SwitchListTile(
+              secondary: const Icon(Icons.vibration),
+              title: const Text('Haptic feedback'),
+              subtitle: const Text('Record start and send taps'),
+              value: hapticFeedbackEnabled,
+              onChanged: onHapticFeedbackChanged,
+            ),
           ),
           const SizedBox(height: 16),
           Card(
@@ -4321,12 +4491,14 @@ class _WorkingAnimationSettingsState extends State<_WorkingAnimationSettings> {
                 SizedBox(
                   width: 84,
                   child: Center(
-                    child: _DigitalThinkingIndicator(
-                      width: 64,
-                      height: 28,
-                      color: theme.colorScheme.primary,
-                      style: _selectedStyle,
-                    ),
+                    child: _selectedStyle.enabled
+                        ? _DigitalThinkingIndicator(
+                            width: 64,
+                            height: 28,
+                            color: theme.colorScheme.primary,
+                            style: _selectedStyle,
+                          )
+                        : Text('Off', style: theme.textTheme.labelMedium),
                   ),
                 ),
               ],
@@ -5131,6 +5303,8 @@ class _DigitalThinkingPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     switch (style) {
+      case _WorkingAnimationStyle.off:
+        return;
       case _WorkingAnimationStyle.digitalFlow:
         _paintDigitalFlow(canvas, size);
         break;
@@ -5508,6 +5682,9 @@ class _MessageTileState extends State<_MessageTile>
     final flashColor = Color.lerp(baseColor, colorScheme.primary, 0.16)!;
 
     if (widget.message.kind == 'processing') {
+      if (!widget.workingAnimationStyle.enabled) {
+        return const SizedBox.shrink();
+      }
       return Card(
         color: Colors.transparent,
         child: AnimatedContainer(
@@ -5628,15 +5805,17 @@ class _MessageTileState extends State<_MessageTile>
           if (processing)
             Row(
               children: [
-                _DigitalThinkingIndicator(
-                  width: 42,
-                  height: 18,
-                  color: userSide
-                      ? colorScheme.onPrimaryContainer
-                      : colorScheme.primary,
-                  style: widget.workingAnimationStyle,
-                ),
-                const SizedBox(width: 8),
+                if (widget.workingAnimationStyle.enabled) ...[
+                  _DigitalThinkingIndicator(
+                    width: 42,
+                    height: 18,
+                    color: userSide
+                        ? colorScheme.onPrimaryContainer
+                        : colorScheme.primary,
+                    style: widget.workingAnimationStyle,
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 Expanded(
                   child: MarkdownBody(
                     data: widget.message.text,
