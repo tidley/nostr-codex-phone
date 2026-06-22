@@ -3301,7 +3301,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   void _tapHapticFeedback() {
     if (!_hapticFeedbackEnabled) return;
-    unawaited(HapticFeedback.lightImpact());
+    unawaited(_performTapHapticFeedback());
+  }
+
+  Future<void> _performTapHapticFeedback() async {
+    if (Platform.isAndroid) {
+      try {
+        await _ttsControlChannel.invokeMethod<void>('hapticTap');
+        return;
+      } catch (_) {
+        // Fall back to Flutter's platform haptic if native vibration is unavailable.
+      }
+    }
+    await HapticFeedback.lightImpact();
   }
 
   Future<void> _stopAndSendRecording() async {
