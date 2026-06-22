@@ -1,5 +1,10 @@
 package com.example.nostr_codex_phone
 
+import android.content.Context
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.speech.tts.TextToSpeech
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -17,6 +22,10 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "hardStop" -> {
                     hardStop()
+                    result.success(null)
+                }
+                "hapticTap" -> {
+                    hapticTap()
                     result.success(null)
                 }
 
@@ -41,6 +50,30 @@ class MainActivity : FlutterActivity() {
         pendingHardStop = true
         ensureHardStopTts()
         hardStopTts?.stop()
+    }
+
+    private fun hapticTap() {
+        val vibrator = currentVibrator() ?: return
+        if (!vibrator.hasVibrator()) return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vibrator.vibrate(
+                VibrationEffect.createOneShot(24, VibrationEffect.DEFAULT_AMPLITUDE)
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(24)
+        }
+    }
+
+    private fun currentVibrator(): Vibrator? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val manager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+            manager?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
     }
 
     override fun onDestroy() {
