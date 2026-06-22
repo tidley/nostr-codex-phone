@@ -1163,11 +1163,11 @@ fn spawn_repo_worker(
         ),
         (
             "CODEX_PERSIST_SESSIONS".to_string(),
-            env_nonempty("CODEX_PERSIST_SESSIONS").unwrap_or_else(|| "0".to_string()),
+            env_nonempty("CODEX_PERSIST_SESSIONS").unwrap_or_else(|| "1".to_string()),
         ),
         (
             "CODEX_RESUME_LATEST_BY_WORKDIR".to_string(),
-            env_nonempty("CODEX_RESUME_LATEST_BY_WORKDIR").unwrap_or_else(|| "0".to_string()),
+            env_nonempty("CODEX_RESUME_LATEST_BY_WORKDIR").unwrap_or_else(|| "1".to_string()),
         ),
     ];
     for key in [
@@ -2592,7 +2592,7 @@ fn load_codex_session(
         return stored;
     }
 
-    if !env_bool("CODEX_RESUME_LATEST_BY_WORKDIR", false) {
+    if !env_bool("CODEX_RESUME_LATEST_BY_WORKDIR", true) {
         return None;
     }
 
@@ -2630,15 +2630,17 @@ fn latest_codex_session_for_workdir_in(
         return Ok(None);
     }
 
-    let target = canonical_path_key(workdir);
+    let target = workdir.to_string_lossy().to_string();
+    let canonical_target = canonical_path_key(workdir);
     let mut best: Option<(String, String)> = None;
-    collect_latest_codex_session(sessions_dir, &target, &mut best)?;
+    collect_latest_codex_session(sessions_dir, &target, &canonical_target, &mut best)?;
     Ok(best.map(|(_, session_id)| session_id))
 }
 
 fn collect_latest_codex_session(
     path: &Path,
     target_workdir: &str,
+    canonical_target_workdir: &str,
     best: &mut Option<(String, String)>,
 ) -> Result<()> {
     if path.is_dir() {
@@ -2646,7 +2648,12 @@ fn collect_latest_codex_session(
             fs::read_dir(path).with_context(|| format!("failed to read `{}`", path.display()))?
         {
             let entry = entry?;
-            collect_latest_codex_session(&entry.path(), target_workdir, best)?;
+            collect_latest_codex_session(
+                &entry.path(),
+                target_workdir,
+                canonical_target_workdir,
+                best,
+            )?;
         }
         return Ok(());
     }
@@ -2655,7 +2662,8 @@ fn collect_latest_codex_session(
         return Ok(());
     }
 
-    let Some(session) = parse_codex_session_file(path, target_workdir)? else {
+    let Some(session) = parse_codex_session_file(path, target_workdir, canonical_target_workdir)?
+    else {
         return Ok(());
     };
     match best {
@@ -2665,7 +2673,11 @@ fn collect_latest_codex_session(
     Ok(())
 }
 
-fn parse_codex_session_file(path: &Path, target_workdir: &str) -> Result<Option<(String, String)>> {
+fn parse_codex_session_file(
+    path: &Path,
+    target_workdir: &str,
+    canonical_target_workdir: &str,
+) -> Result<Option<(String, String)>> {
     let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
     let reader = BufReader::new(file);
     let mut first_line = None;
@@ -2676,9 +2688,7 @@ fn parse_codex_session_file(path: &Path, target_workdir: &str) -> Result<Option<
         if first_line.is_none() {
             first_line = Some(line.clone());
         }
-        if !line.trim().is_empty() {
-            last_line = Some(line);
-        }
+        last_line = Some(line);
     }
 
     let Some(first_line) = first_line else {
@@ -2698,7 +2708,20 @@ fn parse_codex_session_file(path: &Path, target_workdir: &str) -> Result<Option<
     let Some(cwd) = payload.get("cwd").and_then(|value| value.as_str()) else {
         return Ok(None);
     };
-    if canonical_path_key(Path::new(cwd)) != target_workdir {
+    if !codex_session_cwd_matches(cwd, target_workdir, canonical_target_workdir) {
+        return Ok(None);
+    }
+
+    let started_at = payload
+        .get("timestamp")
+        .and_then(|timestamp| timestamp.as_str())
+        .or_else(|| {
+            first
+                .get("timestamp")
+                .and_then(|timestamp| timestamp.as_str())
+        })
+        .unwrap_or_default();
+    if started_at.is_empty() {
         return Ok(None);
     }
 
@@ -2724,8 +2747,19 @@ fn parse_codex_session_file(path: &Path, target_workdir: &str) -> Result<Option<
                 .map(str::to_string)
         })
         .unwrap_or_default();
+    if last_timestamp.is_empty() {
+        return Ok(None);
+    }
 
     Ok(Some((last_timestamp, session_id.to_string())))
+}
+
+fn codex_session_cwd_matches(
+    cwd: &str,
+    target_workdir: &str,
+    canonical_target_workdir: &str,
+) -> bool {
+    cwd == target_workdir || canonical_path_key(Path::new(cwd)) == canonical_target_workdir
 }
 
 fn canonical_path_key(path: &Path) -> String {
@@ -3161,6 +3195,12 @@ mod tests {
             "2026-06-16T10:00:00Z",
             "2026-06-16T10:05:00Z",
         );
+        write_session_fixture_without_last_timestamp(
+            &sessions_dir.join("2026/06/16/fallback.jsonl"),
+            "fallback-session",
+            &workdir,
+            "2026-06-16T10:06:00Z",
+        );
         write_session_fixture(
             &sessions_dir.join("2026/06/16/other.jsonl"),
             "other-session",
@@ -3170,7 +3210,7 @@ mod tests {
         );
 
         let session = latest_codex_session_for_workdir_in(&sessions_dir, &workdir).unwrap();
-        assert_eq!(session.as_deref(), Some("new-session"));
+        assert_eq!(session.as_deref(), Some("fallback-session"));
     }
 
     fn write_session_fixture(
@@ -3191,6 +3231,28 @@ mod tests {
         });
         let last = serde_json::json!({
             "timestamp": last_active,
+            "type": "event_msg",
+            "payload": {"type": "token_count"}
+        });
+        fs::write(path, format!("{first}\n{last}\n")).unwrap();
+    }
+
+    fn write_session_fixture_without_last_timestamp(
+        path: &Path,
+        session_id: &str,
+        workdir: &Path,
+        started_at: &str,
+    ) {
+        let first = serde_json::json!({
+            "timestamp": started_at,
+            "type": "session_meta",
+            "payload": {
+                "id": session_id,
+                "timestamp": started_at,
+                "cwd": workdir.to_string_lossy(),
+            }
+        });
+        let last = serde_json::json!({
             "type": "event_msg",
             "payload": {"type": "token_count"}
         });
