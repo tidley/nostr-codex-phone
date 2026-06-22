@@ -465,6 +465,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   String? _sendingConversationKey;
   String? _sendingAudioConversationKey;
   String? _sendingMediaConversationKey;
+  String? _connectedPeerPubkey;
+  List<String> _connectedRelays = const [];
   bool _mediaUploadCancelled = false;
   int _mediaUploadSessionId = 0;
   Completer<void>? _mediaUploadCancelCompleter;
@@ -2015,6 +2017,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       setState(() {
         _connected = true;
         _connecting = false;
+        _connectedPeerPubkey = peer;
+        _connectedRelays = relays;
         _ownPubkey = status.publicKey;
         _status = 'Connected to ${status.relayCount} relays';
       });
@@ -2025,6 +2029,61 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       setState(() {
         _connecting = false;
         _connected = false;
+        _connectedPeerPubkey = null;
+        _connectedRelays = const [];
+        _status = 'Connection failed';
+      });
+      _showError('Connection failed: $error');
+    }
+  }
+
+  Future<void> _connectToTargetInBackground(_RepoTarget target) async {
+    if (_connected || _connecting) return;
+
+    final secret = _secretKeyController.text.trim();
+    final peer = target.pubkey.trim();
+    final relays = target.relays
+        .map((relay) => relay.trim())
+        .where((relay) => relay.isNotEmpty)
+        .toList();
+
+    if (secret.isEmpty || peer.isEmpty || relays.isEmpty) {
+      _showError('Secret key, target pubkey, and relays are required');
+      return;
+    }
+
+    setState(() {
+      _connecting = true;
+      _status = 'Connecting to ${target.displayName}...';
+    });
+
+    try {
+      final status = await nostrStart(
+        config: BridgeNostrConfig(
+          secretKey: secret,
+          peerPubkey: peer,
+          receivePubkeys: _receivePubkeysForInbox(peer),
+          relays: relays,
+        ),
+      );
+      if (!mounted) return;
+      setState(() {
+        _connected = true;
+        _connecting = false;
+        _connectedPeerPubkey = peer;
+        _connectedRelays = relays;
+        _ownPubkey = status.publicKey;
+        _status = 'Connected to ${target.displayName}';
+      });
+      _startPolling();
+      unawaited(_fetchRecentInboxMessages());
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _connecting = false;
+        _connected = false;
+        _connectedPeerPubkey = null;
+        _connectedRelays = const [];
         _status = 'Connection failed';
       });
       _showError('Connection failed: $error');
@@ -2083,13 +2142,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       }
       if (!mounted) return false;
       setState(() {
-        _applyRepoTargetFields(parent);
         _wavRetryRequested = false;
         _status = 'Starting ${target.displayName}...';
       });
-      await _saveSettings();
 
-      await _connect();
+      await _connectToTargetInBackground(parent);
       if (!mounted || !_connected) return false;
 
       await _sendSpawnSessionRequest(
@@ -2174,8 +2231,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   BridgeNostrConfig _activeNostrConfig() {
     final secret = _secretKeyController.text.trim();
-    final peer = _peerPubkeyController.text.trim();
-    final relays = _relayLines();
+    final peer = _connectedPeerPubkey?.trim().isNotEmpty == true
+        ? _connectedPeerPubkey!.trim()
+        : _peerPubkeyController.text.trim();
+    final relays = _connectedRelays.isNotEmpty
+        ? _connectedRelays
+        : _relayLines();
     if (secret.isEmpty || peer.isEmpty || relays.isEmpty) {
       throw StateError('Secret key, peer pubkey, and relays are required');
     }
@@ -2252,6 +2313,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!mounted) return;
     setState(() {
       _connected = false;
+      _connectedPeerPubkey = null;
+      _connectedRelays = const [];
       _status = 'Disconnected';
     });
   }
@@ -2492,9 +2555,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   bool _incomingFromActivePeer(BridgeIncomingMessage message) {
     final activePeer = _peerPubkeyController.text.trim();
-    if (activePeer.isEmpty) return false;
-    return message.senderPubkey == activePeer ||
-        message.senderPubkeyHex == activePeer;
+    final connectedPeer = _connectedPeerPubkey?.trim();
+    return (activePeer.isNotEmpty &&
+            (message.senderPubkey == activePeer ||
+                message.senderPubkeyHex == activePeer)) ||
+        (connectedPeer != null &&
+            connectedPeer.isNotEmpty &&
+            (message.senderPubkey == connectedPeer ||
+                message.senderPubkeyHex == connectedPeer));
   }
 
   void _cacheRepoChoices(List<_RepoChoice> choices) {
