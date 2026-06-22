@@ -154,6 +154,28 @@ class _RepoChoice {
 
 enum _PendingMessageCompletion { transcript, response }
 
+enum _WorkingAnimationStyle {
+  digitalFlow('digital_flow', 'Digital flow'),
+  neuralLattice('neural_lattice', 'Neural lattice'),
+  orbitSync('orbit_sync', 'Orbit sync'),
+  scanLine('scan_line', 'Scan line'),
+  dataPackets('data_packets', 'Data packets'),
+  pulseSpectrum('pulse_spectrum', 'Pulse spectrum');
+
+  const _WorkingAnimationStyle(this.storageValue, this.label);
+
+  final String storageValue;
+  final String label;
+
+  static _WorkingAnimationStyle fromStorage(String? value) {
+    final cleaned = value?.trim();
+    for (final style in _WorkingAnimationStyle.values) {
+      if (style.storageValue == cleaned) return style;
+    }
+    return _WorkingAnimationStyle.digitalFlow;
+  }
+}
+
 class _PendingProcessingMessage {
   const _PendingProcessingMessage({
     required this.eventId,
@@ -369,6 +391,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   static const _ttsRateStorageKey = 'tts_rate';
   static const _ttsPitchStorageKey = 'tts_pitch';
   static const _ttsVolumeStorageKey = 'tts_volume';
+  static const _workingAnimationStorageKey = 'working_animation_style';
   static const _conversationHistoryStorageKey = 'conversation_history_v1';
   static const _seenIncomingEventIdsStorageKey = 'seen_incoming_event_ids_v1';
   static const _unreadCountsStorageKey = 'unread_counts_v1';
@@ -417,6 +440,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   double _ttsRate = 0.48;
   double _ttsPitch = 1.0;
   double _ttsVolume = 1.0;
+  _WorkingAnimationStyle _workingAnimationStyle =
+      _WorkingAnimationStyle.digitalFlow;
   String _ttsLanguage = 'en-US';
   String? _ttsEngine;
   List<String> _ttsLanguages = const ['en-US'];
@@ -532,6 +557,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final ttsRate = await _storage.read(key: _ttsRateStorageKey);
     final ttsPitch = await _storage.read(key: _ttsPitchStorageKey);
     final ttsVolume = await _storage.read(key: _ttsVolumeStorageKey);
+    final workingAnimation = await _storage.read(
+      key: _workingAnimationStorageKey,
+    );
     final seenEventIds = await _storage.read(
       key: _seenIncomingEventIdsStorageKey,
     );
@@ -570,6 +598,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _ttsRate = _storedDouble(ttsRate, _ttsRate, 0.1, 1.0);
       _ttsPitch = _storedDouble(ttsPitch, _ttsPitch, 0.5, 2.0);
       _ttsVolume = _storedDouble(ttsVolume, _ttsVolume, 0.0, 1.0);
+      _workingAnimationStyle = _WorkingAnimationStyle.fromStorage(
+        workingAnimation,
+      );
       _seenIncomingEventIds
         ..clear()
         ..addAll(_decodeSeenEventIds(seenEventIds));
@@ -647,6 +678,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       );
     }
     await _saveTtsSettings();
+    await _saveWorkingAnimationStyle();
   }
 
   List<_RepoTarget> _decodeRepoTargets(String? raw) {
@@ -1411,6 +1443,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           speaking: _speaking,
           hasReplay: _lastSpokenText?.trim().isNotEmpty ?? false,
           autoSpeak: _autoSpeak,
+          workingAnimationStyle: _workingAnimationStyle,
           language: _ttsLanguage,
           languages: _ttsLanguages,
           engine: _ttsEngine,
@@ -1438,6 +1471,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             setState(() => _autoSpeak = value);
             if (!value) unawaited(_stopSpeaking());
           },
+          onWorkingAnimationChanged: _setWorkingAnimationStyle,
           onLanguageChanged: _setTtsLanguage,
           onEngineChanged: _setTtsEngine,
           onRateChanged: _setTtsRate,
@@ -1528,6 +1562,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     } else {
       await _storage.write(key: _ttsEngineStorageKey, value: engine);
     }
+  }
+
+  Future<void> _saveWorkingAnimationStyle() async {
+    await _storage.write(
+      key: _workingAnimationStorageKey,
+      value: _workingAnimationStyle.storageValue,
+    );
+  }
+
+  void _setWorkingAnimationStyle(_WorkingAnimationStyle style) {
+    setState(() => _workingAnimationStyle = style);
+    unawaited(_saveWorkingAnimationStyle());
   }
 
   Future<void> _loadTtsOptions() async {
@@ -3309,6 +3355,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         unreadCountsByTarget: _unreadCountsByTarget,
         pendingReplyTargetIds: _pendingReplyTargetIds,
         loadedTargetIds: _messagesByTarget.keys.toSet(),
+        workingAnimationStyle: _workingAnimationStyle,
         onSelectTarget: (targetId) => unawaited(_selectRepoTarget(targetId)),
         onNewTarget: () => unawaited(_createRepoTarget()),
         onSpawnSession: () => unawaited(_requestSpawnSession()),
@@ -3358,6 +3405,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
                             speaking:
                                 _speaking &&
                                 message.eventId == _speakingMessageEventId,
+                            workingAnimationStyle: _workingAnimationStyle,
                             stopSpeakingOnTap:
                                 _speaking &&
                                 message.direction == MessageDirection.incoming,
@@ -3404,6 +3452,7 @@ class _SessionDrawer extends StatelessWidget {
     required this.unreadCountsByTarget,
     required this.pendingReplyTargetIds,
     required this.loadedTargetIds,
+    required this.workingAnimationStyle,
     required this.onSelectTarget,
     required this.onNewTarget,
     required this.onSpawnSession,
@@ -3418,6 +3467,7 @@ class _SessionDrawer extends StatelessWidget {
   final Map<String, int> unreadCountsByTarget;
   final Set<String> pendingReplyTargetIds;
   final Set<String> loadedTargetIds;
+  final _WorkingAnimationStyle workingAnimationStyle;
   final ValueChanged<String> onSelectTarget;
   final VoidCallback onNewTarget;
   final VoidCallback onSpawnSession;
@@ -3557,6 +3607,7 @@ class _SessionDrawer extends StatelessWidget {
                                           width: 28,
                                           height: 16,
                                           color: statusColor ?? loadedColor,
+                                          style: workingAnimationStyle,
                                         ),
                                       ),
                                     )
@@ -3846,6 +3897,7 @@ class _SettingsPage extends StatelessWidget {
     required this.speaking,
     required this.hasReplay,
     required this.autoSpeak,
+    required this.workingAnimationStyle,
     required this.language,
     required this.languages,
     required this.engine,
@@ -3866,6 +3918,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onStop,
     required this.onReplay,
     required this.onAutoSpeakChanged,
+    required this.onWorkingAnimationChanged,
     required this.onLanguageChanged,
     required this.onEngineChanged,
     required this.onRateChanged,
@@ -3890,6 +3943,7 @@ class _SettingsPage extends StatelessWidget {
   final bool speaking;
   final bool hasReplay;
   final bool autoSpeak;
+  final _WorkingAnimationStyle workingAnimationStyle;
   final String language;
   final List<String> languages;
   final String? engine;
@@ -3910,6 +3964,7 @@ class _SettingsPage extends StatelessWidget {
   final VoidCallback onStop;
   final VoidCallback onReplay;
   final ValueChanged<bool> onAutoSpeakChanged;
+  final ValueChanged<_WorkingAnimationStyle> onWorkingAnimationChanged;
   final ValueChanged<String> onLanguageChanged;
   final ValueChanged<String?> onEngineChanged;
   final ValueChanged<double> onRateChanged;
@@ -3970,6 +4025,11 @@ class _SettingsPage extends StatelessWidget {
             onTest: onTest,
           ),
           const SizedBox(height: 16),
+          _WorkingAnimationSettings(
+            initialStyle: workingAnimationStyle,
+            onChanged: onWorkingAnimationChanged,
+          ),
+          const SizedBox(height: 16),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(12),
@@ -3997,6 +4057,93 @@ class _SettingsPage extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _WorkingAnimationSettings extends StatefulWidget {
+  const _WorkingAnimationSettings({
+    required this.initialStyle,
+    required this.onChanged,
+  });
+
+  final _WorkingAnimationStyle initialStyle;
+  final ValueChanged<_WorkingAnimationStyle> onChanged;
+
+  @override
+  State<_WorkingAnimationSettings> createState() =>
+      _WorkingAnimationSettingsState();
+}
+
+class _WorkingAnimationSettingsState extends State<_WorkingAnimationSettings> {
+  late _WorkingAnimationStyle _selectedStyle;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedStyle = widget.initialStyle;
+  }
+
+  @override
+  void didUpdateWidget(covariant _WorkingAnimationSettings oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initialStyle != widget.initialStyle) {
+      _selectedStyle = widget.initialStyle;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Working animation', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: DropdownButtonFormField<_WorkingAnimationStyle>(
+                    initialValue: _selectedStyle,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Processing style',
+                    ),
+                    items: [
+                      for (final style in _WorkingAnimationStyle.values)
+                        DropdownMenuItem(
+                          value: style,
+                          child: Text(style.label),
+                        ),
+                    ],
+                    onChanged: (style) {
+                      if (style == null) return;
+                      setState(() => _selectedStyle = style);
+                      widget.onChanged(style);
+                    },
+                  ),
+                ),
+                const SizedBox(width: 16),
+                SizedBox(
+                  width: 84,
+                  child: Center(
+                    child: _DigitalThinkingIndicator(
+                      width: 64,
+                      height: 28,
+                      color: theme.colorScheme.primary,
+                      style: _selectedStyle,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -4731,11 +4878,13 @@ class _RecordingButton extends StatelessWidget {
 class _DigitalThinkingIndicator extends StatefulWidget {
   const _DigitalThinkingIndicator({
     required this.color,
+    this.style = _WorkingAnimationStyle.digitalFlow,
     this.width = 42,
     this.height = 18,
   });
 
   final Color color;
+  final _WorkingAnimationStyle style;
   final double width;
   final double height;
 
@@ -4772,6 +4921,7 @@ class _DigitalThinkingIndicatorState extends State<_DigitalThinkingIndicator>
         painter: _DigitalThinkingPainter(
           animation: _controller,
           color: widget.color,
+          style: widget.style,
         ),
       ),
     );
@@ -4779,14 +4929,41 @@ class _DigitalThinkingIndicatorState extends State<_DigitalThinkingIndicator>
 }
 
 class _DigitalThinkingPainter extends CustomPainter {
-  const _DigitalThinkingPainter({required this.animation, required this.color})
-    : super(repaint: animation);
+  const _DigitalThinkingPainter({
+    required this.animation,
+    required this.color,
+    required this.style,
+  }) : super(repaint: animation);
 
   final Animation<double> animation;
   final Color color;
+  final _WorkingAnimationStyle style;
 
   @override
   void paint(Canvas canvas, Size size) {
+    switch (style) {
+      case _WorkingAnimationStyle.digitalFlow:
+        _paintDigitalFlow(canvas, size);
+        break;
+      case _WorkingAnimationStyle.neuralLattice:
+        _paintNeuralLattice(canvas, size);
+        break;
+      case _WorkingAnimationStyle.orbitSync:
+        _paintOrbitSync(canvas, size);
+        break;
+      case _WorkingAnimationStyle.scanLine:
+        _paintScanLine(canvas, size);
+        break;
+      case _WorkingAnimationStyle.dataPackets:
+        _paintDataPackets(canvas, size);
+        break;
+      case _WorkingAnimationStyle.pulseSpectrum:
+        _paintPulseSpectrum(canvas, size);
+        break;
+    }
+  }
+
+  void _paintDigitalFlow(Canvas canvas, Size size) {
     final t = animation.value;
     final centerY = size.height / 2;
     final count = size.width > 34 ? 7 : 5;
@@ -4839,9 +5016,164 @@ class _DigitalThinkingPainter extends CustomPainter {
     }
   }
 
+  void _paintNeuralLattice(Canvas canvas, Size size) {
+    final t = animation.value;
+    final rows = 3;
+    final columns = size.width > 40 ? 6 : 4;
+    final xStep = size.width / (columns - 1);
+    final yStep = size.height / (rows - 1);
+    final linePaint = Paint()
+      ..color = color.withValues(alpha: 0.16)
+      ..strokeWidth = 1
+      ..strokeCap = StrokeCap.round;
+
+    for (var row = 0; row < rows; row++) {
+      for (var column = 0; column < columns - 1; column++) {
+        final a = Offset(column * xStep, row * yStep);
+        final b = Offset((column + 1) * xStep, row * yStep);
+        canvas.drawLine(a, b, linePaint);
+      }
+    }
+    for (var column = 0; column < columns; column++) {
+      canvas.drawLine(
+        Offset(column * xStep, 0),
+        Offset(column * xStep, size.height),
+        linePaint..color = color.withValues(alpha: 0.08),
+      );
+    }
+
+    for (var row = 0; row < rows; row++) {
+      for (var column = 0; column < columns; column++) {
+        final phase = (t + ((row + column) * 0.11)) % 1;
+        final pulse = (math.sin(phase * math.pi * 2) + 1) / 2;
+        final radius = 1.4 + (pulse * 1.9);
+        final paint = Paint()
+          ..color = color.withValues(alpha: 0.28 + (pulse * 0.6));
+        canvas.drawCircle(Offset(column * xStep, row * yStep), radius, paint);
+      }
+    }
+  }
+
+  void _paintOrbitSync(Canvas canvas, Size size) {
+    final t = animation.value;
+    final center = Offset(size.width / 2, size.height / 2);
+    final radiusX = size.width * 0.38;
+    final radiusY = size.height * 0.32;
+    final orbitPaint = Paint()
+      ..color = color.withValues(alpha: 0.16)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.1;
+    canvas.drawOval(
+      Rect.fromCenter(center: center, width: radiusX * 2, height: radiusY * 2),
+      orbitPaint,
+    );
+    canvas.drawCircle(
+      center,
+      math.max(1.8, size.height * 0.12),
+      Paint()..color = color.withValues(alpha: 0.4),
+    );
+
+    for (var index = 0; index < 5; index++) {
+      final angle = (t * math.pi * 2) + (index * math.pi * 0.4);
+      final depth = (math.sin(angle) + 1) / 2;
+      final point = Offset(
+        center.dx + math.cos(angle) * radiusX,
+        center.dy + math.sin(angle) * radiusY,
+      );
+      canvas.drawCircle(
+        point,
+        1.5 + depth * 2.1,
+        Paint()..color = color.withValues(alpha: 0.28 + depth * 0.62),
+      );
+    }
+  }
+
+  void _paintScanLine(Canvas canvas, Size size) {
+    final t = animation.value;
+    final scanX = size.width * t;
+    final backgroundPaint = Paint()
+      ..color = color.withValues(alpha: 0.1)
+      ..strokeWidth = 1
+      ..strokeCap = StrokeCap.round;
+    for (var y = 2.0; y < size.height; y += 5) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), backgroundPaint);
+    }
+
+    final scanPaint = Paint()
+      ..color = color.withValues(alpha: 0.72)
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(Offset(scanX, 0), Offset(scanX, size.height), scanPaint);
+    for (var index = 0; index < 6; index++) {
+      final x = (scanX - (index * size.width / 7)) % size.width;
+      final alpha = (0.5 - index * 0.06).clamp(0.12, 0.5).toDouble();
+      canvas.drawCircle(
+        Offset(x, size.height * (0.24 + (index % 3) * 0.26)),
+        1.5,
+        Paint()..color = color.withValues(alpha: alpha),
+      );
+    }
+  }
+
+  void _paintDataPackets(Canvas canvas, Size size) {
+    final t = animation.value;
+    final trackPaint = Paint()
+      ..color = color.withValues(alpha: 0.14)
+      ..strokeWidth = 1.2
+      ..strokeCap = StrokeCap.round;
+    final yValues = [size.height * 0.28, size.height * 0.5, size.height * 0.72];
+    for (final y in yValues) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), trackPaint);
+    }
+
+    for (var index = 0; index < 7; index++) {
+      final lane = index % yValues.length;
+      final progress = (t + index * 0.17) % 1;
+      final packetWidth = math.max(4.0, size.width * 0.12);
+      final x = progress * (size.width + packetWidth) - packetWidth;
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(
+          x,
+          yValues[lane] - size.height * 0.11,
+          packetWidth,
+          math.max(3.0, size.height * 0.18),
+        ),
+        const Radius.circular(2),
+      );
+      final pulse = (math.sin((progress + lane * 0.21) * math.pi * 2) + 1) / 2;
+      canvas.drawRRect(
+        rect,
+        Paint()..color = color.withValues(alpha: 0.28 + pulse * 0.5),
+      );
+    }
+  }
+
+  void _paintPulseSpectrum(Canvas canvas, Size size) {
+    final t = animation.value;
+    final bars = size.width > 40 ? 9 : 6;
+    final gap = size.width * 0.045;
+    final barWidth = (size.width - (gap * (bars - 1))) / bars;
+    for (var index = 0; index < bars; index++) {
+      final phase = (t * math.pi * 2) + index * 0.55;
+      final pulse = (math.sin(phase) + 1) / 2;
+      final height = size.height * (0.22 + pulse * 0.72);
+      final left = index * (barWidth + gap);
+      final top = (size.height - height) / 2;
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(left, top, barWidth, height),
+          Radius.circular(barWidth / 2),
+        ),
+        Paint()..color = color.withValues(alpha: 0.28 + pulse * 0.58),
+      );
+    }
+  }
+
   @override
   bool shouldRepaint(covariant _DigitalThinkingPainter oldDelegate) {
-    return oldDelegate.animation != animation || oldDelegate.color != color;
+    return oldDelegate.animation != animation ||
+        oldDelegate.color != color ||
+        oldDelegate.style != style;
   }
 }
 
@@ -4907,6 +5239,7 @@ class _MessageTile extends StatefulWidget {
     required this.message,
     required this.showResend,
     required this.speaking,
+    required this.workingAnimationStyle,
     required this.stopSpeakingOnTap,
     required this.onStopSpeaking,
     required this.onResend,
@@ -4915,6 +5248,7 @@ class _MessageTile extends StatefulWidget {
   final ConversationMessage message;
   final bool showResend;
   final bool speaking;
+  final _WorkingAnimationStyle workingAnimationStyle;
   final bool stopSpeakingOnTap;
   final VoidCallback? onStopSpeaking;
   final VoidCallback? onResend;
@@ -5000,6 +5334,7 @@ class _MessageTileState extends State<_MessageTile>
             width: 34,
             height: 20,
             color: colorScheme.primary,
+            style: widget.workingAnimationStyle,
           ),
         ),
       );
@@ -5110,6 +5445,7 @@ class _MessageTileState extends State<_MessageTile>
                   color: userSide
                       ? colorScheme.onPrimaryContainer
                       : colorScheme.primary,
+                  style: widget.workingAnimationStyle,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
