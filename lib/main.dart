@@ -15,6 +15,7 @@ import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
 import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 const _autoBlossomServer = 'auto';
 const _blossomPresets = <_BlossomPreset>[
@@ -49,6 +50,8 @@ const _autoBlossomUploadServers = <String>[
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
+const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
+const _drawerRailWidth = 30.0;
 
 class _BlossomPreset {
   const _BlossomPreset({
@@ -606,15 +609,37 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   ) {
     final byKey = <String, ConversationMessage>{};
     for (final message in loaded.reversed.followedBy(current.reversed)) {
-      final eventId = message.eventId.trim();
-      final key = eventId.isEmpty
-          ? '${message.direction.name}:${message.kind}:${message.timestamp.toIso8601String()}:${message.text}'
-          : eventId;
-      byKey[key] = message;
+      byKey[_conversationMessageMergeKey(message)] = message;
     }
     return sortConversationMessagesNewestFirst(
       byKey.values,
     ).take(_maxConversationMessages).toList();
+  }
+
+  String _conversationMessageMergeKey(ConversationMessage message) {
+    final eventId = message.eventId.trim();
+    if (eventId.isEmpty) {
+      return '${message.direction.name}:${message.kind}:${message.timestamp.toIso8601String()}:${message.text}';
+    }
+
+    if (message.direction == MessageDirection.outgoing) {
+      final kind =
+          message.kind == 'transcribing' || message.kind == 'transcript'
+          ? 'transcript'
+          : message.kind;
+      return 'outgoing:$kind:$eventId';
+    }
+
+    final kind =
+        message.kind == 'processing' ||
+            message.kind == 'response' ||
+            message.kind == 'audio_retry' ||
+            message.kind == 'error' ||
+            message.kind == 'invalid' ||
+            message.kind == 'cancelled'
+        ? 'response'
+        : message.kind;
+    return 'incoming:$kind:$eventId';
   }
 
   void _scrollToLatestMessage() {
@@ -1604,13 +1629,35 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
   }
 
-  bool _tryCompleteTranscription(String conversationKey, String transcript) {
+  bool _tryCompleteTranscription(
+    String conversationKey,
+    String transcript,
+    String transcriptEventId,
+  ) {
     while (true) {
       final pending = _takePendingProcessingMessage(
         conversationKey,
         _PendingMessageCompletion.transcript,
       );
-      if (pending == null) return false;
+      if (pending == null) {
+        var index = _pendingProcessingMessageIndex(
+          conversationKey,
+          transcriptEventId,
+        );
+        if (index < 0) {
+          index = _singlePendingTranscriptionIndex(conversationKey);
+        }
+        if (index < 0) return false;
+        final messages = _messagesByTarget[conversationKey] ?? const [];
+        final eventId = messages[index].eventId;
+        _completeTranscriptionAtIndex(
+          conversationKey: conversationKey,
+          index: index,
+          transcript: transcript,
+          eventId: eventId,
+        );
+        return true;
+      }
 
       final index = _pendingProcessingMessageIndex(
         conversationKey,
@@ -1618,21 +1665,35 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       );
       if (index < 0) continue;
 
-      final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
-      messages[index] = ConversationMessage(
-        direction: MessageDirection.outgoing,
-        kind: 'transcript',
-        text: transcript,
+      _completeTranscriptionAtIndex(
+        conversationKey: conversationKey,
+        index: index,
+        transcript: transcript,
         eventId: pending.eventId,
-        timestamp: DateTime.now(),
-        audio: messages[index].audio,
       );
-      unawaited(_saveConversationHistoryForKey(conversationKey));
-      _appendIncomingProcessingPlaceholder(conversationKey, pending.eventId);
-      if (conversationKey == _activeConversationKey) {
-        _scrollToLatestMessage();
-      }
       return true;
+    }
+  }
+
+  void _completeTranscriptionAtIndex({
+    required String conversationKey,
+    required int index,
+    required String transcript,
+    required String eventId,
+  }) {
+    final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
+    messages[index] = ConversationMessage(
+      direction: MessageDirection.outgoing,
+      kind: 'transcript',
+      text: transcript,
+      eventId: eventId,
+      timestamp: DateTime.now(),
+      audio: messages[index].audio,
+    );
+    unawaited(_saveConversationHistoryForKey(conversationKey));
+    _appendIncomingProcessingPlaceholder(conversationKey, eventId);
+    if (conversationKey == _activeConversationKey) {
+      _scrollToLatestMessage();
     }
   }
 
@@ -1681,6 +1742,23 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           message.direction == MessageDirection.outgoing &&
           message.eventId == eventId,
     );
+  }
+
+  int _singlePendingTranscriptionIndex(String conversationKey) {
+    final messages = _messagesByTarget[conversationKey];
+    if (messages == null) return -1;
+
+    var foundIndex = -1;
+    for (var index = 0; index < messages.length; index += 1) {
+      final message = messages[index];
+      if (message.kind != 'transcribing' ||
+          message.direction != MessageDirection.outgoing) {
+        continue;
+      }
+      if (foundIndex >= 0) return -1;
+      foundIndex = index;
+    }
+    return foundIndex;
   }
 
   void _appendIncomingProcessingPlaceholder(
@@ -2667,7 +2745,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!isActiveConversation && message.kind == 'status') return false;
 
     if (message.kind == 'transcript' &&
-        _tryCompleteTranscription(targetKey, message.text)) {
+        _tryCompleteTranscription(targetKey, message.text, message.eventId)) {
       setState(() {
         _status = 'Transcription received';
       });
@@ -3989,7 +4067,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
 
     return Scaffold(
-      drawerEdgeDragWidth: 72,
+      drawerEdgeDragWidth: _drawerRailWidth,
       drawer: _SessionDrawer(
         targets: _repoTargets,
         selectedTargetId: _selectedRepoTargetId,
@@ -4031,78 +4109,82 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       body: Stack(
         children: [
           SafeArea(
-            child: Column(
-              children: [
-                Expanded(
-                  child: _recentMessagesForActiveConversation.isEmpty
-                      ? const Center(child: Text('No messages in last hour'))
-                      : ListView.builder(
-                          controller: _chatScrollController,
-                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                          itemCount:
-                              _recentMessagesForActiveConversation.length,
-                          itemBuilder: (context, index) {
-                            final message =
-                                _recentMessagesForActiveConversation[index];
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 10),
-                              child: _MessageTile(
-                                message: message,
-                                showResend: _isResendableMessage(message),
-                                speaking:
-                                    _speaking &&
-                                    message.eventId == _speakingMessageEventId,
-                                workingAnimationStyle: _workingAnimationStyle,
-                                stopSpeakingOnTap:
-                                    _speaking &&
-                                    message.direction ==
-                                        MessageDirection.incoming,
-                                onSpeak: () => unawaited(
-                                  _speak(
-                                    message.text,
-                                    remember: true,
-                                    manual: true,
-                                    messageEventId: message.eventId,
+            child: Padding(
+              padding: const EdgeInsets.only(left: _drawerRailWidth),
+              child: Column(
+                children: [
+                  Expanded(
+                    child: _recentMessagesForActiveConversation.isEmpty
+                        ? const Center(child: Text('No messages in last hour'))
+                        : ListView.builder(
+                            controller: _chatScrollController,
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                            itemCount:
+                                _recentMessagesForActiveConversation.length,
+                            itemBuilder: (context, index) {
+                              final message =
+                                  _recentMessagesForActiveConversation[index];
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 10),
+                                child: _MessageTile(
+                                  message: message,
+                                  showResend: _isResendableMessage(message),
+                                  speaking:
+                                      _speaking &&
+                                      message.eventId ==
+                                          _speakingMessageEventId,
+                                  workingAnimationStyle: _workingAnimationStyle,
+                                  stopSpeakingOnTap:
+                                      _speaking &&
+                                      message.direction ==
+                                          MessageDirection.incoming,
+                                  onSpeak: () => unawaited(
+                                    _speak(
+                                      message.text,
+                                      remember: true,
+                                      manual: true,
+                                      messageEventId: message.eventId,
+                                    ),
                                   ),
+                                  onStopSpeaking: _stopSpeaking,
+                                  onResend: _canResendMessage(message)
+                                      ? () => _resendMessage(message)
+                                      : null,
+                                  onCancelPending:
+                                      message.kind == 'processing' &&
+                                          message.direction ==
+                                              MessageDirection.incoming
+                                      ? () => unawaited(
+                                          _cancelPendingResponse(message),
+                                        )
+                                      : null,
                                 ),
-                                onStopSpeaking: _stopSpeaking,
-                                onResend: _canResendMessage(message)
-                                    ? () => _resendMessage(message)
-                                    : null,
-                                onCancelPending:
-                                    message.kind == 'processing' &&
-                                        message.direction ==
-                                            MessageDirection.incoming
-                                    ? () => unawaited(
-                                        _cancelPendingResponse(message),
-                                      )
-                                    : null,
-                              ),
-                            );
-                          },
-                        ),
-                ),
-                _Composer(
-                  controller: _queryController,
-                  focusNode: _queryFocusNode,
-                  connected: _connected,
-                  connecting: _connecting,
-                  sending: _sendingInActiveConversation,
-                  sendingAudio: _sendingAudioInActiveConversation,
-                  sendingMedia: _sendingMediaInActiveConversation,
-                  recording: _recording,
-                  recordingDurationLabel: _recordingDurationLabel,
-                  wavRetryRequested: _wavRetryRequested,
-                  hasPendingMedia: _hasPendingMediaAttachment,
-                  pendingMediaName: _pendingMediaFileName,
-                  onMicPressed: _toggleRecording,
-                  onAttachMedia: _attachAndSendMedia,
-                  onCancelRecording: () => unawaited(_cancelCurrentAction()),
-                  onClearPendingMedia: _clearPendingMediaAttachment,
-                  onSendPressed: () => _sendMediaOrText(),
-                ),
-                const SizedBox(height: 12),
-              ],
+                              );
+                            },
+                          ),
+                  ),
+                  _Composer(
+                    controller: _queryController,
+                    focusNode: _queryFocusNode,
+                    connected: _connected,
+                    connecting: _connecting,
+                    sending: _sendingInActiveConversation,
+                    sendingAudio: _sendingAudioInActiveConversation,
+                    sendingMedia: _sendingMediaInActiveConversation,
+                    recording: _recording,
+                    recordingDurationLabel: _recordingDurationLabel,
+                    wavRetryRequested: _wavRetryRequested,
+                    hasPendingMedia: _hasPendingMediaAttachment,
+                    pendingMediaName: _pendingMediaFileName,
+                    onMicPressed: _toggleRecording,
+                    onAttachMedia: _attachAndSendMedia,
+                    onCancelRecording: () => unawaited(_cancelCurrentAction()),
+                    onClearPendingMedia: _clearPendingMediaAttachment,
+                    onSendPressed: () => _sendMediaOrText(),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+              ),
             ),
           ),
           Builder(
@@ -4397,8 +4479,8 @@ class _DrawerEdgeHandle extends StatelessWidget {
     final color = hasUnreadConversations
         ? theme.colorScheme.primary
         : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.42);
-    final buttonColor = theme.colorScheme.surfaceContainerHighest.withValues(
-      alpha: 0.94,
+    final railColor = theme.colorScheme.surfaceContainerHighest.withValues(
+      alpha: 0.96,
     );
     final iconColor = theme.colorScheme.onSurfaceVariant;
     return Positioned(
@@ -4416,14 +4498,36 @@ class _DrawerEdgeHandle extends StatelessWidget {
             }
           },
           child: SizedBox(
-            width: 42,
+            width: _drawerRailWidth,
             child: Stack(
               children: [
-                Align(
-                  alignment: Alignment.centerLeft,
+                Positioned.fill(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: railColor,
+                      border: Border(
+                        right: BorderSide(
+                          color: theme.colorScheme.outlineVariant.withValues(
+                            alpha: 0.42,
+                          ),
+                        ),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: theme.shadowColor.withValues(alpha: 0.08),
+                          blurRadius: 8,
+                          offset: const Offset(1, 0),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
                   child: Container(
                     width: 4,
-                    height: 96,
                     decoration: BoxDecoration(
                       color: color,
                       borderRadius: const BorderRadius.only(
@@ -4434,53 +4538,22 @@ class _DrawerEdgeHandle extends StatelessWidget {
                   ),
                 ),
                 Positioned(
-                  left: 0,
-                  top: 8,
+                  left: 4,
+                  top: 10,
                   child: Tooltip(
                     message: 'Open sessions',
-                    child: Container(
-                      width: 34,
+                    child: SizedBox(
+                      width: 24,
                       height: 36,
-                      decoration: BoxDecoration(
-                        color: buttonColor,
-                        borderRadius: const BorderRadius.only(
-                          topRight: Radius.circular(18),
-                          bottomRight: Radius.circular(18),
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: theme.shadowColor.withValues(alpha: 0.16),
-                            blurRadius: 8,
-                            offset: const Offset(0, 2),
-                          ),
-                        ],
-                        border: Border(
-                          top: BorderSide(
-                            color: theme.colorScheme.outlineVariant.withValues(
-                              alpha: 0.42,
-                            ),
-                          ),
-                          right: BorderSide(
-                            color: theme.colorScheme.outlineVariant.withValues(
-                              alpha: 0.42,
-                            ),
-                          ),
-                          bottom: BorderSide(
-                            color: theme.colorScheme.outlineVariant.withValues(
-                              alpha: 0.42,
-                            ),
-                          ),
-                        ),
-                      ),
                       child: Stack(
                         clipBehavior: Clip.none,
                         alignment: Alignment.center,
                         children: [
-                          Icon(Icons.menu, size: 19, color: iconColor),
+                          Icon(Icons.menu, size: 18, color: iconColor),
                           if (hasUnreadConversations)
                             Positioned(
-                              top: 7,
-                              right: 7,
+                              top: 6,
+                              right: 2,
                               child: Container(
                                 width: 8,
                                 height: 8,
@@ -4488,7 +4561,7 @@ class _DrawerEdgeHandle extends StatelessWidget {
                                   color: theme.colorScheme.primary,
                                   shape: BoxShape.circle,
                                   border: Border.all(
-                                    color: buttonColor,
+                                    color: railColor,
                                     width: 1.5,
                                   ),
                                 ),
@@ -6541,6 +6614,7 @@ class _MessageTileState extends State<_MessageTile>
                     data: widget.message.text,
                     selectable: !widget.stopSpeakingOnTap,
                     softLineBreak: true,
+                    onTapLink: incoming ? _openLink : null,
                   ),
                 ),
               ],
@@ -6550,6 +6624,7 @@ class _MessageTileState extends State<_MessageTile>
               data: widget.message.text,
               selectable: !widget.stopSpeakingOnTap,
               softLineBreak: true,
+              onTapLink: incoming ? _openLink : null,
             ),
         ],
       ),
@@ -6596,6 +6671,27 @@ class _MessageTileState extends State<_MessageTile>
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(const SnackBar(content: Text('Copied')));
+  }
+
+  Future<void> _openLink(String text, String? href, String title) async {
+    final value = href?.trim();
+    if (value == null || value.isEmpty) return;
+
+    final uri = Uri.tryParse(value);
+    if (uri == null || !_allowedLinkSchemes.contains(uri.scheme)) {
+      _showLinkError('Cannot open this link');
+      return;
+    }
+
+    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!opened) _showLinkError('Could not open link');
+  }
+
+  void _showLinkError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   IconData _messageIcon({required bool incoming}) {
