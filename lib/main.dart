@@ -456,7 +456,8 @@ class NostrCodexHome extends StatefulWidget {
   State<NostrCodexHome> createState() => _NostrCodexHomeState();
 }
 
-class _NostrCodexHomeState extends State<NostrCodexHome> {
+class _NostrCodexHomeState extends State<NostrCodexHome>
+    with SingleTickerProviderStateMixin {
   static const _storage = FlutterSecureStorage();
   static const _secretKeyStorageKey = 'nostr_secret_key';
   static const _peerPubkeyStorageKey = 'nostr_peer_pubkey';
@@ -493,7 +494,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   final _seenIncomingEventIds = <String>{};
   final _unreadCountsByTarget = <String, int>{};
   final _pendingReplyTargetIds = <String>{};
+  final _pendingTargetInvites = <_RepoTarget>[];
   final ScrollController _chatScrollController = ScrollController();
+  late final AnimationController _menuNotificationPulseController;
 
   bool _loadingSettings = true;
   bool _connecting = false;
@@ -575,6 +578,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _sendingMedia && _sendingMediaConversationKey == _activeConversationKey;
 
   bool get _sendInProgress => _sending || _sendingAudio || _sendingMedia;
+
+  bool get _sessionSwitchBlocked => _sending || _sendingMedia;
 
   List<ConversationMessage> get _recentMessagesForActiveConversation {
     final now = DateTime.now();
@@ -661,6 +666,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   @override
   void initState() {
     super.initState();
+    _menuNotificationPulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 620),
+    );
     _configureTtsHandlers();
     unawaited(_loadSettings());
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -686,6 +695,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     _blossomServerController.dispose();
     _queryController.dispose();
     _queryFocusNode.dispose();
+    _menuNotificationPulseController.dispose();
     unawaited(nostrStop());
     super.dispose();
   }
@@ -1308,6 +1318,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   Future<void> _offerTargetInvite(_RepoTarget target) async {
     if (!mounted) return;
+    if (_recording) {
+      _queueTargetInvite(target);
+      return;
+    }
     final accept = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1331,6 +1345,49 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
     if (accept != true || !mounted) return;
     await _saveAndSelectRepoTarget(target, status: 'Accepted session request');
+  }
+
+  void _queueTargetInvite(_RepoTarget target) {
+    final existingIndex = repoTargetMergeIndex(
+      [
+        for (final item in _pendingTargetInvites)
+          RepoTargetMergeIdentity(
+            id: item.id,
+            pubkey: item.pubkey,
+            workdir: item.workdir,
+          ),
+      ],
+      RepoTargetMergeIdentity(
+        id: target.id,
+        pubkey: target.pubkey,
+        workdir: target.workdir,
+      ),
+    );
+    setState(() {
+      if (existingIndex >= 0) {
+        _pendingTargetInvites[existingIndex] = target;
+      } else {
+        _pendingTargetInvites.add(target);
+      }
+      _status = 'Session request waiting';
+    });
+    _pulseMenuNotification();
+  }
+
+  Future<void> _openSessionsMenu(BuildContext scaffoldContext) async {
+    if (_pendingTargetInvites.isNotEmpty && !_recording) {
+      final target = _pendingTargetInvites.removeAt(0);
+      if (mounted) setState(() {});
+      await _offerTargetInvite(target);
+      return;
+    }
+    if (!scaffoldContext.mounted) return;
+    Scaffold.of(scaffoldContext).openDrawer();
+  }
+
+  void _pulseMenuNotification() {
+    if (!mounted) return;
+    _menuNotificationPulseController.forward(from: 0);
   }
 
   Future<_RepoTarget?> _saveAndSelectRepoTarget(
@@ -1477,7 +1534,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   Future<void> _selectRepoTarget(String targetId) async {
     if (targetId == _selectedRepoTargetId) return;
-    if (_sendInProgress) {
+    if (_sessionSwitchBlocked) {
       if (mounted) {
         setState(
           () => _status = 'Finish current send before switching sessions',
@@ -1489,11 +1546,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (target == null) return;
 
     _dismissQueryKeyboard();
-    final reconnect = _connected;
+    final deferReconnect = _sendingAudio;
+    final reconnect = _connected && !deferReconnect;
     if (_recording) {
       await _cancelRecording();
     }
-    if (_connected || _connecting) {
+    if (!deferReconnect && (_connected || _connecting)) {
       await _disconnect(expand: false);
     }
     if (!mounted) return;
@@ -1504,7 +1562,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _messagesByTarget.putIfAbsent(targetKey, () => []);
       _wavRetryRequested = false;
       _unreadCountsByTarget.remove(targetKey);
-      _status = 'Selected ${target.displayName}';
+      _status = deferReconnect
+          ? 'Selected ${target.displayName}; voice note sending in background'
+          : 'Selected ${target.displayName}';
     });
     await _saveSettings();
     await _saveUnreadCounts();
@@ -2332,6 +2392,33 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
+  Future<bool> _ensureConnectedForVoiceSend(_RepoTarget? target) async {
+    if (target == null || _shouldStartRepoTargetForSend(target)) {
+      return _ensureConnectedForSend();
+    }
+
+    final peer = target.pubkey.trim();
+    if (_connected && _connectedPeerPubkey == peer) return true;
+
+    if (_connected || _connecting) {
+      await _disconnect(expand: false);
+    }
+    if (!mounted) return false;
+
+    await _connectToTargetInBackground(target);
+    return mounted && _connected && _connectedPeerPubkey == peer;
+  }
+
+  Future<void> _reconnectAfterBackgroundVoiceSend() async {
+    if (!mounted || _sendingAudio || _sending || _sendingMedia) return;
+    if (_connected || _connecting) {
+      await _disconnect(expand: false);
+    }
+    if (!mounted) return;
+    setState(() => _status = 'Connecting to selected session...');
+    await _connect();
+  }
+
   Future<bool> _ensureConnectedForSend() async {
     final target = _targetById(_repoTargets, _selectedRepoTargetId);
     if (_shouldStartRepoTargetForSend(target)) {
@@ -2719,6 +2806,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         return true;
       }
       setState(() => _status = 'Received session request');
+      _pulseMenuNotification();
       unawaited(_offerTargetInvite(target));
       return true;
     }
@@ -2794,6 +2882,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         if (!isActiveConversation) {
           _unreadCountsByTarget[targetKey] =
               (_unreadCountsByTarget[targetKey] ?? 0) + 1;
+          _pulseMenuNotification();
           unawaited(_saveUnreadCounts());
         }
       } else {
@@ -3683,6 +3772,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   Future<void> _stopAndSendRecording() async {
     final conversationKey = _activeConversationKey;
+    final sendTarget = _targetById(_repoTargets, _selectedRepoTargetId);
     final fallbackPath = _recordingPath;
     final recordingFormat = _activeRecordingFormat ?? _opusVoiceFormat;
     String? path;
@@ -3728,7 +3818,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
     try {
       setState(() => _status = 'Preparing voice session...');
-      if (!await _ensureConnectedForSend()) {
+      if (!await _ensureConnectedForVoiceSend(sendTarget)) {
         return;
       }
       if (!mounted) return;
@@ -3767,11 +3857,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _showError('Voice query failed: $error');
     } finally {
       unawaited(_deleteTempAudio(path));
+      final reconnectToSelected =
+          mounted && _activeConversationKey != conversationKey;
       if (mounted) {
         setState(() {
           _sendingAudio = false;
           _sendingAudioConversationKey = null;
         });
+      }
+      if (reconnectToSelected) {
+        unawaited(_reconnectAfterBackgroundVoiceSend());
       }
     }
   }
@@ -4071,11 +4166,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       color: Theme.of(context).colorScheme.onSurface,
     );
     if (activeTargets.length < 2 || selected == null) {
-      return Text(
-        selected?.displayName ?? _activeTargetName(),
-        overflow: TextOverflow.ellipsis,
-        style: titleStyle,
-      );
+      return selected == null
+          ? Text(
+              _activeTargetName(),
+              overflow: TextOverflow.ellipsis,
+              style: titleStyle,
+            )
+          : _buildSessionDropdownLabel(selected, titleStyle, compact: true);
     }
 
     return DropdownButtonHideUnderline(
@@ -4084,14 +4181,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         isExpanded: true,
         iconEnabledColor: Theme.of(context).colorScheme.onSurface,
         style: titleStyle,
+        selectedItemBuilder: (context) => [
+          for (final target in activeTargets)
+            _buildSessionDropdownLabel(target, titleStyle, compact: true),
+        ],
         items: [
           for (final target in activeTargets)
             DropdownMenuItem<String>(
               value: target.id,
-              child: Text(target.displayName, overflow: TextOverflow.ellipsis),
+              child: _buildSessionDropdownLabel(target, titleStyle),
             ),
         ],
-        onChanged: _sendInProgress
+        onChanged: _sessionSwitchBlocked
             ? null
             : (targetId) {
                 if (targetId != null) {
@@ -4099,6 +4200,78 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
                 }
               },
       ),
+    );
+  }
+
+  Widget _buildSessionDropdownLabel(
+    _RepoTarget target,
+    TextStyle? titleStyle, {
+    bool compact = false,
+  }) {
+    final theme = Theme.of(context);
+    final dark = theme.brightness == Brightness.dark;
+    final activeColor = dark
+        ? const Color(0xff81c784)
+        : const Color(0xff2e7d32);
+    final loadedColor = dark
+        ? const Color(0xff90caf9)
+        : const Color(0xff1565c0);
+    final selected = target.id == _selectedRepoTargetId;
+    final connected = _connectedPeerPubkey == target.pubkey;
+    final loaded = _messagesByTarget.containsKey(target.id);
+    final pending = _pendingReplyTargetIds.contains(target.id);
+    final hasUnread = (_unreadCountsByTarget[target.id] ?? 0) > 0;
+    final statusColor = selected
+        ? activeColor
+        : connected || loaded
+        ? loadedColor
+        : theme.colorScheme.onSurfaceVariant;
+    final textStyle = titleStyle?.copyWith(
+      color: compact ? titleStyle.color : statusColor,
+      fontWeight: selected || connected ? FontWeight.w700 : FontWeight.w500,
+    );
+
+    return Row(
+      children: [
+        SizedBox(
+          width: compact ? 24 : 32,
+          child: pending
+              ? Center(
+                  child: _workingAnimationStyle.enabled
+                      ? _DigitalThinkingIndicator(
+                          width: compact ? 22 : 28,
+                          height: compact ? 14 : 16,
+                          color: statusColor,
+                          style: _workingAnimationStyle,
+                        )
+                      : Icon(
+                          Icons.chat_bubble_outline,
+                          color: statusColor,
+                          size: compact ? 17 : 20,
+                        ),
+                )
+              : const SizedBox.shrink(),
+        ),
+        Expanded(
+          child: Text(
+            target.displayName,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: textStyle,
+          ),
+        ),
+        if (hasUnread) ...[
+          SizedBox(width: compact ? 6 : 8),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: const Color(0xffff9f1c),
+              shape: BoxShape.circle,
+              border: Border.all(color: theme.colorScheme.surface, width: 1),
+            ),
+            child: SizedBox.square(dimension: compact ? 7 : 8),
+          ),
+        ],
+      ],
     );
   }
 
@@ -4111,6 +4284,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final hasUnreadConversations = _unreadCountsByTarget.values.any(
       (count) => count > 0,
     );
+    final hasMenuNotification =
+        hasUnreadConversations || _pendingTargetInvites.isNotEmpty;
     final activeTargets = _activeSessionTargets();
 
     return Scaffold(
@@ -4119,8 +4294,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         leading: Builder(
           builder: (context) {
             return IconButton(
-              tooltip: hasUnreadConversations
-                  ? 'Open sessions with unread messages'
+              tooltip: hasMenuNotification
+                  ? 'Open sessions with notifications'
                   : 'Open sessions',
               icon: SizedBox.square(
                 dimension: 28,
@@ -4128,26 +4303,35 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
                   clipBehavior: Clip.none,
                   children: [
                     const Center(child: Icon(Icons.menu)),
-                    if (hasUnreadConversations)
+                    if (hasMenuNotification)
                       Positioned(
                         top: 4,
                         right: 3,
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: Color(0xffff9f1c),
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: Theme.of(context).colorScheme.surface,
-                              width: 1.5,
+                        child: AnimatedBuilder(
+                          animation: _menuNotificationPulseController,
+                          builder: (context, child) {
+                            final value =
+                                _menuNotificationPulseController.value;
+                            final scale = 1 + (math.sin(value * math.pi) * 0.7);
+                            return Transform.scale(scale: scale, child: child);
+                          },
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: const Color(0xffff9f1c),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: Theme.of(context).colorScheme.surface,
+                                width: 1.5,
+                              ),
                             ),
+                            child: const SizedBox.square(dimension: 8),
                           ),
-                          child: const SizedBox.square(dimension: 8),
                         ),
                       ),
                   ],
                 ),
               ),
-              onPressed: () => Scaffold.of(context).openDrawer(),
+              onPressed: () => unawaited(_openSessionsMenu(context)),
             );
           },
         ),
@@ -4157,7 +4341,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         targets: _repoTargets,
         selectedTargetId: _selectedRepoTargetId,
         connectedTargetId: _connected ? _selectedRepoTargetId : null,
-        canSelectTargets: !_sendInProgress,
+        canSelectTargets: !_sessionSwitchBlocked,
         unreadCountsByTarget: _unreadCountsByTarget,
         pendingReplyTargetIds: _pendingReplyTargetIds,
         loadedTargetIds: _messagesByTarget.keys.toSet(),
@@ -5671,7 +5855,7 @@ class _ComposerState extends State<_Composer> {
                     widget.sending ||
                     widget.sendingAudio ||
                     widget.sendingMedia;
-                final canUseMainAction = !busy && !widget.connecting;
+                final canUseMainAction = !busy;
                 final onMainPressed = canUseMainAction
                     ? widget.connected
                           ? widget.recording

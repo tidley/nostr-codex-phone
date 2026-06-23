@@ -2115,13 +2115,9 @@ async fn process_text_turn(
     codex_config: &CodexConfig,
     cancel_token: &CodexCancelToken,
 ) {
-    if is_long_running_request(request) {
-        send_status(
-            messenger,
-            peer_pubkey,
-            "Understood — starting work on this request.",
-        )
-        .await;
+    if let Some(estimate) = estimate_task_time(request) {
+        let status = format!("Estimated task time: {estimate}. Starting work now.");
+        send_status(messenger, peer_pubkey, &status).await;
     }
 
     let session_id = if codex_config.persist_sessions {
@@ -2190,6 +2186,71 @@ fn is_long_running_request(request: &str) -> bool {
             || normalized.contains("root cause")
             || normalized.contains("refactor")
             || normalized.contains("large"))
+}
+
+fn estimate_task_time(request: &str) -> Option<&'static str> {
+    if request.trim_start().starts_with('/') {
+        return None;
+    }
+    let normalized = normalize_transcript(request);
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if is_quick_status_request(&normalized) {
+        return Some("under 2 minutes");
+    }
+
+    if normalized.contains("release")
+        || (normalized.contains("build") && normalized.contains("apk"))
+        || normalized.contains("github release")
+    {
+        return Some("8-15 minutes");
+    }
+
+    if normalized.contains("investigate")
+        || normalized.contains("diagnose")
+        || normalized.contains("debug")
+        || normalized.contains("root cause")
+    {
+        return Some("10-25 minutes");
+    }
+
+    if normalized.contains("refactor")
+        || normalized.contains("redesign")
+        || normalized.contains("rewrite")
+        || normalized.len() > 220
+    {
+        return Some("15-30 minutes");
+    }
+
+    if normalized.contains("fix")
+        || normalized.contains("add")
+        || normalized.contains("change")
+        || normalized.contains("make")
+        || normalized.contains("implement")
+        || normalized.contains("remove")
+    {
+        return Some("5-15 minutes");
+    }
+
+    if is_long_running_request(&normalized) {
+        return Some("10-20 minutes");
+    }
+
+    Some("2-5 minutes")
+}
+
+fn is_quick_status_request(normalized: &str) -> bool {
+    matches!(
+        normalized,
+        "status"
+            | "check status"
+            | "what is the status"
+            | "how is it going"
+            | "just checking"
+            | "just checking in"
+    ) || normalized.starts_with("just checking ")
 }
 
 async fn transcribe_or_load_cached(
@@ -3312,6 +3373,24 @@ mod tests {
             classify_request("fix the Android voice recording path"),
             RequestClass::Coding
         );
+    }
+
+    #[test]
+    fn estimates_task_time_by_request_shape() {
+        assert_eq!(estimate_task_time("status"), Some("under 2 minutes"));
+        assert_eq!(
+            estimate_task_time("build an APK and create a GitHub release"),
+            Some("8-15 minutes")
+        );
+        assert_eq!(
+            estimate_task_time("debug why audio transcription disappears"),
+            Some("10-25 minutes")
+        );
+        assert_eq!(
+            estimate_task_time("make the top bar title smaller"),
+            Some("5-15 minutes")
+        );
+        assert_eq!(estimate_task_time("/summary"), None);
     }
 
     #[test]
