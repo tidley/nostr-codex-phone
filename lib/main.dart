@@ -4118,18 +4118,37 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       appBar: AppBar(
         leading: Builder(
           builder: (context) {
-            final icon = IconButton(
-              tooltip: 'Open sessions',
-              icon: const Icon(Icons.menu),
+            return IconButton(
+              tooltip: hasUnreadConversations
+                  ? 'Open sessions with unread messages'
+                  : 'Open sessions',
+              icon: SizedBox.square(
+                dimension: 28,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    const Center(child: Icon(Icons.menu)),
+                    if (hasUnreadConversations)
+                      Positioned(
+                        top: 4,
+                        right: 3,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: Color(0xffff9f1c),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: Theme.of(context).colorScheme.surface,
+                              width: 1.5,
+                            ),
+                          ),
+                          child: const SizedBox.square(dimension: 8),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
               onPressed: () => Scaffold.of(context).openDrawer(),
             );
-            return hasUnreadConversations
-                ? Badge(
-                    alignment: AlignmentDirectional.topEnd,
-                    offset: const Offset(-12, 10),
-                    child: icon,
-                  )
-                : icon;
           },
         ),
         title: _buildSessionTitle(activeTargets),
