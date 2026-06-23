@@ -6085,8 +6085,7 @@ class _MessageTileState extends State<_MessageTile>
     required bool transcript,
     required bool processing,
   }) {
-    if (processing) return Icons.sync;
-    if (transcript) return Icons.notes;
+    if (processing || transcript) return Icons.notes;
     return incoming ? Icons.call_received : Icons.call_made;
   }
 
