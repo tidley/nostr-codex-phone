@@ -51,7 +51,8 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _drawerRailWidth = 30.0;
+const _drawerRailWidth = 10.0;
+const _drawerMenuBulgeWidth = 34.0;
 
 class _BlossomPreset {
   const _BlossomPreset({
@@ -4489,71 +4490,123 @@ class _DrawerEdgeHandle extends StatelessWidget {
       bottom: 0,
       child: SafeArea(
         right: false,
-        child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTap: onOpenDrawer,
-          onHorizontalDragEnd: (details) {
-            if ((details.primaryVelocity ?? 0) > 0) {
-              onOpenDrawer();
-            }
-          },
-          child: SizedBox(
-            width: _drawerRailWidth,
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: railColor,
-                      border: Border(
-                        right: BorderSide(
-                          color: theme.colorScheme.outlineVariant.withValues(
-                            alpha: 0.42,
+        child: SizedBox(
+          width: _drawerMenuBulgeWidth,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned(
+                left: 0,
+                top: 0,
+                bottom: 0,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTap: onOpenDrawer,
+                  onHorizontalDragEnd: (details) {
+                    if ((details.primaryVelocity ?? 0) > 0) {
+                      onOpenDrawer();
+                    }
+                  },
+                  child: SizedBox(
+                    width: _drawerRailWidth,
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: railColor,
+                              border: Border(
+                                right: BorderSide(
+                                  color: theme.colorScheme.outlineVariant
+                                      .withValues(alpha: 0.42),
+                                ),
+                              ),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: theme.shadowColor.withValues(
+                                    alpha: 0.08,
+                                  ),
+                                  blurRadius: 8,
+                                  offset: const Offset(1, 0),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: theme.shadowColor.withValues(alpha: 0.08),
-                          blurRadius: 8,
-                          offset: const Offset(1, 0),
+                        Positioned(
+                          left: 0,
+                          top: 0,
+                          bottom: 0,
+                          child: Container(
+                            width: 4,
+                            decoration: BoxDecoration(
+                              color: color,
+                              borderRadius: const BorderRadius.only(
+                                topRight: Radius.circular(4),
+                                bottomRight: Radius.circular(4),
+                              ),
+                            ),
+                          ),
                         ),
                       ],
                     ),
                   ),
                 ),
-                Positioned(
-                  left: 0,
-                  top: 0,
-                  bottom: 0,
-                  child: Container(
-                    width: 4,
-                    decoration: BoxDecoration(
-                      color: color,
-                      borderRadius: const BorderRadius.only(
-                        topRight: Radius.circular(4),
-                        bottomRight: Radius.circular(4),
-                      ),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  left: 4,
-                  top: 10,
-                  child: Tooltip(
-                    message: 'Open sessions',
-                    child: SizedBox(
-                      width: 24,
+              ),
+              Positioned(
+                left: 0,
+                top: 8,
+                child: Tooltip(
+                  message: 'Open sessions',
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: onOpenDrawer,
+                    child: Container(
+                      width: _drawerMenuBulgeWidth,
                       height: 36,
+                      decoration: BoxDecoration(
+                        color: railColor,
+                        borderRadius: const BorderRadius.only(
+                          topRight: Radius.circular(18),
+                          bottomRight: Radius.circular(18),
+                        ),
+                        border: Border(
+                          top: BorderSide(
+                            color: theme.colorScheme.outlineVariant.withValues(
+                              alpha: 0.42,
+                            ),
+                          ),
+                          right: BorderSide(
+                            color: theme.colorScheme.outlineVariant.withValues(
+                              alpha: 0.42,
+                            ),
+                          ),
+                          bottom: BorderSide(
+                            color: theme.colorScheme.outlineVariant.withValues(
+                              alpha: 0.42,
+                            ),
+                          ),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: theme.shadowColor.withValues(alpha: 0.14),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
                       child: Stack(
                         clipBehavior: Clip.none,
                         alignment: Alignment.center,
                         children: [
-                          Icon(Icons.menu, size: 18, color: iconColor),
+                          Padding(
+                            padding: const EdgeInsets.only(left: 2),
+                            child: Icon(Icons.menu, size: 19, color: iconColor),
+                          ),
                           if (hasUnreadConversations)
                             Positioned(
                               top: 6,
-                              right: 2,
+                              right: 7,
                               child: Container(
                                 width: 8,
                                 height: 8,
@@ -4572,8 +4625,8 @@ class _DrawerEdgeHandle extends StatelessWidget {
                     ),
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),
