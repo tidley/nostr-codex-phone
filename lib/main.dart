@@ -3506,7 +3506,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _appendPendingTranscriptionMessage(
           conversationKey: conversationKey,
           eventId: eventId,
-          label: 'Transcribing voice...',
+          label: 'Transcribing...',
         );
         _status = 'Voice query sent';
       });
