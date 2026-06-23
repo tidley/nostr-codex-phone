@@ -1615,7 +1615,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final alreadyVisible = messages.any(
       (message) =>
           message.kind == 'processing' &&
-          message.direction == MessageDirection.incoming,
+          message.direction == MessageDirection.incoming &&
+          message.eventId == eventId,
     );
     if (alreadyVisible) return;
 
@@ -1631,8 +1632,31 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
   }
 
+  bool _replaceOldestIncomingProcessingPlaceholder(
+    String conversationKey,
+    ConversationMessage replacement,
+  ) {
+    final messages = _messagesByTarget[conversationKey];
+    if (messages == null) return false;
+
+    for (var index = messages.length - 1; index >= 0; index -= 1) {
+      final message = messages[index];
+      if (message.kind == 'processing' &&
+          message.direction == MessageDirection.incoming) {
+        messages[index] = replacement;
+        _syncPendingReplyTarget(conversationKey);
+        unawaited(_saveConversationHistoryForKey(conversationKey));
+        if (conversationKey == _activeConversationKey) {
+          _scrollToLatestMessage();
+        }
+        return true;
+      }
+    }
+    _syncPendingReplyTarget(conversationKey);
+    return false;
+  }
+
   bool _dropIncomingProcessingPlaceholder(String conversationKey) {
-    _pendingReplyTargetIds.remove(conversationKey);
     final messages = _messagesByTarget[conversationKey];
     if (messages == null) return false;
     final index = messages.indexWhere(
@@ -1642,11 +1666,26 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     );
     if (index < 0) return false;
     messages.removeAt(index);
+    _syncPendingReplyTarget(conversationKey);
     unawaited(_saveConversationHistoryForKey(conversationKey));
     if (conversationKey == _activeConversationKey) {
       _scrollToLatestMessage();
     }
     return true;
+  }
+
+  void _syncPendingReplyTarget(String conversationKey) {
+    final messages = _messagesByTarget[conversationKey] ?? const [];
+    final hasPendingResponse = messages.any(
+      (message) =>
+          message.kind == 'processing' &&
+          message.direction == MessageDirection.incoming,
+    );
+    if (hasPendingResponse) {
+      _pendingReplyTargetIds.add(conversationKey);
+    } else {
+      _pendingReplyTargetIds.remove(conversationKey);
+    }
   }
 
   Future<void> _openSettings() async {
@@ -2527,13 +2566,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       timestamp: DateTime.now(),
     );
     final audioRetryRequested = message.kind == 'audio_retry';
+    final completesPendingRequest =
+        message.kind == 'response' ||
+        audioRetryRequested ||
+        message.kind == 'error' ||
+        message.kind == 'invalid';
     setState(() {
-      if (message.kind == 'response' ||
-          audioRetryRequested ||
-          message.kind == 'error' ||
-          message.kind == 'invalid') {
-        _pendingReplyTargetIds.remove(targetKey);
-      }
       if (isActiveConversation && message.kind == 'response') {
         _dropPendingProcessingMessage(
           targetKey,
@@ -2543,8 +2581,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _dropPendingProcessingMessage(targetKey);
       }
       if (message.kind != 'status') {
-        _dropIncomingProcessingPlaceholder(targetKey);
-        _appendMessageForConversation(targetKey, conversationMessage);
+        final replacedPending = completesPendingRequest
+            ? _replaceOldestIncomingProcessingPlaceholder(
+                targetKey,
+                conversationMessage,
+              )
+            : false;
+        if (!replacedPending) {
+          if (!completesPendingRequest) {
+            _dropIncomingProcessingPlaceholder(targetKey);
+          }
+          _appendMessageForConversation(targetKey, conversationMessage);
+        }
         if (isActiveConversation &&
             !fromCatchUp &&
             message.kind == 'transcript') {
@@ -2758,7 +2806,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             timestamp: DateTime.now(),
           ),
         );
-        _pendingReplyTargetIds.add(conversationKey);
+        _appendIncomingProcessingPlaceholder(conversationKey, eventId);
         _queryController.clear();
         _status = 'Query sent';
       });
@@ -3246,7 +3294,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             timestamp: DateTime.now(),
           ),
         );
-        _pendingReplyTargetIds.add(conversationKey);
+        _appendIncomingProcessingPlaceholder(conversationKey, eventId);
         _status = fromTranscript ? 'Transcript sent' : 'Query resent';
       });
     } catch (error) {
