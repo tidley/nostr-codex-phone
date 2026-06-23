@@ -5334,13 +5334,16 @@ class _ComposerState extends State<_Composer> {
                         minimumSize: const Size(48, 48),
                       )
                     : IconButton.styleFrom(minimumSize: const Size(48, 48));
+                final recordingShell = widget.recording || widget.sendingAudio;
 
                 final icon = busy
                     ? SizedBox.square(
                         dimension: 18,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          color: theme.colorScheme.onPrimary,
+                          color: recordingShell
+                              ? const Color(0xff1b140f)
+                              : theme.colorScheme.onPrimary,
                         ),
                       )
                     : widget.recording
@@ -5383,7 +5386,7 @@ class _ComposerState extends State<_Composer> {
                 final mainButton = Tooltip(
                   message: tooltip,
                   child: FilledButton.icon(
-                    style: widget.recording
+                    style: recordingShell
                         ? mainButtonStyle.copyWith(
                             backgroundColor: const WidgetStatePropertyAll(
                               Colors.transparent,
@@ -5398,8 +5401,11 @@ class _ComposerState extends State<_Composer> {
                     label: Text(label),
                   ),
                 );
-                final actionButton = widget.recording
-                    ? _RecordingButton(child: mainButton)
+                final actionButton = recordingShell
+                    ? _RecordingButton(
+                        sendWipe: widget.sendingAudio && !widget.recording,
+                        child: mainButton,
+                      )
                     : mainButton;
 
                 return Row(
@@ -5427,26 +5433,87 @@ class _ComposerState extends State<_Composer> {
   }
 }
 
-class _RecordingButton extends StatelessWidget {
-  const _RecordingButton({required this.child});
+class _RecordingButton extends StatefulWidget {
+  const _RecordingButton({required this.child, required this.sendWipe});
 
   final Widget child;
+  final bool sendWipe;
+
+  @override
+  State<_RecordingButton> createState() => _RecordingButtonState();
+}
+
+class _RecordingButtonState extends State<_RecordingButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _wipeController;
+  late final Animation<double> _wipeAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _wipeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 520),
+    );
+    _wipeAnimation = CurvedAnimation(
+      parent: _wipeController,
+      curve: Curves.easeOutCubic,
+    );
+    if (widget.sendWipe) {
+      _wipeController.value = 1;
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _RecordingButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.sendWipe && !oldWidget.sendWipe) {
+      _wipeController.forward(from: 0);
+    } else if (!widget.sendWipe && oldWidget.sendWipe) {
+      _wipeController.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _wipeController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(28),
-        color: const Color(0xffdfa257),
-      ),
-      child: FilledButtonTheme(
-        data: FilledButtonThemeData(
-          style: FilledButton.styleFrom(
-            backgroundColor: Colors.transparent,
-            foregroundColor: const Color(0xff1b140f),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(28),
+      child: Stack(
+        fit: StackFit.passthrough,
+        children: [
+          const Positioned.fill(child: ColoredBox(color: Color(0xffdfa257))),
+          Positioned.fill(
+            child: AnimatedBuilder(
+              animation: _wipeAnimation,
+              builder: (context, _) {
+                return Align(
+                  alignment: Alignment.bottomCenter,
+                  child: FractionallySizedBox(
+                    heightFactor: _wipeAnimation.value,
+                    widthFactor: 1,
+                    alignment: Alignment.bottomCenter,
+                    child: const ColoredBox(color: Color(0xff68d49f)),
+                  ),
+                );
+              },
+            ),
           ),
-        ),
-        child: child,
+          FilledButtonTheme(
+            data: FilledButtonThemeData(
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.transparent,
+                foregroundColor: const Color(0xff1b140f),
+              ),
+            ),
+            child: widget.child,
+          ),
+        ],
       ),
     );
   }
