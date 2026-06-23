@@ -149,6 +149,44 @@ class _RepoTarget {
   }
 }
 
+class RepoTargetMergeIdentity {
+  const RepoTargetMergeIdentity({
+    required this.id,
+    required this.pubkey,
+    this.workdir,
+  });
+
+  final String id;
+  final String pubkey;
+  final String? workdir;
+}
+
+int repoTargetMergeIndex(
+  List<RepoTargetMergeIdentity> existing,
+  RepoTargetMergeIdentity incoming,
+) {
+  final incomingId = incoming.id.trim();
+  if (incomingId.isNotEmpty) {
+    final idIndex = existing.indexWhere((target) => target.id == incomingId);
+    if (idIndex >= 0) return idIndex;
+  }
+
+  final incomingWorkdir = incoming.workdir?.trim();
+  if (incomingWorkdir != null && incomingWorkdir.isNotEmpty) {
+    final workdirIndex = existing.indexWhere(
+      (target) => target.workdir?.trim() == incomingWorkdir,
+    );
+    if (workdirIndex >= 0) return workdirIndex;
+  }
+
+  final incomingPubkey = incoming.pubkey.trim();
+  if (incomingPubkey.isNotEmpty) {
+    return existing.indexWhere((target) => target.pubkey == incomingPubkey);
+  }
+
+  return -1;
+}
+
 class _RepoChoice {
   const _RepoChoice({
     required this.name,
@@ -533,6 +571,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   bool get _sendingMediaInActiveConversation =>
       _sendingMedia && _sendingMediaConversationKey == _activeConversationKey;
+
+  bool get _sendInProgress => _sending || _sendingAudio || _sendingMedia;
 
   List<ConversationMessage> get _recentMessagesForActiveConversation {
     final now = DateTime.now();
@@ -978,8 +1018,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (!mounted) return;
 
     final targets = [..._repoTargets];
-    final existingIndex = targets.indexWhere(
-      (item) => item.pubkey == target.pubkey,
+    final existingIndex = repoTargetMergeIndex(
+      [
+        for (final item in targets)
+          RepoTargetMergeIdentity(
+            id: item.id,
+            pubkey: item.pubkey,
+            workdir: item.workdir,
+          ),
+      ],
+      RepoTargetMergeIdentity(
+        id: target.id,
+        pubkey: target.pubkey,
+        workdir: target.workdir,
+      ),
     );
     final savedTarget = existingIndex == -1
         ? target
@@ -1257,7 +1309,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     await _saveAndSelectRepoTarget(target, status: 'Accepted session request');
   }
 
-  Future<void> _saveAndSelectRepoTarget(
+  Future<_RepoTarget?> _saveAndSelectRepoTarget(
     _RepoTarget target, {
     required String status,
   }) async {
@@ -1267,11 +1319,23 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     if (_connected || _connecting) {
       await _disconnect(expand: false);
     }
-    if (!mounted) return;
+    if (!mounted) return null;
 
     final targets = [..._repoTargets];
-    final existingIndex = targets.indexWhere(
-      (item) => item.pubkey == target.pubkey,
+    final existingIndex = repoTargetMergeIndex(
+      [
+        for (final item in targets)
+          RepoTargetMergeIdentity(
+            id: item.id,
+            pubkey: item.pubkey,
+            workdir: item.workdir,
+          ),
+      ],
+      RepoTargetMergeIdentity(
+        id: target.id,
+        pubkey: target.pubkey,
+        workdir: target.workdir,
+      ),
     );
     final savedTarget = existingIndex == -1
         ? target
@@ -1301,6 +1365,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     });
     await _saveSettings();
     await _loadConversationHistoryForActiveSession();
+    return savedTarget;
   }
 
   String? _decodeTargetUriPayload(String payload) {
@@ -1339,9 +1404,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     _RepoTarget target,
     Completer<_RepoTarget> completer,
   ) async {
-    await _saveAndSelectRepoTarget(target, status: 'Started session');
+    final savedTarget = await _saveAndSelectRepoTarget(
+      target,
+      status: 'Started session',
+    );
     if (!completer.isCompleted) {
-      completer.complete(target);
+      completer.complete(savedTarget ?? target);
     }
   }
 
@@ -1385,6 +1453,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   Future<void> _selectRepoTarget(String targetId) async {
     if (targetId == _selectedRepoTargetId) return;
+    if (_sendInProgress) {
+      if (mounted) {
+        setState(
+          () => _status = 'Finish current send before switching sessions',
+        );
+      }
+      return;
+    }
     final target = _targetById(_repoTargets, targetId);
     if (target == null) return;
 
@@ -3918,6 +3994,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         targets: _repoTargets,
         selectedTargetId: _selectedRepoTargetId,
         connectedTargetId: _connected ? _selectedRepoTargetId : null,
+        canSelectTargets: !_sendInProgress,
         unreadCountsByTarget: _unreadCountsByTarget,
         pendingReplyTargetIds: _pendingReplyTargetIds,
         loadedTargetIds: _messagesByTarget.keys.toSet(),
@@ -4037,6 +4114,7 @@ class _SessionDrawer extends StatelessWidget {
     required this.targets,
     required this.selectedTargetId,
     required this.connectedTargetId,
+    required this.canSelectTargets,
     required this.unreadCountsByTarget,
     required this.pendingReplyTargetIds,
     required this.loadedTargetIds,
@@ -4053,6 +4131,7 @@ class _SessionDrawer extends StatelessWidget {
   final List<_RepoTarget> targets;
   final String? selectedTargetId;
   final String? connectedTargetId;
+  final bool canSelectTargets;
   final Map<String, int> unreadCountsByTarget;
   final Set<String> pendingReplyTargetIds;
   final Set<String> loadedTargetIds;
@@ -4243,10 +4322,12 @@ class _SessionDrawer extends StatelessWidget {
                           trailing: unreadCount > 0
                               ? Badge(label: Text('$unreadCount'), child: menu)
                               : menu,
-                          onTap: () {
-                            Navigator.of(context).pop();
-                            onSelectTarget(target.id);
-                          },
+                          onTap: canSelectTargets
+                              ? () {
+                                  Navigator.of(context).pop();
+                                  onSelectTarget(target.id);
+                                }
+                              : null,
                         );
                       },
                     ),
@@ -6170,9 +6251,11 @@ class _MessageTile extends StatefulWidget {
 }
 
 class _MessageTileState extends State<_MessageTile>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   bool _flash = false;
+  bool _cancelHoldTriggered = false;
   late final AnimationController _equalizerController;
+  late final AnimationController _cancelHoldController;
 
   @override
   void initState() {
@@ -6181,6 +6264,10 @@ class _MessageTileState extends State<_MessageTile>
       vsync: this,
       duration: const Duration(milliseconds: 780),
     );
+    _cancelHoldController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 5),
+    )..addStatusListener(_handleCancelHoldStatus);
     _syncEqualizer();
   }
 
@@ -6190,10 +6277,17 @@ class _MessageTileState extends State<_MessageTile>
     if (oldWidget.speaking != widget.speaking) {
       _syncEqualizer();
     }
+    if (oldWidget.message.eventId != widget.message.eventId ||
+        oldWidget.onCancelPending != widget.onCancelPending) {
+      _resetCancelHold();
+    }
   }
 
   @override
   void dispose() {
+    _cancelHoldController
+      ..removeStatusListener(_handleCancelHoldStatus)
+      ..dispose();
     _equalizerController.dispose();
     super.dispose();
   }
@@ -6215,6 +6309,30 @@ class _MessageTileState extends State<_MessageTile>
     Future<void>.delayed(const Duration(milliseconds: 170), () {
       if (mounted) setState(() => _flash = false);
     });
+  }
+
+  void _handleCancelHoldStatus(AnimationStatus status) {
+    if (status != AnimationStatus.completed || _cancelHoldTriggered) return;
+    _cancelHoldTriggered = true;
+    widget.onCancelPending?.call();
+    _cancelHoldController.reset();
+  }
+
+  void _startCancelHold() {
+    if (widget.onCancelPending == null) return;
+    _cancelHoldTriggered = false;
+    _cancelHoldController.forward(from: 0);
+  }
+
+  void _stopCancelHold() {
+    if (_cancelHoldController.isAnimating) {
+      _cancelHoldController.reverse();
+    }
+  }
+
+  void _resetCancelHold() {
+    _cancelHoldTriggered = false;
+    _cancelHoldController.reset();
   }
 
   @override
@@ -6240,25 +6358,51 @@ class _MessageTileState extends State<_MessageTile>
           duration: const Duration(milliseconds: 130),
           curve: Curves.easeOut,
           width: 58,
-          padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
             color: baseColor,
             borderRadius: BorderRadius.circular(12),
           ),
-          child: _DigitalThinkingIndicator(
-            width: 34,
-            height: 20,
-            color: colorScheme.primary,
-            style: widget.workingAnimationStyle,
+          clipBehavior: Clip.antiAlias,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: AnimatedBuilder(
+                  animation: _cancelHoldController,
+                  builder: (context, _) {
+                    return Align(
+                      alignment: Alignment.centerLeft,
+                      child: FractionallySizedBox(
+                        widthFactor: _cancelHoldController.value,
+                        heightFactor: 1,
+                        child: ColoredBox(
+                          color: colorScheme.error.withValues(alpha: 0.28),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(14),
+                child: _DigitalThinkingIndicator(
+                  width: 34,
+                  height: 20,
+                  color: colorScheme.primary,
+                  style: widget.workingAnimationStyle,
+                ),
+              ),
+            ],
           ),
         ),
       );
       if (widget.onCancelPending == null) return bubble;
       return Tooltip(
-        message: 'Hold to cancel',
+        message: 'Hold 5 seconds to cancel',
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onLongPress: widget.onCancelPending,
+          onTapDown: (_) => _startCancelHold(),
+          onTapUp: (_) => _stopCancelHold(),
+          onTapCancel: _stopCancelHold,
           child: bubble,
         ),
       );
@@ -6314,11 +6458,7 @@ class _MessageTileState extends State<_MessageTile>
           Row(
             children: [
               Icon(
-                _messageIcon(
-                  incoming: incoming,
-                  transcript: transcript,
-                  processing: processing,
-                ),
+                _messageIcon(incoming: incoming),
                 color: userSide
                     ? colorScheme.onPrimaryContainer
                     : colorScheme.onSurface,
@@ -6436,12 +6576,7 @@ class _MessageTileState extends State<_MessageTile>
       ..showSnackBar(const SnackBar(content: Text('Copied')));
   }
 
-  IconData _messageIcon({
-    required bool incoming,
-    required bool transcript,
-    required bool processing,
-  }) {
-    if (processing || transcript) return Icons.notes;
+  IconData _messageIcon({required bool incoming}) {
     return incoming ? Icons.call_received : Icons.call_made;
   }
 

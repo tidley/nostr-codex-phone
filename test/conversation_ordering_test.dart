@@ -4,6 +4,47 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr_codex_phone/main.dart';
 
 void main() {
+  test('matches target invites by workdir before pubkey', () {
+    final targets = [
+      const RepoTargetMergeIdentity(
+        id: 'phone',
+        pubkey: 'npub1phone',
+        workdir: '/home/tom/code/phone',
+      ),
+      const RepoTargetMergeIdentity(
+        id: 'monitor',
+        pubkey: 'npub1oldmonitor',
+        workdir: '/home/tom/code/pave/monitor',
+      ),
+      const RepoTargetMergeIdentity(
+        id: 'bcm',
+        pubkey: 'npub1oldbcm',
+        workdir: '/home/tom/code/pave/bcm_app',
+      ),
+    ];
+
+    final incomingRestartedBcm = const RepoTargetMergeIdentity(
+      id: 'invite-new-id',
+      pubkey: 'npub1newbcm',
+      workdir: '/home/tom/code/pave/bcm_app',
+    );
+
+    expect(repoTargetMergeIndex(targets, incomingRestartedBcm), 2);
+  });
+
+  test('falls back to pubkey when target has no workdir', () {
+    final targets = [
+      const RepoTargetMergeIdentity(id: 'saved', pubkey: 'npub1same'),
+    ];
+
+    final incoming = const RepoTargetMergeIdentity(
+      id: 'invite-new-id',
+      pubkey: 'npub1same',
+    );
+
+    expect(repoTargetMergeIndex(targets, incoming), 0);
+  });
+
   test('orders screenshot regression chronologically by timestamp', () {
     final base = DateTime(2026, 6, 23, 17, 25);
     final replyToEarlierPrompt = ConversationMessage(
