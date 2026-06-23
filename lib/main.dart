@@ -4057,6 +4057,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
                                     _speaking &&
                                     message.direction ==
                                         MessageDirection.incoming,
+                                onSpeak: () => unawaited(
+                                  _speak(
+                                    message.text,
+                                    remember: true,
+                                    manual: true,
+                                    messageEventId: message.eventId,
+                                  ),
+                                ),
                                 onStopSpeaking: _stopSpeaking,
                                 onResend: _canResendMessage(message)
                                     ? () => _resendMessage(message)
@@ -6232,6 +6240,7 @@ class _MessageTile extends StatefulWidget {
     required this.speaking,
     required this.workingAnimationStyle,
     required this.stopSpeakingOnTap,
+    required this.onSpeak,
     required this.onStopSpeaking,
     required this.onResend,
     required this.onCancelPending,
@@ -6242,6 +6251,7 @@ class _MessageTile extends StatefulWidget {
   final bool speaking;
   final _WorkingAnimationStyle workingAnimationStyle;
   final bool stopSpeakingOnTap;
+  final VoidCallback? onSpeak;
   final VoidCallback? onStopSpeaking;
   final VoidCallback? onResend;
   final VoidCallback? onCancelPending;
@@ -6431,6 +6441,18 @@ class _MessageTileState extends State<_MessageTile>
         ],
         if (incoming && widget.message.text.trim().isNotEmpty) ...[
           const SizedBox(width: 4),
+          if (!widget.speaking)
+            SizedBox.square(
+              dimension: 36,
+              child: IconButton(
+                tooltip: 'Read aloud',
+                visualDensity: VisualDensity.compact,
+                iconSize: 18,
+                onPressed: widget.onSpeak,
+                icon: const Icon(Icons.volume_up_outlined),
+              ),
+            ),
+          if (!widget.speaking) const SizedBox(width: 4),
           SizedBox.square(
             dimension: 36,
             child: IconButton(
