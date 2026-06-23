@@ -1,0 +1,166 @@
+import 'dart:math';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:nostr_codex_phone/main.dart';
+
+void main() {
+  test('orders screenshot regression chronologically by timestamp', () {
+    final base = DateTime(2026, 6, 23, 17, 25);
+    final replyToEarlierPrompt = ConversationMessage(
+      direction: MessageDirection.incoming,
+      kind: 'response',
+      text: 'Yes: /home/tom/code/pave/monitor',
+      eventId: 'reply-earlier',
+      timestamp: base,
+    );
+    final newerPrompt = ConversationMessage(
+      direction: MessageDirection.outgoing,
+      kind: 'query',
+      text: "What's the latest of the status with the reports?",
+      eventId: 'newer-prompt',
+      timestamp: base.add(const Duration(minutes: 1)),
+    );
+    final transcribing = ConversationMessage(
+      direction: MessageDirection.outgoing,
+      kind: 'transcribing',
+      text: 'Transcribing...',
+      eventId: 'media-pending',
+      timestamp: base.add(const Duration(minutes: 1, seconds: 12)),
+    );
+
+    final ordered = sortConversationMessagesChronological([
+      newerPrompt,
+      replyToEarlierPrompt,
+      transcribing,
+    ]);
+
+    expect(ordered, [replyToEarlierPrompt, newerPrompt, transcribing]);
+  });
+
+  test('applies deterministic tie breaks for same-timestamp messages', () {
+    final timestamp = DateTime(2026, 6, 23, 17, 26);
+    final messages = [
+      ConversationMessage(
+        direction: MessageDirection.incoming,
+        kind: 'response',
+        text: 'response',
+        eventId: 'event-b',
+        timestamp: timestamp,
+      ),
+      ConversationMessage(
+        direction: MessageDirection.outgoing,
+        kind: 'media_bundle',
+        text: 'media',
+        eventId: 'event-a',
+        timestamp: timestamp,
+      ),
+      ConversationMessage(
+        direction: MessageDirection.outgoing,
+        kind: 'transcribing',
+        text: 'Transcribing...',
+        eventId: 'event-c',
+        timestamp: timestamp,
+      ),
+    ];
+
+    final ordered = sortConversationMessagesChronological(messages);
+
+    expect(ordered.map((message) => message.eventId), [
+      'event-a',
+      'event-b',
+      'event-c',
+    ]);
+  });
+
+  test('keeps shuffled npub traffic chronological during fuzz run', () {
+    final random = Random(872341);
+    final base = DateTime(2026, 6, 23, 17);
+    final sessions = List.generate(12, (index) => _fakeNpub(index));
+    final messagesBySession = <String, List<ConversationMessage>>{
+      for (final session in sessions) session: <ConversationMessage>[],
+    };
+    final activeSessionsVisited = <String>{};
+
+    for (var index = 0; index < 2500; index += 1) {
+      final session = sessions[random.nextInt(sessions.length)];
+      final direction = random.nextBool()
+          ? MessageDirection.outgoing
+          : MessageDirection.incoming;
+      final kind = switch (random.nextInt(9)) {
+        0 => 'query',
+        1 => 'response',
+        2 => 'transcribing',
+        3 => 'processing',
+        4 => 'media_bundle',
+        5 => 'transcript',
+        6 => 'audio_retry',
+        7 => 'error',
+        _ => 'invalid',
+      };
+      final timestamp = base.add(
+        Duration(
+          seconds: random.nextInt(3 * 60 * 60),
+          milliseconds: index % 11 == 0 ? 0 : random.nextInt(1000),
+        ),
+      );
+
+      messagesBySession[session]!.insert(
+        random.nextInt(messagesBySession[session]!.length + 1),
+        ConversationMessage(
+          direction: direction,
+          kind: kind,
+          text: '$session $kind $index',
+          eventId: 'event-${index % 200}-${random.nextInt(24)}',
+          timestamp: timestamp,
+        ),
+      );
+
+      if (index % 7 == 0) {
+        final activeSession = sessions[random.nextInt(sessions.length)];
+        activeSessionsVisited.add(activeSession);
+        final ordered = sortConversationMessagesChronological(
+          messagesBySession[activeSession]!,
+        );
+        _expectChronological(
+          ordered,
+          reason: 'session $activeSession is chronological after switch',
+        );
+      }
+    }
+
+    expect(activeSessionsVisited, containsAll(sessions));
+    for (final entry in messagesBySession.entries) {
+      final ordered = sortConversationMessagesChronological(entry.value);
+      _expectChronological(
+        ordered,
+        reason: 'session ${entry.key} final ordering is chronological',
+      );
+    }
+  });
+}
+
+String _fakeNpub(int index) {
+  final alphabet = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  final start = index % alphabet.length;
+  final body = List.generate(
+    59,
+    (offset) => alphabet[(start + offset + index) % alphabet.length],
+  ).join();
+  return 'npub1$body';
+}
+
+void _expectChronological(
+  List<ConversationMessage> ordered, {
+  required String reason,
+}) {
+  for (var cursor = 1; cursor < ordered.length; cursor += 1) {
+    expect(
+      compareConversationMessagesChronological(
+        ordered[cursor - 1],
+        ordered[cursor],
+      ),
+      lessThanOrEqualTo(0),
+      reason: reason,
+    );
+  }
+}

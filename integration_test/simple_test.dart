@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/material.dart';
 import 'package:nostr_codex_phone/main.dart';
 import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
 import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
@@ -12,7 +13,12 @@ void main() {
   ) async {
     expect(nostrDefaultRelays(), isNotEmpty);
     await tester.pumpWidget(const NostrCodexApp());
-    await tester.pump();
-    expect(find.text('Nostr Codex'), findsWidgets);
+    for (var attempt = 0; attempt < 50; attempt += 1) {
+      await tester.pump(const Duration(milliseconds: 100));
+      if (find.byType(CircularProgressIndicator).evaluate().isEmpty) {
+        break;
+      }
+    }
+    expect(find.byType(TextField), findsOneWidget);
   });
 }
