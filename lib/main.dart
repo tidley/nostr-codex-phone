@@ -5466,7 +5466,7 @@ class _DigitalThinkingIndicatorState extends State<_DigitalThinkingIndicator>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1280),
+      duration: const Duration(milliseconds: 2560),
     )..repeat();
   }
 
