@@ -4153,7 +4153,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   List<_RepoTarget> _activeSessionTargets() {
     return _repoTargets.where((target) {
       return target.id == _selectedRepoTargetId ||
-          (_connected && target.id == _selectedRepoTargetId) ||
           (_messagesByTarget[target.id]?.isNotEmpty ?? false) ||
           (_unreadCountsByTarget[target.id] ?? 0) > 0 ||
           _pendingReplyTargetIds.contains(target.id);
@@ -6472,6 +6471,7 @@ class _MessageTileState extends State<_MessageTile>
     with TickerProviderStateMixin {
   bool _flash = false;
   bool _cancelHoldTriggered = false;
+  Timer? _cancelHoldTimer;
   late final AnimationController _equalizerController;
   late final AnimationController _cancelHoldController;
 
@@ -6485,7 +6485,7 @@ class _MessageTileState extends State<_MessageTile>
     _cancelHoldController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 5),
-    )..addStatusListener(_handleCancelHoldStatus);
+    );
     _syncEqualizer();
   }
 
@@ -6503,9 +6503,8 @@ class _MessageTileState extends State<_MessageTile>
 
   @override
   void dispose() {
-    _cancelHoldController
-      ..removeStatusListener(_handleCancelHoldStatus)
-      ..dispose();
+    _cancelHoldTimer?.cancel();
+    _cancelHoldController.dispose();
     _equalizerController.dispose();
     super.dispose();
   }
@@ -6529,26 +6528,29 @@ class _MessageTileState extends State<_MessageTile>
     });
   }
 
-  void _handleCancelHoldStatus(AnimationStatus status) {
-    if (status != AnimationStatus.completed || _cancelHoldTriggered) return;
-    _cancelHoldTriggered = true;
-    widget.onCancelPending?.call();
-    _cancelHoldController.reset();
-  }
-
   void _startCancelHold() {
     if (widget.onCancelPending == null) return;
+    _cancelHoldTimer?.cancel();
     _cancelHoldTriggered = false;
     _cancelHoldController.forward(from: 0);
+    _cancelHoldTimer = Timer(const Duration(seconds: 5), () {
+      if (!mounted || _cancelHoldTriggered) return;
+      _cancelHoldTimer = null;
+      _cancelHoldTriggered = true;
+      widget.onCancelPending?.call();
+      _cancelHoldController.reset();
+    });
   }
 
   void _stopCancelHold() {
-    if (_cancelHoldController.isAnimating) {
-      _cancelHoldController.reverse();
-    }
+    _cancelHoldTimer?.cancel();
+    _cancelHoldTimer = null;
+    if (!_cancelHoldTriggered) _cancelHoldController.reset();
   }
 
   void _resetCancelHold() {
+    _cancelHoldTimer?.cancel();
+    _cancelHoldTimer = null;
     _cancelHoldTriggered = false;
     _cancelHoldController.reset();
   }

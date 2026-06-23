@@ -2115,11 +2115,6 @@ async fn process_text_turn(
     codex_config: &CodexConfig,
     cancel_token: &CodexCancelToken,
 ) {
-    if let Some(estimate) = estimate_task_time(request) {
-        let status = format!("Estimated task time: {estimate}. Starting work now.");
-        send_status(messenger, peer_pubkey, &status).await;
-    }
-
     let session_id = if codex_config.persist_sessions {
         load_codex_session(memory, peer_pubkey, &codex_config.working_dir)
     } else {
@@ -2153,104 +2148,6 @@ async fn process_text_turn(
 
     send_response_and_remember(messenger, memory, peer_pubkey, response).await;
     spawn_compaction_if_needed(memory, peer_pubkey, codex_config);
-}
-
-fn is_long_running_request(request: &str) -> bool {
-    let normalized = normalize_transcript(request);
-    if normalized.starts_with('/') {
-        return false;
-    }
-
-    if normalized.len() > 180 {
-        return true;
-    }
-
-    matches!(
-        normalized.as_str(),
-        "build the apk"
-            | "build the android apk"
-            | "build android apk"
-            | "build an apk"
-            | "build apk"
-            | "investigate this issue"
-            | "investigate this problem"
-            | "investigate issue"
-    ) || (normalized.contains("build")
-        && (normalized.contains("apk") || normalized.contains("release")))
-        || (normalized.contains("investigate")
-            || normalized.contains("analysis")
-            || normalized.contains("investigation")
-            || normalized.contains("debug")
-            || normalized.contains("trace")
-            || normalized.contains("diagnose")
-            || normalized.contains("root cause")
-            || normalized.contains("refactor")
-            || normalized.contains("large"))
-}
-
-fn estimate_task_time(request: &str) -> Option<&'static str> {
-    if request.trim_start().starts_with('/') {
-        return None;
-    }
-    let normalized = normalize_transcript(request);
-    if normalized.is_empty() {
-        return None;
-    }
-
-    if is_quick_status_request(&normalized) {
-        return Some("under 2 minutes");
-    }
-
-    if normalized.contains("release")
-        || (normalized.contains("build") && normalized.contains("apk"))
-        || normalized.contains("github release")
-    {
-        return Some("8-15 minutes");
-    }
-
-    if normalized.contains("investigate")
-        || normalized.contains("diagnose")
-        || normalized.contains("debug")
-        || normalized.contains("root cause")
-    {
-        return Some("10-25 minutes");
-    }
-
-    if normalized.contains("refactor")
-        || normalized.contains("redesign")
-        || normalized.contains("rewrite")
-        || normalized.len() > 220
-    {
-        return Some("15-30 minutes");
-    }
-
-    if normalized.contains("fix")
-        || normalized.contains("add")
-        || normalized.contains("change")
-        || normalized.contains("make")
-        || normalized.contains("implement")
-        || normalized.contains("remove")
-    {
-        return Some("5-15 minutes");
-    }
-
-    if is_long_running_request(&normalized) {
-        return Some("10-20 minutes");
-    }
-
-    Some("2-5 minutes")
-}
-
-fn is_quick_status_request(normalized: &str) -> bool {
-    matches!(
-        normalized,
-        "status"
-            | "check status"
-            | "what is the status"
-            | "how is it going"
-            | "just checking"
-            | "just checking in"
-    ) || normalized.starts_with("just checking ")
 }
 
 async fn transcribe_or_load_cached(
@@ -3373,24 +3270,6 @@ mod tests {
             classify_request("fix the Android voice recording path"),
             RequestClass::Coding
         );
-    }
-
-    #[test]
-    fn estimates_task_time_by_request_shape() {
-        assert_eq!(estimate_task_time("status"), Some("under 2 minutes"));
-        assert_eq!(
-            estimate_task_time("build an APK and create a GitHub release"),
-            Some("8-15 minutes")
-        );
-        assert_eq!(
-            estimate_task_time("debug why audio transcription disappears"),
-            Some("10-25 minutes")
-        );
-        assert_eq!(
-            estimate_task_time("make the top bar title smaller"),
-            Some("5-15 minutes")
-        );
-        assert_eq!(estimate_task_time("/summary"), None);
     }
 
     #[test]
