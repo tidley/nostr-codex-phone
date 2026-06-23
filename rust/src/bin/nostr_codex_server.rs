@@ -3032,6 +3032,9 @@ fn nostr_config_from_env(worker_env: &WorkerEnvFile) -> Result<NostrConfig> {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+        once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+
     #[test]
     fn rejects_low_information_transcripts() {
         let response = low_information_transcript_response("You").unwrap();
@@ -3155,6 +3158,80 @@ mod tests {
     }
 
     #[test]
+    fn resolves_spawn_workdir_and_creates_new_repo_inside_code() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_home = env::var_os("HOME");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let current_workdir = home.join("code").join("phone");
+        fs::create_dir_all(&current_workdir).unwrap();
+        env::set_var("HOME", &home);
+
+        let request = SpawnWorkerRequest {
+            workdir: "new-repo".to_string(),
+            create: true,
+            silent: false,
+        };
+        let resolved = resolve_spawn_workdir(&request, &current_workdir).unwrap();
+
+        match previous_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+
+        assert_eq!(
+            resolved,
+            current_workdir.join("new-repo").canonicalize().unwrap()
+        );
+        assert!(resolved.is_dir());
+    }
+
+    #[test]
+    fn rejects_spawn_create_outside_code_folder() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_home = env::var_os("HOME");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let current_workdir = home.join("code").join("phone");
+        fs::create_dir_all(&current_workdir).unwrap();
+        fs::create_dir_all(home.join("tmp")).unwrap();
+        env::set_var("HOME", &home);
+
+        let request = SpawnWorkerRequest {
+            workdir: "../../tmp/new-repo".to_string(),
+            create: true,
+            silent: false,
+        };
+        let error = resolve_spawn_workdir(&request, &current_workdir)
+            .expect_err("create outside ~/code should fail");
+
+        match previous_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+
+        assert!(error
+            .to_string()
+            .contains("new folders may only be created"));
+    }
+
+    #[test]
+    fn removes_stale_worker_lock_before_attach_check() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        let lock_path = workdir.join(WORKER_LOCK_FILE);
+        fs::write(&lock_path, "not-a-pid\n").unwrap();
+
+        let pid = running_worker_lock_pid(&workdir).unwrap();
+
+        assert_eq!(pid, None);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
     fn requests_wav_retry_for_compressed_audio_only() {
         let mut audio = AudioReference {
             url: "https://example.com/audio.m4a".to_string(),
@@ -3211,6 +3288,106 @@ mod tests {
 
         let session = latest_codex_session_for_workdir_in(&sessions_dir, &workdir).unwrap();
         assert_eq!(session.as_deref(), Some("fallback-session"));
+    }
+
+    #[test]
+    fn returns_no_codex_session_when_workdir_has_no_match() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("sessions");
+        let workdir = temp_dir.path().join("repo");
+        let other_workdir = temp_dir.path().join("other");
+        fs::create_dir_all(sessions_dir.join("2026/06/16")).unwrap();
+        fs::create_dir_all(&workdir).unwrap();
+        fs::create_dir_all(&other_workdir).unwrap();
+
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/other.jsonl"),
+            "other-session",
+            &other_workdir,
+            "2026-06-16T10:00:00Z",
+            "2026-06-16T10:05:00Z",
+        );
+
+        let session = latest_codex_session_for_workdir_in(&sessions_dir, &workdir).unwrap();
+        assert_eq!(session, None);
+    }
+
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn discovers_codex_session_for_canonical_workdir_match() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("sessions");
+        let real_workdir = temp_dir.path().join("repo");
+        let linked_workdir = temp_dir.path().join("repo-link");
+        fs::create_dir_all(sessions_dir.join("2026/06/16")).unwrap();
+        fs::create_dir_all(&real_workdir).unwrap();
+        std::os::unix::fs::symlink(&real_workdir, &linked_workdir).unwrap();
+
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/session.jsonl"),
+            "canonical-session",
+            &real_workdir,
+            "2026-06-16T10:00:00Z",
+            "2026-06-16T10:05:00Z",
+        );
+
+        let session = latest_codex_session_for_workdir_in(&sessions_dir, &linked_workdir).unwrap();
+        assert_eq!(session.as_deref(), Some("canonical-session"));
+    }
+
+    #[test]
+    fn loads_saved_codex_session_from_memory_by_peer_and_workdir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        let mut memory = MemoryStore::open(MemoryConfig {
+            enabled: true,
+            db_path: temp_dir.path().join("memory.sqlite3"),
+            recent_messages: 12,
+            compact_after_messages: 16,
+            summary_max_chars: 5000,
+            compaction_max_chars: 12000,
+        })
+        .unwrap()
+        .unwrap();
+        memory
+            .save_codex_session("peer-1", &workdir, "stored-session")
+            .unwrap();
+        memory
+            .save_codex_session("peer-2", &workdir, "other-peer-session")
+            .unwrap();
+
+        let session = load_codex_session(&Some(memory), "peer-1", &workdir);
+        assert_eq!(session.as_deref(), Some("stored-session"));
+    }
+
+    #[test]
+    fn adopts_latest_codex_session_when_memory_has_no_saved_session() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_sessions_dir = env::var_os("CODEX_SESSIONS_DIR");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("sessions");
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(sessions_dir.join("2026/06/16")).unwrap();
+        fs::create_dir_all(&workdir).unwrap();
+        env::set_var("CODEX_SESSIONS_DIR", &sessions_dir);
+
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/session.jsonl"),
+            "latest-session",
+            &workdir,
+            "2026-06-16T10:00:00Z",
+            "2026-06-16T10:05:00Z",
+        );
+
+        let session = load_codex_session(&None, "peer-1", &workdir);
+        match previous_sessions_dir {
+            Some(value) => env::set_var("CODEX_SESSIONS_DIR", value),
+            None => env::remove_var("CODEX_SESSIONS_DIR"),
+        }
+
+        assert_eq!(session.as_deref(), Some("latest-session"));
     }
 
     fn write_session_fixture(
