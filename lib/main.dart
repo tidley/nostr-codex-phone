@@ -4067,10 +4067,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   Widget _buildSessionTitle(List<_RepoTarget> activeTargets) {
     final selected = _targetById(_repoTargets, _selectedRepoTargetId);
+    final titleStyle = Theme.of(context).textTheme.titleMedium?.copyWith(
+      color: Theme.of(context).colorScheme.onSurface,
+    );
     if (activeTargets.length < 2 || selected == null) {
       return Text(
         selected?.displayName ?? _activeTargetName(),
         overflow: TextOverflow.ellipsis,
+        style: titleStyle,
       );
     }
 
@@ -4079,6 +4083,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         value: selected.id,
         isExpanded: true,
         iconEnabledColor: Theme.of(context).colorScheme.onSurface,
+        style: titleStyle,
         items: [
           for (final target in activeTargets)
             DropdownMenuItem<String>(
@@ -4119,7 +4124,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               onPressed: () => Scaffold.of(context).openDrawer(),
             );
             return hasUnreadConversations
-                ? Badge(alignment: AlignmentDirectional.topEnd, child: icon)
+                ? Badge(
+                    alignment: AlignmentDirectional.topEnd,
+                    offset: const Offset(-12, 10),
+                    child: icon,
+                  )
                 : icon;
           },
         ),
