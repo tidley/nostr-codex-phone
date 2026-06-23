@@ -544,7 +544,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
               message.timestamp.isAtSameMomentAs(cutoff),
         )
         .toList();
-    return filtered.reversed.toList();
+    return sortConversationMessagesChronological(filtered);
   }
 
   Future<void> _loadConversationHistoryForActiveSession() async {
@@ -572,9 +572,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           : eventId;
       byKey[key] = message;
     }
-    final merged = byKey.values.toList()
-      ..sort((left, right) => right.timestamp.compareTo(left.timestamp));
-    return merged.take(_maxConversationMessages).toList();
+    return sortConversationMessagesNewestFirst(
+      byKey.values,
+    ).take(_maxConversationMessages).toList();
   }
 
   void _scrollToLatestMessage() {
@@ -1458,8 +1458,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         messages.add(conversationMessage);
       }
     }
-    messages.sort((left, right) => right.timestamp.compareTo(left.timestamp));
-    return messages;
+    return sortConversationMessagesNewestFirst(messages);
   }
 
   Future<void> _writeConversationHistoryStore(
@@ -1474,7 +1473,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   Future<void> _saveConversationHistoryForKey(String conversationKey) async {
     final messages = _messagesByTarget[conversationKey];
     if (messages == null) return;
-    final trimmed = messages.take(_maxConversationMessages).toList();
+    final trimmed = sortConversationMessagesNewestFirst(
+      messages,
+    ).take(_maxConversationMessages).toList();
     final store = await _readConversationHistoryStore();
     store[conversationKey] = trimmed.map((item) => item.toJson()).toList();
     await _writeConversationHistoryStore(store);
@@ -1639,18 +1640,25 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final messages = _messagesByTarget[conversationKey];
     if (messages == null) return false;
 
-    for (var index = messages.length - 1; index >= 0; index -= 1) {
+    var oldestIndex = -1;
+    for (var index = 0; index < messages.length; index += 1) {
       final message = messages[index];
       if (message.kind == 'processing' &&
           message.direction == MessageDirection.incoming) {
-        messages[index] = replacement;
-        _syncPendingReplyTarget(conversationKey);
-        unawaited(_saveConversationHistoryForKey(conversationKey));
-        if (conversationKey == _activeConversationKey) {
-          _scrollToLatestMessage();
+        if (oldestIndex < 0 ||
+            message.timestamp.isBefore(messages[oldestIndex].timestamp)) {
+          oldestIndex = index;
         }
-        return true;
       }
+    }
+    if (oldestIndex >= 0) {
+      messages[oldestIndex] = replacement;
+      _syncPendingReplyTarget(conversationKey);
+      unawaited(_saveConversationHistoryForKey(conversationKey));
+      if (conversationKey == _activeConversationKey) {
+        _scrollToLatestMessage();
+      }
+      return true;
     }
     _syncPendingReplyTarget(conversationKey);
     return false;
@@ -2180,7 +2188,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
 
     if (_connected) return true;
-    if (_connecting) return false;
+    if (_connecting) {
+      setState(() => _status = 'Waiting for connection...');
+      for (var attempt = 0; attempt < 75; attempt += 1) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        if (!mounted) return false;
+        if (_connected) return true;
+        if (!_connecting) break;
+      }
+      return mounted && _connected;
+    }
 
     setState(() => _status = 'Connecting before send...');
     await _connect();
@@ -3174,7 +3191,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   bool _canResendMessage(ConversationMessage message) {
     return _isResendableMessage(message) &&
-        _connected &&
         !_sending &&
         !_sendingAudio &&
         !_sendingMedia &&
@@ -3201,10 +3217,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
 
   Future<void> _attachAndSendMedia() async {
     if (_sending || _sendingAudio || _sendingMedia || _recording) return;
-    if (!_connected) {
-      _showError('Connect before sending media');
-      return;
-    }
 
     final selected = await _pickMediaAttachment();
     final path = selected?.path.trim();
@@ -3360,6 +3372,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     });
 
     try {
+      if (!await _ensureConnectedForSend()) {
+        return;
+      }
       final eventId = await _sendWithAutoRecovery(
         label: 'resend query',
         sender: () => nostrSendQuery(query: query),
@@ -3401,6 +3416,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     });
 
     try {
+      if (!await _ensureConnectedForSend()) {
+        return;
+      }
       final eventId = await _sendWithAutoRecovery(
         label: 'resend voice note',
         sender: () => nostrSendAudio(audio: audio),
@@ -4365,7 +4383,30 @@ class _DrawerEdgeHandle extends StatelessWidget {
                           ),
                         ),
                       ),
-                      child: Icon(Icons.menu, size: 19, color: iconColor),
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        alignment: Alignment.center,
+                        children: [
+                          Icon(Icons.menu, size: 19, color: iconColor),
+                          if (hasUnreadConversations)
+                            Positioned(
+                              top: 7,
+                              right: 7,
+                              child: Container(
+                                width: 8,
+                                height: 8,
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.primary,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: buttonColor,
+                                    width: 1.5,
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -6464,6 +6505,53 @@ class ConversationMessage {
     final direction = raw?.toString();
     if (direction == 'incoming') return MessageDirection.incoming;
     return MessageDirection.outgoing;
+  }
+}
+
+int compareConversationMessagesChronological(
+  ConversationMessage left,
+  ConversationMessage right,
+) {
+  final timestampCompare = left.timestamp.compareTo(right.timestamp);
+  if (timestampCompare != 0) return timestampCompare;
+
+  final eventCompare = left.eventId.compareTo(right.eventId);
+  if (eventCompare != 0) return eventCompare;
+
+  final directionCompare = _conversationMessageDirectionRank(
+    left.direction,
+  ).compareTo(_conversationMessageDirectionRank(right.direction));
+  if (directionCompare != 0) return directionCompare;
+
+  final kindCompare = left.kind.compareTo(right.kind);
+  if (kindCompare != 0) return kindCompare;
+
+  return left.text.compareTo(right.text);
+}
+
+int compareConversationMessagesNewestFirst(
+  ConversationMessage left,
+  ConversationMessage right,
+) => compareConversationMessagesChronological(right, left);
+
+List<ConversationMessage> sortConversationMessagesChronological(
+  Iterable<ConversationMessage> messages,
+) {
+  return messages.toList()..sort(compareConversationMessagesChronological);
+}
+
+List<ConversationMessage> sortConversationMessagesNewestFirst(
+  Iterable<ConversationMessage> messages,
+) {
+  return messages.toList()..sort(compareConversationMessagesNewestFirst);
+}
+
+int _conversationMessageDirectionRank(MessageDirection direction) {
+  switch (direction) {
+    case MessageDirection.outgoing:
+      return 0;
+    case MessageDirection.incoming:
+      return 1;
   }
 }
 
