@@ -2179,7 +2179,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       );
       if (!mounted) return false;
 
-      await completer.future.timeout(const Duration(seconds: 30));
+      try {
+        await completer.future.timeout(const Duration(seconds: 30));
+      } on TimeoutException {
+        if (!mounted) return false;
+        setState(() {
+          _status =
+              'Session invite timed out; connecting to saved ${target.displayName}...';
+        });
+      }
+      if (!mounted) return false;
+
+      if (_connected || _connecting) {
+        await _disconnect(expand: false);
+      }
       if (!mounted) return false;
 
       await _connect();
