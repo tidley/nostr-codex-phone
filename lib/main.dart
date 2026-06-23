@@ -51,8 +51,6 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _drawerRailWidth = 10.0;
-const _drawerMenuBulgeWidth = 34.0;
 
 class _BlossomPreset {
   const _BlossomPreset({
@@ -4057,6 +4055,48 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  List<_RepoTarget> _activeSessionTargets() {
+    return _repoTargets.where((target) {
+      return target.id == _selectedRepoTargetId ||
+          (_connected && target.id == _selectedRepoTargetId) ||
+          (_messagesByTarget[target.id]?.isNotEmpty ?? false) ||
+          (_unreadCountsByTarget[target.id] ?? 0) > 0 ||
+          _pendingReplyTargetIds.contains(target.id);
+    }).toList();
+  }
+
+  Widget _buildSessionTitle(List<_RepoTarget> activeTargets) {
+    final selected = _targetById(_repoTargets, _selectedRepoTargetId);
+    if (activeTargets.length < 2 || selected == null) {
+      return Text(
+        selected?.displayName ?? _activeTargetName(),
+        overflow: TextOverflow.ellipsis,
+      );
+    }
+
+    return DropdownButtonHideUnderline(
+      child: DropdownButton<String>(
+        value: selected.id,
+        isExpanded: true,
+        iconEnabledColor: Theme.of(context).colorScheme.onSurface,
+        items: [
+          for (final target in activeTargets)
+            DropdownMenuItem<String>(
+              value: target.id,
+              child: Text(target.displayName, overflow: TextOverflow.ellipsis),
+            ),
+        ],
+        onChanged: _sendInProgress
+            ? null
+            : (targetId) {
+                if (targetId != null) {
+                  unawaited(_selectRepoTarget(targetId));
+                }
+              },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loadingSettings) {
@@ -4066,9 +4106,25 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final hasUnreadConversations = _unreadCountsByTarget.values.any(
       (count) => count > 0,
     );
+    final activeTargets = _activeSessionTargets();
 
     return Scaffold(
-      drawerEdgeDragWidth: _drawerRailWidth,
+      drawerEnableOpenDragGesture: false,
+      appBar: AppBar(
+        leading: Builder(
+          builder: (context) {
+            final icon = IconButton(
+              tooltip: 'Open sessions',
+              icon: const Icon(Icons.menu),
+              onPressed: () => Scaffold.of(context).openDrawer(),
+            );
+            return hasUnreadConversations
+                ? Badge(alignment: AlignmentDirectional.topEnd, child: icon)
+                : icon;
+          },
+        ),
+        title: _buildSessionTitle(activeTargets),
+      ),
       drawer: _SessionDrawer(
         targets: _repoTargets,
         selectedTargetId: _selectedRepoTargetId,
@@ -4107,94 +4163,77 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           }());
         },
       ),
-      body: Stack(
-        children: [
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.only(left: _drawerRailWidth),
-              child: Column(
-                children: [
-                  Expanded(
-                    child: _recentMessagesForActiveConversation.isEmpty
-                        ? const Center(child: Text('No messages in last hour'))
-                        : ListView.builder(
-                            controller: _chatScrollController,
-                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                            itemCount:
-                                _recentMessagesForActiveConversation.length,
-                            itemBuilder: (context, index) {
-                              final message =
-                                  _recentMessagesForActiveConversation[index];
-                              return Padding(
-                                padding: const EdgeInsets.only(bottom: 10),
-                                child: _MessageTile(
-                                  message: message,
-                                  showResend: _isResendableMessage(message),
-                                  speaking:
-                                      _speaking &&
-                                      message.eventId ==
-                                          _speakingMessageEventId,
-                                  workingAnimationStyle: _workingAnimationStyle,
-                                  stopSpeakingOnTap:
-                                      _speaking &&
-                                      message.direction ==
-                                          MessageDirection.incoming,
-                                  onSpeak: () => unawaited(
-                                    _speak(
-                                      message.text,
-                                      remember: true,
-                                      manual: true,
-                                      messageEventId: message.eventId,
-                                    ),
-                                  ),
-                                  onStopSpeaking: _stopSpeaking,
-                                  onResend: _canResendMessage(message)
-                                      ? () => _resendMessage(message)
-                                      : null,
-                                  onCancelPending:
-                                      message.kind == 'processing' &&
-                                          message.direction ==
-                                              MessageDirection.incoming
-                                      ? () => unawaited(
-                                          _cancelPendingResponse(message),
-                                        )
-                                      : null,
-                                ),
-                              );
-                            },
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: _recentMessagesForActiveConversation.isEmpty
+                  ? const Center(child: Text('No messages in last hour'))
+                  : ListView.builder(
+                      controller: _chatScrollController,
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                      itemCount: _recentMessagesForActiveConversation.length,
+                      itemBuilder: (context, index) {
+                        final message =
+                            _recentMessagesForActiveConversation[index];
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: _MessageTile(
+                            message: message,
+                            showResend: _isResendableMessage(message),
+                            speaking:
+                                _speaking &&
+                                message.eventId == _speakingMessageEventId,
+                            workingAnimationStyle: _workingAnimationStyle,
+                            stopSpeakingOnTap:
+                                _speaking &&
+                                message.direction == MessageDirection.incoming,
+                            onSpeak: () => unawaited(
+                              _speak(
+                                message.text,
+                                remember: true,
+                                manual: true,
+                                messageEventId: message.eventId,
+                              ),
+                            ),
+                            onStopSpeaking: _stopSpeaking,
+                            onResend: _canResendMessage(message)
+                                ? () => _resendMessage(message)
+                                : null,
+                            onCancelPending:
+                                message.kind == 'processing' &&
+                                    message.direction ==
+                                        MessageDirection.incoming
+                                ? () =>
+                                      unawaited(_cancelPendingResponse(message))
+                                : null,
                           ),
-                  ),
-                  _Composer(
-                    controller: _queryController,
-                    focusNode: _queryFocusNode,
-                    connected: _connected,
-                    connecting: _connecting,
-                    sending: _sendingInActiveConversation,
-                    sendingAudio: _sendingAudioInActiveConversation,
-                    sendingMedia: _sendingMediaInActiveConversation,
-                    recording: _recording,
-                    recordingDurationLabel: _recordingDurationLabel,
-                    wavRetryRequested: _wavRetryRequested,
-                    hasPendingMedia: _hasPendingMediaAttachment,
-                    pendingMediaName: _pendingMediaFileName,
-                    onMicPressed: _toggleRecording,
-                    onAttachMedia: _attachAndSendMedia,
-                    onCancelRecording: () => unawaited(_cancelCurrentAction()),
-                    onClearPendingMedia: _clearPendingMediaAttachment,
-                    onSendPressed: () => _sendMediaOrText(),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-              ),
+                        );
+                      },
+                    ),
             ),
-          ),
-          Builder(
-            builder: (context) => _DrawerEdgeHandle(
-              hasUnreadConversations: hasUnreadConversations,
-              onOpenDrawer: () => Scaffold.of(context).openDrawer(),
+            _Composer(
+              controller: _queryController,
+              focusNode: _queryFocusNode,
+              connected: _connected,
+              connecting: _connecting,
+              sending: _sendingInActiveConversation,
+              sendingAudio: _sendingAudioInActiveConversation,
+              sendingMedia: _sendingMediaInActiveConversation,
+              recording: _recording,
+              recordingDurationLabel: _recordingDurationLabel,
+              wavRetryRequested: _wavRetryRequested,
+              hasPendingMedia: _hasPendingMediaAttachment,
+              pendingMediaName: _pendingMediaFileName,
+              onMicPressed: _toggleRecording,
+              onAttachMedia: _attachAndSendMedia,
+              onCancelRecording: () => unawaited(_cancelCurrentAction()),
+              onClearPendingMedia: _clearPendingMediaAttachment,
+              onSendPressed: () => _sendMediaOrText(),
             ),
-          ),
-        ],
+            const SizedBox(height: 12),
+          ],
+        ),
       ),
     );
   }
@@ -4462,175 +4501,6 @@ class _SessionDrawer extends StatelessWidget {
           ),
         ) ??
         false;
-  }
-}
-
-class _DrawerEdgeHandle extends StatelessWidget {
-  const _DrawerEdgeHandle({
-    required this.hasUnreadConversations,
-    required this.onOpenDrawer,
-  });
-
-  final bool hasUnreadConversations;
-  final VoidCallback onOpenDrawer;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final color = hasUnreadConversations
-        ? theme.colorScheme.primary
-        : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.42);
-    final railColor = theme.colorScheme.surfaceContainerHighest.withValues(
-      alpha: 0.96,
-    );
-    final iconColor = theme.colorScheme.onSurfaceVariant;
-    return Positioned(
-      left: 0,
-      top: 0,
-      bottom: 0,
-      child: SafeArea(
-        right: false,
-        child: SizedBox(
-          width: _drawerMenuBulgeWidth,
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Positioned(
-                left: 0,
-                top: 0,
-                bottom: 0,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onTap: onOpenDrawer,
-                  onHorizontalDragEnd: (details) {
-                    if ((details.primaryVelocity ?? 0) > 0) {
-                      onOpenDrawer();
-                    }
-                  },
-                  child: SizedBox(
-                    width: _drawerRailWidth,
-                    child: Stack(
-                      children: [
-                        Positioned.fill(
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: railColor,
-                              border: Border(
-                                right: BorderSide(
-                                  color: theme.colorScheme.outlineVariant
-                                      .withValues(alpha: 0.42),
-                                ),
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: theme.shadowColor.withValues(
-                                    alpha: 0.08,
-                                  ),
-                                  blurRadius: 8,
-                                  offset: const Offset(1, 0),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        Positioned(
-                          left: 0,
-                          top: 0,
-                          bottom: 0,
-                          child: Container(
-                            width: 4,
-                            decoration: BoxDecoration(
-                              color: color,
-                              borderRadius: const BorderRadius.only(
-                                topRight: Radius.circular(4),
-                                bottomRight: Radius.circular(4),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              Positioned(
-                left: 0,
-                top: 8,
-                child: Tooltip(
-                  message: 'Open sessions',
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: onOpenDrawer,
-                    child: Container(
-                      width: _drawerMenuBulgeWidth,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        color: railColor,
-                        borderRadius: const BorderRadius.only(
-                          topRight: Radius.circular(18),
-                          bottomRight: Radius.circular(18),
-                        ),
-                        border: Border(
-                          top: BorderSide(
-                            color: theme.colorScheme.outlineVariant.withValues(
-                              alpha: 0.42,
-                            ),
-                          ),
-                          right: BorderSide(
-                            color: theme.colorScheme.outlineVariant.withValues(
-                              alpha: 0.42,
-                            ),
-                          ),
-                          bottom: BorderSide(
-                            color: theme.colorScheme.outlineVariant.withValues(
-                              alpha: 0.42,
-                            ),
-                          ),
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: theme.shadowColor.withValues(alpha: 0.14),
-                            blurRadius: 8,
-                            offset: const Offset(0, 2),
-                          ),
-                        ],
-                      ),
-                      child: Stack(
-                        clipBehavior: Clip.none,
-                        alignment: Alignment.center,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.only(left: 2),
-                            child: Icon(Icons.menu, size: 19, color: iconColor),
-                          ),
-                          if (hasUnreadConversations)
-                            Positioned(
-                              top: 6,
-                              right: 7,
-                              child: Container(
-                                width: 8,
-                                height: 8,
-                                decoration: BoxDecoration(
-                                  color: theme.colorScheme.primary,
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: railColor,
-                                    width: 1.5,
-                                  ),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 }
 
