@@ -1,12 +1,17 @@
 use std::env;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
@@ -22,6 +27,25 @@ pub struct CodexConfig {
 pub struct CodexRunResult {
     pub response: String,
     pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CodexCancelToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CodexCancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
 }
 
 impl CodexConfig {
@@ -74,8 +98,16 @@ impl CodexConfig {
 }
 
 pub async fn run_codex(prompt: &str, config: &CodexConfig) -> Result<String> {
+    run_codex_with_cancel(prompt, config, None).await
+}
+
+pub async fn run_codex_with_cancel(
+    prompt: &str,
+    config: &CodexConfig,
+    cancel_token: Option<&CodexCancelToken>,
+) -> Result<String> {
     let args = codex_stdin_args(config.args.clone());
-    let output = run_codex_command(prompt, config, args).await?;
+    let output = run_codex_command(prompt, config, args, cancel_token).await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -96,8 +128,17 @@ pub async fn run_codex_session(
     config: &CodexConfig,
     session_id: Option<&str>,
 ) -> Result<CodexRunResult> {
+    run_codex_session_with_cancel(prompt, config, session_id, None).await
+}
+
+pub async fn run_codex_session_with_cancel(
+    prompt: &str,
+    config: &CodexConfig,
+    session_id: Option<&str>,
+    cancel_token: Option<&CodexCancelToken>,
+) -> Result<CodexRunResult> {
     if !config.persist_sessions {
-        return run_codex(prompt, config)
+        return run_codex_with_cancel(prompt, config, cancel_token)
             .await
             .map(|response| CodexRunResult {
                 response,
@@ -106,7 +147,7 @@ pub async fn run_codex_session(
     }
 
     let args = codex_json_session_args(&config.args, session_id);
-    let output = run_codex_command(prompt, config, args).await?;
+    let output = run_codex_command(prompt, config, args, cancel_token).await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -122,6 +163,7 @@ async fn run_codex_command(
     prompt: &str,
     config: &CodexConfig,
     args: Vec<String>,
+    cancel_token: Option<&CodexCancelToken>,
 ) -> Result<std::process::Output> {
     let mut command = Command::new(&config.bin);
     command
@@ -153,10 +195,31 @@ async fn run_codex_command(
         .context("failed to close Codex stdin")?;
     drop(stdin);
 
-    tokio::time::timeout(config.timeout, child.wait_with_output())
-        .await
-        .map_err(|_| anyhow!("Codex timed out after {}s", config.timeout.as_secs()))?
-        .context("failed to wait for Codex output")
+    let wait_for_output = child.wait_with_output();
+    tokio::pin!(wait_for_output);
+
+    tokio::time::timeout(config.timeout, async {
+        tokio::select! {
+            output = &mut wait_for_output => {
+                output.context("failed to wait for Codex output")
+            }
+            _ = wait_for_cancel(cancel_token), if cancel_token.is_some() => {
+                Err(anyhow!("Codex cancelled"))
+            }
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("Codex timed out after {}s", config.timeout.as_secs()))?
+}
+
+async fn wait_for_cancel(cancel_token: Option<&CodexCancelToken>) {
+    let Some(cancel_token) = cancel_token else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    while !cancel_token.is_cancelled() {
+        sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn codex_stdin_args(mut args: Vec<String>) -> Vec<String> {

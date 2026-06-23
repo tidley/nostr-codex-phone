@@ -12,6 +12,7 @@ pub type AttachmentReference = MediaReference;
 #[serde(untagged)]
 pub enum WireMessage {
     Query { query: String },
+    Cancel { cancel_request: CancelRequest },
     Audio { audio: AudioReference },
     MediaBundle { media_bundle: MediaBundle },
     AudioRetry { audio_retry: AudioRetryRequest },
@@ -75,6 +76,12 @@ pub struct AudioRetryRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetInvite {
     #[serde(rename = "type")]
     pub target_type: String,
@@ -135,6 +142,12 @@ impl WireMessage {
         Self::Audio { audio }
     }
 
+    pub fn cancel(event_id: Option<String>) -> Self {
+        Self::Cancel {
+            cancel_request: CancelRequest { event_id },
+        }
+    }
+
     pub fn media_bundle(media_bundle: MediaBundle) -> Self {
         Self::MediaBundle { media_bundle }
     }
@@ -183,6 +196,7 @@ impl WireMessage {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Query { .. } => "query",
+            Self::Cancel { .. } => "cancel",
             Self::Audio { .. } => "audio",
             Self::MediaBundle { .. } => "media_bundle",
             Self::AudioRetry { .. } => "audio_retry",
@@ -198,6 +212,7 @@ impl WireMessage {
     pub fn text(&self) -> &str {
         match self {
             Self::Query { query } => query,
+            Self::Cancel { .. } => "cancel request",
             Self::Audio { audio } => &audio.url,
             Self::MediaBundle { media_bundle } => {
                 media_bundle.query.as_deref().unwrap_or("[media bundle]")
@@ -229,6 +244,7 @@ impl WireMessage {
     pub fn to_json(&self) -> Result<String> {
         let value = match self {
             Self::Query { query } => json!({ "query": query }),
+            Self::Cancel { cancel_request } => json!({ "cancel_request": cancel_request }),
             Self::Audio { audio } => json!({ "audio": audio }),
             Self::MediaBundle { media_bundle } => {
                 json!({ "media_bundle": media_bundle })
@@ -271,6 +287,16 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
             .as_str()
             .map(WireMessage::query)
             .ok_or_else(|| anyhow!("field `query` must be a string"));
+    }
+
+    if let Some(cancel_request) = object.get("cancel_request") {
+        let cancel_request = parse_cancel_request_field(cancel_request)?;
+        return Ok(WireMessage::cancel(cancel_request.event_id));
+    }
+
+    if let Some(cancel_request) = object.get("cancel_task").or_else(|| object.get("cancel")) {
+        let cancel_request = parse_cancel_request_field(cancel_request)?;
+        return Ok(WireMessage::cancel(cancel_request.event_id));
     }
 
     if let Some(audio) = object.get("audio") {
@@ -333,8 +359,39 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `repo_list`, object `media_bundle`, or object `attachments` field"
+        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `repo_list`, object `media_bundle`, object `cancel_request`, or object `attachments` field"
     ))
+}
+
+fn parse_cancel_request_field(value: &Value) -> Result<CancelRequest> {
+    if value.as_bool() == Some(true) {
+        return Ok(CancelRequest { event_id: None });
+    }
+
+    if let Some(event_id) = value.as_str() {
+        return Ok(CancelRequest {
+            event_id: non_empty_string(event_id),
+        });
+    }
+
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("field `cancel_request` must be true, a string, or an object"))?;
+    let event_id = object
+        .get("event_id")
+        .or_else(|| object.get("eventId"))
+        .and_then(Value::as_str)
+        .and_then(non_empty_string);
+    Ok(CancelRequest { event_id })
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 pub fn parse_media_bundle_query(content: &str) -> Result<MediaBundle> {
@@ -667,6 +724,21 @@ mod tests {
         assert_eq!(parsed, WireMessage::status("working"));
         assert_eq!(parsed.kind(), "status");
         assert_eq!(parsed.text(), "working");
+    }
+
+    #[test]
+    fn parses_cancel_request_contract() {
+        let parsed =
+            parse_wire_message(r#"{ "cancel_request": { "event_id": "abc123" } }"#).unwrap();
+        assert_eq!(parsed, WireMessage::cancel(Some("abc123".to_string())));
+        assert_eq!(parsed.kind(), "cancel");
+        assert_eq!(parsed.text(), "cancel request");
+    }
+
+    #[test]
+    fn parses_cancel_request_bool_contract() {
+        let parsed = parse_wire_message(r#"{ "cancel_request": true }"#).unwrap();
+        assert_eq!(parsed, WireMessage::cancel(None));
     }
 
     #[test]

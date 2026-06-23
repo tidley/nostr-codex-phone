@@ -1674,6 +1674,29 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     return true;
   }
 
+  bool _replaceIncomingProcessingPlaceholder(
+    String conversationKey,
+    String eventId,
+    ConversationMessage replacement,
+  ) {
+    final messages = _messagesByTarget[conversationKey];
+    if (messages == null) return false;
+    final index = messages.indexWhere(
+      (message) =>
+          message.kind == 'processing' &&
+          message.direction == MessageDirection.incoming &&
+          message.eventId == eventId,
+    );
+    if (index < 0) return false;
+    messages[index] = replacement;
+    _syncPendingReplyTarget(conversationKey);
+    unawaited(_saveConversationHistoryForKey(conversationKey));
+    if (conversationKey == _activeConversationKey) {
+      _scrollToLatestMessage();
+    }
+    return true;
+  }
+
   void _syncPendingReplyTarget(String conversationKey) {
     final messages = _messagesByTarget[conversationKey] ?? const [];
     final hasPendingResponse = messages.any(
@@ -2822,6 +2845,65 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     }
   }
 
+  Future<void> _cancelPendingResponse(ConversationMessage message) async {
+    if (message.kind != 'processing' ||
+        message.direction != MessageDirection.incoming) {
+      return;
+    }
+    final eventId = message.eventId.trim();
+    if (eventId.isEmpty) return;
+
+    final conversationKey = _activeConversationKey;
+    if (!_replaceIncomingProcessingPlaceholder(
+      conversationKey,
+      eventId,
+      ConversationMessage(
+        direction: MessageDirection.incoming,
+        kind: 'cancelled',
+        text: 'Cancelled',
+        eventId: eventId,
+        timestamp: DateTime.now(),
+      ),
+    )) {
+      return;
+    }
+    if (mounted) {
+      setState(() => _status = 'Cancelling task...');
+    }
+
+    try {
+      if (!await _ensureConnectedForSend()) {
+        throw StateError('Not connected');
+      }
+      final payload = jsonEncode({
+        'cancel_request': {'event_id': eventId},
+      });
+      await _sendWithAutoRecovery(
+        label: 'cancel request',
+        sender: () => nostrSendQuery(query: payload),
+      );
+      if (!mounted) return;
+      setState(() => _status = 'Cancel requested');
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _replaceIncomingProcessingPlaceholder(
+            conversationKey,
+            eventId,
+            ConversationMessage(
+              direction: MessageDirection.incoming,
+              kind: 'processing',
+              text: '',
+              eventId: eventId,
+              timestamp: message.timestamp,
+            ),
+          );
+        });
+      }
+      _showError('Cancel failed: $error');
+    }
+  }
+
   Future<void> _requestSpawnSession() async {
     if (!_connected) {
       _showError('Connect to the parent service first');
@@ -3808,75 +3890,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    final theme = Theme.of(context);
-    final selectedTarget =
-        _selectedRepoTargetId != null &&
-            _repoTargets.any((target) => target.id == _selectedRepoTargetId)
-        ? _selectedRepoTargetId
-        : _repoTargets.isNotEmpty
-        ? _repoTargets.first.id
-        : null;
     final hasUnreadConversations = _unreadCountsByTarget.values.any(
       (count) => count > 0,
     );
 
     return Scaffold(
-      appBar: AppBar(
-        leading: Builder(
-          builder: (context) => IconButton(
-            tooltip: 'Conversations',
-            icon: Badge(
-              isLabelVisible: hasUnreadConversations,
-              smallSize: 9,
-              child: const Icon(Icons.menu),
-            ),
-            onPressed: () => Scaffold.of(context).openDrawer(),
-          ),
-        ),
-        title: _repoTargets.isEmpty
-            ? Text(
-                _activeTargetName(),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              )
-            : DropdownButtonHideUnderline(
-                child: DropdownButton<String>(
-                  value: selectedTarget,
-                  isDense: true,
-                  isExpanded: true,
-                  icon: const Icon(Icons.expand_more),
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    color: theme.colorScheme.onSurface,
-                  ),
-                  items: [
-                    for (final target in _repoTargets)
-                      DropdownMenuItem(
-                        value: target.id,
-                        child: Text(
-                          target.displayName,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) {
-                      unawaited(_selectRepoTarget(value));
-                    }
-                  },
-                ),
-              ),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(0),
-          child: const SizedBox.shrink(),
-        ),
-        actions: [
-          IconButton(
-            tooltip: 'Settings',
-            icon: const Icon(Icons.settings),
-            onPressed: () => unawaited(_openSettings()),
-          ),
-        ],
-      ),
+      drawerEdgeDragWidth: 72,
       drawer: _SessionDrawer(
         targets: _repoTargets,
         selectedTargetId: _selectedRepoTargetId,
@@ -3890,6 +3909,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         onSpawnSession: () => unawaited(_requestSpawnSession()),
         onRestartTarget: (target) => unawaited(_restartRepoTarget(target)),
         onRenameTarget: (target) => unawaited(_renameRepoTarget(target)),
+        onOpenSettings: () => unawaited(_openSettings()),
         onDeleteTarget: (targetId) {
           unawaited(() async {
             final target = _targetById(_repoTargets, targetId);
@@ -3913,62 +3933,82 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
           }());
         },
       ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: _recentMessagesForActiveConversation.isEmpty
-                  ? const Center(child: Text('No messages in last hour'))
-                  : ListView.builder(
-                      controller: _chatScrollController,
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                      itemCount: _recentMessagesForActiveConversation.length,
-                      itemBuilder: (context, index) {
-                        final message =
-                            _recentMessagesForActiveConversation[index];
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: _MessageTile(
-                            message: message,
-                            showResend: _isResendableMessage(message),
-                            speaking:
-                                _speaking &&
-                                message.eventId == _speakingMessageEventId,
-                            workingAnimationStyle: _workingAnimationStyle,
-                            stopSpeakingOnTap:
-                                _speaking &&
-                                message.direction == MessageDirection.incoming,
-                            onStopSpeaking: _stopSpeaking,
-                            onResend: _canResendMessage(message)
-                                ? () => _resendMessage(message)
-                                : null,
-                          ),
-                        );
-                      },
-                    ),
+      body: Stack(
+        children: [
+          SafeArea(
+            child: Column(
+              children: [
+                Expanded(
+                  child: _recentMessagesForActiveConversation.isEmpty
+                      ? const Center(child: Text('No messages in last hour'))
+                      : ListView.builder(
+                          controller: _chatScrollController,
+                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                          itemCount:
+                              _recentMessagesForActiveConversation.length,
+                          itemBuilder: (context, index) {
+                            final message =
+                                _recentMessagesForActiveConversation[index];
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: _MessageTile(
+                                message: message,
+                                showResend: _isResendableMessage(message),
+                                speaking:
+                                    _speaking &&
+                                    message.eventId == _speakingMessageEventId,
+                                workingAnimationStyle: _workingAnimationStyle,
+                                stopSpeakingOnTap:
+                                    _speaking &&
+                                    message.direction ==
+                                        MessageDirection.incoming,
+                                onStopSpeaking: _stopSpeaking,
+                                onResend: _canResendMessage(message)
+                                    ? () => _resendMessage(message)
+                                    : null,
+                                onCancelPending:
+                                    message.kind == 'processing' &&
+                                        message.direction ==
+                                            MessageDirection.incoming
+                                    ? () => unawaited(
+                                        _cancelPendingResponse(message),
+                                      )
+                                    : null,
+                              ),
+                            );
+                          },
+                        ),
+                ),
+                _Composer(
+                  controller: _queryController,
+                  focusNode: _queryFocusNode,
+                  connected: _connected,
+                  connecting: _connecting,
+                  sending: _sendingInActiveConversation,
+                  sendingAudio: _sendingAudioInActiveConversation,
+                  sendingMedia: _sendingMediaInActiveConversation,
+                  recording: _recording,
+                  recordingDurationLabel: _recordingDurationLabel,
+                  wavRetryRequested: _wavRetryRequested,
+                  hasPendingMedia: _hasPendingMediaAttachment,
+                  pendingMediaName: _pendingMediaFileName,
+                  onMicPressed: _toggleRecording,
+                  onAttachMedia: _attachAndSendMedia,
+                  onCancelRecording: () => unawaited(_cancelCurrentAction()),
+                  onClearPendingMedia: _clearPendingMediaAttachment,
+                  onSendPressed: () => _sendMediaOrText(),
+                ),
+                const SizedBox(height: 12),
+              ],
             ),
-            _Composer(
-              controller: _queryController,
-              focusNode: _queryFocusNode,
-              connected: _connected,
-              connecting: _connecting,
-              sending: _sendingInActiveConversation,
-              sendingAudio: _sendingAudioInActiveConversation,
-              sendingMedia: _sendingMediaInActiveConversation,
-              recording: _recording,
-              recordingDurationLabel: _recordingDurationLabel,
-              wavRetryRequested: _wavRetryRequested,
-              hasPendingMedia: _hasPendingMediaAttachment,
-              pendingMediaName: _pendingMediaFileName,
-              onMicPressed: _toggleRecording,
-              onAttachMedia: _attachAndSendMedia,
-              onCancelRecording: () => unawaited(_cancelCurrentAction()),
-              onClearPendingMedia: _clearPendingMediaAttachment,
-              onSendPressed: () => _sendMediaOrText(),
+          ),
+          Builder(
+            builder: (context) => _DrawerEdgeHandle(
+              hasUnreadConversations: hasUnreadConversations,
+              onOpenDrawer: () => Scaffold.of(context).openDrawer(),
             ),
-            const SizedBox(height: 12),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -3988,6 +4028,7 @@ class _SessionDrawer extends StatelessWidget {
     required this.onSpawnSession,
     required this.onRestartTarget,
     required this.onRenameTarget,
+    required this.onOpenSettings,
     required this.onDeleteTarget,
   });
 
@@ -4003,6 +4044,7 @@ class _SessionDrawer extends StatelessWidget {
   final VoidCallback onSpawnSession;
   final ValueChanged<_RepoTarget> onRestartTarget;
   final ValueChanged<_RepoTarget> onRenameTarget;
+  final VoidCallback onOpenSettings;
   final ValueChanged<String> onDeleteTarget;
 
   @override
@@ -4193,6 +4235,18 @@ class _SessionDrawer extends StatelessWidget {
                 ],
               ),
             ),
+            const Divider(height: 1),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: ListTile(
+                leading: const Icon(Icons.settings),
+                title: const Text('Settings'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  onOpenSettings();
+                },
+              ),
+            ),
           ],
         ),
       ),
@@ -4218,6 +4272,58 @@ class _SessionDrawer extends StatelessWidget {
           ),
         ) ??
         false;
+  }
+}
+
+class _DrawerEdgeHandle extends StatelessWidget {
+  const _DrawerEdgeHandle({
+    required this.hasUnreadConversations,
+    required this.onOpenDrawer,
+  });
+
+  final bool hasUnreadConversations;
+  final VoidCallback onOpenDrawer;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = hasUnreadConversations
+        ? theme.colorScheme.primary
+        : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.42);
+    return Positioned(
+      left: 0,
+      top: 0,
+      bottom: 0,
+      child: SafeArea(
+        right: false,
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: onOpenDrawer,
+          onHorizontalDragEnd: (details) {
+            if ((details.primaryVelocity ?? 0) > 0) {
+              onOpenDrawer();
+            }
+          },
+          child: SizedBox(
+            width: 24,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Container(
+                width: 4,
+                height: 96,
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: const BorderRadius.only(
+                    topRight: Radius.circular(4),
+                    bottomRight: Radius.circular(4),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -5519,7 +5625,7 @@ class _RecordingButtonState extends State<_RecordingButton>
     super.initState();
     _wipeController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 520),
+      duration: const Duration(milliseconds: 1040),
     );
     _wipeAnimation = CurvedAnimation(
       parent: _wipeController,
@@ -5955,6 +6061,7 @@ class _MessageTile extends StatefulWidget {
     required this.stopSpeakingOnTap,
     required this.onStopSpeaking,
     required this.onResend,
+    required this.onCancelPending,
   });
 
   final ConversationMessage message;
@@ -5964,6 +6071,7 @@ class _MessageTile extends StatefulWidget {
   final bool stopSpeakingOnTap;
   final VoidCallback? onStopSpeaking;
   final VoidCallback? onResend;
+  final VoidCallback? onCancelPending;
 
   @override
   State<_MessageTile> createState() => _MessageTileState();
@@ -6034,7 +6142,7 @@ class _MessageTileState extends State<_MessageTile>
       if (!widget.workingAnimationStyle.enabled) {
         return const SizedBox.shrink();
       }
-      return Card(
+      final bubble = Card(
         color: Colors.transparent,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 130),
@@ -6051,6 +6159,15 @@ class _MessageTileState extends State<_MessageTile>
             color: colorScheme.primary,
             style: widget.workingAnimationStyle,
           ),
+        ),
+      );
+      if (widget.onCancelPending == null) return bubble;
+      return Tooltip(
+        message: 'Hold to cancel',
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onLongPress: widget.onCancelPending,
+          child: bubble,
         ),
       );
     }
@@ -6206,7 +6323,8 @@ class _MessageTileState extends State<_MessageTile>
     if (kind == 'response' ||
         kind == 'transcript' ||
         kind == 'transcribing' ||
-        kind == 'processing') {
+        kind == 'processing' ||
+        kind == 'cancelled') {
       return '';
     }
     return kind;

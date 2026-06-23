@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -17,7 +17,8 @@ use qrcode::{Color, QrCode};
 mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
 use rust_lib_nostr_codex_phone::codex::{
-    is_codex_usage_limit_error, run_codex, run_codex_session, CodexConfig, CodexRunResult,
+    is_codex_usage_limit_error, run_codex, run_codex_session_with_cancel, CodexCancelToken,
+    CodexConfig, CodexRunResult,
 };
 use rust_lib_nostr_codex_phone::nostr_client::{
     default_relays, IncomingMessage, NostrConfig, NostrMessenger,
@@ -51,6 +52,11 @@ struct SpawnWorkerRequest {
     workdir: String,
     create: bool,
     silent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CancelRequest {
+    event_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -524,12 +530,22 @@ async fn peer_worker(
 ) {
     let mut memory = open_memory_store(memory_config);
     info!("started worker for peer {peer_pubkey}");
+    let mut backlog = VecDeque::<IncomingMessage>::new();
 
-    while let Some(message) = receiver.recv().await {
+    loop {
+        let message = if let Some(message) = backlog.pop_front() {
+            message
+        } else {
+            let Some(message) = receiver.recv().await else {
+                break;
+            };
+            message
+        };
         let event_id = message.event_id.clone();
         let sender_pubkey_hex = message.sender_pubkey_hex.clone();
         let kind = message.kind.clone();
-        let result = AssertUnwindSafe(process_message(
+        let cancel_token = CodexCancelToken::new();
+        let processing = AssertUnwindSafe(process_message(
             message,
             &messenger,
             &mut memory,
@@ -537,9 +553,46 @@ async fn peer_worker(
             &audio_config,
             &transcribe_config,
             &relays,
+            &cancel_token,
         ))
-        .catch_unwind()
-        .await;
+        .catch_unwind();
+        tokio::pin!(processing);
+
+        let mut receiver_open = true;
+        let result = loop {
+            tokio::select! {
+                result = &mut processing => break result,
+                next_message = receiver.recv(), if receiver_open => {
+                    match next_message {
+                        Some(next_message) => {
+                            if let Some(cancel_request) = parse_cancel_message(&next_message) {
+                                if !cancel_request_matches(&cancel_request, &event_id) {
+                                    send_status(
+                                        &messenger,
+                                        &next_message.sender_pubkey_hex,
+                                        "No matching active task to cancel.",
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                                cancel_token.cancel();
+                                send_status(
+                                    &messenger,
+                                    &next_message.sender_pubkey_hex,
+                                    "Cancelling current task...",
+                                )
+                                .await;
+                            } else {
+                                backlog.push_back(next_message);
+                            }
+                        }
+                        None => {
+                            receiver_open = false;
+                        }
+                    }
+                }
+            }
+        };
 
         if let Err(payload) = result {
             let details = panic_payload_description(payload.as_ref());
@@ -577,6 +630,7 @@ async fn process_message(
     audio_config: &AudioConfig,
     transcribe_config: &TranscribeConfig,
     relays: &[String],
+    cancel_token: &CodexCancelToken,
 ) {
     match message.kind.as_str() {
         "query" => {
@@ -584,6 +638,16 @@ async fn process_message(
                 "received query event {} from {}",
                 message.event_id, message.sender_pubkey
             );
+
+            if parse_cancel_message(&message).is_some() {
+                send_status(
+                    messenger,
+                    &message.sender_pubkey_hex,
+                    "No active task to cancel.",
+                )
+                .await;
+                return;
+            }
 
             if let Ok(media_bundle) = parse_media_bundle_query(&message.text) {
                 process_media_bundle_turn(
@@ -595,6 +659,7 @@ async fn process_message(
                     &audio_config,
                     transcribe_config,
                     codex_config,
+                    cancel_token,
                 )
                 .await;
                 return;
@@ -660,6 +725,7 @@ async fn process_message(
                 recorded.id,
                 &message.text,
                 codex_config,
+                cancel_token,
             )
             .await;
         }
@@ -683,6 +749,7 @@ async fn process_message(
                     &audio_config,
                     transcribe_config,
                     codex_config,
+                    cancel_token,
                 )
                 .await;
             } else {
@@ -751,6 +818,12 @@ async fn process_message(
                 Some(transcript) => transcript,
                 None => return,
             };
+            if cancel_token.is_cancelled() {
+                report_codex_cancelled(messenger, &message.sender_pubkey_hex)
+                    .await
+                    .ok();
+                return;
+            }
 
             info!(
                 "transcribed audio event {}: {}",
@@ -799,6 +872,15 @@ async fn process_message(
                 recorded.id,
                 &transcript,
                 codex_config,
+                cancel_token,
+            )
+            .await;
+        }
+        "cancel" => {
+            send_status(
+                messenger,
+                &message.sender_pubkey_hex,
+                "No active task to cancel.",
             )
             .await;
         }
@@ -832,6 +914,7 @@ async fn process_media_bundle_turn(
     audio_config: &AudioConfig,
     transcribe_config: &TranscribeConfig,
     codex_config: &CodexConfig,
+    cancel_token: &CodexCancelToken,
 ) {
     let user_query = bundle.query.as_deref().map(str::trim).unwrap_or_default();
 
@@ -874,6 +957,10 @@ async fn process_media_bundle_turn(
     let mut local_attachments: Vec<DownloadedAudio> = Vec::new();
 
     for (index, attachment) in bundle.attachments.iter().enumerate() {
+        if cancel_token.is_cancelled() {
+            report_codex_cancelled(messenger, peer_pubkey).await.ok();
+            return;
+        }
         let label = attachment
             .name
             .clone()
@@ -899,6 +986,10 @@ async fn process_media_bundle_turn(
                 Some(transcript) => transcript,
                 None => continue,
             };
+            if cancel_token.is_cancelled() {
+                report_codex_cancelled(messenger, peer_pubkey).await.ok();
+                return;
+            }
 
             transcripts.push(format!("{label}:\n{transcript}"));
             local_texts.push(format!("{label}:\n{transcript}"));
@@ -926,6 +1017,10 @@ async fn process_media_bundle_turn(
                 Some(text) => text,
                 None => continue,
             };
+            if cancel_token.is_cancelled() {
+                report_codex_cancelled(messenger, peer_pubkey).await.ok();
+                return;
+            }
 
             local_texts.push(format!("{label}:\n{extracted_text}"));
             continue;
@@ -944,6 +1039,10 @@ async fn process_media_bundle_turn(
                 Some(downloaded) => downloaded,
                 None => continue,
             };
+            if cancel_token.is_cancelled() {
+                report_codex_cancelled(messenger, peer_pubkey).await.ok();
+                return;
+            }
             let local_path = downloaded.path.display().to_string();
             attachment_lines.push(format!("  local decrypted image: {local_path}"));
             local_texts.push(format!(
@@ -974,6 +1073,10 @@ async fn process_media_bundle_turn(
     if request_parts.is_empty() {
         request_parts.push("Process the attached media and answer the user's request.".to_string());
     }
+    if cancel_token.is_cancelled() {
+        report_codex_cancelled(messenger, peer_pubkey).await.ok();
+        return;
+    }
 
     let request_text = request_parts.join("\n\n");
 
@@ -994,6 +1097,7 @@ async fn process_media_bundle_turn(
         recorded_bundle.id,
         &request_text,
         codex_config,
+        cancel_token,
     )
     .await;
 
@@ -1288,7 +1392,10 @@ fn worker_lock_is_stale(path: &Path) -> Result<bool> {
     if pid == std::process::id() {
         return Ok(true);
     }
-    Ok(!process_is_running(pid))
+    if !process_is_running(pid) {
+        return Ok(true);
+    }
+    Ok(!worker_lock_process_matches(path, pid))
 }
 
 fn running_worker_lock_pid(workdir: &Path) -> Result<Option<u32>> {
@@ -1313,6 +1420,36 @@ fn process_is_running(pid: u32) -> bool {
 
 #[cfg(not(target_family = "unix"))]
 fn process_is_running(_pid: u32) -> bool {
+    true
+}
+
+#[cfg(target_family = "unix")]
+fn worker_lock_process_matches(path: &Path, pid: u32) -> bool {
+    let Some(workdir) = path.parent() else {
+        return false;
+    };
+    let process_dir = Path::new("/proc").join(pid.to_string());
+    let Ok(cwd) = fs::read_link(process_dir.join("cwd")) else {
+        return false;
+    };
+    if canonical_path_key(&cwd) != canonical_path_key(workdir) {
+        return false;
+    }
+
+    let Ok(exe) = fs::read_link(process_dir.join("exe")) else {
+        return false;
+    };
+    let current_exe_name = env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_owned()));
+    current_exe_name
+        .as_ref()
+        .zip(exe.file_name())
+        .is_some_and(|(current, candidate)| current == candidate)
+}
+
+#[cfg(not(target_family = "unix"))]
+fn worker_lock_process_matches(_path: &Path, _pid: u32) -> bool {
     true
 }
 
@@ -1610,6 +1747,69 @@ fn parse_spawn_worker_json_request(request: &str) -> Option<SpawnWorkerRequest> 
         create,
         silent,
     })
+}
+
+fn parse_cancel_message(message: &IncomingMessage) -> Option<CancelRequest> {
+    if message.kind == "cancel" {
+        return parse_cancel_request(&message.raw_json);
+    }
+    parse_cancel_request(&message.text)
+}
+
+fn parse_cancel_request(request: &str) -> Option<CancelRequest> {
+    let trimmed = request.trim();
+    let command = trimmed.to_ascii_lowercase();
+    if matches!(command.as_str(), "/cancel" | "/stop" | "/abort") {
+        return Some(CancelRequest { event_id: None });
+    }
+
+    if let Ok(WireMessage::Cancel { cancel_request }) = parse_wire_message(trimmed) {
+        return Some(CancelRequest {
+            event_id: cancel_request.event_id,
+        });
+    }
+
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let object = value.as_object()?;
+    let raw = object
+        .get("cancel_request")
+        .or_else(|| object.get("cancel_task"))
+        .or_else(|| object.get("cancel"));
+
+    match raw {
+        Some(value) if value.as_bool() == Some(true) => Some(CancelRequest { event_id: None }),
+        Some(value) if value.as_bool() == Some(false) => None,
+        Some(value) if value.as_str().is_some() => Some(CancelRequest {
+            event_id: value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+        }),
+        Some(value) => {
+            let event_id = value
+                .as_object()
+                .and_then(|object| object.get("event_id").or_else(|| object.get("eventId")))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            Some(CancelRequest { event_id })
+        }
+        None => None,
+    }
+}
+
+fn cancel_request_matches(request: &CancelRequest, active_event_id: &str) -> bool {
+    match request
+        .event_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|event_id| !event_id.is_empty())
+    {
+        Some(event_id) => event_id == active_event_id,
+        None => true,
+    }
 }
 
 fn is_shutdown_request(request: &str) -> bool {
@@ -1913,6 +2113,7 @@ async fn process_text_turn(
     recorded_id: i64,
     request: &str,
     codex_config: &CodexConfig,
+    cancel_token: &CodexCancelToken,
 ) {
     if is_long_running_request(request) {
         send_status(
@@ -1933,6 +2134,10 @@ async fn process_text_turn(
     } else {
         None
     };
+    if cancel_token.is_cancelled() {
+        report_codex_cancelled(messenger, peer_pubkey).await.ok();
+        return;
+    }
     let prompt = codex_phone_prompt(request, memory_context.as_deref());
 
     let response = match run_codex_and_report(
@@ -1942,6 +2147,7 @@ async fn process_text_turn(
         &prompt,
         codex_config,
         session_id.as_deref(),
+        cancel_token,
     )
     .await
     {
@@ -2902,44 +3108,75 @@ async fn run_codex_and_report(
     prompt: &str,
     codex_config: &CodexConfig,
     session_id: Option<&str>,
+    cancel_token: &CodexCancelToken,
 ) -> std::result::Result<String, ()> {
-    let result = match run_codex_session(prompt, codex_config, session_id).await {
-        Ok(result) => result,
-        Err(err) if is_codex_usage_limit_error(&err) => {
-            match retry_codex_with_usage_limit_fallback(prompt, codex_config, session_id, err).await
-            {
-                Ok(result) => result,
-                Err(err) => return report_codex_error(messenger, receiver_pubkey, err).await,
+    let result =
+        match run_codex_session_with_cancel(prompt, codex_config, session_id, Some(cancel_token))
+            .await
+        {
+            Ok(result) => result,
+            Err(err) if is_codex_cancelled_error(&err) => {
+                return report_codex_cancelled(messenger, receiver_pubkey).await;
             }
-        }
-        Err(err) if session_id.is_some() => {
-            warn!("Codex resume failed; clearing session and retrying once: {err:#}");
-            if let Some(memory) = memory.as_mut() {
-                if let Err(clear_err) =
-                    memory.clear_codex_session(receiver_pubkey, &codex_config.working_dir)
+            Err(err) if is_codex_usage_limit_error(&err) => {
+                match retry_codex_with_usage_limit_fallback(
+                    prompt,
+                    codex_config,
+                    session_id,
+                    cancel_token,
+                    err,
+                )
+                .await
                 {
-                    warn!("failed to clear Codex session: {clear_err:#}");
+                    Ok(result) => result,
+                    Err(err) if is_codex_cancelled_error(&err) => {
+                        return report_codex_cancelled(messenger, receiver_pubkey).await;
+                    }
+                    Err(err) => return report_codex_error(messenger, receiver_pubkey, err).await,
                 }
             }
-            match run_codex_session(prompt, codex_config, None).await {
-                Ok(result) => result,
-                Err(err) if is_codex_usage_limit_error(&err) => {
-                    match retry_codex_with_usage_limit_fallback(prompt, codex_config, None, err)
-                        .await
+            Err(err) if session_id.is_some() => {
+                warn!("Codex resume failed; clearing session and retrying once: {err:#}");
+                if let Some(memory) = memory.as_mut() {
+                    if let Err(clear_err) =
+                        memory.clear_codex_session(receiver_pubkey, &codex_config.working_dir)
                     {
-                        Ok(result) => result,
-                        Err(err) => {
-                            return report_codex_error(messenger, receiver_pubkey, err).await
-                        }
+                        warn!("failed to clear Codex session: {clear_err:#}");
                     }
                 }
-                Err(err) => return report_codex_error(messenger, receiver_pubkey, err).await,
+                match run_codex_session_with_cancel(prompt, codex_config, None, Some(cancel_token))
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(err) if is_codex_cancelled_error(&err) => {
+                        return report_codex_cancelled(messenger, receiver_pubkey).await;
+                    }
+                    Err(err) if is_codex_usage_limit_error(&err) => {
+                        match retry_codex_with_usage_limit_fallback(
+                            prompt,
+                            codex_config,
+                            None,
+                            cancel_token,
+                            err,
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(err) if is_codex_cancelled_error(&err) => {
+                                return report_codex_cancelled(messenger, receiver_pubkey).await;
+                            }
+                            Err(err) => {
+                                return report_codex_error(messenger, receiver_pubkey, err).await
+                            }
+                        }
+                    }
+                    Err(err) => return report_codex_error(messenger, receiver_pubkey, err).await,
+                }
             }
-        }
-        Err(err) => {
-            return report_codex_error(messenger, receiver_pubkey, err).await;
-        }
-    };
+            Err(err) => {
+                return report_codex_error(messenger, receiver_pubkey, err).await;
+            }
+        };
 
     if let Some(next_session_id) = result
         .session_id
@@ -2965,6 +3202,7 @@ async fn retry_codex_with_usage_limit_fallback(
     prompt: &str,
     codex_config: &CodexConfig,
     session_id: Option<&str>,
+    cancel_token: &CodexCancelToken,
     original_err: anyhow::Error,
 ) -> Result<CodexRunResult> {
     let Some(fallback_model) = codex_config.usage_limit_fallback_model.as_deref() else {
@@ -2977,13 +3215,26 @@ async fn retry_codex_with_usage_limit_fallback(
     );
     let fallback_config = codex_config.with_model_override(fallback_model);
 
-    run_codex_session(prompt, &fallback_config, session_id)
+    run_codex_session_with_cancel(prompt, &fallback_config, session_id, Some(cancel_token))
         .await
         .with_context(|| {
             format!(
                 "Codex fallback model `{fallback_model}` failed after usage-limit error: {original}"
             )
         })
+}
+
+fn is_codex_cancelled_error(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains("Codex cancelled")
+}
+
+async fn report_codex_cancelled(
+    messenger: &NostrMessenger,
+    receiver_pubkey: &str,
+) -> std::result::Result<String, ()> {
+    info!("codex task cancelled for {receiver_pubkey}");
+    send_status(messenger, receiver_pubkey, "Cancelled.").await;
+    Err(())
 }
 
 async fn report_codex_error(
@@ -3112,6 +3363,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_cancel_requests() {
+        assert_eq!(
+            parse_cancel_request("/cancel"),
+            Some(CancelRequest { event_id: None })
+        );
+        assert_eq!(
+            parse_cancel_request(r#"{"cancel_request":{"event_id":"abc123"}}"#),
+            Some(CancelRequest {
+                event_id: Some("abc123".to_string())
+            })
+        );
+        assert_eq!(
+            parse_cancel_request(r#"{"cancel_request":true}"#),
+            Some(CancelRequest { event_id: None })
+        );
+        assert_eq!(parse_cancel_request(r#"{"cancel_request":false}"#), None);
+        assert_eq!(parse_cancel_request("cancel this"), None);
+    }
+
+    #[test]
+    fn matches_targeted_cancel_requests_to_active_event() {
+        assert!(cancel_request_matches(
+            &CancelRequest { event_id: None },
+            "active"
+        ));
+        assert!(cancel_request_matches(
+            &CancelRequest {
+                event_id: Some("active".to_string())
+            },
+            "active"
+        ));
+        assert!(!cancel_request_matches(
+            &CancelRequest {
+                event_id: Some("other".to_string())
+            },
+            "active"
+        ));
+    }
+
+    #[test]
     fn detects_repo_list_requests() {
         assert!(is_repo_list_request("/repos"));
         assert!(is_repo_list_request(
@@ -3226,6 +3517,24 @@ mod tests {
         fs::write(&lock_path, "not-a-pid\n").unwrap();
 
         let pid = running_worker_lock_pid(&workdir).unwrap();
+
+        assert_eq!(pid, None);
+        assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn removes_worker_lock_for_unrelated_live_process() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        let lock_path = workdir.join(WORKER_LOCK_FILE);
+
+        let mut child = StdCommand::new("sleep").arg("30").spawn().unwrap();
+        fs::write(&lock_path, format!("{}\n", child.id())).unwrap();
+
+        let pid = running_worker_lock_pid(&workdir).unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
 
         assert_eq!(pid, None);
         assert!(!lock_path.exists());
