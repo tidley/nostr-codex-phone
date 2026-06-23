@@ -446,6 +446,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
   final _relayController = TextEditingController();
   final _blossomServerController = TextEditingController();
   final _queryController = TextEditingController();
+  final _queryFocusNode = FocusNode();
   final _recorder = AudioRecorder();
   final _tts = FlutterTts();
   final _messagesByTarget = <String, List<ConversationMessage>>{};
@@ -588,11 +589,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     });
   }
 
+  void _dismissQueryKeyboard() {
+    _queryFocusNode.unfocus();
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
+
   @override
   void initState() {
     super.initState();
     _configureTtsHandlers();
     unawaited(_loadSettings());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _dismissQueryKeyboard();
+    });
   }
 
   @override
@@ -612,6 +621,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     _relayController.dispose();
     _blossomServerController.dispose();
     _queryController.dispose();
+    _queryFocusNode.dispose();
     unawaited(nostrStop());
     super.dispose();
   }
@@ -687,6 +697,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       _loadingSettings = false;
     });
     await _loadConversationHistoryForActiveSession();
+    _dismissQueryKeyboard();
     _refreshOwnPubkey();
     await _applyTtsSettings();
     unawaited(_loadTtsOptions());
@@ -1377,6 +1388,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
     final target = _targetById(_repoTargets, targetId);
     if (target == null) return;
 
+    _dismissQueryKeyboard();
     final reconnect = _connected;
     if (_recording) {
       await _cancelRecording();
@@ -3858,6 +3870,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
             ),
             _Composer(
               controller: _queryController,
+              focusNode: _queryFocusNode,
               connected: _connected,
               connecting: _connecting,
               sending: _sendingInActiveConversation,
@@ -5160,6 +5173,7 @@ class _RepoTargetQrScannerPageState extends State<_RepoTargetQrScannerPage> {
 class _Composer extends StatefulWidget {
   const _Composer({
     required this.controller,
+    required this.focusNode,
     required this.connected,
     required this.connecting,
     required this.sending,
@@ -5178,6 +5192,7 @@ class _Composer extends StatefulWidget {
   });
 
   final TextEditingController controller;
+  final FocusNode focusNode;
   final bool connected;
   final bool connecting;
   final bool sending;
@@ -5246,6 +5261,8 @@ class _ComposerState extends State<_Composer> {
               ),
             TextField(
               controller: widget.controller,
+              focusNode: widget.focusNode,
+              autofocus: false,
               minLines: 1,
               maxLines: 4,
               decoration: const InputDecoration(
