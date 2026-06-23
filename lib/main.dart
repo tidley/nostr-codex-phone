@@ -2179,10 +2179,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       );
       if (!mounted) return false;
 
+      _RepoTarget targetToConnect;
       try {
-        await completer.future.timeout(const Duration(seconds: 30));
+        targetToConnect = await completer.future.timeout(
+          const Duration(seconds: 30),
+          onTimeout: () => throw TimeoutException(
+            'Session invite timed out',
+            const Duration(seconds: 30),
+          ),
+        );
       } on TimeoutException {
         if (!mounted) return false;
+        targetToConnect = _targetById(_repoTargets, target.id) ?? target;
         setState(() {
           _status =
               'Session invite timed out; connecting to saved ${target.displayName}...';
@@ -2190,13 +2198,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
       }
       if (!mounted) return false;
 
-      if (_connected || _connecting) {
-        await _disconnect(expand: false);
-      }
-      if (!mounted) return false;
-
-      await _connect();
-      return mounted && _connected;
+      return await _connectToRepoTargetForSend(targetToConnect);
     } catch (error) {
       if (mounted) {
         _showError('Could not start ${target.displayName}: $error');
@@ -2207,6 +2209,22 @@ class _NostrCodexHomeState extends State<NostrCodexHome> {
         _pendingSessionStart = null;
       }
     }
+  }
+
+  Future<bool> _connectToRepoTargetForSend(_RepoTarget target) async {
+    if (!mounted) return false;
+
+    if (_connected || _connecting) {
+      await _disconnect(expand: false);
+    }
+    if (!mounted) return false;
+
+    setState(() {
+      _applyRepoTargetFields(target);
+      _status = 'Connecting to ${target.displayName}...';
+    });
+    await _connectToTargetInBackground(target);
+    return mounted && _connected && _connectedPeerPubkey == target.pubkey;
   }
 
   _RepoTarget? _parentRepoTargetFor(_RepoTarget target) {
