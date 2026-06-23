@@ -4290,6 +4290,10 @@ class _DrawerEdgeHandle extends StatelessWidget {
     final color = hasUnreadConversations
         ? theme.colorScheme.primary
         : theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.42);
+    final buttonColor = theme.colorScheme.surfaceContainerHighest.withValues(
+      alpha: 0.94,
+    );
+    final iconColor = theme.colorScheme.onSurfaceVariant;
     return Positioned(
       left: 0,
       top: 0,
@@ -4305,20 +4309,67 @@ class _DrawerEdgeHandle extends StatelessWidget {
             }
           },
           child: SizedBox(
-            width: 24,
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Container(
-                width: 4,
-                height: 96,
-                decoration: BoxDecoration(
-                  color: color,
-                  borderRadius: const BorderRadius.only(
-                    topRight: Radius.circular(4),
-                    bottomRight: Radius.circular(4),
+            width: 42,
+            child: Stack(
+              children: [
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Container(
+                    width: 4,
+                    height: 96,
+                    decoration: BoxDecoration(
+                      color: color,
+                      borderRadius: const BorderRadius.only(
+                        topRight: Radius.circular(4),
+                        bottomRight: Radius.circular(4),
+                      ),
+                    ),
                   ),
                 ),
-              ),
+                Positioned(
+                  left: 0,
+                  top: 8,
+                  child: Tooltip(
+                    message: 'Open sessions',
+                    child: Container(
+                      width: 34,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        color: buttonColor,
+                        borderRadius: const BorderRadius.only(
+                          topRight: Radius.circular(18),
+                          bottomRight: Radius.circular(18),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: theme.shadowColor.withValues(alpha: 0.16),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                        border: Border(
+                          top: BorderSide(
+                            color: theme.colorScheme.outlineVariant.withValues(
+                              alpha: 0.42,
+                            ),
+                          ),
+                          right: BorderSide(
+                            color: theme.colorScheme.outlineVariant.withValues(
+                              alpha: 0.42,
+                            ),
+                          ),
+                          bottom: BorderSide(
+                            color: theme.colorScheme.outlineVariant.withValues(
+                              alpha: 0.42,
+                            ),
+                          ),
+                        ),
+                      ),
+                      child: Icon(Icons.menu, size: 19, color: iconColor),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
