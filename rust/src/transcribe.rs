@@ -7,7 +7,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use hound::{SampleFormat, WavSpec, WavWriter};
+use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use ogg::PacketReader;
 use opus_decoder::OpusDecoder;
 use reqwest::Client;
@@ -25,6 +25,8 @@ use tokio::process::Command;
 use crate::audio_crypto::decrypt_audio_payload;
 use crate::blossom::sha256_hex;
 use crate::protocol::AudioReference;
+
+const MIN_TRANSCRIBE_AUDIO_DURATION: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
@@ -185,6 +187,7 @@ pub async fn download_blossom_attachment(
 
 pub async fn transcribe_audio(audio_path: &Path, config: &TranscribeConfig) -> Result<String> {
     let prepared_audio = prepare_audio_for_transcription(audio_path, config).await?;
+    reject_short_audio(&prepared_audio.path)?;
     let output_dir = tempfile::tempdir().context("failed to create transcript temp directory")?;
     let audio_arg = prepared_audio.path.to_string_lossy().to_string();
     let output_dir_arg = output_dir.path().to_string_lossy().to_string();
@@ -241,6 +244,28 @@ pub async fn transcribe_audio(audio_path: &Path, config: &TranscribeConfig) -> R
     }
 
     Ok(transcript)
+}
+
+fn reject_short_audio(audio_path: &Path) -> Result<()> {
+    let reader = WavReader::open(audio_path).with_context(|| {
+        format!(
+            "failed to inspect prepared audio `{}`",
+            audio_path.display()
+        )
+    })?;
+    let sample_rate = reader.spec().sample_rate;
+    if sample_rate == 0 {
+        return Err(anyhow!("prepared audio sample rate is zero"));
+    }
+
+    let duration = Duration::from_secs_f64(reader.duration() as f64 / sample_rate as f64);
+    if duration < MIN_TRANSCRIBE_AUDIO_DURATION {
+        return Err(anyhow!(
+            "audio recording is too short: {:.2}s; minimum is 1.00s",
+            duration.as_secs_f64()
+        ));
+    }
+    Ok(())
 }
 
 struct PreparedAudio {
@@ -721,6 +746,19 @@ mod tests {
         assert_eq!(f32_to_i16(2.0), i16::MAX);
         assert_eq!(f32_to_i16(-2.0), -i16::MAX);
         assert_eq!(f32_to_i16(0.0), 0);
+    }
+
+    #[test]
+    fn rejects_prepared_audio_under_one_second() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let short_wav = temp_dir.path().join("short.wav");
+        let full_wav = temp_dir.path().join("full.wav");
+
+        write_mono_wav(&short_wav, 16_000, &vec![0.0; 15_999]).unwrap();
+        write_mono_wav(&full_wav, 16_000, &vec![0.0; 16_000]).unwrap();
+
+        assert!(reject_short_audio(&short_wav).is_err());
+        assert!(reject_short_audio(&full_wav).is_ok());
     }
 
     #[test]
