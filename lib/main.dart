@@ -235,7 +235,9 @@ enum _WorkingAnimationStyle {
   orbitSync('orbit_sync', 'Orbit sync'),
   scanLine('scan_line', 'Scan line'),
   dataPackets('data_packets', 'Data packets'),
-  pulseSpectrum('pulse_spectrum', 'Pulse spectrum');
+  pulseSpectrum('pulse_spectrum', 'Pulse spectrum'),
+  randomWalk('random_walk', 'Random walk'),
+  noiseField('noise_field', 'Noise field');
 
   const _WorkingAnimationStyle(this.storageValue, this.label);
 
@@ -334,6 +336,8 @@ const _wavVoiceFormat = _VoiceRecordingFormat(
   encoder: AudioEncoder.wav,
   bitRate: 256000,
 );
+
+const _minimumVoiceRecordingDuration = Duration(seconds: 1);
 
 String _compactIdentifier(String value) {
   if (value.length <= 18) return value;
@@ -577,7 +581,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   bool get _sendingMediaInActiveConversation =>
       _sendingMedia && _sendingMediaConversationKey == _activeConversationKey;
 
-  bool get _sendInProgress => _sending || _sendingAudio || _sendingMedia;
+  bool get _activeConversationSendBlocked =>
+      _sendingInActiveConversation ||
+      _sendingAudioInActiveConversation ||
+      _sendingMediaInActiveConversation;
 
   bool get _sessionSwitchBlocked => _sending || _sendingMedia;
 
@@ -2444,6 +2451,41 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     return mounted && _connected;
   }
 
+  Future<bool> _ensureConnectedToParentService() async {
+    final selected = _targetById(_repoTargets, _selectedRepoTargetId);
+    final parent = selected == null || _isParentRepoTarget(selected)
+        ? selected
+        : _parentRepoTargetFor(selected);
+
+    if (_connected) {
+      if (parent == null || _connectedPeerPubkey == parent.pubkey) return true;
+      await _disconnect(expand: false);
+    }
+
+    if (_connecting) {
+      setState(() => _status = 'Waiting for parent connection...');
+      for (var attempt = 0; attempt < 75; attempt += 1) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        if (!mounted) return false;
+        if (!_connecting) break;
+      }
+      if (_connected) {
+        if (parent == null || _connectedPeerPubkey == parent.pubkey) {
+          return true;
+        }
+        await _disconnect(expand: false);
+      }
+    }
+
+    if (parent != null) {
+      await _connectToTargetInBackground(parent);
+      return mounted && _connected && _connectedPeerPubkey == parent.pubkey;
+    }
+
+    await _connect();
+    return mounted && _connected;
+  }
+
   bool _shouldStartRepoTargetForSend(_RepoTarget? target) {
     if (target == null || _isParentRepoTarget(target)) return false;
     final workdir = target.workdir?.trim();
@@ -3164,10 +3206,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _requestSpawnSession() async {
-    if (!_connected) {
+    if (!await _ensureConnectedToParentService()) {
       _showError('Connect to the parent service first');
       return;
     }
+    if (!mounted) return;
     final request = await showDialog<_SpawnSessionRequest>(
       context: context,
       builder: (context) => _SpawnSessionDialog(
@@ -3197,7 +3240,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _showError('This session does not have a saved folder path');
       return;
     }
-    if (!_connected) {
+    if (!await _ensureConnectedToParentService()) {
       _showError('Connect to the parent service first');
       return;
     }
@@ -3267,7 +3310,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<List<_RepoChoice>> _requestRepoChoices() async {
-    if (!_connected) {
+    if (!await _ensureConnectedToParentService()) {
       throw StateError('Connect to the parent service first');
     }
     final existing = _pendingRepoListCompleter;
@@ -3696,7 +3739,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return;
     }
 
-    if (_sending || _sendingAudio) return;
+    if (_sendingInActiveConversation || _sendingAudioInActiveConversation) {
+      return;
+    }
     _tapHapticFeedback();
     _clearAutoSpeakSuppression();
 
@@ -3775,6 +3820,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final sendTarget = _targetById(_repoTargets, _selectedRepoTargetId);
     final fallbackPath = _recordingPath;
     final recordingFormat = _activeRecordingFormat ?? _opusVoiceFormat;
+    final recordingStartedAt = _recordingStartedAt;
     String? path;
     try {
       path = await _recorder.stop();
@@ -3794,6 +3840,23 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
 
     if (!mounted) return;
+    final recordingDuration = recordingStartedAt == null
+        ? null
+        : DateTime.now().difference(recordingStartedAt);
+    if (recordingDuration != null &&
+        recordingDuration < _minimumVoiceRecordingDuration) {
+      setState(() {
+        _recording = false;
+        _recordingPath = null;
+        _activeRecordingFormat = null;
+        _recordingStartedAt = null;
+        _stopRecordingTimer();
+        _status = 'Recording too short';
+      });
+      if (path != null) unawaited(_deleteTempAudio(path));
+      return;
+    }
+
     setState(() {
       _recording = false;
       _recordingPath = null;
@@ -4232,25 +4295,24 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     return Row(
       children: [
-        SizedBox(
-          width: compact ? 24 : 32,
-          child: pending
-              ? Center(
-                  child: _workingAnimationStyle.enabled
-                      ? _DigitalThinkingIndicator(
-                          width: compact ? 22 : 28,
-                          height: compact ? 14 : 16,
-                          color: statusColor,
-                          style: _workingAnimationStyle,
-                        )
-                      : Icon(
-                          Icons.chat_bubble_outline,
-                          color: statusColor,
-                          size: compact ? 17 : 20,
-                        ),
-                )
-              : const SizedBox.shrink(),
-        ),
+        if (pending && !compact)
+          SizedBox(
+            width: 32,
+            child: Center(
+              child: _workingAnimationStyle.enabled
+                  ? _DigitalThinkingIndicator(
+                      width: 28,
+                      height: 16,
+                      color: statusColor,
+                      style: _workingAnimationStyle,
+                    )
+                  : Icon(
+                      Icons.chat_bubble_outline,
+                      color: statusColor,
+                      size: 20,
+                    ),
+            ),
+          ),
         Expanded(
           child: Text(
             target.displayName,
@@ -4431,6 +4493,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               sending: _sendingInActiveConversation,
               sendingAudio: _sendingAudioInActiveConversation,
               sendingMedia: _sendingMediaInActiveConversation,
+              activeSendBlocked: _activeConversationSendBlocked,
               recording: _recording,
               recordingDurationLabel: _recordingDurationLabel,
               wavRetryRequested: _wavRetryRequested,
@@ -5752,6 +5815,7 @@ class _Composer extends StatefulWidget {
     required this.sending,
     required this.sendingAudio,
     required this.sendingMedia,
+    required this.activeSendBlocked,
     required this.recording,
     required this.recordingDurationLabel,
     required this.wavRetryRequested,
@@ -5771,6 +5835,7 @@ class _Composer extends StatefulWidget {
   final bool sending;
   final bool sendingAudio;
   final bool sendingMedia;
+  final bool activeSendBlocked;
   final bool recording;
   final String recordingDurationLabel;
   final bool wavRetryRequested;
@@ -5850,10 +5915,7 @@ class _ComposerState extends State<_Composer> {
               builder: (context, value, _) {
                 final hasText = value.text.trim().isNotEmpty;
                 final canSendFromInput = hasText || widget.hasPendingMedia;
-                final busy =
-                    widget.sending ||
-                    widget.sendingAudio ||
-                    widget.sendingMedia;
+                final busy = widget.activeSendBlocked;
                 final canUseMainAction = !busy;
                 final onMainPressed = canUseMainAction
                     ? widget.connected
@@ -6166,6 +6228,12 @@ class _DigitalThinkingPainter extends CustomPainter {
       case _WorkingAnimationStyle.pulseSpectrum:
         _paintPulseSpectrum(canvas, size);
         break;
+      case _WorkingAnimationStyle.randomWalk:
+        _paintRandomWalk(canvas, size);
+        break;
+      case _WorkingAnimationStyle.noiseField:
+        _paintNoiseField(canvas, size);
+        break;
     }
   }
 
@@ -6373,6 +6441,69 @@ class _DigitalThinkingPainter extends CustomPainter {
         Paint()..color = color.withValues(alpha: 0.28 + pulse * 0.58),
       );
     }
+  }
+
+  void _paintRandomWalk(Canvas canvas, Size size) {
+    final t = animation.value;
+    final points = <Offset>[];
+    const count = 9;
+    for (var index = 0; index < count; index++) {
+      final x = size.width * index / (count - 1);
+      final drift =
+          math.sin((t * 2.7 + index * 0.37) * math.pi * 2) * 0.18 +
+          math.sin((t * 5.1 + index * 0.19) * math.pi * 2) * 0.09;
+      final y = size.height * (0.5 + drift).clamp(0.12, 0.88);
+      points.add(Offset(x, y));
+    }
+
+    final path = Path()..moveTo(points.first.dx, points.first.dy);
+    for (final point in points.skip(1)) {
+      path.lineTo(point.dx, point.dy);
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color.withValues(alpha: 0.32)
+        ..strokeWidth = 1.25
+        ..strokeCap = StrokeCap.round
+        ..style = PaintingStyle.stroke,
+    );
+
+    for (var index = 0; index < points.length; index++) {
+      final blink = _noise(t, index, 0);
+      canvas.drawCircle(
+        points[index],
+        1.2 + blink * 2.1,
+        Paint()..color = color.withValues(alpha: 0.2 + blink * 0.68),
+      );
+    }
+  }
+
+  void _paintNoiseField(Canvas canvas, Size size) {
+    final t = animation.value;
+    final columns = size.width > 40 ? 8 : 6;
+    final rows = 3;
+    final xStep = size.width / (columns - 1);
+    final yStep = size.height / (rows - 1);
+
+    for (var row = 0; row < rows; row++) {
+      for (var column = 0; column < columns; column++) {
+        final pulse = _noise(t, column, row);
+        if (pulse < 0.28) continue;
+        final point = Offset(column * xStep, row * yStep);
+        canvas.drawCircle(
+          point,
+          0.9 + pulse * 2.4,
+          Paint()..color = color.withValues(alpha: 0.14 + pulse * 0.66),
+        );
+      }
+    }
+  }
+
+  double _noise(double t, int x, int y) {
+    final a = math.sin((x * 12.9898) + (y * 78.233) + (t * 17.17));
+    final b = math.sin((x * 39.3468) + (y * 11.135) - (t * 31.43));
+    return ((a + b + 2) / 4).clamp(0, 1).toDouble();
   }
 
   @override
@@ -6616,15 +6747,12 @@ class _MessageTileState extends State<_MessageTile>
         ),
       );
       if (widget.onCancelPending == null) return bubble;
-      return Tooltip(
-        message: 'Hold 5 seconds to cancel',
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapDown: (_) => _startCancelHold(),
-          onTapUp: (_) => _stopCancelHold(),
-          onTapCancel: _stopCancelHold,
-          child: bubble,
-        ),
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => _startCancelHold(),
+        onTapUp: (_) => _stopCancelHold(),
+        onTapCancel: _stopCancelHold,
+        child: bubble,
       );
     }
 
