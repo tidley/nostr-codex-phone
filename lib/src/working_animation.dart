@@ -67,7 +67,7 @@ class _DigitalThinkingIndicatorState extends State<DigitalThinkingIndicator>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.speed == widget.speed) return;
     _controller.duration = _durationForSpeed(widget.speed);
-    if (!_controller.isAnimating) _controller.repeat();
+    _controller.repeat();
   }
 
   @override
@@ -410,8 +410,7 @@ class _DigitalThinkingPainter extends CustomPainter {
   }
 
   double _time() {
-    return (animation.lastElapsedDuration ?? Duration.zero).inMicroseconds /
-        Duration.microsecondsPerSecond;
+    return animation.value;
   }
 
   @override

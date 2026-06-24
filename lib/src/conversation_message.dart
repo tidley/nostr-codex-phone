@@ -60,6 +60,11 @@ int compareConversationMessagesChronological(
   ConversationMessage left,
   ConversationMessage right,
 ) {
+  final pendingCompare = _pendingPlaceholderRank(
+    left,
+  ).compareTo(_pendingPlaceholderRank(right));
+  if (pendingCompare != 0) return pendingCompare;
+
   final timestampCompare = left.timestamp.compareTo(right.timestamp);
   if (timestampCompare != 0) return timestampCompare;
 
@@ -75,6 +80,14 @@ int compareConversationMessagesChronological(
   if (kindCompare != 0) return kindCompare;
 
   return left.text.compareTo(right.text);
+}
+
+int _pendingPlaceholderRank(ConversationMessage message) {
+  if (message.direction == MessageDirection.outgoing &&
+      message.kind == 'transcribing') {
+    return 1;
+  }
+  return 0;
 }
 
 int compareConversationMessagesNewestFirst(
