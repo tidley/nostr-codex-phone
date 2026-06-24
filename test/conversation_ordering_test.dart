@@ -1,7 +1,8 @@
 import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:nostr_codex_phone/main.dart';
+import 'package:nostr_codex_phone/src/conversation_message.dart';
+import 'package:nostr_codex_phone/src/repo_target_merge.dart';
 
 void main() {
   test('matches target invites by workdir before pubkey', () {
