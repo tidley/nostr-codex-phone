@@ -656,7 +656,7 @@ async fn process_message(
                     &message.sender_pubkey_hex,
                     &message,
                     media_bundle,
-                    &audio_config,
+                    audio_config,
                     transcribe_config,
                     codex_config,
                     cancel_token,
@@ -746,7 +746,7 @@ async fn process_message(
                     &message.sender_pubkey_hex,
                     &message,
                     media_bundle,
-                    &audio_config,
+                    audio_config,
                     transcribe_config,
                     codex_config,
                     cancel_token,
@@ -2371,9 +2371,7 @@ fn memory_context(
     before_message_id: i64,
     request: &str,
 ) -> Option<String> {
-    let Some(memory) = memory.as_ref() else {
-        return None;
-    };
+    let memory = memory.as_ref()?;
 
     match memory.prompt_context(peer_pubkey, before_message_id, request) {
         Ok(context) => context,

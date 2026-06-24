@@ -4,6 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:nostr_codex_phone/main.dart';
+import 'package:nostr_codex_phone/src/bridge_json.dart';
+import 'package:nostr_codex_phone/src/repo_choice.dart';
+import 'package:nostr_codex_phone/src/repo_target.dart';
+import 'package:nostr_codex_phone/src/text_utils.dart';
 
 void main() {
   test('app widget is available', () {
@@ -42,5 +46,28 @@ Use [the docs](https://example.com).
     final negative = BigInt.from(-1);
 
     expect(() => bridgeUIntToJsonInt(negative), throwsArgumentError);
+  });
+
+  test('round trips extracted repo target and repo choice models', () {
+    final target = RepoTarget.fromJson({
+      'id': 'phone',
+      'name': '',
+      'pubkey': 'npub1234567890abcdef123456',
+      'relays': [' wss://relay.example ', ''],
+      'workdir': '/home/tom/code/phone',
+      'parent_relays': ['wss://parent.example'],
+    });
+    final choice = RepoChoice.fromJson({
+      'name': 'phone',
+      'path': '/home/tom/code/phone',
+      'relative_path': 'phone',
+      'is_git_repo': true,
+    });
+
+    expect(target, isNotNull);
+    expect(target!.displayName, 'npub123456...123456');
+    expect(target.toJson()['relays'], ['wss://relay.example']);
+    expect(choice?.displayName, 'phone');
+    expect(choice?.toJson()['is_git_repo'], true);
   });
 }
