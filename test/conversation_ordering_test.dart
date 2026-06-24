@@ -79,6 +79,31 @@ void main() {
     expect(ordered, [replyToEarlierPrompt, newerPrompt, transcribing]);
   });
 
+  test('keeps stale outgoing transcribing placeholders at the bottom', () {
+    final base = DateTime(2026, 6, 23, 17, 25);
+    final staleTranscribing = ConversationMessage(
+      direction: MessageDirection.outgoing,
+      kind: 'transcribing',
+      text: 'Transcribing...',
+      eventId: 'stale-transcribing',
+      timestamp: base,
+    );
+    final lastReceived = ConversationMessage(
+      direction: MessageDirection.incoming,
+      kind: 'response',
+      text: 'Last received message',
+      eventId: 'last-received',
+      timestamp: base.add(const Duration(minutes: 3)),
+    );
+
+    final ordered = sortConversationMessagesChronological([
+      staleTranscribing,
+      lastReceived,
+    ]);
+
+    expect(ordered, [lastReceived, staleTranscribing]);
+  });
+
   test('applies deterministic tie breaks for same-timestamp messages', () {
     final timestamp = DateTime(2026, 6, 23, 17, 26);
     final messages = [
@@ -112,6 +137,39 @@ void main() {
       'event-b',
       'event-c',
     ]);
+  });
+
+  test('keeps pending transcription placeholders at the bottom', () {
+    final base = DateTime(2026, 6, 24, 16);
+    final queuedVoice = ConversationMessage(
+      direction: MessageDirection.outgoing,
+      kind: 'transcribing',
+      text: 'Queued',
+      eventId: 'voice-pending',
+      timestamp: base,
+    );
+    final receivedReply = ConversationMessage(
+      direction: MessageDirection.incoming,
+      kind: 'response',
+      text: 'Previous reply arrived',
+      eventId: 'reply',
+      timestamp: base.add(const Duration(minutes: 2)),
+    );
+    final followUp = ConversationMessage(
+      direction: MessageDirection.outgoing,
+      kind: 'query',
+      text: 'Follow up',
+      eventId: 'follow-up',
+      timestamp: base.add(const Duration(minutes: 3)),
+    );
+
+    final ordered = sortConversationMessagesChronological([
+      followUp,
+      queuedVoice,
+      receivedReply,
+    ]);
+
+    expect(ordered, [receivedReply, followUp, queuedVoice]);
   });
 
   test('keeps shuffled npub traffic chronological during fuzz run', () {

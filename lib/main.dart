@@ -2609,7 +2609,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         message.kind == 'error' ||
         message.kind == 'invalid';
     setState(() {
-      if (isActiveConversation && message.kind == 'response') {
+      if (message.kind == 'response') {
         _dropPendingProcessingMessage(
           targetKey,
           completion: _PendingMessageCompletion.response,
