@@ -652,6 +652,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       parentWorkdir: existing?.parentWorkdir,
       parentName: existing?.parentName,
       pairingSecret: existing?.pairingSecret,
+      isMasterSession: existing?.isMasterSession ?? false,
     );
   }
 
@@ -742,17 +743,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     );
     final savedTarget = existingIndex == -1
         ? target
-        : RepoTarget(
+        : target.copyWith(
             id: targets[existingIndex].id,
-            name: target.name,
-            pubkey: target.pubkey,
-            relays: target.relays,
-            workdir: target.workdir,
-            parentPubkey: target.parentPubkey,
-            parentRelays: target.parentRelays,
-            parentWorkdir: target.parentWorkdir,
-            parentName: target.parentName,
-            pairingSecret: target.pairingSecret,
+            isMasterSession: targets[existingIndex].isMasterSession,
           );
     if (existingIndex == -1) {
       targets.add(savedTarget);
@@ -1103,17 +1096,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     );
     final savedTarget = existingIndex == -1
         ? target
-        : RepoTarget(
+        : target.copyWith(
             id: targets[existingIndex].id,
-            name: target.name,
-            pubkey: target.pubkey,
-            relays: target.relays,
-            workdir: target.workdir,
-            parentPubkey: target.parentPubkey,
-            parentRelays: target.parentRelays,
-            parentWorkdir: target.parentWorkdir,
-            parentName: target.parentName,
-            pairingSecret: target.pairingSecret,
+            isMasterSession: targets[existingIndex].isMasterSession,
           );
     if (existingIndex == -1) {
       targets.add(savedTarget);
@@ -1778,18 +1763,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return;
     }
 
-    targets[index] = RepoTarget(
-      id: target.id,
-      name: cleaned,
-      pubkey: target.pubkey,
-      relays: target.relays,
-      workdir: target.workdir,
-      parentPubkey: target.parentPubkey,
-      parentRelays: target.parentRelays,
-      parentWorkdir: target.parentWorkdir,
-      parentName: target.parentName,
-      pairingSecret: target.pairingSecret,
-    );
+    targets[index] = target.copyWith(name: cleaned);
     setState(() {
       _repoTargets = targets;
       if (_selectedRepoTargetId == target.id) {
@@ -2196,9 +2170,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<bool> _ensureConnectedToParentService() async {
-    final parent = _parentServiceTargetForSpawn();
+    final parent = await _parentServiceTargetForSpawn();
     if (parent == null) {
-      _showError('Select the parent phone session at /home/tom/code/phone');
+      _showError('Set a master session first');
       return false;
     }
 
@@ -2224,25 +2198,67 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     return mounted && _connected && _connectedPeerPubkey == parent.pubkey;
   }
 
-  RepoTarget? _parentServiceTargetForSpawn() {
+  Future<RepoTarget?> _parentServiceTargetForSpawn() async {
+    final master = _masterRepoTarget();
+    if (master != null) return master;
+
     final selected = _targetById(_repoTargets, _selectedRepoTargetId);
     if (selected != null) {
-      if (_isParentRepoTarget(selected)) return selected;
+      if (_canBecomeMasterSession(selected)) {
+        return _setMasterRepoTarget(selected, announce: false);
+      }
       return _parentRepoTargetFor(selected);
     }
 
-    final active = _activeRepoTargetFromControllers();
-    if (active != null && _isParentRepoTarget(active)) return active;
     return null;
+  }
+
+  RepoTarget? _masterRepoTarget() {
+    for (final target in _repoTargets) {
+      if (target.isMasterSession) return target;
+    }
+    return null;
+  }
+
+  bool _canBecomeMasterSession(RepoTarget target) {
+    final parentPubkey = target.parentPubkey?.trim();
+    return parentPubkey == null || parentPubkey.isEmpty;
+  }
+
+  Future<RepoTarget> _setMasterRepoTarget(
+    RepoTarget target, {
+    bool announce = true,
+  }) async {
+    final targets = [..._repoTargets];
+    final index = targets.indexWhere((item) => item.id == target.id);
+    final savedTarget = (index >= 0 ? targets[index] : target).copyWith(
+      isMasterSession: true,
+    );
+
+    for (var i = 0; i < targets.length; i += 1) {
+      targets[i] = targets[i].copyWith(
+        isMasterSession: targets[i].id == savedTarget.id,
+      );
+    }
+    if (index < 0) {
+      targets.add(savedTarget);
+    }
+
+    setState(() {
+      _repoTargets = targets;
+      if (_selectedRepoTargetId == savedTarget.id) {
+        _applyRepoTargetFields(savedTarget);
+      }
+      if (announce) {
+        _status = 'Master session set: ${savedTarget.displayName}';
+      }
+    });
+    await _saveSettings();
+    return savedTarget;
   }
 
   bool _shouldStartRepoTargetForSend(RepoTarget? target) {
     return false;
-  }
-
-  bool _isParentRepoTarget(RepoTarget target) {
-    final workdir = target.workdir?.trim();
-    return workdir == '/home/tom/code/phone';
   }
 
   Future<bool?> _startSelectedRepoTargetForSend(RepoTarget target) async {
@@ -2372,17 +2388,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final index = targets.indexWhere((target) => target.id == targetId);
     if (index < 0) return;
     final target = targets[index];
-    targets[index] = RepoTarget(
-      id: target.id,
-      name: target.name,
-      pubkey: target.pubkey,
-      relays: target.relays,
-      workdir: target.workdir,
-      parentPubkey: target.parentPubkey,
-      parentRelays: target.parentRelays,
-      parentWorkdir: target.parentWorkdir,
-      parentName: target.parentName,
-    );
+    targets[index] = target.copyWith(clearPairingSecret: true);
     _repoTargets = targets;
   }
 
@@ -2401,35 +2407,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         pubkey: parentPubkey,
         relays: parentRelays,
         workdir: target.parentWorkdir,
+        isMasterSession: true,
       );
     }
 
-    final targetWorkdir = target.workdir?.trim();
-    final candidates = _repoTargets.where((candidate) {
-      if (candidate.id == target.id) return false;
-      return candidate.pubkey != target.pubkey;
-    }).toList();
-    if (candidates.isEmpty) return null;
-
-    RepoTarget? firstWhere(bool Function(RepoTarget target) test) {
-      for (final candidate in candidates) {
-        if (test(candidate)) return candidate;
-      }
-      return null;
-    }
-
-    return firstWhere((candidate) {
-          final workdir = candidate.workdir?.trim();
-          return workdir != null &&
-              workdir.isNotEmpty &&
-              workdir != targetWorkdir &&
-              workdir == '/home/tom/code/phone';
-        }) ??
-        firstWhere((candidate) {
-          final workdir = candidate.workdir?.trim();
-          return workdir == null &&
-              candidate.displayName.trim().toLowerCase() == 'phone';
-        });
+    return _masterRepoTarget();
   }
 
   BridgeNostrConfig _activeNostrConfig() {
@@ -4270,6 +4252,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         onNewTarget: () => unawaited(_createRepoTarget()),
         onSpawnSession: () => unawaited(_requestSpawnSession()),
         onRestartTarget: (target) => unawaited(_restartRepoTarget(target)),
+        onSetMasterTarget: (target) => unawaited(_setMasterRepoTarget(target)),
         onRenameTarget: (target) => unawaited(_renameRepoTarget(target)),
         onOpenSettings: () => unawaited(_openSettings()),
         onDeleteTarget: (targetId) {
