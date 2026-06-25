@@ -46,6 +46,24 @@ void main() {
     expect(repoTargetMergeIndex(targets, incoming), 0);
   });
 
+  test('does not merge routed sessions by shared service pubkey', () {
+    final targets = [
+      const RepoTargetMergeIdentity(
+        id: 'phone',
+        pubkey: 'npub1service',
+        workdir: '/home/tom/code/phone',
+      ),
+    ];
+
+    final incoming = const RepoTargetMergeIdentity(
+      id: 'invite-new-id',
+      pubkey: 'npub1service',
+      workdir: '/home/tom/code/pave/monitor',
+    );
+
+    expect(repoTargetMergeIndex(targets, incoming), -1);
+  });
+
   test('orders screenshot regression chronologically by timestamp', () {
     final base = DateTime(2026, 6, 23, 17, 25);
     final replyToEarlierPrompt = ConversationMessage(

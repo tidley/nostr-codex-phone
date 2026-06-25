@@ -1067,6 +1067,13 @@ class _ConnectionPanel extends StatelessWidget {
                     style: theme.textTheme.bodySmall,
                   ),
                 ),
+                IconButton(
+                  tooltip: 'Copy local pubkey',
+                  onPressed: ownPubkey == null || ownPubkey!.isEmpty
+                      ? null
+                      : () => _copyOwnPubkey(context),
+                  icon: const Icon(Icons.content_copy),
+                ),
                 TextButton.icon(
                   onPressed: connected ? null : onGenerateKey,
                   icon: const Icon(Icons.key),
@@ -1251,6 +1258,16 @@ class _ConnectionPanel extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _copyOwnPubkey(BuildContext context) async {
+    final pubkey = ownPubkey;
+    if (pubkey == null || pubkey.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: pubkey));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Copied local pubkey')));
   }
 }
 

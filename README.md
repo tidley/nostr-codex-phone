@@ -127,11 +127,11 @@ event delivered by multiple relays is only processed once per session.
 
 ## Multi-Repo Command And Control
 
-The phone can store multiple repo targets. Each target is a named Nostr peer
-pubkey plus relay list, so the same mobile key can quickly switch between
-the main parent worker and spawned repo workers. Each worker has its own Nostr
-identity and therefore its own npub. The phone sends DMs to the selected target
-only.
+The phone can store multiple repo targets. Each target is a named session with
+a Nostr service pubkey, relay list, and optional workdir route, so the same
+mobile key can quickly switch between repo sessions while still DMing one
+service npub. The selected workdir route is carried inside the encrypted
+GiftWrapped DM payload.
 
 The phone session drawer includes **Spawn on computer**. It sends a
 `spawn_session` request to the currently connected worker. The dialog treats
@@ -139,10 +139,9 @@ The phone session drawer includes **Spawn on computer**. It sends a
 name such as `my-new-project`, `phone`, or `pave/website`. In **Open** mode, the
 dialog can ask the worker for folders under `/home/tom/code` and
 `/home/tom/code/pave` and fill the field from that list. If the spawn succeeds,
-the parent worker starts a child worker, writes the child `.env.server`, sends a
-target invite DM back to the phone, and records the child in
-`.nostr-codex-workers.json`. Accepting the invite adds the child worker as a
-saved phone session.
+the service sends a target invite DM back to the phone and records the routed
+session in `.nostr-codex-workers.json`. Accepting the invite adds it as a saved
+phone session.
 
 The same workflow can be driven by text:
 
