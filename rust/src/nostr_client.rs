@@ -175,6 +175,19 @@ impl NostrMessenger {
             .await
     }
 
+    pub async fn send_routed_response_to(
+        &self,
+        receiver_pubkey: &str,
+        response: impl Into<String>,
+        workdir: impl Into<String>,
+    ) -> Result<String> {
+        self.send_wire_to_pubkey(
+            receiver_pubkey,
+            WireMessage::routed_response(response, workdir),
+        )
+        .await
+    }
+
     pub async fn send_error(&self, error: impl Into<String>) -> Result<String> {
         self.send_wire(WireMessage::error(error)).await
     }

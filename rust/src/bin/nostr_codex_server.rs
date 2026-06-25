@@ -39,6 +39,7 @@ use tracing::{error, info, warn};
 
 const WORKER_REGISTRY_FILE: &str = ".nostr-codex-workers.json";
 const WORKER_LOCK_FILE: &str = ".nostr-codex-worker.lock";
+const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestClass {
@@ -59,6 +60,12 @@ struct SpawnWorkerRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CancelRequest {
     event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NonblockingControlRequest {
+    Spawn(SpawnWorkerRequest),
+    RepoList,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -790,7 +797,17 @@ async fn peer_worker(
                                     "Cancelling current task...",
                                 )
                                 .await;
-                            } else {
+                            } else if !process_nonblocking_control_message(
+                                &next_message,
+                                &messenger,
+                                &relays,
+                                &codex_config,
+                                &audio_config,
+                                &transcribe_config,
+                                &manager,
+                            )
+                            .await
+                            {
                                 backlog.push_back(next_message);
                             }
                         }
@@ -828,6 +845,60 @@ fn panic_payload_description(payload: &(dyn Any + Send)) -> String {
         return message.clone();
     }
     "non-string panic payload".to_string()
+}
+
+async fn process_nonblocking_control_message(
+    message: &IncomingMessage,
+    messenger: &NostrMessenger,
+    relays: &[String],
+    codex_config: &CodexConfig,
+    audio_config: &AudioConfig,
+    transcribe_config: &TranscribeConfig,
+    manager: &RepoRuntimeManager,
+) -> bool {
+    match nonblocking_control_request(&message.kind, &message.text) {
+        Some(NonblockingControlRequest::Spawn(spawn_request)) => {
+            info!(
+                "processing spawn request event {} while codex task is active",
+                message.event_id
+            );
+            process_spawn_worker_request(
+                messenger,
+                &message.sender_pubkey,
+                &message.sender_pubkey_hex,
+                &spawn_request,
+                relays,
+                codex_config,
+                audio_config,
+                transcribe_config,
+                manager,
+            )
+            .await;
+            true
+        }
+        Some(NonblockingControlRequest::RepoList) => {
+            info!(
+                "processing repo list request event {} while codex task is active",
+                message.event_id
+            );
+            process_repo_list_request(messenger, &message.sender_pubkey_hex).await;
+            true
+        }
+        None => false,
+    }
+}
+
+fn nonblocking_control_request(kind: &str, text: &str) -> Option<NonblockingControlRequest> {
+    if kind != "query" {
+        return None;
+    }
+    if let Some(spawn_request) = parse_spawn_worker_request(text) {
+        return Some(NonblockingControlRequest::Spawn(spawn_request));
+    }
+    if is_repo_list_request(text) {
+        return Some(NonblockingControlRequest::RepoList);
+    }
+    None
 }
 
 async fn process_message(
@@ -2361,7 +2432,14 @@ async fn process_text_turn(
         Err(()) => return,
     };
 
-    send_response_and_remember(messenger, memory, peer_pubkey, response).await;
+    send_response_and_remember(
+        messenger,
+        memory,
+        peer_pubkey,
+        response,
+        &codex_config.working_dir,
+    )
+    .await;
     spawn_compaction_if_needed(memory, peer_pubkey, codex_config);
 }
 
@@ -3259,9 +3337,14 @@ async fn send_response_and_remember(
     memory: &mut Option<MemoryStore>,
     receiver_pubkey: &str,
     response: String,
+    workdir: &Path,
 ) {
     match messenger
-        .send_response_to(receiver_pubkey, response.clone())
+        .send_routed_response_to(
+            receiver_pubkey,
+            response.clone(),
+            workdir.to_string_lossy().to_string(),
+        )
         .await
     {
         Ok(event_id) => {
@@ -3342,73 +3425,78 @@ async fn run_codex_and_report(
     session_id: Option<&str>,
     cancel_token: &CodexCancelToken,
 ) -> std::result::Result<String, ()> {
-    let result =
-        match run_codex_session_with_cancel(prompt, codex_config, session_id, Some(cancel_token))
+    let first_attempt_config = codex_config_for_first_attempt(codex_config, session_id);
+    let result = match run_codex_session_with_cancel(
+        prompt,
+        &first_attempt_config,
+        session_id,
+        Some(cancel_token),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(err) if is_codex_cancelled_error(&err) => {
+            return report_codex_cancelled(messenger, receiver_pubkey).await;
+        }
+        Err(err) if is_codex_usage_limit_error(&err) => {
+            match retry_codex_with_usage_limit_fallback(
+                prompt,
+                codex_config,
+                session_id,
+                cancel_token,
+                err,
+            )
             .await
-        {
-            Ok(result) => result,
-            Err(err) if is_codex_cancelled_error(&err) => {
-                return report_codex_cancelled(messenger, receiver_pubkey).await;
+            {
+                Ok(result) => result,
+                Err(err) if is_codex_cancelled_error(&err) => {
+                    return report_codex_cancelled(messenger, receiver_pubkey).await;
+                }
+                Err(err) => return report_codex_error(messenger, receiver_pubkey, err).await,
             }
-            Err(err) if is_codex_usage_limit_error(&err) => {
-                match retry_codex_with_usage_limit_fallback(
-                    prompt,
-                    codex_config,
-                    session_id,
-                    cancel_token,
-                    err,
-                )
+        }
+        Err(err) if session_id.is_some() => {
+            warn!("Codex resume failed; clearing session and retrying once: {err:#}");
+            if let Some(memory) = memory.as_mut() {
+                if let Err(clear_err) =
+                    memory.clear_codex_session(receiver_pubkey, &codex_config.working_dir)
+                {
+                    warn!("failed to clear Codex session: {clear_err:#}");
+                }
+            }
+            match run_codex_session_with_cancel(prompt, codex_config, None, Some(cancel_token))
                 .await
-                {
-                    Ok(result) => result,
-                    Err(err) if is_codex_cancelled_error(&err) => {
-                        return report_codex_cancelled(messenger, receiver_pubkey).await;
-                    }
-                    Err(err) => return report_codex_error(messenger, receiver_pubkey, err).await,
+            {
+                Ok(result) => result,
+                Err(err) if is_codex_cancelled_error(&err) => {
+                    return report_codex_cancelled(messenger, receiver_pubkey).await;
                 }
-            }
-            Err(err) if session_id.is_some() => {
-                warn!("Codex resume failed; clearing session and retrying once: {err:#}");
-                if let Some(memory) = memory.as_mut() {
-                    if let Err(clear_err) =
-                        memory.clear_codex_session(receiver_pubkey, &codex_config.working_dir)
-                    {
-                        warn!("failed to clear Codex session: {clear_err:#}");
-                    }
-                }
-                match run_codex_session_with_cancel(prompt, codex_config, None, Some(cancel_token))
+                Err(err) if is_codex_usage_limit_error(&err) => {
+                    match retry_codex_with_usage_limit_fallback(
+                        prompt,
+                        codex_config,
+                        None,
+                        cancel_token,
+                        err,
+                    )
                     .await
-                {
-                    Ok(result) => result,
-                    Err(err) if is_codex_cancelled_error(&err) => {
-                        return report_codex_cancelled(messenger, receiver_pubkey).await;
-                    }
-                    Err(err) if is_codex_usage_limit_error(&err) => {
-                        match retry_codex_with_usage_limit_fallback(
-                            prompt,
-                            codex_config,
-                            None,
-                            cancel_token,
-                            err,
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(err) if is_codex_cancelled_error(&err) => {
-                                return report_codex_cancelled(messenger, receiver_pubkey).await;
-                            }
-                            Err(err) => {
-                                return report_codex_error(messenger, receiver_pubkey, err).await
-                            }
+                    {
+                        Ok(result) => result,
+                        Err(err) if is_codex_cancelled_error(&err) => {
+                            return report_codex_cancelled(messenger, receiver_pubkey).await;
+                        }
+                        Err(err) => {
+                            return report_codex_error(messenger, receiver_pubkey, err).await
                         }
                     }
-                    Err(err) => return report_codex_error(messenger, receiver_pubkey, err).await,
                 }
+                Err(err) => return report_codex_error(messenger, receiver_pubkey, err).await,
             }
-            Err(err) => {
-                return report_codex_error(messenger, receiver_pubkey, err).await;
-            }
-        };
+        }
+        Err(err) => {
+            return report_codex_error(messenger, receiver_pubkey, err).await;
+        }
+    };
 
     if let Some(next_session_id) = result
         .session_id
@@ -3428,6 +3516,19 @@ async fn run_codex_and_report(
     }
 
     Ok(result.response)
+}
+
+fn codex_config_for_first_attempt(
+    codex_config: &CodexConfig,
+    session_id: Option<&str>,
+) -> CodexConfig {
+    if session_id.is_none() || codex_config.timeout <= CODEX_RESUME_TIMEOUT {
+        return codex_config.clone();
+    }
+
+    let mut config = codex_config.clone();
+    config.timeout = CODEX_RESUME_TIMEOUT;
+    config
 }
 
 async fn retry_codex_with_usage_limit_fallback(
@@ -3592,6 +3693,50 @@ mod tests {
         );
         assert_eq!(parse_spawn_worker_request("/spawn"), None);
         assert_eq!(parse_spawn_worker_request("spawn a repo"), None);
+    }
+
+    #[test]
+    fn detects_nonblocking_control_requests() {
+        assert_eq!(
+            nonblocking_control_request("query", r#"{"repo_list_request":{}}"#),
+            Some(NonblockingControlRequest::RepoList)
+        );
+        assert_eq!(
+            nonblocking_control_request(
+                "query",
+                r#"{"spawn_session":{"workdir":"/home/tom/code/repo"}}"#
+            ),
+            Some(NonblockingControlRequest::Spawn(SpawnWorkerRequest {
+                workdir: "/home/tom/code/repo".to_string(),
+                create: false,
+                silent: false,
+            }))
+        );
+        assert_eq!(
+            nonblocking_control_request("audio", r#"{"repo_list_request":{}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn caps_resume_attempt_timeout_only() {
+        let config = CodexConfig {
+            bin: "codex".to_string(),
+            args: vec!["exec".to_string()],
+            working_dir: PathBuf::from("/tmp"),
+            timeout: Duration::from_secs(300),
+            persist_sessions: true,
+            usage_limit_fallback_model: None,
+        };
+
+        assert_eq!(
+            codex_config_for_first_attempt(&config, Some("session")).timeout,
+            CODEX_RESUME_TIMEOUT
+        );
+        assert_eq!(
+            codex_config_for_first_attempt(&config, None).timeout,
+            Duration::from_secs(300)
+        );
     }
 
     #[test]

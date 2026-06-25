@@ -2,6 +2,8 @@ import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr_codex_phone/src/conversation_message.dart';
+import 'package:nostr_codex_phone/src/incoming_route.dart';
+import 'package:nostr_codex_phone/src/repo_target.dart';
 import 'package:nostr_codex_phone/src/repo_target_merge.dart';
 
 void main() {
@@ -62,6 +64,68 @@ void main() {
     );
 
     expect(repoTargetMergeIndex(targets, incoming), -1);
+  });
+
+  test(
+    'routes incoming responses by embedded workdir before shared pubkey',
+    () {
+      final targets = [
+        const RepoTarget(
+          id: 'phone',
+          name: 'phone',
+          pubkey: 'npub1service',
+          relays: ['wss://relay.example'],
+          workdir: '/home/tom/code/phone',
+        ),
+        const RepoTarget(
+          id: 'monitor',
+          name: 'monitor',
+          pubkey: 'npub1service',
+          relays: ['wss://relay.example'],
+          workdir: '/home/tom/code/pave/monitor',
+        ),
+      ];
+
+      expect(
+        conversationKeyForIncomingRoute(
+          targets: targets,
+          senderPubkey: 'npub1service',
+          senderPubkeyHex: '',
+          rawJson:
+              '{"workdir":"/home/tom/code/pave/monitor","response":"done"}',
+        ),
+        'monitor',
+      );
+    },
+  );
+
+  test('drops ambiguous unrouted responses from shared service pubkey', () {
+    final targets = [
+      const RepoTarget(
+        id: 'phone',
+        name: 'phone',
+        pubkey: 'npub1service',
+        relays: ['wss://relay.example'],
+        workdir: '/home/tom/code/phone',
+      ),
+      const RepoTarget(
+        id: 'monitor',
+        name: 'monitor',
+        pubkey: 'npub1service',
+        relays: ['wss://relay.example'],
+        workdir: '/home/tom/code/pave/monitor',
+      ),
+    ];
+
+    expect(
+      conversationKeyForIncomingRoute(
+        targets: targets,
+        senderPubkey: 'npub1service',
+        senderPubkeyHex: '',
+        rawJson: '{"response":"old"}',
+      ),
+      isNull,
+    );
   });
 
   test('orders screenshot regression chronologically by timestamp', () {
