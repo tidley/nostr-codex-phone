@@ -1164,7 +1164,11 @@ async fn process_message(
             }
 
             if let Err(err) = messenger
-                .send_transcript_to(&message.sender_pubkey_hex, transcript.clone())
+                .send_transcript_for_event_to(
+                    &message.sender_pubkey_hex,
+                    transcript.clone(),
+                    message.event_id.clone(),
+                )
                 .await
             {
                 warn!("failed to send transcript DM: {err:#}");
@@ -1324,7 +1328,11 @@ async fn process_media_bundle_turn(
             local_texts.push(format!("{label}:\n{transcript}"));
 
             if let Err(err) = messenger
-                .send_transcript_to(peer_pubkey, transcript.clone())
+                .send_transcript_for_event_to(
+                    peer_pubkey,
+                    transcript.clone(),
+                    message.event_id.clone(),
+                )
                 .await
             {
                 warn!("failed to send transcript DM: {err:#}");

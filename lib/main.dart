@@ -168,6 +168,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   DateTime? _recordingStartedAt;
   Timer? _recordingTimer;
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
+  final _completedVoiceEventIds = <String>{};
   Completer<List<RepoChoice>>? _pendingRepoListCompleter;
   _PendingSessionStart? _pendingSessionStart;
   List<RepoChoice> _cachedRepoChoices = const [];
@@ -1362,8 +1363,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   bool _tryCompleteTranscription(
     String conversationKey,
     String transcript,
-    String transcriptEventId,
+    String sourceEventId,
   ) {
+    if (_completedVoiceEventIds.contains(sourceEventId)) return true;
+
     while (true) {
       final pending = _takePendingProcessingMessage(
         conversationKey,
@@ -1372,7 +1375,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       if (pending == null) {
         var index = _pendingProcessingMessageIndex(
           conversationKey,
-          transcriptEventId,
+          sourceEventId,
         );
         if (index < 0) {
           index = _singlePendingTranscriptionIndex(conversationKey);
@@ -1403,6 +1406,42 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       );
       return true;
     }
+  }
+
+  bool _dropOldestPendingTranscriptionForResponse(String conversationKey) {
+    final messages = _messagesByTarget[conversationKey];
+    if (messages == null) return false;
+
+    var oldestIndex = -1;
+    for (var index = 0; index < messages.length; index += 1) {
+      final message = messages[index];
+      if (message.kind != 'transcribing' ||
+          message.direction != MessageDirection.outgoing) {
+        continue;
+      }
+      if (oldestIndex < 0 ||
+          message.timestamp.isBefore(messages[oldestIndex].timestamp)) {
+        oldestIndex = index;
+      }
+    }
+    if (oldestIndex < 0) return false;
+
+    final eventId = messages[oldestIndex].eventId;
+    messages.removeAt(oldestIndex);
+    _completedVoiceEventIds.add(eventId);
+    final pendingIndex = _pendingProcessingMessages.indexWhere(
+      (pending) =>
+          pending.conversationKey == conversationKey &&
+          pending.eventId == eventId,
+    );
+    if (pendingIndex >= 0) {
+      _pendingProcessingMessages.removeAt(pendingIndex);
+    }
+    unawaited(_saveConversationHistoryForKey(conversationKey));
+    if (conversationKey == _activeConversationKey) {
+      _scrollToLatestMessage();
+    }
+    return true;
   }
 
   void _completeTranscriptionAtIndex({
@@ -2648,12 +2687,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final isActiveConversation = targetKey == _activeConversationKey;
     if (!isActiveConversation && message.kind == 'status') return false;
 
-    if (message.kind == 'transcript' &&
-        _tryCompleteTranscription(targetKey, message.text, message.eventId)) {
-      setState(() {
-        _status = 'Transcription received';
-      });
-      return true;
+    if (message.kind == 'transcript') {
+      final sourceEventId =
+          _transcriptSourceEventId(message) ?? message.eventId;
+      if (_tryCompleteTranscription(targetKey, message.text, sourceEventId)) {
+        setState(() {
+          _status = 'Transcription received';
+        });
+        return true;
+      }
     }
 
     final conversationMessage = ConversationMessage(
@@ -2691,6 +2733,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               )
             : false;
         if (!replacedPending) {
+          if (message.kind == 'response') {
+            _dropOldestPendingTranscriptionForResponse(targetKey);
+          }
           if (!completesPendingRequest) {
             _dropIncomingProcessingPlaceholder(targetKey);
           }
@@ -2760,6 +2805,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
     unawaited(_saveSeenIncomingEventIds());
     return true;
+  }
+
+  String? _transcriptSourceEventId(BridgeIncomingMessage message) {
+    try {
+      final decoded = jsonDecode(message.rawJson);
+      if (decoded is! Map) return null;
+      for (final key in ['source_event_id', 'request_event_id', 'event_id']) {
+        final value = decoded[key]?.toString().trim();
+        if (value != null && value.isNotEmpty) return value;
+      }
+    } catch (_) {
+      return null;
+    }
+    return null;
   }
 
   String? _conversationKeyForIncoming(BridgeIncomingMessage message) {
