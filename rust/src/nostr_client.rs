@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use nostr_sdk::prelude::*;
+use serde_json::json;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
@@ -156,6 +157,21 @@ impl NostrMessenger {
             .await
     }
 
+    pub async fn send_transcript_for_event_to(
+        &self,
+        receiver_pubkey: &str,
+        transcript: impl Into<String>,
+        source_event_id: impl Into<String>,
+    ) -> Result<String> {
+        let receiver =
+            PublicKey::parse(receiver_pubkey.trim()).context("invalid receiver pubkey")?;
+        let payload = serde_json::to_string(&json!({
+            "transcript": transcript.into(),
+            "source_event_id": source_event_id.into(),
+        }))?;
+        self.send_payload_to(receiver, payload).await
+    }
+
     pub async fn send_audio_retry_to(
         &self,
         receiver_pubkey: &str,
@@ -220,6 +236,10 @@ impl NostrMessenger {
 
     pub async fn send_wire_to(&self, receiver: PublicKey, message: WireMessage) -> Result<String> {
         let payload = message.to_json()?;
+        self.send_payload_to(receiver, payload).await
+    }
+
+    async fn send_payload_to(&self, receiver: PublicKey, payload: String) -> Result<String> {
         let event = PrivateDirectMessageBuilder::new(receiver, payload)
             .finalize(&self.keys)
             .context("failed to build GiftWrapped DM")?;

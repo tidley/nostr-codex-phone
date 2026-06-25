@@ -793,6 +793,13 @@ mod tests {
         let parsed = parse_wire_message(r#"{ "transcript": "turn on the lights" }"#).unwrap();
         assert_eq!(parsed.kind(), "transcript");
         assert_eq!(parsed.text(), "turn on the lights");
+
+        let parsed = parse_wire_message(
+            r#"{ "transcript": "turn on the lights", "source_event_id": "voice-event" }"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.kind(), "transcript");
+        assert_eq!(parsed.text(), "turn on the lights");
     }
 
     #[test]
