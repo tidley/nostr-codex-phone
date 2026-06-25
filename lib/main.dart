@@ -4168,48 +4168,55 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             Expanded(
               child: _recentMessagesForActiveConversation.isEmpty
                   ? const Center(child: Text('No messages in last hour'))
-                  : ListView.builder(
-                      controller: _chatScrollController,
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                      itemCount: _recentMessagesForActiveConversation.length,
-                      itemBuilder: (context, index) {
-                        final message =
-                            _recentMessagesForActiveConversation[index];
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: _MessageTile(
-                            message: message,
-                            showResend: _isResendableMessage(message),
-                            speaking:
-                                _speaking &&
-                                message.eventId == _speakingMessageEventId,
-                            workingAnimationStyle: _workingAnimationStyle,
-                            workingAnimationSpeed: _workingAnimationSpeed,
-                            stopSpeakingOnTap:
-                                _speaking &&
-                                message.direction == MessageDirection.incoming,
-                            onSpeak: () => unawaited(
-                              _speak(
-                                message.text,
-                                remember: true,
-                                manual: true,
-                                messageEventId: message.eventId,
+                  : ScrollConfiguration(
+                      behavior: ScrollConfiguration.of(
+                        context,
+                      ).copyWith(overscroll: false),
+                      child: ListView.builder(
+                        controller: _chatScrollController,
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                        itemCount: _recentMessagesForActiveConversation.length,
+                        itemBuilder: (context, index) {
+                          final message =
+                              _recentMessagesForActiveConversation[index];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: _MessageTile(
+                              message: message,
+                              showResend: _isResendableMessage(message),
+                              speaking:
+                                  _speaking &&
+                                  message.eventId == _speakingMessageEventId,
+                              workingAnimationStyle: _workingAnimationStyle,
+                              workingAnimationSpeed: _workingAnimationSpeed,
+                              stopSpeakingOnTap:
+                                  _speaking &&
+                                  message.direction ==
+                                      MessageDirection.incoming,
+                              onSpeak: () => unawaited(
+                                _speak(
+                                  message.text,
+                                  remember: true,
+                                  manual: true,
+                                  messageEventId: message.eventId,
+                                ),
                               ),
+                              onStopSpeaking: _stopSpeaking,
+                              onResend: _canResendMessage(message)
+                                  ? () => _resendMessage(message)
+                                  : null,
+                              onCancelPending:
+                                  message.kind == 'processing' &&
+                                      message.direction ==
+                                          MessageDirection.incoming
+                                  ? () => unawaited(
+                                      _cancelPendingResponse(message),
+                                    )
+                                  : null,
                             ),
-                            onStopSpeaking: _stopSpeaking,
-                            onResend: _canResendMessage(message)
-                                ? () => _resendMessage(message)
-                                : null,
-                            onCancelPending:
-                                message.kind == 'processing' &&
-                                    message.direction ==
-                                        MessageDirection.incoming
-                                ? () =>
-                                      unawaited(_cancelPendingResponse(message))
-                                : null,
-                          ),
-                        );
-                      },
+                          );
+                        },
+                      ),
                     ),
             ),
             _Composer(
