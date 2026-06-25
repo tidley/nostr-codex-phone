@@ -2196,13 +2196,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<bool> _ensureConnectedToParentService() async {
-    final selected = _targetById(_repoTargets, _selectedRepoTargetId);
-    final parent = selected == null || _isParentRepoTarget(selected)
-        ? selected
-        : _parentRepoTargetFor(selected);
+    final parent = _parentServiceTargetForSpawn();
+    if (parent == null) {
+      _showError('Select or save the parent phone session first');
+      return false;
+    }
 
     if (_connected) {
-      if (parent == null || _connectedPeerPubkey == parent.pubkey) return true;
+      if (_connectedPeerPubkey == parent.pubkey) return true;
       await _disconnect(expand: false);
     }
 
@@ -2214,20 +2215,25 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         if (!_connecting) break;
       }
       if (_connected) {
-        if (parent == null || _connectedPeerPubkey == parent.pubkey) {
-          return true;
-        }
+        if (_connectedPeerPubkey == parent.pubkey) return true;
         await _disconnect(expand: false);
       }
     }
 
-    if (parent != null) {
-      await _connectToTargetInBackground(parent);
-      return mounted && _connected && _connectedPeerPubkey == parent.pubkey;
+    await _connectToTargetInBackground(parent);
+    return mounted && _connected && _connectedPeerPubkey == parent.pubkey;
+  }
+
+  RepoTarget? _parentServiceTargetForSpawn() {
+    final selected = _targetById(_repoTargets, _selectedRepoTargetId);
+    if (selected != null) {
+      if (_isParentRepoTarget(selected)) return selected;
+      return _parentRepoTargetFor(selected);
     }
 
-    await _connect();
-    return mounted && _connected;
+    final active = _activeRepoTargetFromControllers();
+    if (active != null && _isParentRepoTarget(active)) return active;
+    return null;
   }
 
   bool _shouldStartRepoTargetForSend(RepoTarget? target) {
