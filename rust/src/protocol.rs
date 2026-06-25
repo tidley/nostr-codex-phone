@@ -21,6 +21,7 @@ pub enum WireMessage {
     Transcript { transcript: String },
     Status { status: String },
     Response { response: String },
+    RoutedResponse { response: String, workdir: String },
     Error { error: String },
 }
 
@@ -175,6 +176,13 @@ impl WireMessage {
         }
     }
 
+    pub fn routed_response<S: Into<String>, W: Into<String>>(response: S, workdir: W) -> Self {
+        Self::RoutedResponse {
+            response: response.into(),
+            workdir: workdir.into(),
+        }
+    }
+
     pub fn transcript<S: Into<String>>(transcript: S) -> Self {
         Self::Transcript {
             transcript: transcript.into(),
@@ -204,7 +212,7 @@ impl WireMessage {
             Self::RepoList { .. } => "repo_list",
             Self::Transcript { .. } => "transcript",
             Self::Status { .. } => "status",
-            Self::Response { .. } => "response",
+            Self::Response { .. } | Self::RoutedResponse { .. } => "response",
             Self::Error { .. } => "error",
         }
     }
@@ -222,7 +230,7 @@ impl WireMessage {
             Self::RepoList { .. } => "repo list",
             Self::Transcript { transcript } => transcript,
             Self::Status { status } => status,
-            Self::Response { response } => response,
+            Self::Response { response } | Self::RoutedResponse { response, .. } => response,
             Self::Error { error } => error,
         }
     }
@@ -255,6 +263,9 @@ impl WireMessage {
             Self::Transcript { transcript } => json!({ "transcript": transcript }),
             Self::Status { status } => json!({ "status": status }),
             Self::Response { response } => json!({ "response": response }),
+            Self::RoutedResponse { response, workdir } => {
+                json!({ "workdir": workdir, "response": response })
+            }
             Self::Error { error } => json!({ "error": error }),
         };
         Ok(serde_json::to_string(&value)?)
@@ -733,6 +744,16 @@ mod tests {
         assert_eq!(
             WireMessage::response("done").to_json().unwrap(),
             r#"{"response":"done"}"#
+        );
+    }
+
+    #[test]
+    fn serializes_routed_response_contract() {
+        assert_eq!(
+            WireMessage::routed_response("done", "/home/tom/code/phone")
+                .to_json()
+                .unwrap(),
+            r#"{"response":"done","workdir":"/home/tom/code/phone"}"#
         );
     }
 

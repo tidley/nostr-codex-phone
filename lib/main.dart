@@ -17,6 +17,7 @@ import 'package:nostr_codex_phone/src/bridge_json.dart';
 import 'package:nostr_codex_phone/src/blossom_config.dart';
 import 'package:nostr_codex_phone/src/compact_identifier.dart';
 import 'package:nostr_codex_phone/src/conversation_message.dart';
+import 'package:nostr_codex_phone/src/incoming_route.dart';
 import 'package:nostr_codex_phone/src/repo_target_merge.dart';
 import 'package:nostr_codex_phone/src/repo_choice.dart';
 import 'package:nostr_codex_phone/src/repo_target.dart';
@@ -1625,6 +1626,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     return true;
   }
 
+  bool _hasIncomingProcessingPlaceholder(String conversationKey) {
+    final messages = _messagesByTarget[conversationKey] ?? const [];
+    return messages.any(
+      (message) =>
+          message.kind == 'processing' &&
+          message.direction == MessageDirection.incoming,
+    );
+  }
+
   bool _replaceIncomingProcessingPlaceholder(
     String conversationKey,
     String eventId,
@@ -2657,6 +2667,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
 
     final targetKey = _conversationKeyForIncoming(message);
+    if (targetKey == null) return false;
     final isActiveConversation = targetKey == _activeConversationKey;
     if (!isActiveConversation && message.kind == 'status') return false;
 
@@ -2681,6 +2692,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         audioRetryRequested ||
         message.kind == 'error' ||
         message.kind == 'invalid';
+    if (fromCatchUp &&
+        completesPendingRequest &&
+        !_hasIncomingProcessingPlaceholder(targetKey)) {
+      return false;
+    }
     setState(() {
       if (message.kind == 'response') {
         _dropPendingProcessingMessage(
@@ -2769,14 +2785,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     return true;
   }
 
-  String _conversationKeyForIncoming(BridgeIncomingMessage message) {
-    for (final target in _repoTargets) {
-      if (target.pubkey == message.senderPubkey ||
-          target.pubkey == message.senderPubkeyHex) {
-        return target.id;
-      }
-    }
-    return message.senderPubkey.isNotEmpty ? message.senderPubkey : 'default';
+  String? _conversationKeyForIncoming(BridgeIncomingMessage message) {
+    final routedKey = conversationKeyForIncomingRoute(
+      targets: _repoTargets,
+      senderPubkey: message.senderPubkey,
+      senderPubkeyHex: message.senderPubkeyHex,
+      rawJson: message.rawJson,
+      fallbackKey: message.senderPubkey.isNotEmpty
+          ? message.senderPubkey
+          : 'default',
+    );
+    return routedKey;
   }
 
   bool _incomingFromActivePeer(BridgeIncomingMessage message) {
