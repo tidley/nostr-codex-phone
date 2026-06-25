@@ -15,6 +15,7 @@ class _SessionDrawer extends StatelessWidget {
     required this.onNewTarget,
     required this.onSpawnSession,
     required this.onRestartTarget,
+    required this.onSetMasterTarget,
     required this.onRenameTarget,
     required this.onOpenSettings,
     required this.onDeleteTarget,
@@ -33,6 +34,7 @@ class _SessionDrawer extends StatelessWidget {
   final VoidCallback onNewTarget;
   final VoidCallback onSpawnSession;
   final ValueChanged<RepoTarget> onRestartTarget;
+  final ValueChanged<RepoTarget> onSetMasterTarget;
   final ValueChanged<RepoTarget> onRenameTarget;
   final VoidCallback onOpenSettings;
   final ValueChanged<String> onDeleteTarget;
@@ -105,6 +107,9 @@ class _SessionDrawer extends StatelessWidget {
                           onSelected: (action) async {
                             if (action == _SessionDrawerAction.restart) {
                               onRestartTarget(target);
+                            } else if (action ==
+                                _SessionDrawerAction.setMaster) {
+                              onSetMasterTarget(target);
                             } else if (action == _SessionDrawerAction.rename) {
                               onRenameTarget(target);
                             } else if (action == _SessionDrawerAction.delete) {
@@ -126,6 +131,16 @@ class _SessionDrawer extends StatelessWidget {
                                 contentPadding: EdgeInsets.zero,
                                 leading: Icon(Icons.restart_alt),
                                 title: Text('Restart'),
+                              ),
+                            ),
+                            PopupMenuItem(
+                              value: _SessionDrawerAction.setMaster,
+                              enabled: !target.isMasterSession,
+                              child: const ListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.home_work_outlined),
+                                title: Text('Set as master'),
                               ),
                             ),
                             const PopupMenuItem(
@@ -207,7 +222,9 @@ class _SessionDrawer extends StatelessWidget {
                                   ),
                           ),
                           subtitle: Text(
-                            target.workdir?.trim().isNotEmpty == true
+                            target.isMasterSession
+                                ? 'Master session'
+                                : target.workdir?.trim().isNotEmpty == true
                                 ? target.workdir!
                                 : compactIdentifier(target.pubkey),
                             maxLines: 1,
@@ -268,7 +285,7 @@ class _SessionDrawer extends StatelessWidget {
   }
 }
 
-enum _SessionDrawerAction { restart, rename, delete }
+enum _SessionDrawerAction { restart, setMaster, rename, delete }
 
 class _SpawnSessionRequest {
   const _SpawnSessionRequest({required this.path, required this.create});

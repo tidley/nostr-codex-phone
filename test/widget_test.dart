@@ -56,6 +56,7 @@ Use [the docs](https://example.com).
       'relays': [' wss://relay.example ', ''],
       'workdir': '/home/tom/code/phone',
       'parent_relays': ['wss://parent.example'],
+      'is_master_session': true,
     });
     final choice = RepoChoice.fromJson({
       'name': 'phone',
@@ -67,6 +68,7 @@ Use [the docs](https://example.com).
     expect(target, isNotNull);
     expect(target!.displayName, 'npub123456...123456');
     expect(target.toJson()['relays'], ['wss://relay.example']);
+    expect(target.toJson()['is_master_session'], true);
     expect(choice?.displayName, 'phone');
     expect(choice?.toJson()['is_git_repo'], true);
   });
