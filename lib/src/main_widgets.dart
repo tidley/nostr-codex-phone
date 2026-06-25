@@ -992,7 +992,7 @@ class _ConnectionPanel extends StatelessWidget {
               isExpanded: true,
               decoration: const InputDecoration(
                 border: OutlineInputBorder(),
-                labelText: 'Active repo service',
+                labelText: 'Active worker target',
               ),
               hint: const Text('New unsaved target'),
               items: [
@@ -1994,6 +1994,8 @@ class _MessageTileState extends State<_MessageTile>
                 Expanded(
                   child: MarkdownBody(
                     data: widget.message.text,
+                    imageBuilder: (uri, title, alt) =>
+                        _buildMarkdownImage(context, uri, title, alt),
                     selectable: !widget.stopSpeakingOnTap,
                     softLineBreak: true,
                     onTapLink: incoming ? _openLink : null,
@@ -2004,6 +2006,8 @@ class _MessageTileState extends State<_MessageTile>
           else
             MarkdownBody(
               data: widget.message.text,
+              imageBuilder: (uri, title, alt) =>
+                  _buildMarkdownImage(context, uri, title, alt),
               selectable: !widget.stopSpeakingOnTap,
               softLineBreak: true,
               onTapLink: incoming ? _openLink : null,
@@ -2045,6 +2049,94 @@ class _MessageTileState extends State<_MessageTile>
     if (widget.message.kind == 'audio') return 'Resend voice note';
     if (widget.message.kind == 'transcript') return 'Send transcript as query';
     return 'Resend query';
+  }
+
+  Widget _buildMarkdownImage(
+    BuildContext context,
+    Uri uri,
+    String? title,
+    String? alt,
+  ) {
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme != 'http' && scheme != 'https') {
+      return _markdownImageFallback(context, title, alt);
+    }
+
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: 220),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.network(
+          uri.toString(),
+          fit: BoxFit.contain,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return _markdownImagePlaceholder(context);
+          },
+          errorBuilder: (context, error, stackTrace) {
+            return _markdownImageFallback(context, title, alt);
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _markdownImagePlaceholder(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      height: 72,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: SizedBox.square(
+        dimension: 18,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: colorScheme.primary,
+        ),
+      ),
+    );
+  }
+
+  Widget _markdownImageFallback(
+    BuildContext context,
+    String? title,
+    String? alt,
+  ) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final label = title?.trim().isNotEmpty == true
+        ? title!.trim()
+        : alt?.trim().isNotEmpty == true
+        ? alt!.trim()
+        : 'Image unavailable';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.broken_image_outlined,
+            size: 18,
+            color: colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _copyMessage(BuildContext context) async {

@@ -106,7 +106,7 @@ class NostrCodexHome extends StatefulWidget {
 }
 
 class _NostrCodexHomeState extends State<NostrCodexHome>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   static const _storage = FlutterSecureStorage();
   static const _secretKeyStorageKey = 'nostr_secret_key';
   static const _peerPubkeyStorageKey = 'nostr_peer_pubkey';
@@ -320,6 +320,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _menuNotificationPulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 620),
@@ -333,6 +334,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _polling = false;
     final recordingPath = _recordingPath;
     unawaited(_recorder.dispose());
@@ -352,6 +354,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _menuNotificationPulseController.dispose();
     unawaited(nostrStop());
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || !_connected) return;
+    unawaited(_fetchRecentInboxMessages(allowCatchUpSpeech: true));
   }
 
   Future<void> _loadSettings() async {

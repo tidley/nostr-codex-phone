@@ -129,8 +129,9 @@ event delivered by multiple relays is only processed once per session.
 
 The phone can store multiple repo targets. Each target is a named Nostr peer
 pubkey plus relay list, so the same mobile key can quickly switch between
-separate repo services. Each repo service has its own Nostr identity and
-therefore its own npub. The phone sends DMs to the selected target only.
+the main parent worker and spawned repo workers. Each worker has its own Nostr
+identity and therefore its own npub. The phone sends DMs to the selected target
+only.
 
 The phone session drawer includes **Spawn on computer**. It sends a
 `spawn_session` request to the currently connected worker. The dialog treats
@@ -155,6 +156,9 @@ Use `/workers` or `/sessions` to list spawned child workers known by the current
 parent worker. Use `/shutdown`, `/quit`, or `/exit` inside a child session to
 stop that worker process.
 
+Only the parent worker should be installed as a persistent machine service.
+Spawned repo workers are ephemeral child processes started by the parent.
+
 From any repo folder, start a foreground worker with one command:
 
 ```bash
@@ -171,7 +175,7 @@ already configured, prints/saves the QR target, and listens for DMs. If
 becomes the saved owner for that worker. Set `NOSTR_PEER_PUBKEY=npub...` before
 the command when you want to pre-lock a worker to a specific phone.
 
-Generate a fresh server key for a repo service:
+Generate a fresh worker key:
 
 ```bash
 cargo run --manifest-path /home/tom/code/phone/rust/Cargo.toml --bin nostr-keygen
@@ -189,20 +193,7 @@ TRANSCRIBE_BIN='/home/tom/.local/bin/whisper-cpp'
 TRANSCRIBE_ARGS='-m /home/tom/code/phone/models/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/transcript -nt'
 ```
 
-Install a user systemd service for that repo:
-
-```bash
-/home/tom/code/phone/scripts/install-repo-service.sh /path/to/repo nostr-codex-myrepo /path/to/repo/.env.server
-```
-
-The installer uses this project’s `nostr-codex-server` binary, sets
-`CODEX_WORKDIR` to the target repo, enables user lingering, and enables the
-service at boot. The service npub printed in `journalctl --user -u
-nostr-codex-myrepo` is the pubkey to add as a target in the phone app. If the
-env file is empty or missing, the service creates it and saves its generated
-Nostr identity there on first start.
-
-On startup each repo service also prints a QR code and saves an SVG target card
+On startup the worker also prints a QR code and saves an SVG target card
 to `.nostr-codex-target.svg` in its `CODEX_WORKDIR`. The QR payload is plain
 JSON:
 
@@ -222,7 +213,7 @@ Set `NOSTR_CODEX_QR_PRINT=0` to stop printing the terminal QR, set
 `NOSTR_CODEX_QR_PATH=/path/to/target.svg` to change where it is saved, or set
 `NOSTR_CODEX_QR_OPEN=1` to best-effort open the SVG with `xdg-open`.
 
-If the phone has no stored Codex session for a repo service yet, the server
+If the phone has no stored Codex session for a worker yet, the server
 looks in `CODEX_SESSIONS_DIR` or `~/.codex/sessions` and adopts the newest
 Codex session whose `session_meta.payload.cwd` matches `CODEX_WORKDIR`. This
 uses the same session files as `~/code/tooling/codex-sessions.sh`. Disable it
@@ -336,14 +327,14 @@ instead of the server crashing.
 ## Mobile
 
 The Flutter app stores the local `nsec`, repo targets, relay lists, and Blossom
-selection in `flutter_secure_storage`. A repo target is a display name, a service
-npub/hex pubkey, and the relays used by that service. Switching targets while
-connected disconnects from the current repo service, reconnects to the selected
+selection in `flutter_secure_storage`. A repo target is a display name, a worker
+npub/hex pubkey, and the relays used by that worker. Switching targets while
+connected disconnects from the current worker, reconnects to the selected
 one, and keeps on-screen message history separated per target for the current
 app session.
 
 When adding a repo target, tap `Scan` and point the camera at the worker QR
-printed or saved by the repo service. The app imports the service pubkey, relays,
+printed or saved by the worker. The app imports the worker pubkey, relays,
 and folder-derived target name.
 
 The mic button records an Opus/Ogg file by default, encrypts it locally, uploads
@@ -401,7 +392,7 @@ flutter run
 ```
 
 Use the app to generate or paste the mobile key, copy the displayed mobile
-public key into each repo service's `NOSTR_PEER_PUBKEY`, add each service npub
+public key into the parent worker's `NOSTR_PEER_PUBKEY`, add the parent npub
 as a named repo target in the app, and use the same relay list on both sides of
 each target.
 
