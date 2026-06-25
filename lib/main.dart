@@ -2198,7 +2198,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Future<bool> _ensureConnectedToParentService() async {
     final parent = _parentServiceTargetForSpawn();
     if (parent == null) {
-      _showError('Select or save the parent phone session first');
+      _showError('Select the parent phone session at /home/tom/code/phone');
       return false;
     }
 
@@ -2242,8 +2242,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   bool _isParentRepoTarget(RepoTarget target) {
     final workdir = target.workdir?.trim();
-    if (workdir == '/home/tom/code/phone') return true;
-    return target.displayName.toLowerCase().contains('phone');
+    return workdir == '/home/tom/code/phone';
   }
 
   Future<bool?> _startSelectedRepoTargetForSend(RepoTarget target) async {
@@ -2428,14 +2427,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         }) ??
         firstWhere((candidate) {
           final workdir = candidate.workdir?.trim();
-          return workdir != null &&
-              workdir.isNotEmpty &&
-              workdir != targetWorkdir &&
-              candidate.displayName.toLowerCase().contains('phone');
-        }) ??
-        firstWhere((candidate) {
-          final workdir = candidate.workdir?.trim();
-          return workdir == null || workdir.isEmpty;
+          return workdir == null &&
+              candidate.displayName.trim().toLowerCase() == 'phone';
         });
   }
 
