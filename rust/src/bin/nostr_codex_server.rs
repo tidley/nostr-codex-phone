@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Stdio};
+use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ use rust_lib_nostr_codex_phone::transcribe::{
     DownloadedAudio, TranscribeConfig,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
 
 const WORKER_REGISTRY_FILE: &str = ".nostr-codex-workers.json";
@@ -85,6 +85,39 @@ struct WorkerProcessLock {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct RepoWorkerContext {
+    workdir: PathBuf,
+    env_file: WorkerEnvFile,
+    secret_key: String,
+    public_key: String,
+    public_key_hex: String,
+    relays: Vec<String>,
+    relay_csv: String,
+    memory_db: PathBuf,
+}
+
+#[derive(Clone)]
+struct RepoRuntimeManager {
+    inner: Arc<Mutex<HashMap<PathBuf, RepoRuntimeHandle>>>,
+}
+
+struct RepoRuntimeHandle {
+    _task: tokio::task::JoinHandle<()>,
+}
+
+struct WorkerRuntimeConfig {
+    messenger: Arc<NostrMessenger>,
+    worker_env: WorkerEnvFile,
+    owner_peer_hex: Option<String>,
+    memory_config: MemoryConfig,
+    codex_config: CodexConfig,
+    audio_config: AudioConfig,
+    transcribe_config: TranscribeConfig,
+    relays: Vec<String>,
+    manager: RepoRuntimeManager,
+}
+
 impl Drop for WorkerProcessLock {
     fn drop(&mut self) {
         match fs::read_to_string(&self.path) {
@@ -103,6 +136,69 @@ impl Drop for WorkerProcessLock {
                 self.path.display()
             ),
         }
+    }
+}
+
+impl RepoRuntimeManager {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn start_repo_runtime(
+        &self,
+        context: RepoWorkerContext,
+        owner_pubkey: &str,
+        owner_pubkey_hex: &str,
+        codex_config: &CodexConfig,
+        audio_config: &AudioConfig,
+        transcribe_config: &TranscribeConfig,
+    ) -> Result<(u32, bool)> {
+        let mut runtimes = self.inner.lock().await;
+        if runtimes.contains_key(&context.workdir) {
+            return Ok((std::process::id(), true));
+        }
+
+        let messenger = Arc::new(
+            NostrMessenger::connect(NostrConfig {
+                secret_key: context.secret_key.clone(),
+                peer_pubkey: Some(owner_pubkey.to_string()),
+                receive_pubkeys: vec![],
+                relays: context.relays.clone(),
+            })
+            .await?,
+        );
+        let mut repo_codex_config = codex_config.clone();
+        repo_codex_config.working_dir = context.workdir.clone();
+        let mut repo_memory_config = MemoryConfig::from_env(&context.workdir);
+        repo_memory_config.db_path = context.memory_db.clone();
+        let runtime_config = WorkerRuntimeConfig {
+            messenger,
+            worker_env: context.env_file,
+            owner_peer_hex: Some(owner_pubkey_hex.to_string()),
+            memory_config: repo_memory_config,
+            codex_config: repo_codex_config,
+            audio_config: audio_config.clone(),
+            transcribe_config: transcribe_config.clone(),
+            relays: context.relays,
+            manager: self.clone(),
+        };
+        let workdir = context.workdir.clone();
+        let task = tokio::spawn(async move {
+            if let Err(err) = run_worker_runtime(runtime_config).await {
+                error!(
+                    "repo worker runtime for `{}` stopped: {err:#}",
+                    workdir.display()
+                );
+            }
+        });
+
+        runtimes.insert(
+            context.workdir,
+            RepoRuntimeHandle { _task: task },
+        );
+        Ok((std::process::id(), false))
     }
 }
 
@@ -402,7 +498,7 @@ async fn main() -> Result<()> {
     let memory_config = MemoryConfig::from_env(&codex_config.working_dir);
     let memory_probe = open_memory_store(memory_config.clone());
     let messenger = Arc::new(NostrMessenger::connect(nostr_config.clone()).await?);
-    let mut owner_peer_hex = nostr_config
+    let owner_peer_hex = nostr_config
         .peer_pubkey
         .as_deref()
         .map(pubkey_to_hex)
@@ -447,13 +543,33 @@ async fn main() -> Result<()> {
     );
     drop(memory_probe);
 
+    let manager = RepoRuntimeManager::new();
+    run_worker_runtime(WorkerRuntimeConfig {
+        messenger,
+        worker_env,
+        owner_peer_hex,
+        memory_config,
+        codex_config,
+        audio_config,
+        transcribe_config,
+        relays: nostr_config.relays,
+        manager,
+    })
+    .await
+}
+
+async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     let mut peer_workers = HashMap::<String, mpsc::Sender<IncomingMessage>>::new();
 
     loop {
-        let Some(message) = messenger.next_message(Duration::from_secs(3600)).await? else {
+        let Some(message) = config
+            .messenger
+            .next_message(Duration::from_secs(3600))
+            .await?
+        else {
             continue;
         };
-        if !accept_or_claim_owner(&worker_env, &mut owner_peer_hex, &message) {
+        if !accept_or_claim_owner(&config.worker_env, &mut config.owner_peer_hex, &message) {
             continue;
         }
 
@@ -463,12 +579,13 @@ async fn main() -> Result<()> {
             .or_insert_with(|| {
                 spawn_peer_worker(
                     worker_key.clone(),
-                    Arc::clone(&messenger),
-                    memory_config.clone(),
-                    codex_config.clone(),
-                    audio_config.clone(),
-                    transcribe_config.clone(),
-                    nostr_config.relays.clone(),
+                    Arc::clone(&config.messenger),
+                    config.memory_config.clone(),
+                    config.codex_config.clone(),
+                    config.audio_config.clone(),
+                    config.transcribe_config.clone(),
+                    config.relays.clone(),
+                    config.manager.clone(),
                 )
             })
             .clone();
@@ -479,12 +596,13 @@ async fn main() -> Result<()> {
             let message = send_err.0;
             let sender = spawn_peer_worker(
                 worker_key.clone(),
-                Arc::clone(&messenger),
-                memory_config.clone(),
-                codex_config.clone(),
-                audio_config.clone(),
-                transcribe_config.clone(),
-                nostr_config.relays.clone(),
+                Arc::clone(&config.messenger),
+                config.memory_config.clone(),
+                config.codex_config.clone(),
+                config.audio_config.clone(),
+                config.transcribe_config.clone(),
+                config.relays.clone(),
+                config.manager.clone(),
             );
             if sender.send(message).await.is_err() {
                 error!("restarted peer worker for {worker_key} stopped; dropping incoming message");
@@ -503,6 +621,7 @@ fn spawn_peer_worker(
     audio_config: AudioConfig,
     transcribe_config: TranscribeConfig,
     relays: Vec<String>,
+    manager: RepoRuntimeManager,
 ) -> mpsc::Sender<IncomingMessage> {
     let (tx, rx) = mpsc::channel(32);
     tokio::spawn(peer_worker(
@@ -514,6 +633,7 @@ fn spawn_peer_worker(
         audio_config,
         transcribe_config,
         relays,
+        manager,
     ));
     tx
 }
@@ -527,6 +647,7 @@ async fn peer_worker(
     audio_config: AudioConfig,
     transcribe_config: TranscribeConfig,
     relays: Vec<String>,
+    manager: RepoRuntimeManager,
 ) {
     let mut memory = open_memory_store(memory_config);
     info!("started worker for peer {peer_pubkey}");
@@ -553,6 +674,7 @@ async fn peer_worker(
             &audio_config,
             &transcribe_config,
             &relays,
+            &manager,
             &cancel_token,
         ))
         .catch_unwind();
@@ -630,6 +752,7 @@ async fn process_message(
     audio_config: &AudioConfig,
     transcribe_config: &TranscribeConfig,
     relays: &[String],
+    manager: &RepoRuntimeManager,
     cancel_token: &CodexCancelToken,
 ) {
     match message.kind.as_str() {
@@ -684,6 +807,9 @@ async fn process_message(
                     &spawn_request,
                     relays,
                     codex_config,
+                    audio_config,
+                    transcribe_config,
+                    manager,
                 )
                 .await;
                 return;
@@ -1111,6 +1237,9 @@ async fn process_spawn_worker_request(
     request: &SpawnWorkerRequest,
     relays: &[String],
     codex_config: &CodexConfig,
+    audio_config: &AudioConfig,
+    transcribe_config: &TranscribeConfig,
+    manager: &RepoRuntimeManager,
 ) {
     let parent_pubkey = match messenger.public_key_bech32() {
         Ok(pubkey) => pubkey,
@@ -1124,7 +1253,7 @@ async fn process_spawn_worker_request(
             return;
         }
     };
-    match spawn_repo_worker(
+    match start_repo_worker(
         request,
         owner_pubkey,
         owner_pubkey_hex,
@@ -1132,7 +1261,13 @@ async fn process_spawn_worker_request(
         &codex_config.working_dir,
         &parent_pubkey,
         &messenger.public_key_hex(),
-    ) {
+        codex_config,
+        audio_config,
+        transcribe_config,
+        manager,
+    )
+    .await
+    {
         Ok((target, pid, reused_existing)) => {
             match messenger
                 .send_wire_to_pubkey(owner_pubkey_hex, WireMessage::target_invite(target.clone()))
@@ -1164,7 +1299,7 @@ async fn process_spawn_worker_request(
                         );
                     } else {
                         info!(
-                            "spawned child worker pid {pid} for {} ({})",
+                            "started in-process child worker pid {pid} for {} ({})",
                             target.name,
                             target.workdir.as_deref().unwrap_or("unknown")
                         );
@@ -1224,7 +1359,7 @@ async fn process_repo_list_request(messenger: &NostrMessenger, owner_pubkey_hex:
     }
 }
 
-fn spawn_repo_worker(
+async fn start_repo_worker(
     request: &SpawnWorkerRequest,
     owner_pubkey: &str,
     owner_pubkey_hex: &str,
@@ -1232,38 +1367,33 @@ fn spawn_repo_worker(
     current_workdir: &Path,
     parent_pubkey: &str,
     parent_pubkey_hex: &str,
+    codex_config: &CodexConfig,
+    audio_config: &AudioConfig,
+    transcribe_config: &TranscribeConfig,
+    manager: &RepoRuntimeManager,
 ) -> Result<(TargetInvite, u32, bool)> {
-    let workdir = resolve_spawn_workdir(request, current_workdir)?;
-    let env_file = WorkerEnvFile::default_for_workdir(&workdir);
-    let secret_key = ensure_child_worker_secret(&env_file)?;
-    let keys = Keys::parse(secret_key.trim()).context("invalid child worker secret key")?;
-    let public_key = keys.public_key().to_bech32()?;
-    let public_key_hex = keys.public_key().to_hex();
-    let relay_list = if relays.is_empty() {
-        default_relays()
-    } else {
-        relays.to_vec()
-    };
-    let relay_csv = relay_list.join(",");
-    let memory_db = workdir.join(".nostr-codex-memory.sqlite3");
+    let context = repo_worker_context(request, relays, current_workdir)?;
 
     let mut env_values = vec![
-        ("NOSTR_SECRET_KEY".to_string(), secret_key.clone()),
-        ("NOSTR_PUBLIC_KEY".to_string(), public_key.clone()),
-        ("NOSTR_PUBLIC_KEY_HEX".to_string(), public_key_hex.clone()),
+        ("NOSTR_SECRET_KEY".to_string(), context.secret_key.clone()),
+        ("NOSTR_PUBLIC_KEY".to_string(), context.public_key.clone()),
+        (
+            "NOSTR_PUBLIC_KEY_HEX".to_string(),
+            context.public_key_hex.clone(),
+        ),
         ("NOSTR_PEER_PUBKEY".to_string(), owner_pubkey.to_string()),
         (
             "NOSTR_PEER_PUBKEY_HEX".to_string(),
             owner_pubkey_hex.to_string(),
         ),
-        ("NOSTR_RELAYS".to_string(), relay_csv.clone()),
+        ("NOSTR_RELAYS".to_string(), context.relay_csv.clone()),
         (
             "CODEX_WORKDIR".to_string(),
-            workdir.to_string_lossy().to_string(),
+            context.workdir.to_string_lossy().to_string(),
         ),
         (
             "CODEX_MEMORY_DB".to_string(),
-            memory_db.to_string_lossy().to_string(),
+            context.memory_db.to_string_lossy().to_string(),
         ),
         (
             "CODEX_PERSIST_SESSIONS".to_string(),
@@ -1288,62 +1418,72 @@ fn spawn_repo_worker(
             env_values.push((key.to_string(), value));
         }
     }
-    upsert_env_file_owned(&env_file.path, &env_values)?;
+    upsert_env_file_owned(&context.env_file.path, &env_values)?;
 
     let target = TargetInvite {
         target_type: "nostr_codex_target".to_string(),
         version: 1,
-        name: worker_target_name(&workdir),
-        pubkey: public_key.clone(),
-        pubkey_hex: Some(public_key_hex.clone()),
-        workdir: Some(workdir.to_string_lossy().to_string()),
-        relays: relay_list.clone(),
+        name: worker_target_name(&context.workdir),
+        pubkey: context.public_key.clone(),
+        pubkey_hex: Some(context.public_key_hex.clone()),
+        workdir: Some(context.workdir.to_string_lossy().to_string()),
+        relays: context.relays.clone(),
         parent: Some(TargetParent {
             name: worker_target_name(current_workdir),
             pubkey: parent_pubkey.to_string(),
             pubkey_hex: Some(parent_pubkey_hex.to_string()),
             workdir: Some(current_workdir.to_string_lossy().to_string()),
-            relays: relay_list.clone(),
+            relays: context.relays.clone(),
         }),
     };
 
-    if let Some(pid) = find_running_worker_for_workdir(&workdir) {
-        if let Err(err) = upsert_worker_registry(current_workdir, &target, pid) {
-            warn!("failed to update worker registry for existing worker: {err:#}");
-        }
-        return Ok((target, pid, true));
-    }
-    if let Some(pid) = running_worker_lock_pid(&workdir)? {
-        if let Err(err) = upsert_worker_registry(current_workdir, &target, pid) {
-            warn!("failed to update worker registry for locked worker: {err:#}");
-        }
-        return Ok((target, pid, true));
-    }
-
-    let child = StdCommand::new(env::current_exe().context("failed to locate worker executable")?)
-        .current_dir(&workdir)
-        .env("NOSTR_CODEX_ENV_FILE", &env_file.path)
-        .env("NOSTR_SECRET_KEY", &secret_key)
-        .env("NOSTR_PUBLIC_KEY", &public_key)
-        .env("NOSTR_PUBLIC_KEY_HEX", &public_key_hex)
-        .env("CODEX_WORKDIR", &workdir)
-        .env("CODEX_MEMORY_DB", &memory_db)
-        .env("NOSTR_PEER_PUBKEY", owner_pubkey)
-        .env("NOSTR_PEER_PUBKEY_HEX", owner_pubkey_hex)
-        .env("NOSTR_RELAYS", &relay_csv)
-        .env("NOSTR_CODEX_QR_PRINT", "false")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("failed to start worker in `{}`", workdir.display()))?;
-    let pid = child.id();
+    let (pid, reused_existing) = manager
+        .start_repo_runtime(
+            context,
+            owner_pubkey,
+            owner_pubkey_hex,
+            codex_config,
+            audio_config,
+            transcribe_config,
+        )
+        .await?;
 
     if let Err(err) = upsert_worker_registry(current_workdir, &target, pid) {
         warn!("failed to update worker registry: {err:#}");
     }
 
-    Ok((target, pid, false))
+    Ok((target, pid, reused_existing))
+}
+
+fn repo_worker_context(
+    request: &SpawnWorkerRequest,
+    relays: &[String],
+    current_workdir: &Path,
+) -> Result<RepoWorkerContext> {
+    let workdir = resolve_spawn_workdir(request, current_workdir)?;
+    let env_file = WorkerEnvFile::default_for_workdir(&workdir);
+    let secret_key = ensure_child_worker_secret(&env_file)?;
+    let keys = Keys::parse(secret_key.trim()).context("invalid child worker secret key")?;
+    let public_key = keys.public_key().to_bech32()?;
+    let public_key_hex = keys.public_key().to_hex();
+    let relays = if relays.is_empty() {
+        default_relays()
+    } else {
+        relays.to_vec()
+    };
+    let relay_csv = relays.join(",");
+    let memory_db = workdir.join(".nostr-codex-memory.sqlite3");
+
+    Ok(RepoWorkerContext {
+        workdir,
+        env_file,
+        secret_key,
+        public_key,
+        public_key_hex,
+        relays,
+        relay_csv,
+        memory_db,
+    })
 }
 
 fn acquire_worker_process_lock(workdir: &Path) -> Result<WorkerProcessLock> {
@@ -1451,51 +1591,6 @@ fn worker_lock_process_matches(path: &Path, pid: u32) -> bool {
 #[cfg(not(target_family = "unix"))]
 fn worker_lock_process_matches(_path: &Path, _pid: u32) -> bool {
     true
-}
-
-fn find_running_worker_for_workdir(workdir: &Path) -> Option<u32> {
-    find_running_worker_for_workdir_impl(workdir)
-}
-
-#[cfg(target_family = "unix")]
-fn find_running_worker_for_workdir_impl(workdir: &Path) -> Option<u32> {
-    let current_pid = std::process::id();
-    let target_workdir = canonical_path_key(workdir);
-    let current_exe_name = env::current_exe()
-        .ok()
-        .and_then(|path| path.file_name().map(|name| name.to_owned()));
-    let proc_dir = fs::read_dir("/proc").ok()?;
-    for entry in proc_dir.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        if pid == current_pid {
-            continue;
-        }
-        let process_dir = entry.path();
-        let Ok(cwd) = fs::read_link(process_dir.join("cwd")) else {
-            continue;
-        };
-        if canonical_path_key(&cwd) != target_workdir {
-            continue;
-        }
-        let Ok(exe) = fs::read_link(process_dir.join("exe")) else {
-            continue;
-        };
-        let same_executable_name = current_exe_name
-            .as_ref()
-            .zip(exe.file_name())
-            .is_some_and(|(current, candidate)| current == candidate);
-        if same_executable_name {
-            return Some(pid);
-        }
-    }
-    None
-}
-
-#[cfg(not(target_family = "unix"))]
-fn find_running_worker_for_workdir_impl(_workdir: &Path) -> Option<u32> {
-    None
 }
 
 fn is_repo_list_request(request: &str) -> bool {
@@ -1693,17 +1788,11 @@ fn parse_spawn_worker_request(request: &str) -> Option<SpawnWorkerRequest> {
     }
     for (marker, create) in [
         ("create worker in ", true),
-        ("create service in ", true),
         ("create a worker in ", true),
-        ("create a service in ", true),
         ("spawn new worker in ", true),
-        ("spawn new service in ", true),
         ("spawn worker in ", false),
-        ("spawn service in ", false),
         ("start worker in ", false),
-        ("start service in ", false),
         ("start a worker in ", false),
-        ("start a service in ", false),
     ] {
         if lowered.starts_with(marker) {
             return parse_spawn_path_argument(&trimmed[marker.len()..]).map(|workdir| {
@@ -2116,7 +2205,7 @@ async fn process_text_turn(
     cancel_token: &CodexCancelToken,
 ) {
     let session_id = if codex_config.persist_sessions {
-        load_codex_session(memory, peer_pubkey, &codex_config.working_dir)
+        load_codex_session(memory, peer_pubkey, &codex_config.working_dir, request)
     } else {
         None
     };
@@ -2739,6 +2828,7 @@ fn load_codex_session(
     memory: &Option<MemoryStore>,
     peer_pubkey: &str,
     workdir: &Path,
+    request: &str,
 ) -> Option<String> {
     let stored =
         memory
@@ -2750,28 +2840,48 @@ fn load_codex_session(
                     None
                 }
             });
-    if stored.is_some() {
+
+    if !env_bool("CODEX_RESUME_LATEST_BY_WORKDIR", true) {
         return stored;
     }
 
-    if !env_bool("CODEX_RESUME_LATEST_BY_WORKDIR", true) {
-        return None;
+    if stored.is_some() && !should_refresh_codex_session_for_request(request) {
+        return stored;
     }
 
     match latest_codex_session_for_workdir(workdir) {
         Ok(Some(session_id)) => {
+            if stored.as_deref() == Some(session_id.as_str()) {
+                return stored;
+            }
             info!(
                 "adopting latest existing Codex session {session_id} for {}",
                 workdir.display()
             );
             Some(session_id)
         }
-        Ok(None) => None,
+        Ok(None) => stored,
         Err(err) => {
             warn!("failed to discover latest Codex session for workdir: {err:#}");
-            None
+            stored
         }
     }
+}
+
+fn should_refresh_codex_session_for_request(request: &str) -> bool {
+    let normalized = request.to_ascii_lowercase();
+    [
+        "last issue",
+        "latest issue",
+        "recent issue",
+        "most recent",
+        "progress",
+        "worked on",
+        "last task",
+        "latest task",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
 }
 
 fn latest_codex_session_for_workdir(workdir: &Path) -> Result<Option<String>> {
@@ -2794,16 +2904,23 @@ fn latest_codex_session_for_workdir_in(
 
     let target = workdir.to_string_lossy().to_string();
     let canonical_target = canonical_path_key(workdir);
-    let mut best: Option<(String, String)> = None;
+    let mut best: Option<CodexSessionCandidate> = None;
     collect_latest_codex_session(sessions_dir, &target, &canonical_target, &mut best)?;
-    Ok(best.map(|(_, session_id)| session_id))
+    Ok(best.map(|candidate| candidate.session_id))
+}
+
+#[derive(Debug)]
+struct CodexSessionCandidate {
+    started_at: String,
+    last_timestamp: String,
+    session_id: String,
 }
 
 fn collect_latest_codex_session(
     path: &Path,
     target_workdir: &str,
     canonical_target_workdir: &str,
-    best: &mut Option<(String, String)>,
+    best: &mut Option<CodexSessionCandidate>,
 ) -> Result<()> {
     if path.is_dir() {
         for entry in
@@ -2829,7 +2946,11 @@ fn collect_latest_codex_session(
         return Ok(());
     };
     match best {
-        Some((best_timestamp, _)) if best_timestamp.as_str() >= session.0.as_str() => {}
+        Some(best_session)
+            if (
+                best_session.started_at.as_str(),
+                best_session.last_timestamp.as_str(),
+            ) >= (session.started_at.as_str(), session.last_timestamp.as_str()) => {}
         _ => *best = Some(session),
     }
     Ok(())
@@ -2839,7 +2960,7 @@ fn parse_codex_session_file(
     path: &Path,
     target_workdir: &str,
     canonical_target_workdir: &str,
-) -> Result<Option<(String, String)>> {
+) -> Result<Option<CodexSessionCandidate>> {
     let file = File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
     let reader = BufReader::new(file);
     let mut first_line = None;
@@ -2913,7 +3034,11 @@ fn parse_codex_session_file(
         return Ok(None);
     }
 
-    Ok(Some((last_timestamp, session_id.to_string())))
+    Ok(Some(CodexSessionCandidate {
+        started_at: started_at.to_string(),
+        last_timestamp,
+        session_id: session_id.to_string(),
+    }))
 }
 
 fn codex_session_cwd_matches(
@@ -3622,7 +3747,7 @@ mod tests {
             .save_codex_session("peer-2", &workdir, "other-peer-session")
             .unwrap();
 
-        let session = load_codex_session(&Some(memory), "peer-1", &workdir);
+        let session = load_codex_session(&Some(memory), "peer-1", &workdir, "continue");
         assert_eq!(session.as_deref(), Some("stored-session"));
     }
 
@@ -3646,13 +3771,68 @@ mod tests {
             "2026-06-16T10:05:00Z",
         );
 
-        let session = load_codex_session(&None, "peer-1", &workdir);
+        let session = load_codex_session(&None, "peer-1", &workdir, "continue");
         match previous_sessions_dir {
             Some(value) => env::set_var("CODEX_SESSIONS_DIR", value),
             None => env::remove_var("CODEX_SESSIONS_DIR"),
         }
 
         assert_eq!(session.as_deref(), Some("latest-session"));
+    }
+
+    #[test]
+    fn latest_issue_request_refreshes_older_saved_codex_session() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_sessions_dir = env::var_os("CODEX_SESSIONS_DIR");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("sessions");
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(sessions_dir.join("2026/06/16")).unwrap();
+        fs::create_dir_all(&workdir).unwrap();
+        env::set_var("CODEX_SESSIONS_DIR", &sessions_dir);
+
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/older.jsonl"),
+            "stored-session",
+            &workdir,
+            "2026-06-16T10:00:00Z",
+            "2026-06-16T10:30:00Z",
+        );
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/newer.jsonl"),
+            "newer-session",
+            &workdir,
+            "2026-06-16T11:00:00Z",
+            "2026-06-16T11:05:00Z",
+        );
+
+        let mut memory = MemoryStore::open(MemoryConfig {
+            enabled: true,
+            db_path: temp_dir.path().join("memory.sqlite3"),
+            recent_messages: 12,
+            compact_after_messages: 16,
+            summary_max_chars: 5000,
+            compaction_max_chars: 12000,
+        })
+        .unwrap()
+        .unwrap();
+        memory
+            .save_codex_session("peer-1", &workdir, "stored-session")
+            .unwrap();
+
+        let session = load_codex_session(
+            &Some(memory),
+            "peer-1",
+            &workdir,
+            "How is progress with the last issue?",
+        );
+        match previous_sessions_dir {
+            Some(value) => env::set_var("CODEX_SESSIONS_DIR", value),
+            None => env::remove_var("CODEX_SESSIONS_DIR"),
+        }
+
+        assert_eq!(session.as_deref(), Some("newer-session"));
     }
 
     fn write_session_fixture(
