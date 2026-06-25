@@ -650,6 +650,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       parentRelays: existing?.parentRelays,
       parentWorkdir: existing?.parentWorkdir,
       parentName: existing?.parentName,
+      pairingSecret: existing?.pairingSecret,
     );
   }
 
@@ -750,6 +751,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             parentRelays: target.parentRelays,
             parentWorkdir: target.parentWorkdir,
             parentName: target.parentName,
+            pairingSecret: target.pairingSecret,
           );
     if (existingIndex == -1) {
       targets.add(savedTarget);
@@ -820,6 +822,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       final parentName = parent is Map
           ? parent['name']?.toString().trim()
           : decoded['parent_name']?.toString().trim();
+      final pairingSecret = decoded['pairing_secret']?.toString().trim();
       final rawName = decoded['name']?.toString().trim() ?? '';
       final name = rawName.isNotEmpty
           ? rawName
@@ -840,6 +843,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         parentName: parentName == null || parentName.isEmpty
             ? null
             : parentName,
+        pairingSecret: pairingSecret == null || pairingSecret.isEmpty
+            ? null
+            : pairingSecret,
       );
     } catch (_) {
       return null;
@@ -886,6 +892,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       final parentName = parent is Map
           ? parent['name']?.toString().trim()
           : invite['parent_name']?.toString().trim();
+      final pairingSecret = invite['pairing_secret']?.toString().trim();
       final rawName = invite['name']?.toString().trim() ?? '';
       final name = rawName.isNotEmpty
           ? rawName
@@ -906,6 +913,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         parentName: parentName == null || parentName.isEmpty
             ? null
             : parentName,
+        pairingSecret: pairingSecret == null || pairingSecret.isEmpty
+            ? null
+            : pairingSecret,
       );
     } catch (_) {
       return null;
@@ -944,6 +954,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       parentRelays: parentRelays,
       parentWorkdir: selectedParent?.workdir,
       parentName: parentName,
+      pairingSecret: target.pairingSecret,
     );
   }
 
@@ -1101,6 +1112,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             parentRelays: target.parentRelays,
             parentWorkdir: target.parentWorkdir,
             parentName: target.parentName,
+            pairingSecret: target.pairingSecret,
           );
     if (existingIndex == -1) {
       targets.add(savedTarget);
@@ -1770,6 +1782,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       parentRelays: target.parentRelays,
       parentWorkdir: target.parentWorkdir,
       parentName: target.parentName,
+      pairingSecret: target.pairingSecret,
     );
     setState(() {
       _repoTargets = targets;
@@ -2135,7 +2148,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (!mounted) return false;
 
     await _connectToTargetInBackground(target);
-    return mounted && _connected && _connectedPeerPubkey == peer;
+    if (!mounted || !_connected || _connectedPeerPubkey != peer) return false;
+    return _sendPairingSecretIfNeeded(target);
   }
 
   Future<void> _reconnectAfterBackgroundVoiceSend() async {
@@ -2156,21 +2170,23 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return false;
     }
 
-    if (_connected) return true;
+    if (_connected) {
+      return _sendPairingSecretIfNeeded(target);
+    }
     if (_connecting) {
       setState(() => _status = 'Waiting for connection...');
       for (var attempt = 0; attempt < 75; attempt += 1) {
         await Future<void>.delayed(const Duration(milliseconds: 200));
         if (!mounted) return false;
-        if (_connected) return true;
+        if (_connected) return _sendPairingSecretIfNeeded(target);
         if (!_connecting) break;
       }
-      return mounted && _connected;
+      return mounted && _connected && await _sendPairingSecretIfNeeded(target);
     }
 
     setState(() => _status = 'Connecting before send...');
     await _connect();
-    return mounted && _connected;
+    return mounted && _connected && await _sendPairingSecretIfNeeded(target);
   }
 
   Future<bool> _ensureConnectedToParentService() async {
@@ -2209,9 +2225,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   bool _shouldStartRepoTargetForSend(RepoTarget? target) {
-    if (target == null || _isParentRepoTarget(target)) return false;
-    final workdir = target.workdir?.trim();
-    return workdir != null && workdir.isNotEmpty;
+    return false;
   }
 
   bool _isParentRepoTarget(RepoTarget target) {
@@ -2297,6 +2311,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Future<bool> _connectToRepoTargetForSend(RepoTarget target) async {
     if (!mounted) return false;
 
+    final peer = target.pubkey.trim();
+    if (_connected && _connectedPeerPubkey == peer) {
+      setState(() => _applyRepoTargetFields(target));
+      return _sendPairingSecretIfNeeded(target);
+    }
+
     if (_connected || _connecting) {
       await _disconnect(expand: false);
     }
@@ -2307,7 +2327,52 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _status = 'Connecting to ${target.displayName}...';
     });
     await _connectToTargetInBackground(target);
-    return mounted && _connected && _connectedPeerPubkey == target.pubkey;
+    if (!mounted || !_connected || _connectedPeerPubkey != target.pubkey) {
+      return false;
+    }
+    return _sendPairingSecretIfNeeded(target);
+  }
+
+  Future<bool> _sendPairingSecretIfNeeded(RepoTarget? target) async {
+    final secret = target?.pairingSecret?.trim();
+    if (target == null || secret == null || secret.isEmpty) return true;
+    if (!_connected || _connectedPeerPubkey != target.pubkey) return false;
+
+    try {
+      setState(() => _status = 'Pairing ${target.displayName}...');
+      await _sendWithAutoRecovery(
+        label: 'pairing request',
+        sender: () => nostrSendQuery(
+          query: jsonEncode(_withActiveRoute({'pairing_secret': secret})),
+        ),
+      );
+      _clearPairingSecret(target.id);
+      if (mounted) setState(() => _status = 'Paired ${target.displayName}');
+      await _saveSettings();
+      return true;
+    } catch (error) {
+      _showError('Pairing failed: $error');
+      return false;
+    }
+  }
+
+  void _clearPairingSecret(String targetId) {
+    final targets = [..._repoTargets];
+    final index = targets.indexWhere((target) => target.id == targetId);
+    if (index < 0) return;
+    final target = targets[index];
+    targets[index] = RepoTarget(
+      id: target.id,
+      name: target.name,
+      pubkey: target.pubkey,
+      relays: target.relays,
+      workdir: target.workdir,
+      parentPubkey: target.parentPubkey,
+      parentRelays: target.parentRelays,
+      parentWorkdir: target.parentWorkdir,
+      parentName: target.parentName,
+    );
+    _repoTargets = targets;
   }
 
   RepoTarget? _parentRepoTargetFor(RepoTarget target) {
@@ -2841,7 +2906,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     try {
       final eventId = await _sendWithAutoRecovery(
         label: 'query send',
-        sender: () => nostrSendQuery(query: query),
+        sender: () => nostrSendQuery(query: _buildQueryPayload(query)),
       );
       if (!mounted) return;
       setState(() {
@@ -3386,7 +3451,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       }
       final eventId = await _sendWithAutoRecovery(
         label: 'resend query',
-        sender: () => nostrSendQuery(query: query),
+        sender: () => nostrSendQuery(query: _buildQueryPayload(query)),
       );
       if (!mounted) return;
       setState(() {
@@ -3430,7 +3495,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       }
       final eventId = await _sendWithAutoRecovery(
         label: 'resend voice note',
-        sender: () => nostrSendAudio(audio: audio),
+        sender: () => nostrSendQuery(
+          query: _buildMediaBundlePayload(attachment: audio, caption: ''),
+        ),
       );
       if (!mounted) return;
       setState(() {
@@ -3626,7 +3693,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
       final eventId = await _sendWithAutoRecovery(
         label: 'voice note send',
-        sender: () => nostrSendAudio(audio: audio),
+        sender: () => nostrSendQuery(
+          query: _buildMediaBundlePayload(attachment: audio, caption: ''),
+        ),
       );
       if (!mounted) return;
       setState(() {
@@ -3883,9 +3952,22 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (trimmedCaption.isNotEmpty) {
       mediaBundle['query'] = trimmedCaption;
     }
-    final payload = {'media_bundle': mediaBundle};
+    final payload = _withActiveRoute({'media_bundle': mediaBundle});
     const encoder = JsonEncoder.withIndent('  ');
     return encoder.convert(payload);
+  }
+
+  Map<String, dynamic> _withActiveRoute(Map<String, dynamic> payload) {
+    final workdir = _targetById(
+      _repoTargets,
+      _selectedRepoTargetId,
+    )?.workdir?.trim();
+    if (workdir == null || workdir.isEmpty) return payload;
+    return {'workdir': workdir, ...payload};
+  }
+
+  String _buildQueryPayload(String query) {
+    return jsonEncode(_withActiveRoute({'message': query}));
   }
 
   List<String> _selectedBlossomServers() {

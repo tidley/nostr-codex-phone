@@ -11,6 +11,7 @@ class RepoTarget {
     this.parentRelays,
     this.parentWorkdir,
     this.parentName,
+    this.pairingSecret,
   });
 
   final String id;
@@ -22,6 +23,7 @@ class RepoTarget {
   final List<String>? parentRelays;
   final String? parentWorkdir;
   final String? parentName;
+  final String? pairingSecret;
 
   String get displayName {
     final cleaned = name.trim();
@@ -43,6 +45,8 @@ class RepoTarget {
       'parent_workdir': parentWorkdir,
     if (parentName != null && parentName!.trim().isNotEmpty)
       'parent_name': parentName,
+    if (pairingSecret != null && pairingSecret!.trim().isNotEmpty)
+      'pairing_secret': pairingSecret,
   };
 
   static RepoTarget? fromJson(dynamic raw) {
@@ -54,6 +58,7 @@ class RepoTarget {
     final parentPubkey = raw['parent_pubkey']?.toString().trim();
     final parentWorkdir = raw['parent_workdir']?.toString().trim();
     final parentName = raw['parent_name']?.toString().trim();
+    final pairingSecret = raw['pairing_secret']?.toString().trim();
     final rawRelays = raw['relays'];
     final relays = rawRelays is Iterable
         ? rawRelays
@@ -83,6 +88,9 @@ class RepoTarget {
           ? null
           : parentWorkdir,
       parentName: parentName == null || parentName.isEmpty ? null : parentName,
+      pairingSecret: pairingSecret == null || pairingSecret.isEmpty
+          ? null
+          : pairingSecret,
     );
   }
 }

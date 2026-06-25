@@ -6,13 +6,15 @@ use std::io::{BufRead, BufReader};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use futures_util::FutureExt;
 use nostr_sdk::prelude::{Keys, PublicKey, ToBech32};
 use qrcode::{Color, QrCode};
+use rand::{rngs::OsRng, RngCore};
 #[path = "nostr_codex_server/memory.rs"]
 mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
@@ -32,7 +34,7 @@ use rust_lib_nostr_codex_phone::transcribe::{
     DownloadedAudio, TranscribeConfig,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Notify};
 use tracing::{error, info, warn};
 
 const WORKER_REGISTRY_FILE: &str = ".nostr-codex-workers.json";
@@ -85,7 +87,11 @@ struct WorkerProcessLock {
     path: PathBuf,
 }
 
-#[derive(Debug, Clone)]
+struct RepoTargetContext {
+    workdir: PathBuf,
+    relays: Vec<String>,
+}
+
 struct RepoWorkerContext {
     workdir: PathBuf,
     env_file: WorkerEnvFile,
@@ -97,25 +103,53 @@ struct RepoWorkerContext {
     memory_db: PathBuf,
 }
 
-#[derive(Clone)]
-struct RepoRuntimeManager {
-    inner: Arc<Mutex<HashMap<PathBuf, RepoRuntimeHandle>>>,
-}
-
-struct RepoRuntimeHandle {
-    _task: tokio::task::JoinHandle<()>,
-}
-
 struct WorkerRuntimeConfig {
     messenger: Arc<NostrMessenger>,
     worker_env: WorkerEnvFile,
     owner_peer_hex: Option<String>,
+    pairing_secret: Option<String>,
+    control: RuntimeControl,
     memory_config: MemoryConfig,
     codex_config: CodexConfig,
     audio_config: AudioConfig,
     transcribe_config: TranscribeConfig,
     relays: Vec<String>,
     manager: RepoRuntimeManager,
+}
+
+#[derive(Debug, Clone)]
+struct RepoRuntimeManager;
+
+impl RepoRuntimeManager {
+    fn new() -> Self {
+        Self
+    }
+}
+
+#[derive(Clone)]
+struct RuntimeControl {
+    is_root: bool,
+    shutdown_requested: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
+}
+
+impl RuntimeControl {
+    fn new(is_root: bool) -> Self {
+        Self {
+            is_root,
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            shutdown_notify: Arc::new(Notify::new()),
+        }
+    }
+
+    fn request_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::SeqCst);
+        self.shutdown_notify.notify_waiters();
+    }
+
+    fn is_shutdown_requested(&self) -> bool {
+        self.shutdown_requested.load(Ordering::SeqCst)
+    }
 }
 
 impl Drop for WorkerProcessLock {
@@ -136,69 +170,6 @@ impl Drop for WorkerProcessLock {
                 self.path.display()
             ),
         }
-    }
-}
-
-impl RepoRuntimeManager {
-    fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    async fn start_repo_runtime(
-        &self,
-        context: RepoWorkerContext,
-        owner_pubkey: &str,
-        owner_pubkey_hex: &str,
-        codex_config: &CodexConfig,
-        audio_config: &AudioConfig,
-        transcribe_config: &TranscribeConfig,
-    ) -> Result<(u32, bool)> {
-        let mut runtimes = self.inner.lock().await;
-        if runtimes.contains_key(&context.workdir) {
-            return Ok((std::process::id(), true));
-        }
-
-        let messenger = Arc::new(
-            NostrMessenger::connect(NostrConfig {
-                secret_key: context.secret_key.clone(),
-                peer_pubkey: Some(owner_pubkey.to_string()),
-                receive_pubkeys: vec![],
-                relays: context.relays.clone(),
-            })
-            .await?,
-        );
-        let mut repo_codex_config = codex_config.clone();
-        repo_codex_config.working_dir = context.workdir.clone();
-        let mut repo_memory_config = MemoryConfig::from_env(&context.workdir);
-        repo_memory_config.db_path = context.memory_db.clone();
-        let runtime_config = WorkerRuntimeConfig {
-            messenger,
-            worker_env: context.env_file,
-            owner_peer_hex: Some(owner_pubkey_hex.to_string()),
-            memory_config: repo_memory_config,
-            codex_config: repo_codex_config,
-            audio_config: audio_config.clone(),
-            transcribe_config: transcribe_config.clone(),
-            relays: context.relays,
-            manager: self.clone(),
-        };
-        let workdir = context.workdir.clone();
-        let task = tokio::spawn(async move {
-            if let Err(err) = run_worker_runtime(runtime_config).await {
-                error!(
-                    "repo worker runtime for `{}` stopped: {err:#}",
-                    workdir.display()
-                );
-            }
-        });
-
-        runtimes.insert(
-            context.workdir,
-            RepoRuntimeHandle { _task: task },
-        );
-        Ok((std::process::id(), false))
     }
 }
 
@@ -315,6 +286,19 @@ fn env_nonempty(key: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn allow_first_owner_claim() -> bool {
+    env::var("NOSTR_ALLOW_FIRST_OWNER_CLAIM")
+        .ok()
+        .map(|value| !is_falsey_env(&value))
+        .unwrap_or(false)
+}
+
+fn generate_pairing_secret() -> String {
+    let mut bytes = [0_u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn parse_env_assignment(line: &str) -> Option<(String, String)> {
@@ -436,6 +420,7 @@ fn pubkey_to_hex(pubkey: &str) -> Result<String> {
 fn accept_or_claim_owner(
     env_file: &WorkerEnvFile,
     owner_peer_hex: &mut Option<String>,
+    pairing_secret: &Option<String>,
     message: &IncomingMessage,
 ) -> bool {
     match owner_peer_hex.as_deref() {
@@ -448,6 +433,13 @@ fn accept_or_claim_owner(
         }
         Some(_) => true,
         None => {
+            if !allow_first_owner_claim() && !pairing_secret_matches(pairing_secret, message) {
+                warn!(
+                    "ignored first-owner claim from {} without matching pairing secret",
+                    message.sender_pubkey_hex
+                );
+                return false;
+            }
             info!(
                 "claiming first DM sender as worker owner: {}",
                 message.sender_pubkey
@@ -469,6 +461,79 @@ fn accept_or_claim_owner(
             true
         }
     }
+}
+
+fn pairing_secret_matches(pairing_secret: &Option<String>, message: &IncomingMessage) -> bool {
+    let Some(expected) = pairing_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    message_pairing_secret(message).as_deref() == Some(expected)
+}
+
+fn message_pairing_secret(message: &IncomingMessage) -> Option<String> {
+    pairing_secret_from_json(&message.text).or_else(|| pairing_secret_from_json(&message.raw_json))
+}
+
+fn pairing_secret_from_json(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let object = value.as_object()?;
+    object
+        .get("pairing_secret")
+        .or_else(|| object.get("pairingSecret"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn is_pairing_claim_message(message: &IncomingMessage) -> bool {
+    message_pairing_secret(message).is_some()
+}
+
+fn routed_codex_config(config: &CodexConfig, message: &IncomingMessage) -> Result<CodexConfig> {
+    let Some(workdir) = route_workdir_from_json(&message.raw_json)
+        .or_else(|| route_workdir_from_json(&message.text))
+    else {
+        return Ok(config.clone());
+    };
+
+    let workdir = PathBuf::from(workdir);
+    let canonical = workdir
+        .canonicalize()
+        .with_context(|| format!("route workdir `{}` is not accessible", workdir.display()))?;
+    if !canonical.is_dir() {
+        bail!("route workdir `{}` is not a directory", canonical.display());
+    }
+
+    let mut routed = config.clone();
+    routed.working_dir = canonical;
+    Ok(routed)
+}
+
+fn route_workdir_from_json(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("workdir")
+        .or_else(|| value.get("route")?.as_object()?.get("workdir"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn route_session_id_from_json(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("session_id")
+        .or_else(|| value.get("sessionId"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[tokio::main]
@@ -503,13 +568,16 @@ async fn main() -> Result<()> {
         .as_deref()
         .map(pubkey_to_hex)
         .transpose()?;
+    let pairing_secret = owner_peer_hex.is_none().then(generate_pairing_secret);
 
     let server_pubkey = messenger.public_key_bech32()?;
     info!("server pubkey: {}", server_pubkey);
     info!("server pubkey hex: {}", messenger.public_key_hex());
     match &nostr_config.peer_pubkey {
         Some(peer) => info!("peer pubkey: {peer}"),
-        None => warn!("peer pubkey not configured; first valid DM sender will be saved as owner"),
+        None => warn!(
+            "peer pubkey not configured; first DM must include the QR pairing secret to claim ownership"
+        ),
     }
     info!("relays: {}", nostr_config.relays.join(", "));
     info!(
@@ -540,6 +608,7 @@ async fn main() -> Result<()> {
         &messenger.public_key_hex(),
         &codex_config.working_dir,
         &nostr_config.relays,
+        pairing_secret.as_deref(),
     );
     drop(memory_probe);
 
@@ -548,6 +617,8 @@ async fn main() -> Result<()> {
         messenger,
         worker_env,
         owner_peer_hex,
+        pairing_secret,
+        control: RuntimeControl::new(true),
         memory_config,
         codex_config,
         audio_config,
@@ -562,14 +633,23 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     let mut peer_workers = HashMap::<String, mpsc::Sender<IncomingMessage>>::new();
 
     loop {
-        let Some(message) = config
-            .messenger
-            .next_message(Duration::from_secs(3600))
-            .await?
-        else {
-            continue;
+        let message = tokio::select! {
+            message = config.messenger.next_message(Duration::from_secs(3600)) => message?,
+            _ = config.control.shutdown_notify.notified() => {
+                if config.control.is_shutdown_requested() {
+                    info!("runtime shutdown requested");
+                    return Ok(());
+                }
+                continue;
+            }
         };
-        if !accept_or_claim_owner(&config.worker_env, &mut config.owner_peer_hex, &message) {
+        let Some(message) = message else { continue };
+        if !accept_or_claim_owner(
+            &config.worker_env,
+            &mut config.owner_peer_hex,
+            &config.pairing_secret,
+            &message,
+        ) {
             continue;
         }
 
@@ -586,6 +666,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                     config.transcribe_config.clone(),
                     config.relays.clone(),
                     config.manager.clone(),
+                    config.control.clone(),
                 )
             })
             .clone();
@@ -603,6 +684,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                 config.transcribe_config.clone(),
                 config.relays.clone(),
                 config.manager.clone(),
+                config.control.clone(),
             );
             if sender.send(message).await.is_err() {
                 error!("restarted peer worker for {worker_key} stopped; dropping incoming message");
@@ -622,6 +704,7 @@ fn spawn_peer_worker(
     transcribe_config: TranscribeConfig,
     relays: Vec<String>,
     manager: RepoRuntimeManager,
+    control: RuntimeControl,
 ) -> mpsc::Sender<IncomingMessage> {
     let (tx, rx) = mpsc::channel(32);
     tokio::spawn(peer_worker(
@@ -634,6 +717,7 @@ fn spawn_peer_worker(
         transcribe_config,
         relays,
         manager,
+        control,
     ));
     tx
 }
@@ -648,6 +732,7 @@ async fn peer_worker(
     transcribe_config: TranscribeConfig,
     relays: Vec<String>,
     manager: RepoRuntimeManager,
+    control: RuntimeControl,
 ) {
     let mut memory = open_memory_store(memory_config);
     info!("started worker for peer {peer_pubkey}");
@@ -675,6 +760,7 @@ async fn peer_worker(
             &transcribe_config,
             &relays,
             &manager,
+            &control,
             &cancel_token,
         ))
         .catch_unwind();
@@ -753,8 +839,24 @@ async fn process_message(
     transcribe_config: &TranscribeConfig,
     relays: &[String],
     manager: &RepoRuntimeManager,
+    control: &RuntimeControl,
     cancel_token: &CodexCancelToken,
 ) {
+    let codex_config = match routed_codex_config(codex_config, &message) {
+        Ok(config) => config,
+        Err(err) => {
+            send_response(
+                messenger,
+                &message.sender_pubkey_hex,
+                format!("Invalid route: {err:#}"),
+            )
+            .await;
+            return;
+        }
+    };
+    let route_session_id = route_session_id_from_json(&message.raw_json)
+        .or_else(|| route_session_id_from_json(&message.text));
+
     match message.kind.as_str() {
         "query" => {
             info!(
@@ -772,6 +874,11 @@ async fn process_message(
                 return;
             }
 
+            if is_pairing_claim_message(&message) {
+                send_status(messenger, &message.sender_pubkey_hex, "Paired.").await;
+                return;
+            }
+
             if let Ok(media_bundle) = parse_media_bundle_query(&message.text) {
                 process_media_bundle_turn(
                     messenger,
@@ -781,7 +888,8 @@ async fn process_message(
                     media_bundle,
                     audio_config,
                     transcribe_config,
-                    codex_config,
+                    &codex_config,
+                    route_session_id.as_deref(),
                     cancel_token,
                 )
                 .await;
@@ -789,14 +897,34 @@ async fn process_message(
             }
 
             if is_shutdown_request(&message.text) {
+                if !is_shutdown_confirm_request(&message.text) {
+                    send_response(
+                        messenger,
+                        &message.sender_pubkey_hex,
+                        "Shutdown requires confirmation. Send `/shutdown confirm` to stop this worker.".to_string(),
+                    )
+                    .await;
+                    return;
+                }
+                if control.is_root {
+                    send_response(
+                        messenger,
+                        &message.sender_pubkey_hex,
+                        "Confirmed. Shutting down the root Nostr Codex service.".to_string(),
+                    )
+                    .await;
+                    info!("owner confirmed root worker shutdown");
+                    std::process::exit(0);
+                }
                 send_response(
                     messenger,
                     &message.sender_pubkey_hex,
-                    "Shutting down this Nostr Codex worker.".to_string(),
+                    "Confirmed. Stopping this repo worker runtime.".to_string(),
                 )
                 .await;
-                info!("owner requested worker shutdown");
-                std::process::exit(0);
+                info!("owner confirmed repo worker runtime shutdown");
+                control.request_shutdown();
+                return;
             }
 
             if let Some(spawn_request) = parse_spawn_worker_request(&message.text) {
@@ -806,7 +934,7 @@ async fn process_message(
                     &message.sender_pubkey_hex,
                     &spawn_request,
                     relays,
-                    codex_config,
+                    &codex_config,
                     audio_config,
                     transcribe_config,
                     manager,
@@ -850,7 +978,8 @@ async fn process_message(
                 &message.sender_pubkey_hex,
                 recorded.id,
                 &message.text,
-                codex_config,
+                &codex_config,
+                route_session_id.as_deref(),
                 cancel_token,
             )
             .await;
@@ -874,7 +1003,8 @@ async fn process_message(
                     media_bundle,
                     audio_config,
                     transcribe_config,
-                    codex_config,
+                    &codex_config,
+                    route_session_id.as_deref(),
                     cancel_token,
                 )
                 .await;
@@ -997,7 +1127,8 @@ async fn process_message(
                 &message.sender_pubkey_hex,
                 recorded.id,
                 &transcript,
-                codex_config,
+                &codex_config,
+                route_session_id.as_deref(),
                 cancel_token,
             )
             .await;
@@ -1040,6 +1171,7 @@ async fn process_media_bundle_turn(
     audio_config: &AudioConfig,
     transcribe_config: &TranscribeConfig,
     codex_config: &CodexConfig,
+    session_id: Option<&str>,
     cancel_token: &CodexCancelToken,
 ) {
     let user_query = bundle.query.as_deref().map(str::trim).unwrap_or_default();
@@ -1223,6 +1355,7 @@ async fn process_media_bundle_turn(
         recorded_bundle.id,
         &request_text,
         codex_config,
+        session_id,
         cancel_token,
     )
     .await;
@@ -1284,7 +1417,7 @@ async fn process_spawn_worker_request(
                             messenger,
                             owner_pubkey_hex,
                             format!(
-                                "{action} Nostr Codex worker for `{}`.\n\nIt has its own npub and I sent this phone a target invite DM. Open the session switcher to select `{}`.",
+                                "{action} Nostr Codex session for `{}`.\n\nIt uses this service npub and I sent this phone a target invite DM. Open the session switcher to select `{}`.",
                                 target.workdir.as_deref().unwrap_or("unknown"),
                                 target.name
                             ),
@@ -1361,71 +1494,25 @@ async fn process_repo_list_request(messenger: &NostrMessenger, owner_pubkey_hex:
 
 async fn start_repo_worker(
     request: &SpawnWorkerRequest,
-    owner_pubkey: &str,
-    owner_pubkey_hex: &str,
+    _owner_pubkey: &str,
+    _owner_pubkey_hex: &str,
     relays: &[String],
     current_workdir: &Path,
     parent_pubkey: &str,
     parent_pubkey_hex: &str,
-    codex_config: &CodexConfig,
-    audio_config: &AudioConfig,
-    transcribe_config: &TranscribeConfig,
-    manager: &RepoRuntimeManager,
+    _codex_config: &CodexConfig,
+    _audio_config: &AudioConfig,
+    _transcribe_config: &TranscribeConfig,
+    _manager: &RepoRuntimeManager,
 ) -> Result<(TargetInvite, u32, bool)> {
-    let context = repo_worker_context(request, relays, current_workdir)?;
-
-    let mut env_values = vec![
-        ("NOSTR_SECRET_KEY".to_string(), context.secret_key.clone()),
-        ("NOSTR_PUBLIC_KEY".to_string(), context.public_key.clone()),
-        (
-            "NOSTR_PUBLIC_KEY_HEX".to_string(),
-            context.public_key_hex.clone(),
-        ),
-        ("NOSTR_PEER_PUBKEY".to_string(), owner_pubkey.to_string()),
-        (
-            "NOSTR_PEER_PUBKEY_HEX".to_string(),
-            owner_pubkey_hex.to_string(),
-        ),
-        ("NOSTR_RELAYS".to_string(), context.relay_csv.clone()),
-        (
-            "CODEX_WORKDIR".to_string(),
-            context.workdir.to_string_lossy().to_string(),
-        ),
-        (
-            "CODEX_MEMORY_DB".to_string(),
-            context.memory_db.to_string_lossy().to_string(),
-        ),
-        (
-            "CODEX_PERSIST_SESSIONS".to_string(),
-            env_nonempty("CODEX_PERSIST_SESSIONS").unwrap_or_else(|| "1".to_string()),
-        ),
-        (
-            "CODEX_RESUME_LATEST_BY_WORKDIR".to_string(),
-            env_nonempty("CODEX_RESUME_LATEST_BY_WORKDIR").unwrap_or_else(|| "1".to_string()),
-        ),
-    ];
-    for key in [
-        "CODEX_BIN",
-        "CODEX_ARGS",
-        "CODEX_TIMEOUT_SECS",
-        "TRANSCRIBE_BIN",
-        "TRANSCRIBE_ARGS",
-        "TRANSCRIBE_TIMEOUT_SECS",
-        "FFMPEG_BIN",
-        "AUDIO_MAX_BYTES",
-    ] {
-        if let Some(value) = env_nonempty(key) {
-            env_values.push((key.to_string(), value));
-        }
-    }
-    upsert_env_file_owned(&context.env_file.path, &env_values)?;
+    let context = repo_target_context(request, relays, current_workdir)?;
 
     let target = TargetInvite {
         target_type: "nostr_codex_target".to_string(),
         version: 1,
         name: worker_target_name(&context.workdir),
-        pubkey: context.public_key.clone(),
-        pubkey_hex: Some(context.public_key_hex.clone()),
+        pubkey: parent_pubkey.to_string(),
+        pubkey_hex: Some(parent_pubkey_hex.to_string()),
         workdir: Some(context.workdir.to_string_lossy().to_string()),
         relays: context.relays.clone(),
         parent: Some(TargetParent {
@@ -1437,22 +1524,27 @@ async fn start_repo_worker(
         }),
     };
 
-    let (pid, reused_existing) = manager
-        .start_repo_runtime(
-            context,
-            owner_pubkey,
-            owner_pubkey_hex,
-            codex_config,
-            audio_config,
-            transcribe_config,
-        )
-        .await?;
+    let pid = std::process::id();
 
     if let Err(err) = upsert_worker_registry(current_workdir, &target, pid) {
         warn!("failed to update worker registry: {err:#}");
     }
 
-    Ok((target, pid, reused_existing))
+    Ok((target, pid, false))
+}
+
+fn repo_target_context(
+    request: &SpawnWorkerRequest,
+    relays: &[String],
+    current_workdir: &Path,
+) -> Result<RepoTargetContext> {
+    let workdir = resolve_spawn_workdir(request, current_workdir)?;
+    let relays = if relays.is_empty() {
+        default_relays()
+    } else {
+        relays.to_vec()
+    };
+    Ok(RepoTargetContext { workdir, relays })
 }
 
 fn repo_worker_context(
@@ -1538,6 +1630,7 @@ fn worker_lock_is_stale(path: &Path) -> Result<bool> {
     Ok(!worker_lock_process_matches(path, pid))
 }
 
+#[cfg(test)]
 fn running_worker_lock_pid(workdir: &Path) -> Result<Option<u32>> {
     let path = workdir.join(WORKER_LOCK_FILE);
     if !path.is_file() {
@@ -1553,17 +1646,35 @@ fn running_worker_lock_pid(workdir: &Path) -> Result<Option<u32>> {
     Ok(raw.trim().parse::<u32>().ok())
 }
 
-#[cfg(target_family = "unix")]
+#[cfg(unix)]
 fn process_is_running(pid: u32) -> bool {
-    Path::new("/proc").join(pid.to_string()).exists()
+    StdCommand::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
-#[cfg(not(target_family = "unix"))]
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    let Ok(output) = StdCommand::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .any(|part| part == pid.to_string())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn process_is_running(_pid: u32) -> bool {
-    true
+    false
 }
 
-#[cfg(target_family = "unix")]
+#[cfg(target_os = "linux")]
 fn worker_lock_process_matches(path: &Path, pid: u32) -> bool {
     let Some(workdir) = path.parent() else {
         return false;
@@ -1588,7 +1699,7 @@ fn worker_lock_process_matches(path: &Path, pid: u32) -> bool {
         .is_some_and(|(current, candidate)| current == candidate)
 }
 
-#[cfg(not(target_family = "unix"))]
+#[cfg(not(target_os = "linux"))]
 fn worker_lock_process_matches(_path: &Path, _pid: u32) -> bool {
     true
 }
@@ -1903,12 +2014,24 @@ fn cancel_request_matches(request: &CancelRequest, active_event_id: &str) -> boo
 
 fn is_shutdown_request(request: &str) -> bool {
     let command = request.trim().to_ascii_lowercase();
-    if matches!(command.as_str(), "/shutdown" | "/quit" | "/exit") {
+    if matches!(command.as_str(), "/shutdown" | "/quit" | "/exit")
+        || matches!(
+            command.as_str(),
+            "/shutdown confirm" | "/quit confirm" | "/exit confirm"
+        )
+    {
         return true;
     }
     matches!(
         normalize_transcript(request).as_str(),
         "shutdown" | "quit" | "exit"
+    )
+}
+
+fn is_shutdown_confirm_request(request: &str) -> bool {
+    matches!(
+        request.trim().to_ascii_lowercase().as_str(),
+        "/shutdown confirm" | "/quit confirm" | "/exit confirm"
     )
 }
 
@@ -2202,9 +2325,12 @@ async fn process_text_turn(
     recorded_id: i64,
     request: &str,
     codex_config: &CodexConfig,
+    explicit_session_id: Option<&str>,
     cancel_token: &CodexCancelToken,
 ) {
-    let session_id = if codex_config.persist_sessions {
+    let session_id = if explicit_session_id.is_some() {
+        explicit_session_id.map(ToOwned::to_owned)
+    } else if codex_config.persist_sessions {
         load_codex_session(memory, peer_pubkey, &codex_config.working_dir, request)
     } else {
         None
@@ -2634,9 +2760,25 @@ fn read_worker_registry(workdir: &Path) -> Result<WorkerRegistry> {
 
 fn write_worker_registry(workdir: &Path, registry: &WorkerRegistry) -> Result<()> {
     let path = registry_path(workdir);
+    let tmp_path = workdir.join(format!(
+        ".{}.{}.tmp",
+        WORKER_REGISTRY_FILE,
+        std::process::id()
+    ));
     let raw = serde_json::to_string_pretty(registry)?;
-    fs::write(&path, format!("{raw}\n"))
-        .with_context(|| format!("failed to write worker registry `{}`", path.display()))?;
+    fs::write(&tmp_path, format!("{raw}\n")).with_context(|| {
+        format!(
+            "failed to write temporary worker registry `{}`",
+            tmp_path.display()
+        )
+    })?;
+    fs::rename(&tmp_path, &path).with_context(|| {
+        format!(
+            "failed to replace worker registry `{}` with `{}`",
+            path.display(),
+            tmp_path.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -2680,8 +2822,14 @@ fn worker_registry_status_text(workdir: &Path) -> String {
     lines.join("\n")
 }
 
-fn write_worker_target_qr(pubkey: &str, pubkey_hex: &str, workdir: &Path, relays: &[String]) {
-    let payload = serde_json::json!({
+fn write_worker_target_qr(
+    pubkey: &str,
+    pubkey_hex: &str,
+    workdir: &Path,
+    relays: &[String],
+    pairing_secret: Option<&str>,
+) {
+    let mut payload = serde_json::json!({
         "type": "nostr_codex_target",
         "version": 1,
         "name": worker_target_name(workdir),
@@ -2690,6 +2838,9 @@ fn write_worker_target_qr(pubkey: &str, pubkey_hex: &str, workdir: &Path, relays
         "workdir": workdir.to_string_lossy(),
         "relays": relays,
     });
+    if let Some(secret) = pairing_secret.filter(|secret| !secret.trim().is_empty()) {
+        payload["pairing_secret"] = serde_json::Value::String(secret.to_string());
+    }
     let Ok(payload) = serde_json::to_string(&payload) else {
         warn!("failed to serialize worker QR payload");
         return;
@@ -3461,6 +3612,27 @@ mod tests {
         );
         assert_eq!(parse_cancel_request(r#"{"cancel_request":false}"#), None);
         assert_eq!(parse_cancel_request("cancel this"), None);
+    }
+
+    #[test]
+    fn requires_confirmed_shutdown_command() {
+        assert!(is_shutdown_request("/shutdown"));
+        assert!(is_shutdown_request("/shutdown confirm"));
+        assert!(!is_shutdown_confirm_request("/shutdown"));
+        assert!(is_shutdown_confirm_request("/shutdown confirm"));
+    }
+
+    #[test]
+    fn extracts_top_level_route_metadata() {
+        let raw = r#"{"session_id":"session-1","workdir":"/home/tom/code/phone","message":"hi"}"#;
+        assert_eq!(
+            route_workdir_from_json(raw).as_deref(),
+            Some("/home/tom/code/phone")
+        );
+        assert_eq!(
+            route_session_id_from_json(raw).as_deref(),
+            Some("session-1")
+        );
     }
 
     #[test]

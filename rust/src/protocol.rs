@@ -289,6 +289,13 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
             .ok_or_else(|| anyhow!("field `query` must be a string"));
     }
 
+    if let Some(message) = object.get("message") {
+        return message
+            .as_str()
+            .map(WireMessage::query)
+            .ok_or_else(|| anyhow!("field `message` must be a string"));
+    }
+
     if let Some(cancel_request) = object.get("cancel_request") {
         let cancel_request = parse_cancel_request_field(cancel_request)?;
         return Ok(WireMessage::cancel(cancel_request.event_id));
@@ -359,7 +366,7 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `repo_list`, object `media_bundle`, object `cancel_request`, or object `attachments` field"
+        "message must contain a string `query`, `message`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `repo_list`, object `media_bundle`, object `cancel_request`, or object `attachments` field"
     ))
 }
 
@@ -627,6 +634,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_routed_message_contract() {
+        let parsed = parse_wire_message(
+            r#"{ "session_id": "session-1", "workdir": "/home/tom/code/phone", "message": "hello" }"#,
+        )
+        .unwrap();
+        assert_eq!(parsed, WireMessage::query("hello"));
+        assert_eq!(parsed.kind(), "query");
+        assert_eq!(parsed.text(), "hello");
+    }
+
+    #[test]
     fn parses_media_bundle_payload() {
         let parsed = parse_wire_message(
             r#"{
@@ -869,7 +887,7 @@ mod tests {
     #[test]
     fn rejects_malformed_payloads() {
         assert!(parse_wire_message(r#"{ "query": 42 }"#).is_err());
-        assert!(parse_wire_message(r#"{ "message": "hello" }"#).is_err());
+        assert!(parse_wire_message(r#"{ "message": 42 }"#).is_err());
         assert!(parse_wire_message(
             r#"{ "audio": { "url": "ftp://x", "sha256": "bad", "size": 1, "type": "audio/mp4" } }"#
         )

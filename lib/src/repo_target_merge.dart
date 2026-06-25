@@ -26,6 +26,7 @@ int repoTargetMergeIndex(
       (target) => target.workdir?.trim() == incomingWorkdir,
     );
     if (workdirIndex >= 0) return workdirIndex;
+    return -1;
   }
 
   final incomingPubkey = incoming.pubkey.trim();
