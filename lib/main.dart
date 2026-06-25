@@ -1331,10 +1331,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _writeConversationHistoryStore(store);
   }
 
-  void _appendMessageForActiveConversation(ConversationMessage message) {
-    _appendMessageForConversation(_activeConversationKey, message);
-  }
-
   void _appendMessageForConversation(
     String conversationKey,
     ConversationMessage message,
@@ -2275,15 +2271,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       await _connectToTargetInBackground(parent);
       if (!mounted || !_connected) return false;
 
-      await _sendSpawnSessionRequest(
+      if (!await _sendSpawnSessionRequest(
         path: workdir,
         create: false,
         sendingStatus: 'Starting ${target.displayName}...',
-        outgoingText: 'Start session in $workdir',
         sentStatus: 'Waiting for ${target.displayName}...',
-        recordOutgoing: false,
         silent: true,
-      );
+      )) {
+        return false;
+      }
       if (!mounted) return false;
 
       RepoTarget targetToConnect;
@@ -3030,16 +3026,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (request == null || !mounted) return;
 
     final path = '/home/tom/code/${request.path}';
-    await _sendSpawnSessionRequest(
+    await _spawnAndOpenSession(
       path: path,
       create: request.create,
       sendingStatus: request.create
           ? 'Requesting new project session...'
           : 'Requesting session spawn...',
-      outgoingText: request.create
-          ? 'Create session in $path'
-          : 'Spawn session in $path',
-      sentStatus: 'Spawn request sent',
+      waitingStatus: request.create
+          ? 'Waiting for new project session...'
+          : 'Waiting for spawned session...',
+      timeoutMessage: 'Session invite timed out',
     );
   }
 
@@ -3057,22 +3053,68 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _showError('Select the parent service first, then restart this session');
       return;
     }
-    await _sendSpawnSessionRequest(
+    await _spawnAndOpenSession(
       path: workdir,
       create: false,
       sendingStatus: 'Requesting session restart...',
-      outgoingText: 'Restart session in $workdir',
-      sentStatus: 'Restart request sent',
+      waitingStatus: 'Waiting for restarted session...',
+      timeoutMessage: 'Session restart timed out',
     );
   }
 
-  Future<void> _sendSpawnSessionRequest({
+  Future<bool> _spawnAndOpenSession({
     required String path,
     required bool create,
     required String sendingStatus,
-    required String outgoingText,
+    required String waitingStatus,
+    required String timeoutMessage,
+  }) async {
+    if (_pendingSessionStart != null) {
+      _showError('A session is already starting');
+      return false;
+    }
+
+    final completer = Completer<RepoTarget>();
+    _pendingSessionStart = _PendingSessionStart(
+      workdir: path,
+      completer: completer,
+    );
+
+    try {
+      if (!await _sendSpawnSessionRequest(
+        path: path,
+        create: create,
+        sendingStatus: sendingStatus,
+        sentStatus: waitingStatus,
+        silent: true,
+      )) {
+        return false;
+      }
+
+      final target = await completer.future.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () => throw TimeoutException(timeoutMessage),
+      );
+      if (!mounted) return false;
+      return _connectToRepoTargetForSend(target);
+    } on TimeoutException catch (error) {
+      if (mounted) setState(() => _status = error.message ?? timeoutMessage);
+      return false;
+    } catch (error) {
+      _showError('Could not open session: $error');
+      return false;
+    } finally {
+      if (identical(_pendingSessionStart?.completer, completer)) {
+        _pendingSessionStart = null;
+      }
+    }
+  }
+
+  Future<bool> _sendSpawnSessionRequest({
+    required String path,
+    required bool create,
+    required String sendingStatus,
     required String sentStatus,
-    bool recordOutgoing = true,
     bool silent = false,
   }) async {
     final payload = jsonEncode({
@@ -3089,25 +3131,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _status = sendingStatus;
     });
     try {
-      final eventId = await _sendWithAutoRecovery(
+      await _sendWithAutoRecovery(
         label: 'spawn session request',
         sender: () => nostrSendQuery(query: payload),
       );
-      if (recordOutgoing) {
-        _appendMessageForActiveConversation(
-          ConversationMessage(
-            direction: MessageDirection.outgoing,
-            kind: 'query',
-            text: outgoingText,
-            eventId: eventId,
-            timestamp: DateTime.now(),
-          ),
-        );
-      }
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() => _status = sentStatus);
+      return true;
     } catch (error) {
       _showError('Session request failed: $error');
+      return false;
     } finally {
       if (mounted) {
         setState(() {
