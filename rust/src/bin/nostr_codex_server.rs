@@ -1950,10 +1950,14 @@ fn parse_spawn_worker_request(request: &str) -> Option<SpawnWorkerRequest> {
         ("/spawn --create", true),
         ("/spawn -c", true),
         ("/spawn-create", true),
+        ("/create-session", true),
         ("/create-worker", true),
         ("/spawn", false),
+        ("/spawn-session", false),
         ("/spawn-worker", false),
+        ("/start-session", false),
         ("/start-worker", false),
+        ("/restart-session", false),
     ] {
         if lowered == prefix {
             return None;
@@ -1971,10 +1975,18 @@ fn parse_spawn_worker_request(request: &str) -> Option<SpawnWorkerRequest> {
     for (marker, create) in [
         ("create worker in ", true),
         ("create a worker in ", true),
+        ("create session in ", true),
+        ("create a session in ", true),
         ("spawn new worker in ", true),
+        ("spawn new session in ", true),
         ("spawn worker in ", false),
+        ("spawn session in ", false),
+        ("spawn a session in ", false),
         ("start worker in ", false),
         ("start a worker in ", false),
+        ("start session in ", false),
+        ("start a session in ", false),
+        ("restart session in ", false),
     ] {
         if lowered.starts_with(marker) {
             return parse_spawn_path_argument(&trimmed[marker.len()..]).map(|workdir| {
@@ -3670,6 +3682,38 @@ mod tests {
             Some(SpawnWorkerRequest {
                 workdir: "~/code/repo".to_string(),
                 create: false,
+                silent: false,
+            })
+        );
+        assert_eq!(
+            parse_spawn_worker_request("Spawn session in /home/tom/code/repo"),
+            Some(SpawnWorkerRequest {
+                workdir: "/home/tom/code/repo".to_string(),
+                create: false,
+                silent: false,
+            })
+        );
+        assert_eq!(
+            parse_spawn_worker_request("Start session in /home/tom/code/repo"),
+            Some(SpawnWorkerRequest {
+                workdir: "/home/tom/code/repo".to_string(),
+                create: false,
+                silent: false,
+            })
+        );
+        assert_eq!(
+            parse_spawn_worker_request("Restart session in /home/tom/code/repo"),
+            Some(SpawnWorkerRequest {
+                workdir: "/home/tom/code/repo".to_string(),
+                create: false,
+                silent: false,
+            })
+        );
+        assert_eq!(
+            parse_spawn_worker_request("Create session in /home/tom/code/new"),
+            Some(SpawnWorkerRequest {
+                workdir: "/home/tom/code/new".to_string(),
+                create: true,
                 silent: false,
             })
         );
