@@ -254,10 +254,17 @@ fn print_generated_key() -> Result<()> {
 }
 
 fn initial_workdir() -> Result<PathBuf> {
-    env::var("CODEX_WORKDIR")
-        .map(PathBuf::from)
-        .or_else(|_| env::current_dir())
-        .context("failed to resolve worker directory")
+    if let Ok(workdir) = env::var("CODEX_WORKDIR") {
+        return Ok(PathBuf::from(workdir));
+    }
+    let code = env::var("HOME")
+        .map(|home| PathBuf::from(home).join("code"))
+        .ok()
+        .filter(|code| code.is_dir());
+    match code {
+        Some(code) => Ok(code),
+        None => env::current_dir().context("failed to resolve worker directory"),
+    }
 }
 
 fn ensure_worker_secret(env_file: &WorkerEnvFile) -> Result<String> {
@@ -556,7 +563,11 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let initial_env = WorkerEnvFile::for_workdir(&initial_workdir()?);
+    let initial_workdir = initial_workdir()?;
+    if env::var_os("CODEX_WORKDIR").is_none() {
+        env::set_var("CODEX_WORKDIR", &initial_workdir);
+    }
+    let initial_env = WorkerEnvFile::for_workdir(&initial_workdir);
     initial_env.load_missing()?;
     let codex_config = CodexConfig::from_env()?;
     let worker_env = WorkerEnvFile::for_workdir(&codex_config.working_dir);
@@ -1459,7 +1470,7 @@ async fn process_spawn_worker_request(
             send_response(
                 messenger,
                 owner_pubkey_hex,
-                format!("Could not resolve parent bridge pubkey: {err:#}"),
+                format!("Could not resolve computer service pubkey: {err:#}"),
             )
             .await;
             return;
@@ -1871,12 +1882,12 @@ fn ensure_child_worker_secret(env_file: &WorkerEnvFile) -> Result<String> {
     Ok(secret_key)
 }
 
-fn resolve_spawn_workdir(request: &SpawnWorkerRequest, current_workdir: &Path) -> Result<PathBuf> {
+fn resolve_spawn_workdir(request: &SpawnWorkerRequest, _current_workdir: &Path) -> Result<PathBuf> {
     let requested = expand_home_path(clean_path_argument(&request.workdir));
     let path = if requested.is_absolute() {
         requested
     } else {
-        current_workdir.join(requested)
+        canonical_code_dir()?.join(requested)
     };
     if request.create && !path.exists() {
         ensure_spawn_create_allowed(&path)?;
@@ -1894,14 +1905,14 @@ fn resolve_spawn_workdir(request: &SpawnWorkerRequest, current_workdir: &Path) -
 }
 
 fn ensure_spawn_existing_allowed(path: &Path) -> Result<()> {
-    let home = canonical_home_dir()?;
-    if path == home || path.starts_with(&home) {
+    let code = canonical_code_dir()?;
+    if path == code || path.starts_with(&code) {
         return Ok(());
     }
     anyhow::bail!(
         "`{}` is outside the allowed folders (`{}` and folders inside it)",
         path.display(),
-        home.display()
+        code.display()
     )
 }
 
@@ -3820,6 +3831,33 @@ mod tests {
     }
 
     #[test]
+    fn defaults_initial_workdir_to_code_folder() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_home = env::var_os("HOME");
+        let previous_workdir = env::var_os("CODEX_WORKDIR");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let code = home.join("code");
+        fs::create_dir_all(&code).unwrap();
+        env::set_var("HOME", &home);
+        env::remove_var("CODEX_WORKDIR");
+
+        let resolved = initial_workdir().unwrap();
+
+        match previous_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        match previous_workdir {
+            Some(value) => env::set_var("CODEX_WORKDIR", value),
+            None => env::remove_var("CODEX_WORKDIR"),
+        }
+
+        assert_eq!(resolved, code);
+    }
+
+    #[test]
     fn extracts_top_level_route_metadata() {
         let raw = r#"{"session_id":"session-1","workdir":"/home/tom/code/phone","message":"hi"}"#;
         assert_eq!(
@@ -3899,12 +3937,13 @@ mod tests {
     }
 
     #[test]
-    fn resolves_spawn_workdir_and_creates_new_repo_inside_code() {
+    fn resolves_relative_spawn_workdir_from_code_root() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let previous_home = env::var_os("HOME");
 
         let temp_dir = tempfile::tempdir().unwrap();
         let home = temp_dir.path().join("home");
+        let code = home.join("code");
         let current_workdir = home.join("code").join("phone");
         fs::create_dir_all(&current_workdir).unwrap();
         env::set_var("HOME", &home);
@@ -3921,11 +3960,37 @@ mod tests {
             None => env::remove_var("HOME"),
         }
 
-        assert_eq!(
-            resolved,
-            current_workdir.join("new-repo").canonicalize().unwrap()
-        );
+        assert_eq!(resolved, code.join("new-repo").canonicalize().unwrap());
         assert!(resolved.is_dir());
+    }
+
+    #[test]
+    fn rejects_existing_spawn_outside_code_folder() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_home = env::var_os("HOME");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        let current_workdir = home.join("code").join("phone");
+        let outside = home.join("other");
+        fs::create_dir_all(&current_workdir).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        env::set_var("HOME", &home);
+
+        let request = SpawnWorkerRequest {
+            workdir: outside.to_string_lossy().to_string(),
+            create: false,
+            silent: false,
+        };
+        let error = resolve_spawn_workdir(&request, &current_workdir)
+            .expect_err("existing folder outside ~/code should fail");
+
+        match previous_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+
+        assert!(error.to_string().contains("outside the allowed folders"));
     }
 
     #[test]
@@ -3941,7 +4006,7 @@ mod tests {
         env::set_var("HOME", &home);
 
         let request = SpawnWorkerRequest {
-            workdir: "../../tmp/new-repo".to_string(),
+            workdir: "../tmp/new-repo".to_string(),
             create: true,
             silent: false,
         };

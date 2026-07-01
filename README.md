@@ -119,8 +119,8 @@ The server listens for `{ "query": "..." }`, `{ "audio": { ... } }`, and
 runs Codex non-interactively, and replies with `{ "response": "..." }` or
 `{ "error": "..." }`. For compressed audio transcription failures, it can also
 reply with `{ "audio_retry": { "format": "wav", "reason": "..." } }`. When a
-parent worker starts another repo worker, it sends `{ "target_invite": { ... } }`
-so the phone can add the new worker as a selectable session.
+root worker opens another repo session, it sends `{ "target_invite": { ... } }`
+so the phone can add the new routed workdir as a selectable session.
 
 Both server and mobile dedupe incoming GiftWrapped DMs by event ID so the same
 event delivered by multiple relays is only processed once per session.
@@ -134,41 +134,40 @@ service npub. The selected workdir route is carried inside the encrypted
 GiftWrapped DM payload.
 
 The phone session drawer includes **Spawn on computer**. It sends a
-`spawn_session` request to the currently connected worker. The dialog treats
-`/home/tom/code` as the fixed base path, so Create and Open only need a folder
-name such as `my-new-project`, `phone`, or `pave/website`. In **Open** mode, the
-dialog can ask the worker for folders under `/home/tom/code` and
-`/home/tom/code/pave` and fill the field from that list. If the spawn succeeds,
-the service sends a target invite DM back to the phone and records the routed
-session in `.nostr-codex-workers.json`. Accepting the invite adds it as a saved
-phone session.
+`spawn_session` request to the computer service. The worker treats `~/code` as
+the fixed base path, so Create and Open only need a folder name such as
+`my-new-project`, `phone`, or `pave/website`. In **Open** mode, the dialog can
+ask the worker for folders under `~/code` and `~/code/pave` and fill the field
+from that list. If the spawn succeeds, the service sends a target invite DM back
+to the phone and records the routed session in `~/code/.nostr-codex-workers.json`.
+Accepting the invite adds it as a saved phone session.
 
 The same workflow can be driven by text:
 
 ```text
 /spawn --create my-new-project
-/spawn /home/tom/code/existing-repo
-start worker in ~/code/existing-repo
+/spawn existing-repo
+start worker in existing-repo
 ```
 
-Use `/workers` or `/sessions` to list spawned child workers known by the current
-parent worker. Use `/shutdown`, `/quit`, or `/exit` inside a child session to
-stop that worker process.
+Use `/workers` or `/sessions` to list spawned sessions known by the computer
+service. Use `/shutdown`, `/quit`, or `/exit` from the computer service to stop
+the worker process.
 
-Only the parent worker should be installed as a persistent machine service.
-Spawned repo workers are ephemeral child processes started by the parent.
+Only the `~/code` worker should be installed as a persistent machine service.
+Repo sessions are routed workdirs under that worker.
 
-From any repo folder, start a foreground worker with one command:
+Start a foreground worker with one command. It runs from `~/code` by default:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tidley/nostr-codex-phone/main/scripts/bootstrap-worker.sh | bash
 ```
 
-The bootstrap script checks for `./nostr-codex-worker-linux-x64` or
-`./nostr-codex-worker` first. If neither exists, it downloads
+The bootstrap script checks for `~/code/nostr-codex-worker-linux-x64` or
+`~/code/nostr-codex-worker` first. If neither exists, it downloads
 `nostr-codex-worker-linux-x64` from the latest GitHub release, makes it
-executable, and starts it. The worker writes `.env.server` in that repo if
-needed, generates and saves a repo-local `NOSTR_SECRET_KEY` when one is not
+executable, and starts it. The worker writes `~/code/.env.server` if needed,
+generates and saves a root worker `NOSTR_SECRET_KEY` when one is not
 already configured, prints/saves the QR target, and listens for DMs. If
 `NOSTR_PEER_PUBKEY` is not configured, the first phone key that sends a DM
 becomes the saved owner for that worker. Set `NOSTR_PEER_PUBKEY=npub...` before
@@ -391,9 +390,8 @@ flutter run
 ```
 
 Use the app to generate or paste the mobile key, copy the displayed mobile
-public key into the parent worker's `NOSTR_PEER_PUBKEY`, add the parent npub
-as a named repo target in the app, and use the same relay list on both sides of
-each target.
+public key into the computer service's `NOSTR_PEER_PUBKEY`, add the service npub
+as a named target in the app, and use the same relay list on both sides.
 
 Android permissions include internet, microphone, and camera access.
 

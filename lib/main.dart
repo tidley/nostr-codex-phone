@@ -35,7 +35,7 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.1.125+125';
+const _appVersion = '0.1.127+127';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -1339,11 +1339,33 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   bool _sameWorkdir(String? left, String? right) {
     final cleanedLeft = left?.trim();
     final cleanedRight = right?.trim();
+    final leftKey = _workdirCompareKey(cleanedLeft);
+    final rightKey = _workdirCompareKey(cleanedRight);
     return cleanedLeft != null &&
         cleanedLeft.isNotEmpty &&
         cleanedRight != null &&
         cleanedRight.isNotEmpty &&
-        cleanedLeft == cleanedRight;
+        leftKey != null &&
+        rightKey != null &&
+        leftKey == rightKey;
+  }
+
+  String? _workdirCompareKey(String? value) {
+    if (value == null || value.isEmpty) return null;
+    var normalized = value.replaceAll('\\', '/').replaceAll(RegExp(r'/+'), '/');
+    while (normalized.length > 1 && normalized.endsWith('/')) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+    if (normalized == '~/code') return '';
+    if (normalized.startsWith('~/code/')) {
+      return normalized.substring('~/code/'.length);
+    }
+    const codeMarker = '/code/';
+    final codeIndex = normalized.indexOf(codeMarker);
+    if (codeIndex >= 0) {
+      return normalized.substring(codeIndex + codeMarker.length);
+    }
+    return normalized;
   }
 
   Future<void> _acceptPendingSessionStart(
@@ -2389,7 +2411,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Future<bool> _ensureConnectedToParentService() async {
     final parent = await _parentServiceTargetForSpawn();
     if (parent == null) {
-      _showError('Set a master session first');
+      _showError('Add or select the computer service first');
       return false;
     }
 
@@ -2399,7 +2421,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
 
     if (_connecting) {
-      setState(() => _status = 'Waiting for parent connection...');
+      setState(() => _status = 'Waiting for computer service...');
       for (var attempt = 0; attempt < 75; attempt += 1) {
         await Future<void>.delayed(const Duration(milliseconds: 200));
         if (!mounted) return false;
@@ -2416,62 +2438,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<RepoTarget?> _parentServiceTargetForSpawn() async {
-    final master = _masterRepoTarget();
-    if (master != null) return master;
-
     final selected = _targetById(_repoTargets, _selectedRepoTargetId);
     if (selected != null) {
-      if (_canBecomeMasterSession(selected)) {
-        return _setMasterRepoTarget(selected, announce: false);
-      }
-      return _parentRepoTargetFor(selected);
+      return _parentRepoTargetFor(selected) ?? selected;
     }
 
-    return null;
-  }
-
-  RepoTarget? _masterRepoTarget() {
     for (final target in _repoTargets) {
-      if (target.isMasterSession) return target;
+      final parentPubkey = target.parentPubkey?.trim();
+      if (parentPubkey == null || parentPubkey.isEmpty) {
+        return target;
+      }
     }
+
     return null;
-  }
-
-  bool _canBecomeMasterSession(RepoTarget target) {
-    final parentPubkey = target.parentPubkey?.trim();
-    return parentPubkey == null || parentPubkey.isEmpty;
-  }
-
-  Future<RepoTarget> _setMasterRepoTarget(
-    RepoTarget target, {
-    bool announce = true,
-  }) async {
-    final targets = [..._repoTargets];
-    final index = targets.indexWhere((item) => item.id == target.id);
-    final savedTarget = (index >= 0 ? targets[index] : target).copyWith(
-      isMasterSession: true,
-    );
-
-    for (var i = 0; i < targets.length; i += 1) {
-      targets[i] = targets[i].copyWith(
-        isMasterSession: targets[i].id == savedTarget.id,
-      );
-    }
-    if (index < 0) {
-      targets.add(savedTarget);
-    }
-
-    setState(() {
-      _repoTargets = targets;
-      if (_selectedRepoTargetId == savedTarget.id) {
-        _applyRepoTargetFields(savedTarget);
-      }
-      if (announce) {
-        _status = 'Master session set: ${savedTarget.displayName}';
-      }
-    });
-    await _saveSettings();
-    return savedTarget;
   }
 
   bool _shouldStartRepoTargetForSend(RepoTarget? target) {
@@ -2485,7 +2464,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final parent = _parentRepoTargetFor(target);
     if (parent == null) {
       _showError(
-        'Could not start ${target.displayName}: parent phone session is not saved',
+        'Could not start ${target.displayName}: computer service is not saved',
       );
       return null;
     }
@@ -2624,11 +2603,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         pubkey: parentPubkey,
         relays: parentRelays,
         workdir: target.parentWorkdir,
-        isMasterSession: true,
       );
     }
 
-    return _masterRepoTarget();
+    return null;
   }
 
   BridgeNostrConfig _activeNostrConfig() {
@@ -3246,7 +3224,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<void> _requestSpawnSession() async {
     if (!await _ensureConnectedToParentService()) {
-      _showError('Connect to the parent service first');
+      _showError('Connect to the computer service first');
       return;
     }
     if (!mounted) return;
@@ -3259,9 +3237,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     );
     if (request == null || !mounted) return;
 
-    final path = '/home/tom/code/${request.path}';
     await _spawnAndOpenSession(
-      path: path,
+      path: request.path,
       create: request.create,
       sendingStatus: request.create
           ? 'Requesting new project session...'
@@ -3280,11 +3257,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return;
     }
     if (!await _ensureConnectedToParentService()) {
-      _showError('Connect to the parent service first');
-      return;
-    }
-    if (target.id == _selectedRepoTargetId) {
-      _showError('Select the parent service first, then restart this session');
+      _showError('Connect to the computer service first');
       return;
     }
     await _spawnAndOpenSession(
@@ -3387,7 +3360,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<List<RepoChoice>> _requestRepoChoices() async {
     if (!await _ensureConnectedToParentService()) {
-      throw StateError('Connect to the parent service first');
+      throw StateError('Connect to the computer service first');
     }
     final existing = _pendingRepoListCompleter;
     if (existing != null && !existing.isCompleted) {
@@ -3398,7 +3371,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     final payload = jsonEncode({
       'repo_list_request': {
-        'roots': ['/home/tom/code', '/home/tom/code/pave'],
+        'roots': ['~/code', '~/code/pave'],
       },
     });
 
@@ -4513,7 +4486,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         onNewTarget: () => unawaited(_createRepoTarget()),
         onSpawnSession: () => unawaited(_requestSpawnSession()),
         onRestartTarget: (target) => unawaited(_restartRepoTarget(target)),
-        onSetMasterTarget: (target) => unawaited(_setMasterRepoTarget(target)),
         onRenameTarget: (target) => unawaited(_renameRepoTarget(target)),
         onOpenSettings: () => unawaited(_openSettings()),
         onDeleteTarget: (targetId) {
