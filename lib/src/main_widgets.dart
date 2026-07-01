@@ -468,6 +468,7 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
 class _SettingsPage extends StatelessWidget {
   const _SettingsPage({
     required this.repoTargets,
+    required this.computerServiceTarget,
     required this.selectedRepoTargetId,
     required this.activeTargetName,
     required this.targetNameController,
@@ -520,6 +521,7 @@ class _SettingsPage extends StatelessWidget {
   });
 
   final List<RepoTarget> repoTargets;
+  final RepoTarget? computerServiceTarget;
   final String? selectedRepoTargetId;
   final String activeTargetName;
   final TextEditingController targetNameController;
@@ -655,6 +657,11 @@ class _SettingsPage extends StatelessWidget {
                     Text('Local pubkey: ${compactIdentifier(ownPubkey!)}'),
                   if (ownPubkey == null || ownPubkey!.isEmpty)
                     const Text('Local pubkey not available'),
+                  Text(
+                    computerServiceTarget == null
+                        ? 'Computer service: not saved'
+                        : 'Computer service: ${computerServiceTarget!.displayName}',
+                  ),
                   Text('Total saved sessions: ${repoTargets.length}'),
                   const Text('Version: $_appVersion'),
                   const SizedBox(height: 12),
