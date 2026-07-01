@@ -1367,19 +1367,33 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   ) {
     if (_completedVoiceEventIds.contains(sourceEventId)) return true;
 
+    final sourceIndex = _pendingProcessingMessageIndex(
+      conversationKey,
+      sourceEventId,
+    );
+    if (sourceIndex >= 0) {
+      _pendingProcessingMessages.removeWhere(
+        (pending) =>
+            pending.conversationKey == conversationKey &&
+            pending.eventId == sourceEventId,
+      );
+      _completeTranscriptionAtIndex(
+        conversationKey: conversationKey,
+        index: sourceIndex,
+        transcript: transcript,
+        eventId: sourceEventId,
+      );
+      _completedVoiceEventIds.add(sourceEventId);
+      return true;
+    }
+
     while (true) {
       final pending = _takePendingProcessingMessage(
         conversationKey,
         _PendingMessageCompletion.transcript,
       );
       if (pending == null) {
-        var index = _pendingProcessingMessageIndex(
-          conversationKey,
-          sourceEventId,
-        );
-        if (index < 0) {
-          index = _singlePendingTranscriptionIndex(conversationKey);
-        }
+        final index = _singlePendingTranscriptionIndex(conversationKey);
         if (index < 0) return false;
         final messages = _messagesByTarget[conversationKey] ?? const [];
         final eventId = messages[index].eventId;
@@ -1389,6 +1403,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           transcript: transcript,
           eventId: eventId,
         );
+        _completedVoiceEventIds.add(sourceEventId);
         return true;
       }
 
@@ -1404,6 +1419,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         transcript: transcript,
         eventId: pending.eventId,
       );
+      _completedVoiceEventIds.add(sourceEventId);
       return true;
     }
   }
@@ -2682,15 +2698,37 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return true;
     }
 
-    final targetKey = _conversationKeyForIncoming(message);
+    final audioRetryRequested = message.kind == 'audio_retry';
+    final completesPendingRequest =
+        message.kind == 'response' ||
+        audioRetryRequested ||
+        message.kind == 'error' ||
+        message.kind == 'invalid';
+    var targetKey = _conversationKeyForIncoming(message);
+    if (completesPendingRequest &&
+        (targetKey == null || !_hasIncomingProcessingPlaceholder(targetKey))) {
+      targetKey =
+          conversationKeyForPendingResponse(
+            targets: _repoTargets,
+            messagesByTarget: _messagesByTarget,
+            senderPubkey: message.senderPubkey,
+            senderPubkeyHex: message.senderPubkeyHex,
+          ) ??
+          targetKey;
+    }
     if (targetKey == null) return false;
-    final isActiveConversation = targetKey == _activeConversationKey;
+    final conversationKey = targetKey;
+    final isActiveConversation = conversationKey == _activeConversationKey;
     if (!isActiveConversation && message.kind == 'status') return false;
 
     if (message.kind == 'transcript') {
       final sourceEventId =
           _transcriptSourceEventId(message) ?? message.eventId;
-      if (_tryCompleteTranscription(targetKey, message.text, sourceEventId)) {
+      if (_tryCompleteTranscription(
+        conversationKey,
+        message.text,
+        sourceEventId,
+      )) {
         setState(() {
           _status = 'Transcription received';
         });
@@ -2705,53 +2743,50 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       eventId: message.eventId,
       timestamp: DateTime.now(),
     );
-    final audioRetryRequested = message.kind == 'audio_retry';
-    final completesPendingRequest =
-        message.kind == 'response' ||
-        audioRetryRequested ||
-        message.kind == 'error' ||
-        message.kind == 'invalid';
     if (fromCatchUp &&
         completesPendingRequest &&
-        !_hasIncomingProcessingPlaceholder(targetKey)) {
+        !_hasIncomingProcessingPlaceholder(conversationKey)) {
       return false;
     }
     setState(() {
       if (message.kind == 'response') {
         _dropPendingProcessingMessage(
-          targetKey,
+          conversationKey,
           completion: _PendingMessageCompletion.response,
         );
       } else if (audioRetryRequested || message.kind == 'error') {
-        _dropPendingProcessingMessage(targetKey);
+        _dropPendingProcessingMessage(conversationKey);
       }
       if (message.kind != 'status') {
+        if (message.kind == 'response') {
+          _dropOldestPendingTranscriptionForResponse(conversationKey);
+        }
         final replacedPending = completesPendingRequest
             ? _replaceOldestIncomingProcessingPlaceholder(
-                targetKey,
+                conversationKey,
                 conversationMessage,
               )
             : false;
         if (!replacedPending) {
-          if (message.kind == 'response') {
-            _dropOldestPendingTranscriptionForResponse(targetKey);
-          }
           if (!completesPendingRequest) {
-            _dropIncomingProcessingPlaceholder(targetKey);
+            _dropIncomingProcessingPlaceholder(conversationKey);
           }
-          _appendMessageForConversation(targetKey, conversationMessage);
+          _appendMessageForConversation(conversationKey, conversationMessage);
         }
         if (completesPendingRequest) {
-          _promoteOldestQueuedTranscription(targetKey);
+          _promoteOldestQueuedTranscription(conversationKey);
         }
         if (isActiveConversation &&
             !fromCatchUp &&
             message.kind == 'transcript') {
-          _appendIncomingProcessingPlaceholder(targetKey, message.eventId);
+          _appendIncomingProcessingPlaceholder(
+            conversationKey,
+            message.eventId,
+          );
         }
         if (!isActiveConversation) {
-          _unreadCountsByTarget[targetKey] =
-              (_unreadCountsByTarget[targetKey] ?? 0) + 1;
+          _unreadCountsByTarget[conversationKey] =
+              (_unreadCountsByTarget[conversationKey] ?? 0) + 1;
           _pulseMenuNotification();
           unawaited(_saveUnreadCounts());
         }
@@ -2790,7 +2825,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           remember: true,
           manual: false,
           messageEventId: message.eventId,
-          conversationKey: targetKey,
+          conversationKey: conversationKey,
         ),
       );
     }

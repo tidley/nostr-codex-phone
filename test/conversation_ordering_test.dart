@@ -128,6 +128,47 @@ void main() {
     );
   });
 
+  test('routes shared-pubkey response to the only pending session', () {
+    final targets = [
+      const RepoTarget(
+        id: 'master',
+        name: 'master',
+        pubkey: 'npub1service',
+        relays: ['wss://relay.example'],
+        isMasterSession: true,
+      ),
+      const RepoTarget(
+        id: 'phone',
+        name: 'phone',
+        pubkey: 'npub1service',
+        relays: ['wss://relay.example'],
+        workdir: '/home/tom/code/phone',
+      ),
+    ];
+    final messagesByTarget = {
+      'master': [
+        ConversationMessage(
+          direction: MessageDirection.incoming,
+          kind: 'processing',
+          text: '',
+          eventId: 'pending-master',
+          timestamp: DateTime(2026, 7),
+        ),
+      ],
+      'phone': <ConversationMessage>[],
+    };
+
+    expect(
+      conversationKeyForPendingResponse(
+        targets: targets,
+        messagesByTarget: messagesByTarget,
+        senderPubkey: 'npub1service',
+        senderPubkeyHex: '',
+      ),
+      'master',
+    );
+  });
+
   test('orders screenshot regression chronologically by timestamp', () {
     final base = DateTime(2026, 6, 23, 17, 25);
     final replyToEarlierPrompt = ConversationMessage(
