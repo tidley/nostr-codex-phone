@@ -532,6 +532,8 @@ class _SettingsPage extends StatelessWidget {
     required this.onVolumeChanged,
     required this.onSliderChangeEnd,
     required this.onTest,
+    required this.onExportProfile,
+    required this.onImportProfile,
   });
 
   final List<RepoTarget> repoTargets;
@@ -582,6 +584,8 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<double> onVolumeChanged;
   final ValueChanged<double> onSliderChangeEnd;
   final VoidCallback onTest;
+  final VoidCallback onExportProfile;
+  final VoidCallback onImportProfile;
 
   @override
   Widget build(BuildContext context) {
@@ -670,6 +674,23 @@ class _SettingsPage extends StatelessWidget {
                     const Text('Local pubkey not available'),
                   Text('Total saved sessions: ${repoTargets.length}'),
                   const Text('Version: $_appVersion'),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: onExportProfile,
+                        icon: const Icon(Icons.file_upload_outlined),
+                        label: const Text('Export profile'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: onImportProfile,
+                        icon: const Icon(Icons.file_download_outlined),
+                        label: const Text('Import profile'),
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),

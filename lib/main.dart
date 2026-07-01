@@ -35,7 +35,7 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.1.123+123';
+const _appVersion = '0.1.124+124';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -128,6 +128,26 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _seenIncomingEventIdsStorageKey = 'seen_incoming_event_ids_v1';
   static const _unreadCountsStorageKey = 'unread_counts_v1';
   static const _repoChoicesStorageKey = 'repo_choices_v1';
+  static const _profileStorageKeys = <String>[
+    _secretKeyStorageKey,
+    _peerPubkeyStorageKey,
+    _relaysStorageKey,
+    _repoTargetsStorageKey,
+    _selectedRepoTargetStorageKey,
+    _blossomServerStorageKey,
+    _ttsLanguageStorageKey,
+    _ttsEngineStorageKey,
+    _ttsRateStorageKey,
+    _ttsPitchStorageKey,
+    _ttsVolumeStorageKey,
+    _workingAnimationStorageKey,
+    _workingAnimationSpeedStorageKey,
+    _hapticFeedbackStorageKey,
+    _conversationHistoryStorageKey,
+    _seenIncomingEventIdsStorageKey,
+    _unreadCountsStorageKey,
+    _repoChoicesStorageKey,
+  ];
   static const _recentMessagesWindow = Duration(hours: 1);
   static const _maxConversationMessages = 200;
   static const _maxSeenIncomingEventIds = 5000;
@@ -515,6 +535,180 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _saveTtsSettings();
     await _saveWorkingAnimationStyle();
     await _saveHapticFeedbackEnabled();
+  }
+
+  Future<void> _exportProfile() async {
+    try {
+      _showStatus('Preparing profile export...');
+      await _saveSettings();
+      for (final conversationKey in _messagesByTarget.keys.toList()) {
+        await _saveConversationHistoryForKey(conversationKey);
+      }
+
+      final storage = <String, String>{};
+      for (final key in _profileStorageKeys) {
+        final value = await _storage.read(key: key);
+        if (value != null) storage[key] = value;
+      }
+
+      final exportedAt = DateTime.now().toUtc();
+      final payload = {
+        'type': 'code_call_profile',
+        'version': 1,
+        'app_version': _appVersion,
+        'exported_at': exportedAt.toIso8601String(),
+        'storage': storage,
+      };
+      final bytes = Uint8List.fromList(
+        utf8.encode(const JsonEncoder.withIndent('  ').convert(payload)),
+      );
+      final timestamp = exportedAt.toIso8601String().replaceAll(
+        RegExp(r'[:.]'),
+        '-',
+      );
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: 'Export profile',
+        fileName: 'code-call-profile-$timestamp.json',
+        type: FileType.custom,
+        allowedExtensions: const ['json'],
+        bytes: bytes,
+      );
+      if (path == null) {
+        _showStatus('Profile export cancelled');
+        return;
+      }
+      _showStatus('Profile export saved');
+    } catch (error) {
+      _showError('Profile export failed: $error');
+    }
+  }
+
+  Future<void> _importProfile() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['json'],
+        allowMultiple: false,
+        withData: true,
+      );
+      if (result == null || result.files.isEmpty) {
+        _showStatus('Profile import cancelled');
+        return;
+      }
+
+      final file = result.files.first;
+      final bytes = file.bytes ?? await _readPickedFileBytes(file.path);
+      final storage = _decodeProfileExport(utf8.decode(bytes));
+      if (!mounted) return;
+      final confirmed = await _confirmProfileImport(storage);
+      if (confirmed != true) {
+        _showStatus('Profile import cancelled');
+        return;
+      }
+
+      if (_connected) {
+        await _disconnect(expand: false);
+      }
+      for (final key in _profileStorageKeys) {
+        final value = storage[key];
+        if (value == null) {
+          await _storage.delete(key: key);
+        } else {
+          await _storage.write(key: key, value: value);
+        }
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _loadingSettings = true;
+        _messagesByTarget.clear();
+        _pendingReplyTargetIds.clear();
+        _pendingProcessingMessages.clear();
+        _status = 'Profile imported';
+      });
+      await _loadSettings();
+      _showStatus('Profile imported');
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+    } catch (error) {
+      _showError('Profile import failed: $error');
+    }
+  }
+
+  Future<Uint8List> _readPickedFileBytes(String? path) async {
+    final cleaned = path?.trim();
+    if (cleaned == null || cleaned.isEmpty) {
+      throw const FormatException('Selected file was not readable');
+    }
+    return File(cleaned).readAsBytes();
+  }
+
+  Map<String, String> _decodeProfileExport(String raw) {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) {
+      throw const FormatException('Profile export must be a JSON object');
+    }
+    final storageRaw = decoded['storage'];
+    if (storageRaw is! Map) {
+      throw const FormatException('Profile export is missing storage data');
+    }
+
+    final storage = <String, String>{};
+    for (final key in _profileStorageKeys) {
+      final value = storageRaw[key];
+      if (value == null) continue;
+      if (value is! String) {
+        throw FormatException('Profile value for $key is not text');
+      }
+      storage[key] = value;
+    }
+    if (storage.isEmpty) {
+      throw const FormatException('Profile export did not contain app data');
+    }
+    return storage;
+  }
+
+  Future<bool> _confirmProfileImport(Map<String, String> storage) async {
+    final targets = _decodeRepoTargets(storage[_repoTargetsStorageKey]);
+    final conversationCount = _profileConversationCount(
+      storage[_conversationHistoryStorageKey],
+    );
+    final hasSecret = _cleanStoredString(storage[_secretKeyStorageKey]) != null;
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) {
+            return AlertDialog(
+              title: const Text('Import profile?'),
+              content: Text(
+                'This replaces the current app profile.\n\n'
+                'Local nsec: ${hasSecret ? 'included' : 'missing'}\n'
+                'Sessions: ${targets.length}\n'
+                'Conversation histories: $conversationCount',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: const Text('Import'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+  }
+
+  int _profileConversationCount(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return 0;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) return decoded.length;
+    } catch (_) {}
+    return 0;
   }
 
   List<RepoTarget> _decodeRepoTargets(String? raw) {
@@ -1768,6 +1962,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           onVolumeChanged: _setTtsVolume,
           onSliderChangeEnd: _commitTtsSettings,
           onTest: _testTtsSettings,
+          onExportProfile: () => unawaited(_exportProfile()),
+          onImportProfile: () => unawaited(_importProfile()),
           messagesInActiveConversation:
               _recentMessagesForActiveConversation.length,
         ),
@@ -4142,6 +4338,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final previousStatus = _status;
     setState(() => _status = message);
     debugPrint('status update: ${previousStatus ?? '(none)'} -> $message');
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _showStatus(String message) {
+    if (!mounted) return;
+    setState(() => _status = message);
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
