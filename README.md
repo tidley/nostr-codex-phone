@@ -134,13 +134,14 @@ service npub. The selected workdir route is carried inside the encrypted
 GiftWrapped DM payload.
 
 The phone session drawer includes **Spawn on computer**. It sends a
-`spawn_session` request to the computer service. The worker treats `~/code` as
-the fixed base path, so Create and Open only need a folder name such as
-`my-new-project`, `phone`, or `pave/website`. In **Open** mode, the dialog can
-ask the worker for folders under `~/code` and `~/code/pave` and fill the field
-from that list. If the spawn succeeds, the service sends a target invite DM back
-to the phone and records the routed session in `~/code/.nostr-codex-workers.json`.
-Accepting the invite adds it as a saved phone session.
+`spawn_session` request to the computer service. The worker treats its startup
+directory as the root, so Create and Open only need a folder name such as
+`my-new-project`, `phone`, or `pave/website`. In **Open** mode, the dialog asks
+the worker for folders under that root and its `pave` subfolder and fills the
+field from that list. If the spawn succeeds, the service sends a target invite
+DM back to the phone and records the routed session in
+`.nostr-codex-workers.json` under the worker root. Accepting the invite adds it
+as a saved phone session.
 
 The same workflow can be driven by text:
 
@@ -154,24 +155,35 @@ Use `/workers` or `/sessions` to list spawned sessions known by the computer
 service. Use `/shutdown`, `/quit`, or `/exit` from the computer service to stop
 the worker process.
 
-Only the `~/code` worker should be installed as a persistent machine service.
-Repo sessions are routed workdirs under that worker.
+Only the root worker should be installed as a persistent machine service. Repo
+sessions are routed workdirs under that worker.
 
-Start a foreground worker with one command. It runs from `~/code` by default:
+Start a foreground worker with one command from the directory you want to use as
+the worker root:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tidley/nostr-codex-phone/main/scripts/bootstrap-worker.sh | bash
 ```
 
-The bootstrap script checks for `~/code/nostr-codex-worker-linux-x64` or
-`~/code/nostr-codex-worker` first. If neither exists, it downloads
+The bootstrap script checks for `./nostr-codex-worker-linux-x64` or
+`./nostr-codex-worker` first. If neither exists, it downloads
 `nostr-codex-worker-linux-x64` from the latest GitHub release, makes it
-executable, and starts it. The worker writes `~/code/.env.server` if needed,
-generates and saves a root worker `NOSTR_SECRET_KEY` when one is not
+executable, and starts it. The worker writes `.env.server` in the worker root if
+needed, generates and saves a root worker `NOSTR_SECRET_KEY` when one is not
 already configured, prints/saves the QR target, and listens for DMs. If
 `NOSTR_PEER_PUBKEY` is not configured, the first phone key that sends a DM
 becomes the saved owner for that worker. Set `NOSTR_PEER_PUBKEY=npub...` before
 the command when you want to pre-lock a worker to a specific phone.
+
+Install or refresh the user systemd service from the directory you want as the
+worker root:
+
+```bash
+/path/to/nostr-codex-phone/scripts/install-worker-service.sh
+```
+
+The generated unit records the current directory as `WorkingDirectory`, because
+systemd services do not inherit the shell's later `PWD` on restart.
 
 Generate a fresh worker key:
 
@@ -214,8 +226,8 @@ Set `NOSTR_CODEX_QR_PRINT=0` to stop printing the terminal QR, set
 If the phone has no stored Codex session for a worker yet, the server
 looks in `CODEX_SESSIONS_DIR` or `~/.codex/sessions` and adopts the newest
 Codex session whose `session_meta.payload.cwd` matches `CODEX_WORKDIR`. This
-uses the same session files as `~/code/tooling/codex-sessions.sh`. Disable it
-with `CODEX_RESUME_LATEST_BY_WORKDIR=0`.
+uses Codex's normal session files. Disable it with
+`CODEX_RESUME_LATEST_BY_WORKDIR=0`.
 
 Manual environment:
 
