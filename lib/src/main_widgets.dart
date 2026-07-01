@@ -1002,7 +1002,7 @@ class _ConnectionPanel extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Session and speech', style: theme.textTheme.titleMedium),
+            Text('Settings', style: theme.textTheme.titleMedium),
             const SizedBox(height: 12),
             Text('Repo target', style: theme.textTheme.titleSmall),
             const SizedBox(height: 8),
@@ -1103,10 +1103,10 @@ class _ConnectionPanel extends StatelessWidget {
             const SizedBox(height: 12),
             TextField(
               controller: peerPubkeyController,
-              enabled: !connected,
+              enabled: !connecting,
               decoration: const InputDecoration(
                 border: OutlineInputBorder(),
-                labelText: 'Peer npub or hex',
+                labelText: 'Home npub',
               ),
             ),
             const SizedBox(height: 12),

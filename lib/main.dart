@@ -35,7 +35,7 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.1.132+132';
+const _appVersion = '0.1.133+133';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -2007,72 +2007,121 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _openSettings() async {
+    var settingsConnected = _connected;
+    var settingsConnecting = _connecting;
+    var settingsOwnPubkey = _ownPubkey;
+    var settingsRate = _ttsRate;
+    var settingsPitch = _ttsPitch;
+    var settingsVolume = _ttsVolume;
+
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
-        builder: (_) => _SettingsPage(
-          repoTargets: _repoTargets,
-          computerServiceTarget: _computerServiceTarget,
-          selectedRepoTargetId: _selectedRepoTargetId,
-          activeTargetName: _activeTargetName(),
-          targetNameController: _targetNameController,
-          secretKeyController: _secretKeyController,
-          peerPubkeyController: _peerPubkeyController,
-          relayController: _relayController,
-          blossomServerController: _blossomServerController,
-          blossomPresets: blossomPresets,
-          ownPubkey: _ownPubkey,
-          connected: _connected,
-          connecting: _connecting,
-          speaking: _speaking,
-          hasReplay: _lastSpokenText?.trim().isNotEmpty ?? false,
-          autoSpeak: _autoSpeak,
-          workingAnimationStyle: _workingAnimationStyle,
-          workingAnimationSpeed: _workingAnimationSpeed,
-          hapticFeedbackEnabled: _hapticFeedbackEnabled,
-          language: _ttsLanguage,
-          languages: _ttsLanguages,
-          engine: _ttsEngine,
-          engines: _ttsEngines,
-          rate: _ttsRate,
-          pitch: _ttsPitch,
-          volume: _ttsVolume,
-          onTargetChanged: (value) {
-            if (value != null) unawaited(_selectRepoTarget(value));
-          },
-          onSaveTarget: () => unawaited(_saveCurrentRepoTarget()),
-          onNewTarget: () => unawaited(_createRepoTarget()),
-          onScanTarget: () => unawaited(_scanRepoTargetQr()),
-          onDeleteTarget: _selectedRepoTargetId == null
-              ? null
-              : () => unawaited(_deleteSelectedRepoTarget()),
-          onGenerateKey: _generateKey,
-          onSecretChanged: (_) => _refreshOwnPubkey(),
-          onConnect: _connect,
-          onDisconnect: _disconnect,
-          onStop: _stopSpeaking,
-          onReplay: _replayLastSpoken,
-          onAutoSpeakChanged: (value) {
-            if (value) _clearAutoSpeakSuppression();
-            setState(() => _autoSpeak = value);
-            if (!value) unawaited(_stopSpeaking());
-          },
-          onWorkingAnimationChanged: _setWorkingAnimationStyle,
-          onWorkingAnimationSpeedChanged: _setWorkingAnimationSpeed,
-          onHapticFeedbackChanged: _setHapticFeedbackEnabled,
-          onLanguageChanged: _setTtsLanguage,
-          onEngineChanged: _setTtsEngine,
-          onRateChanged: _setTtsRate,
-          onPitchChanged: _setTtsPitch,
-          onVolumeChanged: _setTtsVolume,
-          onSliderChangeEnd: _commitTtsSettings,
-          onTest: _testTtsSettings,
-          onExportProfile: () => unawaited(_exportProfile()),
-          onImportProfile: () => unawaited(_importProfile()),
-          messagesInActiveConversation:
-              _recentMessagesForActiveConversation.length,
+        builder: (_) => StatefulBuilder(
+          builder: (settingsContext, refreshSettings) => _SettingsPage(
+            repoTargets: _repoTargets,
+            computerServiceTarget: _computerServiceTarget,
+            selectedRepoTargetId: _selectedRepoTargetId,
+            activeTargetName: _activeTargetName(),
+            targetNameController: _targetNameController,
+            secretKeyController: _secretKeyController,
+            peerPubkeyController: _peerPubkeyController,
+            relayController: _relayController,
+            blossomServerController: _blossomServerController,
+            blossomPresets: blossomPresets,
+            ownPubkey: settingsOwnPubkey,
+            connected: settingsConnected,
+            connecting: settingsConnecting,
+            speaking: _speaking,
+            hasReplay: _lastSpokenText?.trim().isNotEmpty ?? false,
+            autoSpeak: _autoSpeak,
+            workingAnimationStyle: _workingAnimationStyle,
+            workingAnimationSpeed: _workingAnimationSpeed,
+            hapticFeedbackEnabled: _hapticFeedbackEnabled,
+            language: _ttsLanguage,
+            languages: _ttsLanguages,
+            engine: _ttsEngine,
+            engines: _ttsEngines,
+            rate: settingsRate,
+            pitch: settingsPitch,
+            volume: settingsVolume,
+            onTargetChanged: (value) {
+              if (value != null) unawaited(_selectRepoTarget(value));
+            },
+            onSaveTarget: () => unawaited(_saveCurrentRepoTarget()),
+            onNewTarget: () => unawaited(_createRepoTarget()),
+            onScanTarget: () => unawaited(_scanRepoTargetQr()),
+            onDeleteTarget: _selectedRepoTargetId == null
+                ? null
+                : () => unawaited(_deleteSelectedRepoTarget()),
+            onGenerateKey: () async {
+              await _generateKey();
+              if (!settingsContext.mounted) return;
+              refreshSettings(() => settingsOwnPubkey = _ownPubkey);
+            },
+            onSecretChanged: (_) {
+              _refreshOwnPubkey();
+              refreshSettings(() => settingsOwnPubkey = _ownPubkey);
+            },
+            onConnect: () {
+              refreshSettings(() => settingsConnecting = true);
+              unawaited(
+                _connect().whenComplete(() {
+                  if (!settingsContext.mounted) return;
+                  refreshSettings(() {
+                    settingsConnected = _connected;
+                    settingsConnecting = _connecting;
+                    settingsOwnPubkey = _ownPubkey;
+                  });
+                }),
+              );
+            },
+            onDisconnect: () {
+              refreshSettings(() => settingsConnecting = true);
+              unawaited(
+                _disconnect().whenComplete(() {
+                  if (!settingsContext.mounted) return;
+                  refreshSettings(() {
+                    settingsConnected = _connected;
+                    settingsConnecting = _connecting;
+                  });
+                }),
+              );
+            },
+            onStop: _stopSpeaking,
+            onReplay: _replayLastSpoken,
+            onAutoSpeakChanged: (value) {
+              if (value) _clearAutoSpeakSuppression();
+              setState(() => _autoSpeak = value);
+              if (!value) unawaited(_stopSpeaking());
+            },
+            onWorkingAnimationChanged: _setWorkingAnimationStyle,
+            onWorkingAnimationSpeedChanged: _setWorkingAnimationSpeed,
+            onHapticFeedbackChanged: _setHapticFeedbackEnabled,
+            onLanguageChanged: _setTtsLanguage,
+            onEngineChanged: _setTtsEngine,
+            onRateChanged: (value) {
+              refreshSettings(() => settingsRate = value);
+              _setTtsRate(value);
+            },
+            onPitchChanged: (value) {
+              refreshSettings(() => settingsPitch = value);
+              _setTtsPitch(value);
+            },
+            onVolumeChanged: (value) {
+              refreshSettings(() => settingsVolume = value);
+              _setTtsVolume(value);
+            },
+            onSliderChangeEnd: _commitTtsSettings,
+            onTest: _testTtsSettings,
+            onExportProfile: () => unawaited(_exportProfile()),
+            onImportProfile: () => unawaited(_importProfile()),
+            messagesInActiveConversation:
+                _recentMessagesForActiveConversation.length,
+          ),
         ),
       ),
     );
+    if (mounted) await _saveSettings();
   }
 
   Future<void> _renameRepoTarget(RepoTarget target) async {
