@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:nostr_codex_phone/src/conversation_message.dart';
 import 'package:nostr_codex_phone/src/repo_target.dart';
 
 String? incomingRouteWorkdir(String rawJson) {
@@ -41,4 +42,28 @@ String? conversationKeyForIncomingRoute({
   if (matches.isEmpty) return fallbackKey;
 
   return null;
+}
+
+String? conversationKeyForPendingResponse({
+  required List<RepoTarget> targets,
+  required Map<String, List<ConversationMessage>> messagesByTarget,
+  required String senderPubkey,
+  required String senderPubkeyHex,
+}) {
+  final matches = <String>[];
+  for (final target in targets) {
+    final targetPubkey = target.pubkey.trim();
+    if (targetPubkey != senderPubkey && targetPubkey != senderPubkeyHex) {
+      continue;
+    }
+    final messages = messagesByTarget[target.id] ?? const [];
+    final hasPendingResponse = messages.any(
+      (message) =>
+          message.kind == 'processing' &&
+          message.direction == MessageDirection.incoming,
+    );
+    if (hasPendingResponse) matches.add(target.id);
+  }
+
+  return matches.length == 1 ? matches.single : null;
 }
