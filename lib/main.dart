@@ -35,7 +35,7 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.1.128+128';
+const _appVersion = '0.1.129+129';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -115,6 +115,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _relaysStorageKey = 'nostr_relays';
   static const _repoTargetsStorageKey = 'repo_targets_v1';
   static const _selectedRepoTargetStorageKey = 'selected_repo_target_id';
+  static const _computerServiceTargetStorageKey = 'computer_service_target_v1';
   static const _blossomServerStorageKey = 'blossom_server';
   static const _ttsLanguageStorageKey = 'tts_language';
   static const _ttsEngineStorageKey = 'tts_engine';
@@ -134,6 +135,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _relaysStorageKey,
     _repoTargetsStorageKey,
     _selectedRepoTargetStorageKey,
+    _computerServiceTargetStorageKey,
     _blossomServerStorageKey,
     _ttsLanguageStorageKey,
     _ttsEngineStorageKey,
@@ -197,6 +199,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   bool _speaking = false;
   bool _wavRetryRequested = false;
   List<RepoTarget> _repoTargets = const [];
+  RepoTarget? _computerServiceTarget;
   String? _selectedRepoTargetId;
   double _ttsRate = 0.48;
   double _ttsPitch = 1.0;
@@ -394,6 +397,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final selectedRepoTarget = await _storage.read(
       key: _selectedRepoTargetStorageKey,
     );
+    final computerServiceTarget = await _storage.read(
+      key: _computerServiceTargetStorageKey,
+    );
     final blossomServer = await _storage.read(key: _blossomServerStorageKey);
     final ttsLanguage = await _storage.read(key: _ttsLanguageStorageKey);
     final ttsEngine = await _storage.read(key: _ttsEngineStorageKey);
@@ -415,16 +421,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     final migratedRelays = relays?.replaceAll(',', '\n') ?? defaultRelays;
     final targets = _decodeRepoTargets(repoTargets);
-    if (targets.isEmpty && _cleanStoredString(peerPubkey) != null) {
-      targets.add(
-        RepoTarget(
-          id: _newRepoTargetId(),
-          name: 'Default repo',
-          pubkey: peerPubkey!.trim(),
-          relays: _splitRelayText(migratedRelays),
-        ),
-      );
-    }
+    final serviceTarget =
+        _decodeRepoTarget(computerServiceTarget) ??
+        _deriveComputerServiceTarget(
+          targets,
+          legacyPeerPubkey: peerPubkey,
+          legacyRelays: _splitRelayText(migratedRelays),
+        );
     final selectedTarget =
         _targetById(targets, selectedRepoTarget) ??
         (targets.isNotEmpty ? targets.first : null);
@@ -433,9 +436,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     setState(() {
       _secretKeyController.text = secretKey ?? '';
       _repoTargets = targets;
+      _computerServiceTarget = serviceTarget;
       _selectedRepoTargetId = selectedTarget?.id;
       _targetNameController.text = selectedTarget?.name ?? '';
-      _peerPubkeyController.text = selectedTarget?.pubkey ?? peerPubkey ?? '';
+      _peerPubkeyController.text =
+          selectedTarget?.pubkey ??
+          (serviceTarget == null ? peerPubkey ?? '' : '');
       _relayController.text = selectedTarget == null
           ? migratedRelays
           : selectedTarget.relays.join('\n');
@@ -523,6 +529,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       key: _repoTargetsStorageKey,
       value: jsonEncode(_repoTargets.map((target) => target.toJson()).toList()),
     );
+    await _saveComputerServiceTarget();
     final selectedTargetId = _selectedRepoTargetId;
     if (selectedTargetId == null || selectedTargetId.isEmpty) {
       await _storage.delete(key: _selectedRepoTargetStorageKey);
@@ -729,6 +736,100 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
   }
 
+  RepoTarget? _decodeRepoTarget(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return null;
+    try {
+      return RepoTarget.fromJson(jsonDecode(raw));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  RepoTarget? _deriveComputerServiceTarget(
+    List<RepoTarget> targets, {
+    required String? legacyPeerPubkey,
+    required List<String> legacyRelays,
+  }) {
+    for (final target in targets) {
+      final parent = _computerServiceTargetFromParent(target);
+      if (parent != null) return parent;
+    }
+
+    for (final target in targets) {
+      if (_isComputerServiceTarget(target)) {
+        return _normalizeComputerServiceTarget(target);
+      }
+    }
+
+    final peer = _cleanStoredString(legacyPeerPubkey);
+    if (peer == null || legacyRelays.isEmpty) return null;
+    return RepoTarget(
+      id: 'computer-service',
+      name: 'Computer service',
+      pubkey: peer,
+      relays: legacyRelays,
+    );
+  }
+
+  RepoTarget? _computerServiceTargetFromParent(RepoTarget target) {
+    final parentPubkey = target.parentPubkey?.trim();
+    final parentRelays = target.parentRelays;
+    if (parentPubkey == null ||
+        parentPubkey.isEmpty ||
+        parentRelays == null ||
+        parentRelays.isEmpty) {
+      return null;
+    }
+    return RepoTarget(
+      id: 'computer-service',
+      name: target.parentName?.trim().isNotEmpty == true
+          ? target.parentName!.trim()
+          : 'Computer service',
+      pubkey: parentPubkey,
+      relays: parentRelays,
+      workdir: target.parentWorkdir,
+    );
+  }
+
+  bool _isComputerServiceTarget(RepoTarget target) {
+    return target.parentPubkey?.trim().isNotEmpty != true;
+  }
+
+  RepoTarget _normalizeComputerServiceTarget(RepoTarget target) {
+    final name = target.name.trim().isNotEmpty
+        ? target.name.trim()
+        : 'Computer service';
+    return RepoTarget(
+      id: 'computer-service',
+      name: name,
+      pubkey: target.pubkey,
+      relays: target.relays,
+      workdir: target.workdir,
+      pairingSecret: target.pairingSecret,
+    );
+  }
+
+  Future<void> _saveComputerServiceTarget() async {
+    final target = _computerServiceTarget;
+    if (target == null) {
+      await _storage.delete(key: _computerServiceTargetStorageKey);
+      return;
+    }
+    await _storage.write(
+      key: _computerServiceTargetStorageKey,
+      value: jsonEncode(target.toJson()),
+    );
+  }
+
+  Future<void> _storeComputerServiceTarget(RepoTarget target) async {
+    final serviceTarget = _normalizeComputerServiceTarget(target);
+    setState(() {
+      _computerServiceTarget = serviceTarget;
+      _status = 'Computer service saved: ${serviceTarget.displayName}';
+    });
+    await _saveComputerServiceTarget();
+  }
+
   List<String> _decodeSeenEventIds(String? raw) {
     if (raw == null || raw.trim().isEmpty) return const [];
     try {
@@ -921,6 +1022,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
     if (!mounted) return;
 
+    if (_isComputerServiceTarget(target)) {
+      await _storeComputerServiceTarget(target);
+      return;
+    }
+
     final targets = [..._repoTargets];
     final existingIndex = repoTargetMergeIndex(
       [
@@ -948,9 +1054,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     } else {
       targets[existingIndex] = savedTarget;
     }
+    final parentService = _computerServiceTargetFromParent(savedTarget);
 
     setState(() {
       _repoTargets = targets;
+      if (parentService != null) {
+        _computerServiceTarget = parentService;
+      }
       _applyRepoTargetFields(savedTarget);
       _messagesByTarget.putIfAbsent(savedTarget.id, () => []);
       _wavRetryRequested = false;
@@ -1128,11 +1238,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return target;
     }
 
-    final selectedParent = _targetById(_repoTargets, _selectedRepoTargetId);
-    final parentRelays = _relayLines().isNotEmpty
-        ? _relayLines()
-        : target.relays;
-    final parentName = selectedParent?.displayName ?? _activeTargetName();
+    final selectedParent =
+        _targetById(_repoTargets, _selectedRepoTargetId) ??
+        _computerServiceTarget;
+    final parentRelays =
+        selectedParent?.relays ??
+        (_connectedRelays.isNotEmpty ? _connectedRelays : target.relays);
+    final parentName =
+        selectedParent?.displayName ??
+        _computerServiceTarget?.displayName ??
+        'Computer service';
 
     return RepoTarget(
       id: target.id,
@@ -1301,9 +1416,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     } else {
       targets[existingIndex] = savedTarget;
     }
+    final parentService = _computerServiceTargetFromParent(savedTarget);
 
     setState(() {
       _repoTargets = targets;
+      if (parentService != null) {
+        _computerServiceTarget = parentService;
+      }
       _applyRepoTargetFields(savedTarget);
       _messagesByTarget.putIfAbsent(savedTarget.id, () => []);
       _wavRetryRequested = false;
@@ -1472,6 +1591,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (name.isNotEmpty) return name;
     final peer = _peerPubkeyController.text.trim();
     if (peer.isNotEmpty) return _defaultTargetName(peer);
+    if (_computerServiceTarget != null) return 'No session';
     return 'No target';
   }
 
@@ -1891,6 +2011,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       MaterialPageRoute(
         builder: (_) => _SettingsPage(
           repoTargets: _repoTargets,
+          computerServiceTarget: _computerServiceTarget,
           selectedRepoTargetId: _selectedRepoTargetId,
           activeTargetName: _activeTargetName(),
           targetNameController: _targetNameController,
@@ -2405,9 +2526,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<bool> _ensureConnectedToParentService() async {
-    final parent = await _parentServiceTargetForSpawn();
+    var parent = await _parentServiceTargetForSpawn();
+    parent ??= await _scanComputerServiceForSpawn();
     if (parent == null) {
-      _showError('Add or select the computer service first');
+      _showError('Scan the computer service QR first');
       return false;
     }
 
@@ -2430,14 +2552,21 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
 
     await _connectToTargetInBackground(parent);
-    return mounted && _connected && _connectedPeerPubkey == parent.pubkey;
+    return mounted &&
+        _connected &&
+        _connectedPeerPubkey == parent.pubkey &&
+        await _sendPairingSecretIfNeeded(parent);
   }
 
   Future<RepoTarget?> _parentServiceTargetForSpawn() async {
     final selected = _targetById(_repoTargets, _selectedRepoTargetId);
     if (selected != null) {
-      return _parentRepoTargetFor(selected) ?? selected;
+      return _parentRepoTargetFor(selected) ??
+          _computerServiceTarget ??
+          selected;
     }
+
+    if (_computerServiceTarget != null) return _computerServiceTarget;
 
     for (final target in _repoTargets) {
       final parentPubkey = target.parentPubkey?.trim();
@@ -2447,6 +2576,46 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
 
     return null;
+  }
+
+  Future<RepoTarget?> _scanComputerServiceForSpawn() async {
+    if (!mounted) return null;
+    final shouldScan = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Connect computer service'),
+        content: const Text('Scan the computer service QR to spawn sessions.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.qr_code_scanner),
+            label: const Text('Scan'),
+          ),
+        ],
+      ),
+    );
+    if (shouldScan != true || !mounted) return null;
+
+    final payload = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const _RepoTargetQrScannerPage()),
+    );
+    if (!mounted || payload == null || payload.trim().isEmpty) return null;
+
+    final target = _repoTargetFromQrPayload(payload);
+    if (target == null) {
+      _showError('QR did not contain a Nostr Codex target');
+      return null;
+    }
+    if (!_isComputerServiceTarget(target)) {
+      _showError('Scan the computer service QR, not a spawned session QR');
+      return null;
+    }
+    await _storeComputerServiceTarget(target);
+    return _computerServiceTarget;
   }
 
   bool _shouldStartRepoTargetForSend(RepoTarget? target) {
@@ -2576,6 +2745,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   void _clearPairingSecret(String targetId) {
+    final serviceTarget = _computerServiceTarget;
+    if (serviceTarget != null && serviceTarget.id == targetId) {
+      _computerServiceTarget = serviceTarget.copyWith(clearPairingSecret: true);
+      return;
+    }
+
     final targets = [..._repoTargets];
     final index = targets.indexWhere((target) => target.id == targetId);
     if (index < 0) return;
@@ -2585,6 +2760,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   RepoTarget? _parentRepoTargetFor(RepoTarget target) {
+    final storedService = _computerServiceTarget;
     final parentPubkey = target.parentPubkey?.trim();
     final parentRelays = target.parentRelays;
     if (parentPubkey != null &&
@@ -2602,7 +2778,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       );
     }
 
-    return null;
+    return storedService;
   }
 
   BridgeNostrConfig _activeNostrConfig() {
@@ -2628,9 +2804,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final pubkeys = <String>{};
     final cleanedSelected = selectedPeer.trim();
     if (cleanedSelected.isNotEmpty) pubkeys.add(cleanedSelected);
+    final servicePubkey = _computerServiceTarget?.pubkey.trim();
+    if (servicePubkey != null && servicePubkey.isNotEmpty) {
+      pubkeys.add(servicePubkey);
+    }
     for (final target in _repoTargets) {
       final pubkey = target.pubkey.trim();
       if (pubkey.isNotEmpty) pubkeys.add(pubkey);
+      final parentPubkey = target.parentPubkey?.trim();
+      if (parentPubkey != null && parentPubkey.isNotEmpty) {
+        pubkeys.add(parentPubkey);
+      }
     }
     return pubkeys.toList()..sort();
   }
