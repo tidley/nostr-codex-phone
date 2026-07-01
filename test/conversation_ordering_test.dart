@@ -295,6 +295,31 @@ void main() {
     expect(ordered, [receivedReply, followUp, queuedVoice]);
   });
 
+  test('orders completed voice transcript before its response', () {
+    final base = DateTime(2026, 7, 1, 12);
+    final transcript = ConversationMessage(
+      direction: MessageDirection.outgoing,
+      kind: 'transcript',
+      text: 'Run the tests',
+      eventId: 'voice-event',
+      timestamp: base,
+    );
+    final response = ConversationMessage(
+      direction: MessageDirection.incoming,
+      kind: 'response',
+      text: 'Tests passed',
+      eventId: 'response-event',
+      timestamp: base.add(const Duration(seconds: 12)),
+    );
+
+    final ordered = sortConversationMessagesChronological([
+      response,
+      transcript,
+    ]);
+
+    expect(ordered, [transcript, response]);
+  });
+
   test('keeps shuffled npub traffic chronological during fuzz run', () {
     final random = Random(872341);
     final base = DateTime(2026, 6, 23, 17);

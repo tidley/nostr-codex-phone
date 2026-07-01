@@ -1619,42 +1619,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
   }
 
-  bool _dropOldestPendingTranscriptionForResponse(String conversationKey) {
-    final messages = _messagesByTarget[conversationKey];
-    if (messages == null) return false;
-
-    var oldestIndex = -1;
-    for (var index = 0; index < messages.length; index += 1) {
-      final message = messages[index];
-      if (message.kind != 'transcribing' ||
-          message.direction != MessageDirection.outgoing) {
-        continue;
-      }
-      if (oldestIndex < 0 ||
-          message.timestamp.isBefore(messages[oldestIndex].timestamp)) {
-        oldestIndex = index;
-      }
-    }
-    if (oldestIndex < 0) return false;
-
-    final eventId = messages[oldestIndex].eventId;
-    messages.removeAt(oldestIndex);
-    _completedVoiceEventIds.add(eventId);
-    final pendingIndex = _pendingProcessingMessages.indexWhere(
-      (pending) =>
-          pending.conversationKey == conversationKey &&
-          pending.eventId == eventId,
-    );
-    if (pendingIndex >= 0) {
-      _pendingProcessingMessages.removeAt(pendingIndex);
-    }
-    unawaited(_saveConversationHistoryForKey(conversationKey));
-    if (conversationKey == _activeConversationKey) {
-      _scrollToLatestMessage();
-    }
-    return true;
-  }
-
   void _completeTranscriptionAtIndex({
     required String conversationKey,
     required int index,
@@ -1662,13 +1626,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     required String eventId,
   }) {
     final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
+    final pending = messages[index];
     messages[index] = ConversationMessage(
       direction: MessageDirection.outgoing,
       kind: 'transcript',
       text: transcript,
       eventId: eventId,
-      timestamp: DateTime.now(),
-      audio: messages[index].audio,
+      timestamp: pending.timestamp,
+      audio: pending.audio,
     );
     unawaited(_saveConversationHistoryForKey(conversationKey));
     _appendIncomingProcessingPlaceholder(conversationKey, eventId);
@@ -2955,9 +2920,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _dropPendingProcessingMessage(conversationKey);
       }
       if (message.kind != 'status') {
-        if (message.kind == 'response') {
-          _dropOldestPendingTranscriptionForResponse(conversationKey);
-        }
         final replacedPending = completesPendingRequest
             ? _replaceOldestIncomingProcessingPlaceholder(
                 conversationKey,
