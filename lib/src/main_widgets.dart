@@ -587,7 +587,7 @@ class _SettingsPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('Session & speech')),
+      appBar: AppBar(title: const Text('Settings')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -669,6 +669,7 @@ class _SettingsPage extends StatelessWidget {
                   if (ownPubkey == null || ownPubkey!.isEmpty)
                     const Text('Local pubkey not available'),
                   Text('Total saved sessions: ${repoTargets.length}'),
+                  const Text('Version: $_appVersion'),
                 ],
               ),
             ),
@@ -1288,7 +1289,7 @@ class _ConnectionPanel extends StatelessWidget {
   }
 }
 
-class _SpeechSlider extends StatelessWidget {
+class _SpeechSlider extends StatefulWidget {
   const _SpeechSlider({
     required this.label,
     required this.value,
@@ -1308,23 +1309,48 @@ class _SpeechSlider extends StatelessWidget {
   final ValueChanged<double> onChangeEnd;
 
   @override
+  State<_SpeechSlider> createState() => _SpeechSliderState();
+}
+
+class _SpeechSliderState extends State<_SpeechSlider> {
+  late double _value;
+
+  @override
+  void initState() {
+    super.initState();
+    _value = widget.value;
+  }
+
+  @override
+  void didUpdateWidget(covariant _SpeechSlider oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.value != widget.value) {
+      _value = widget.value;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final value = _value.clamp(widget.min, widget.max).toDouble();
     return Column(
       children: [
         Row(
           children: [
-            Expanded(child: Text(label)),
+            Expanded(child: Text(widget.label)),
             Text(value.toStringAsFixed(2)),
           ],
         ),
         Slider(
-          value: value.clamp(min, max).toDouble(),
-          min: min,
-          max: max,
-          divisions: divisions,
+          value: value,
+          min: widget.min,
+          max: widget.max,
+          divisions: widget.divisions,
           label: value.toStringAsFixed(2),
-          onChanged: onChanged,
-          onChangeEnd: onChangeEnd,
+          onChanged: (next) {
+            setState(() => _value = next);
+            widget.onChanged(next);
+          },
+          onChangeEnd: widget.onChangeEnd,
         ),
       ],
     );

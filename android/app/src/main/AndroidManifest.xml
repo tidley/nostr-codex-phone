@@ -16,7 +16,7 @@
     </queries>
 
     <application
-        android:label="Nostr Codex Phone"
+        android:label="Code Call"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round">
