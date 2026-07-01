@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export CODEX_WORKDIR="${CODEX_WORKDIR:-$HOME/code}"
-mkdir -p "$CODEX_WORKDIR"
+export CODEX_WORKDIR="${CODEX_WORKDIR:-$PWD}"
 
 worker="${NOSTR_CODEX_WORKER:-$CODEX_WORKDIR/nostr-codex-worker-linux-x64}"
 fallback_worker="$CODEX_WORKDIR/nostr-codex-worker"

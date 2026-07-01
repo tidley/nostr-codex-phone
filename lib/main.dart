@@ -35,7 +35,7 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.1.127+127';
+const _appVersion = '0.1.128+128';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -1337,35 +1337,31 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   bool _sameWorkdir(String? left, String? right) {
-    final cleanedLeft = left?.trim();
-    final cleanedRight = right?.trim();
-    final leftKey = _workdirCompareKey(cleanedLeft);
-    final rightKey = _workdirCompareKey(cleanedRight);
-    return cleanedLeft != null &&
-        cleanedLeft.isNotEmpty &&
-        cleanedRight != null &&
-        cleanedRight.isNotEmpty &&
-        leftKey != null &&
-        rightKey != null &&
-        leftKey == rightKey;
+    final leftPath = _normalizeWorkdirPath(left);
+    final rightPath = _normalizeWorkdirPath(right);
+    if (leftPath == null || rightPath == null) return false;
+    if (leftPath == rightPath) return true;
+    return _matchesRelativeWorkdir(leftPath, rightPath) ||
+        _matchesRelativeWorkdir(rightPath, leftPath);
   }
 
-  String? _workdirCompareKey(String? value) {
-    if (value == null || value.isEmpty) return null;
-    var normalized = value.replaceAll('\\', '/').replaceAll(RegExp(r'/+'), '/');
+  String? _normalizeWorkdirPath(String? value) {
+    final cleaned = value?.trim();
+    if (cleaned == null || cleaned.isEmpty) return null;
+    var normalized = cleaned
+        .replaceAll('\\', '/')
+        .replaceAll(RegExp(r'/+'), '/');
     while (normalized.length > 1 && normalized.endsWith('/')) {
       normalized = normalized.substring(0, normalized.length - 1);
     }
-    if (normalized == '~/code') return '';
-    if (normalized.startsWith('~/code/')) {
-      return normalized.substring('~/code/'.length);
-    }
-    const codeMarker = '/code/';
-    final codeIndex = normalized.indexOf(codeMarker);
-    if (codeIndex >= 0) {
-      return normalized.substring(codeIndex + codeMarker.length);
-    }
     return normalized;
+  }
+
+  bool _matchesRelativeWorkdir(String absolutePath, String relativePath) {
+    if (relativePath.startsWith('/') || relativePath.startsWith('~/')) {
+      return false;
+    }
+    return absolutePath.endsWith('/$relativePath');
   }
 
   Future<void> _acceptPendingSessionStart(
@@ -3371,7 +3367,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     final payload = jsonEncode({
       'repo_list_request': {
-        'roots': ['~/code', '~/code/pave'],
+        'roots': ['.', './pave'],
       },
     });
 
