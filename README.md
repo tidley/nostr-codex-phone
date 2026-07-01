@@ -417,3 +417,14 @@ flutter analyze
 flutter test
 flutter build apk --debug
 ```
+
+Release assets are packaged with:
+
+```bash
+flutter build apk --release
+cargo build --release --manifest-path rust/Cargo.toml --bin nostr-codex-server
+scripts/package-release-assets.sh
+```
+
+The packaging script strips the Linux worker binary before writing
+`build/release-assets/v*/nostr-codex-worker-linux-x64`.
