@@ -99,6 +99,39 @@ void main() {
     },
   );
 
+  test(
+    'routes incoming transcripts by embedded workdir before shared pubkey',
+    () {
+      final targets = [
+        const RepoTarget(
+          id: 'phone',
+          name: 'phone',
+          pubkey: 'npub1service',
+          relays: ['wss://relay.example'],
+          workdir: '/home/tom/code/phone',
+        ),
+        const RepoTarget(
+          id: 'hybrid',
+          name: 'hybrid',
+          pubkey: 'npub1service',
+          relays: ['wss://relay.example'],
+          workdir: '/home/tom/code/chapar-stun-hybrid',
+        ),
+      ];
+
+      expect(
+        conversationKeyForIncomingRoute(
+          targets: targets,
+          senderPubkey: 'npub1service',
+          senderPubkeyHex: '',
+          rawJson:
+              '{"workdir":"/home/tom/code/chapar-stun-hybrid","transcript":"Hi"}',
+        ),
+        'hybrid',
+      );
+    },
+  );
+
   test('drops ambiguous unrouted responses from shared service pubkey', () {
     final targets = [
       const RepoTarget(
@@ -125,6 +158,29 @@ void main() {
         rawJson: '{"response":"old"}',
       ),
       isNull,
+    );
+  });
+
+  test('routes unrouted transcript to matching pending voice event', () {
+    final messagesByTarget = {
+      'phone': <ConversationMessage>[],
+      'hybrid': [
+        ConversationMessage(
+          direction: MessageDirection.outgoing,
+          kind: 'transcribing',
+          text: 'Transcribing...',
+          eventId: 'voice-event',
+          timestamp: DateTime(2026, 7, 1, 22, 30),
+        ),
+      ],
+    };
+
+    expect(
+      conversationKeyForPendingTranscript(
+        messagesByTarget: messagesByTarget,
+        sourceEventId: 'voice-event',
+      ),
+      'hybrid',
     );
   });
 
@@ -293,6 +349,35 @@ void main() {
     ]);
 
     expect(ordered, [receivedReply, followUp, queuedVoice]);
+  });
+
+  test('finds oldest active transcribing placeholder and ignores queued', () {
+    final base = DateTime(2026, 7, 1, 22);
+    final messages = [
+      ConversationMessage(
+        direction: MessageDirection.outgoing,
+        kind: 'transcribing',
+        text: 'Queued',
+        eventId: 'queued',
+        timestamp: base,
+      ),
+      ConversationMessage(
+        direction: MessageDirection.outgoing,
+        kind: 'transcribing',
+        text: 'Transcribing...',
+        eventId: 'newer-active',
+        timestamp: base.add(const Duration(minutes: 2)),
+      ),
+      ConversationMessage(
+        direction: MessageDirection.outgoing,
+        kind: 'transcribing',
+        text: 'Transcribing message...',
+        eventId: 'older-active',
+        timestamp: base.add(const Duration(minutes: 1)),
+      ),
+    ];
+
+    expect(oldestActiveTranscribingPlaceholderIndex(messages), 2);
   });
 
   test('orders completed voice transcript before its response', () {

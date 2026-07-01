@@ -107,6 +107,25 @@ List<ConversationMessage> sortConversationMessagesNewestFirst(
   return messages.toList()..sort(compareConversationMessagesNewestFirst);
 }
 
+int oldestActiveTranscribingPlaceholderIndex(
+  List<ConversationMessage> messages,
+) {
+  var oldestIndex = -1;
+  for (var index = 0; index < messages.length; index += 1) {
+    final message = messages[index];
+    if (message.direction != MessageDirection.outgoing ||
+        message.kind != 'transcribing' ||
+        message.text.trim().toLowerCase() == 'queued') {
+      continue;
+    }
+    if (oldestIndex < 0 ||
+        message.timestamp.isBefore(messages[oldestIndex].timestamp)) {
+      oldestIndex = index;
+    }
+  }
+  return oldestIndex;
+}
+
 int _conversationMessageDirectionRank(MessageDirection direction) {
   switch (direction) {
     case MessageDirection.outgoing:

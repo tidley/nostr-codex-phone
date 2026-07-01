@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(parsed.text(), "turn on the lights");
 
         let parsed = parse_wire_message(
-            r#"{ "transcript": "turn on the lights", "source_event_id": "voice-event" }"#,
+            r#"{ "transcript": "turn on the lights", "source_event_id": "voice-event", "workdir": "/home/tom/code/phone" }"#,
         )
         .unwrap();
         assert_eq!(parsed.kind(), "transcript");

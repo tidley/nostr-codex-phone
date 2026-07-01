@@ -1191,6 +1191,7 @@ async fn process_message(
                     &message.sender_pubkey_hex,
                     transcript.clone(),
                     message.event_id.clone(),
+                    codex_config.working_dir.to_string_lossy().to_string(),
                 )
                 .await
             {
@@ -1355,6 +1356,7 @@ async fn process_media_bundle_turn(
                     peer_pubkey,
                     transcript.clone(),
                     message.event_id.clone(),
+                    codex_config.working_dir.to_string_lossy().to_string(),
                 )
                 .await
             {

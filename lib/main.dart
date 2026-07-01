@@ -35,7 +35,7 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.1.133+133';
+const _appVersion = '0.1.134+134';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -1960,6 +1960,30 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     return true;
   }
 
+  bool _dropActiveTranscribingPlaceholder(String conversationKey) {
+    final messages = _messagesByTarget[conversationKey];
+    if (messages == null) return false;
+    final index = oldestActiveTranscribingPlaceholderIndex(messages);
+    if (index < 0) return false;
+
+    final eventId = messages[index].eventId;
+    messages.removeAt(index);
+    _pendingProcessingMessages.removeWhere(
+      (pending) =>
+          pending.conversationKey == conversationKey &&
+          pending.eventId == eventId,
+    );
+    final trimmedEventId = eventId.trim();
+    if (trimmedEventId.isNotEmpty) {
+      _completedVoiceEventIds.add(trimmedEventId);
+    }
+    unawaited(_saveConversationHistoryForKey(conversationKey));
+    if (conversationKey == _activeConversationKey) {
+      _scrollToLatestMessage();
+    }
+    return true;
+  }
+
   bool _hasIncomingProcessingPlaceholder(String conversationKey) {
     final messages = _messagesByTarget[conversationKey] ?? const [];
     return messages.any(
@@ -3074,6 +3098,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         message.kind == 'error' ||
         message.kind == 'invalid';
     var targetKey = _conversationKeyForIncoming(message);
+    final transcriptSourceEventId = message.kind == 'transcript'
+        ? _transcriptSourceEventId(message) ?? message.eventId
+        : null;
+    if (transcriptSourceEventId != null) {
+      targetKey =
+          conversationKeyForPendingTranscript(
+            messagesByTarget: _messagesByTarget,
+            sourceEventId: transcriptSourceEventId,
+          ) ??
+          targetKey;
+    }
     if (completesPendingRequest &&
         (targetKey == null || !_hasIncomingProcessingPlaceholder(targetKey))) {
       targetKey =
@@ -3091,12 +3126,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (!isActiveConversation && message.kind == 'status') return false;
 
     if (message.kind == 'transcript') {
-      final sourceEventId =
-          _transcriptSourceEventId(message) ?? message.eventId;
       if (_tryCompleteTranscription(
         conversationKey,
         message.text,
-        sourceEventId,
+        transcriptSourceEventId ?? message.eventId,
       )) {
         setState(() {
           _status = 'Transcription received';
@@ -3125,6 +3158,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         );
       } else if (audioRetryRequested || message.kind == 'error') {
         _dropPendingProcessingMessage(conversationKey);
+      }
+      if (completesPendingRequest) {
+        _dropActiveTranscribingPlaceholder(conversationKey);
       }
       if (message.kind != 'status') {
         final replacedPending = completesPendingRequest
