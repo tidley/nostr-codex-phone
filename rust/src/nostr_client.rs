@@ -162,12 +162,14 @@ impl NostrMessenger {
         receiver_pubkey: &str,
         transcript: impl Into<String>,
         source_event_id: impl Into<String>,
+        workdir: impl Into<String>,
     ) -> Result<String> {
         let receiver =
             PublicKey::parse(receiver_pubkey.trim()).context("invalid receiver pubkey")?;
         let payload = serde_json::to_string(&json!({
             "transcript": transcript.into(),
             "source_event_id": source_event_id.into(),
+            "workdir": workdir.into(),
         }))?;
         self.send_payload_to(receiver, payload).await
     }

@@ -67,3 +67,24 @@ String? conversationKeyForPendingResponse({
 
   return matches.length == 1 ? matches.single : null;
 }
+
+String? conversationKeyForPendingTranscript({
+  required Map<String, List<ConversationMessage>> messagesByTarget,
+  required String sourceEventId,
+}) {
+  final trimmedEventId = sourceEventId.trim();
+  if (trimmedEventId.isEmpty) return null;
+
+  final matches = <String>[];
+  for (final entry in messagesByTarget.entries) {
+    final hasPendingTranscript = entry.value.any(
+      (message) =>
+          message.kind == 'transcribing' &&
+          message.direction == MessageDirection.outgoing &&
+          message.eventId == trimmedEventId,
+    );
+    if (hasPendingTranscript) matches.add(entry.key);
+  }
+
+  return matches.length == 1 ? matches.single : null;
+}
