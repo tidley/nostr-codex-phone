@@ -12,7 +12,6 @@ class _SessionDrawer extends StatelessWidget {
     required this.workingAnimationStyle,
     required this.workingAnimationSpeed,
     required this.onSelectTarget,
-    required this.onNewTarget,
     required this.onSpawnSession,
     required this.onRestartTarget,
     required this.onRenameTarget,
@@ -30,7 +29,6 @@ class _SessionDrawer extends StatelessWidget {
   final WorkingAnimationStyle workingAnimationStyle;
   final double workingAnimationSpeed;
   final ValueChanged<String> onSelectTarget;
-  final VoidCallback onNewTarget;
   final VoidCallback onSpawnSession;
   final ValueChanged<RepoTarget> onRestartTarget;
   final ValueChanged<RepoTarget> onRenameTarget;
@@ -49,14 +47,6 @@ class _SessionDrawer extends StatelessWidget {
               subtitle: Text('${targets.length} sessions'),
             ),
             const Divider(height: 1),
-            ListTile(
-              leading: const Icon(Icons.add),
-              title: const Text('New session'),
-              onTap: () {
-                Navigator.of(context).pop();
-                onNewTarget();
-              },
-            ),
             ListTile(
               leading: const Icon(Icons.create_new_folder_outlined),
               title: const Text('Spawn on computer'),

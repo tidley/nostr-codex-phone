@@ -35,7 +35,7 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.1.129+129';
+const _appVersion = '0.1.130+130';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -4663,7 +4663,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         workingAnimationStyle: _workingAnimationStyle,
         workingAnimationSpeed: _workingAnimationSpeed,
         onSelectTarget: (targetId) => unawaited(_selectRepoTarget(targetId)),
-        onNewTarget: () => unawaited(_createRepoTarget()),
         onSpawnSession: () => unawaited(_requestSpawnSession()),
         onRestartTarget: (target) => unawaited(_restartRepoTarget(target)),
         onRenameTarget: (target) => unawaited(_renameRepoTarget(target)),
