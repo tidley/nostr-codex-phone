@@ -3,12 +3,23 @@ set -euo pipefail
 
 export CODEX_WORKDIR="${CODEX_WORKDIR:-$PWD}"
 
-worker="${NOSTR_CODEX_WORKER:-$CODEX_WORKDIR/nostr-codex-worker-linux-x64}"
-fallback_worker="$CODEX_WORKDIR/nostr-codex-worker"
+state_dir="$CODEX_WORKDIR/.nostr-codex"
+mkdir -p "$state_dir"
+
+worker="${NOSTR_CODEX_WORKER:-$state_dir/nostr-codex-worker-linux-x64}"
+fallback_worker="$state_dir/nostr-codex-worker"
+legacy_worker="$CODEX_WORKDIR/nostr-codex-worker-linux-x64"
+legacy_fallback_worker="$CODEX_WORKDIR/nostr-codex-worker"
 worker_url="${NOSTR_CODEX_WORKER_URL:-https://github.com/tidley/nostr-codex-phone/releases/latest/download/nostr-codex-worker-linux-x64}"
 
 if [[ ! -x "$worker" && -x "$fallback_worker" ]]; then
   worker="$fallback_worker"
+fi
+if [[ ! -x "$worker" && -x "$legacy_worker" ]]; then
+  worker="$legacy_worker"
+fi
+if [[ ! -x "$worker" && -x "$legacy_fallback_worker" ]]; then
+  worker="$legacy_fallback_worker"
 fi
 
 if [[ ! -x "$worker" ]]; then
@@ -34,8 +45,8 @@ fi
 
 export RUST_LOG="${RUST_LOG:-info,nostr_codex_server=debug,nostr_sdk=info,nostr=info}"
 export NOSTR_RELAYS="${NOSTR_RELAYS:-wss://relay.damus.io,wss://nos.lol,wss://nostr.mom}"
-export NOSTR_CODEX_ENV_FILE="${NOSTR_CODEX_ENV_FILE:-$CODEX_WORKDIR/.env.server}"
-export CODEX_MEMORY_DB="${CODEX_MEMORY_DB:-$CODEX_WORKDIR/.nostr-codex-memory.sqlite3}"
+export NOSTR_CODEX_ENV_FILE="${NOSTR_CODEX_ENV_FILE:-$state_dir/.env.server}"
+export CODEX_MEMORY_DB="${CODEX_MEMORY_DB:-$state_dir/memory.sqlite3}"
 export CODEX_BIN="${CODEX_BIN:-/home/tom/.nvm/versions/node/v24.12.0/bin/codex}"
 export CODEX_ARGS="$codex_args"
 export TRANSCRIBE_BIN="${TRANSCRIBE_BIN:-/home/tom/.local/bin/whisper-cpp}"

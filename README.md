@@ -140,7 +140,7 @@ directory as the root, so Create and Open only need a folder name such as
 the worker for folders under that root and its `pave` subfolder and fills the
 field from that list. If the spawn succeeds, the service sends a target invite
 DM back to the phone and records the routed session in
-`.nostr-codex-workers.json` under the worker root. Accepting the invite adds it
+`.nostr-codex/workers.json` under the worker root. Accepting the invite adds it
 as a saved phone session.
 
 The same workflow can be driven by text:
@@ -165,15 +165,16 @@ the worker root:
 curl -fsSL https://raw.githubusercontent.com/tidley/nostr-codex-phone/main/scripts/bootstrap-worker.sh | bash
 ```
 
-The bootstrap script checks for `./nostr-codex-worker-linux-x64` or
-`./nostr-codex-worker` first. If neither exists, it downloads
+The bootstrap script checks for `.nostr-codex/nostr-codex-worker-linux-x64` or
+`.nostr-codex/nostr-codex-worker` first, with the old root-level names as a
+fallback. If neither exists, it downloads
 `nostr-codex-worker-linux-x64` from the latest GitHub release, makes it
-executable, and starts it. The worker writes `.env.server` in the worker root if
-needed, generates and saves a root worker `NOSTR_SECRET_KEY` when one is not
-already configured, prints/saves the QR target, and listens for DMs. If
-`NOSTR_PEER_PUBKEY` is not configured, the first phone key that sends a DM
-becomes the saved owner for that worker. Set `NOSTR_PEER_PUBKEY=npub...` before
-the command when you want to pre-lock a worker to a specific phone.
+executable, and starts it. The worker writes generated state under
+`.nostr-codex/`, including `.env.server`, `memory.sqlite3`, `target.svg`,
+`target.txt`, `workers.json`, and `worker.lock`. If `NOSTR_PEER_PUBKEY` is not
+configured, the first phone key that sends a DM becomes the saved owner for that
+worker. Set `NOSTR_PEER_PUBKEY=npub...` before the command when you want to
+pre-lock a worker to a specific phone.
 
 Install or refresh the user systemd service from the directory you want as the
 worker root:
@@ -191,7 +192,7 @@ Generate a fresh worker key:
 cargo run --manifest-path /home/tom/code/phone/rust/Cargo.toml --bin nostr-keygen
 ```
 
-Create a per-repo env file such as `/path/to/repo/.env.server`:
+Create a per-repo env file such as `/path/to/repo/.nostr-codex/.env.server`:
 
 ```bash
 NOSTR_SECRET_KEY='nsec...from nostr-keygen, optional...'
@@ -204,8 +205,8 @@ TRANSCRIBE_ARGS='-m /home/tom/code/phone/models/ggml-base.en.bin -f {audio} -otx
 ```
 
 On startup the worker also prints a QR code, saves an SVG target card to
-`.nostr-codex-target.svg`, and writes the raw target payload to
-`.nostr-codex-target.txt` in its worker root. The QR payload is plain JSON:
+`.nostr-codex/target.svg`, and writes the raw target payload to
+`.nostr-codex/target.txt` in its worker root. The QR payload is plain JSON:
 
 ```json
 {
@@ -241,8 +242,8 @@ export NOSTR_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://nostr.mom'
 
 `NOSTR_PEER_PUBKEY` is optional for the server. If omitted, the server subscribes
 to its own GiftWrap inbox and saves the first valid DM sender as the owner in
-`NOSTR_CODEX_ENV_FILE` or `.env.server`. Set it when you want to restrict
-processing to one phone key before first contact:
+`NOSTR_CODEX_ENV_FILE` or `.nostr-codex/.env.server`. Set it when you want to
+restrict processing to one phone key before first contact:
 
 ```bash
 export NOSTR_PEER_PUBKEY='npub...'
@@ -277,7 +278,7 @@ Optional SQLite memory configuration:
 
 ```bash
 export CODEX_MEMORY=1
-export CODEX_MEMORY_DB="$PWD/.nostr-codex-memory.sqlite3"
+export CODEX_MEMORY_DB="$PWD/.nostr-codex/memory.sqlite3"
 export CODEX_MEMORY_RECENT_MESSAGES=12
 export CODEX_MEMORY_COMPACT_AFTER_MESSAGES=16
 export CODEX_MEMORY_SUMMARY_MAX_CHARS=5000

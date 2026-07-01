@@ -73,7 +73,7 @@ impl MemoryConfig {
             .unwrap_or(true);
         let db_path = env::var("CODEX_MEMORY_DB")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| working_dir.join(".nostr-codex-memory.sqlite3"));
+            .unwrap_or_else(|_| working_dir.join(".nostr-codex").join("memory.sqlite3"));
 
         Self {
             enabled,

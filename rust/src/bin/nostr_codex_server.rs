@@ -37,8 +37,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
 use tracing::{error, info, warn};
 
-const WORKER_REGISTRY_FILE: &str = ".nostr-codex-workers.json";
-const WORKER_LOCK_FILE: &str = ".nostr-codex-worker.lock";
+const WORKER_STATE_DIR: &str = ".nostr-codex";
+const WORKER_REGISTRY_FILE: &str = "workers.json";
+const WORKER_LOCK_FILE: &str = "worker.lock";
 const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,13 +185,13 @@ impl WorkerEnvFile {
     fn for_workdir(workdir: &Path) -> Self {
         let path = env::var("NOSTR_CODEX_ENV_FILE")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| workdir.join(".env.server"));
+            .unwrap_or_else(|_| default_worker_env_path(workdir));
         Self { path }
     }
 
     fn default_for_workdir(workdir: &Path) -> Self {
         Self {
-            path: workdir.join(".env.server"),
+            path: worker_state_path(workdir, ".env.server"),
         }
     }
 
@@ -222,6 +223,24 @@ impl WorkerEnvFile {
             }
         }
         Ok(values)
+    }
+}
+
+fn worker_state_dir(workdir: &Path) -> PathBuf {
+    workdir.join(WORKER_STATE_DIR)
+}
+
+fn worker_state_path(workdir: &Path, file_name: &str) -> PathBuf {
+    worker_state_dir(workdir).join(file_name)
+}
+
+fn default_worker_env_path(workdir: &Path) -> PathBuf {
+    let path = worker_state_path(workdir, ".env.server");
+    let legacy_path = workdir.join(".env.server");
+    if path.is_file() || !legacy_path.is_file() {
+        path
+    } else {
+        legacy_path
     }
 }
 
@@ -1647,7 +1666,7 @@ fn repo_worker_context(
         relays.to_vec()
     };
     let relay_csv = relays.join(",");
-    let memory_db = workdir.join(".nostr-codex-memory.sqlite3");
+    let memory_db = worker_state_path(&workdir, "memory.sqlite3");
 
     Ok(RepoWorkerContext {
         workdir,
@@ -1662,8 +1681,16 @@ fn repo_worker_context(
 }
 
 fn acquire_worker_process_lock(workdir: &Path) -> Result<WorkerProcessLock> {
-    let path = workdir.join(WORKER_LOCK_FILE);
+    let path = worker_state_path(workdir, WORKER_LOCK_FILE);
     let pid = std::process::id().to_string();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create worker lock directory `{}`",
+                parent.display()
+            )
+        })?;
+    }
 
     loop {
         match fs::OpenOptions::new()
@@ -1715,7 +1742,7 @@ fn worker_lock_is_stale(path: &Path) -> Result<bool> {
 
 #[cfg(test)]
 fn running_worker_lock_pid(workdir: &Path) -> Result<Option<u32>> {
-    let path = workdir.join(WORKER_LOCK_FILE);
+    let path = worker_state_path(workdir, WORKER_LOCK_FILE);
     if !path.is_file() {
         return Ok(None);
     }
@@ -2849,7 +2876,7 @@ fn repo_status_text(workdir: &Path) -> String {
 }
 
 fn registry_path(workdir: &Path) -> PathBuf {
-    workdir.join(WORKER_REGISTRY_FILE)
+    worker_state_path(workdir, WORKER_REGISTRY_FILE)
 }
 
 fn read_worker_registry(workdir: &Path) -> Result<WorkerRegistry> {
@@ -2865,7 +2892,15 @@ fn read_worker_registry(workdir: &Path) -> Result<WorkerRegistry> {
 
 fn write_worker_registry(workdir: &Path, registry: &WorkerRegistry) -> Result<()> {
     let path = registry_path(workdir);
-    let tmp_path = workdir.join(format!(
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create worker registry directory `{}`",
+                parent.display()
+            )
+        })?;
+    }
+    let tmp_path = worker_state_dir(workdir).join(format!(
         ".{}.{}.tmp",
         WORKER_REGISTRY_FILE,
         std::process::id()
@@ -2971,7 +3006,7 @@ fn write_worker_target_qr(
 
     let qr_path = env::var("NOSTR_CODEX_QR_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| workdir.join(".nostr-codex-target.svg"));
+        .unwrap_or_else(|_| worker_state_path(workdir, "target.svg"));
     if let Some(parent) = qr_path.parent() {
         if let Err(err) = fs::create_dir_all(parent) {
             warn!(
@@ -4038,7 +4073,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let workdir = temp_dir.path().join("repo");
         fs::create_dir_all(&workdir).unwrap();
-        let lock_path = workdir.join(WORKER_LOCK_FILE);
+        let lock_path = worker_state_path(&workdir, WORKER_LOCK_FILE);
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
         fs::write(&lock_path, "not-a-pid\n").unwrap();
 
         let pid = running_worker_lock_pid(&workdir).unwrap();
@@ -4052,7 +4088,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let workdir = temp_dir.path().join("repo");
         fs::create_dir_all(&workdir).unwrap();
-        let lock_path = workdir.join(WORKER_LOCK_FILE);
+        let lock_path = worker_state_path(&workdir, WORKER_LOCK_FILE);
+        fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
 
         let mut child = StdCommand::new("sleep").arg("30").spawn().unwrap();
         fs::write(&lock_path, format!("{}\n", child.id())).unwrap();
