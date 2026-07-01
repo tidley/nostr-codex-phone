@@ -1,9 +1,9 @@
 repository: https://github.com/tidley/nostr-codex-phone
 pubkey: npub19at4nqjjymca2lh3v546vcg5ktun3al4c5xu2pts3ewckv0y70ys0gupzr
-name: Nostr Codex Phone
+name: Code Call
 summary: Control Codex from an Android phone over Nostr.
 description: |
-  Nostr Codex Phone is an Android client for sending text, voice, and media
+  Code Call is an Android client for sending text, voice, and media
   requests to a local Codex worker over encrypted Nostr direct messages.
 
   It supports multiple repo sessions, voice transcription, routed worker

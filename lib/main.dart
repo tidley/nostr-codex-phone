@@ -35,6 +35,7 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
+const _appVersion = '0.1.123+123';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -71,7 +72,7 @@ class NostrCodexApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Nostr Codex',
+      title: 'Code Call',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff1f7a63)),

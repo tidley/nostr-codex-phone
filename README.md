@@ -1,4 +1,4 @@
-# Nostr Codex Phone
+# Code Call
 
 Bidirectional voice query client and Rust server over encrypted Nostr GiftWrapped DMs.
 
