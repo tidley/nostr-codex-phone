@@ -203,9 +203,9 @@ TRANSCRIBE_BIN='/home/tom/.local/bin/whisper-cpp'
 TRANSCRIBE_ARGS='-m /home/tom/code/phone/models/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/transcript -nt'
 ```
 
-On startup the worker also prints a QR code and saves an SVG target card
-to `.nostr-codex-target.svg` in its `CODEX_WORKDIR`. The QR payload is plain
-JSON:
+On startup the worker also prints a QR code, saves an SVG target card to
+`.nostr-codex-target.svg`, and writes the raw target payload to
+`.nostr-codex-target.txt` in its worker root. The QR payload is plain JSON:
 
 ```json
 {
@@ -220,8 +220,10 @@ JSON:
 ```
 
 Set `NOSTR_CODEX_QR_PRINT=0` to stop printing the terminal QR, set
-`NOSTR_CODEX_QR_PATH=/path/to/target.svg` to change where it is saved, or set
-`NOSTR_CODEX_QR_OPEN=1` to best-effort open the SVG with `xdg-open`.
+`NOSTR_CODEX_QR_PATH=/path/to/target.svg` to change where the SVG is saved, set
+`NOSTR_CODEX_TARGET_PAYLOAD_PATH=/path/to/target.txt` to change where the raw
+payload is saved, or set `NOSTR_CODEX_QR_OPEN=1` to best-effort open the SVG
+with `xdg-open`.
 
 If the phone has no stored Codex session for a worker yet, the server
 looks in `CODEX_SESSIONS_DIR` or `~/.codex/sessions` and adopts the newest
