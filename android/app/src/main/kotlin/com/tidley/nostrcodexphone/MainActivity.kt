@@ -1,4 +1,4 @@
-package com.example.nostr_codex_phone
+package com.tidley.nostrcodexphone
 
 import android.content.Context
 import android.os.Build

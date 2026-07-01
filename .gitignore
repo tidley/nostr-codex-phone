@@ -47,6 +47,10 @@ models/
 
 # Local/native build outputs
 /android/local.properties
+/android/key.properties
+/android/app/*.jks
+/android/app/*.keystore
+/android/app/*.p12
 /rust/target/
 
 # Symbolication related
