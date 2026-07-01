@@ -2990,6 +2990,27 @@ fn write_worker_target_qr(
     }
     info!("worker target QR saved: {}", qr_path.display());
 
+    let payload_path = env::var("NOSTR_CODEX_TARGET_PAYLOAD_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| qr_path.with_extension("txt"));
+    if let Some(parent) = payload_path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            warn!(
+                "failed to create worker target payload directory `{}`: {err:#}",
+                parent.display()
+            );
+            return;
+        }
+    }
+    if let Err(err) = fs::write(&payload_path, format!("{payload}\n")) {
+        warn!(
+            "failed to save worker target payload `{}`: {err:#}",
+            payload_path.display()
+        );
+        return;
+    }
+    info!("worker target payload saved: {}", payload_path.display());
+
     if env_bool("NOSTR_CODEX_QR_OPEN", false) {
         if let Err(err) = StdCommand::new("xdg-open").arg(&qr_path).spawn() {
             warn!(
