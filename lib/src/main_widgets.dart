@@ -1678,6 +1678,15 @@ class _ComposerState extends State<_Composer> {
                               Color(0xff1b140f),
                             ),
                           )
+                        : widget.recording
+                        ? mainButtonStyle.copyWith(
+                            backgroundColor: const WidgetStatePropertyAll(
+                              Color(0xffdfa257),
+                            ),
+                            foregroundColor: const WidgetStatePropertyAll(
+                              Color(0xff1b140f),
+                            ),
+                          )
                         : mainButtonStyle,
                     onPressed: onMainPressed,
                     icon: icon,
@@ -2105,8 +2114,8 @@ class _MessageTileState extends State<_MessageTile>
         (processing && widget.message.text.trim().isEmpty);
 
     if (voiceWaveform) {
-      final bubbleColor = colorScheme.primaryContainer;
-      final waveformColor = colorScheme.onPrimaryContainer;
+      const bubbleColor = Color(0xffdfa257);
+      const waveformColor = Color(0xff1b140f);
       return SizedBox(
         height: 48,
         width: double.infinity,
@@ -2117,7 +2126,7 @@ class _MessageTileState extends State<_MessageTile>
               : 0.18,
           backgroundColor: bubbleColor,
           foregroundColor: waveformColor,
-          waveformColor: const Color(0xff07140f),
+          waveformColor: waveformColor,
           child: const SizedBox.expand(),
         ),
       );
