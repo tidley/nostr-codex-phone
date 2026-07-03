@@ -1616,10 +1616,8 @@ class _ComposerState extends State<_Composer> {
                         minimumSize: const Size(48, 48),
                       )
                     : IconButton.styleFrom(minimumSize: const Size(48, 48));
-                final recordingShell = widget.recording;
                 final sendingAudioShell =
                     widget.sendingAudio && !widget.recording;
-                final audioActionShell = recordingShell || sendingAudioShell;
 
                 final icon = busy
                     ? SizedBox.square(
@@ -1671,7 +1669,7 @@ class _ComposerState extends State<_Composer> {
                 final mainButton = Tooltip(
                   message: tooltip,
                   child: FilledButton.icon(
-                    style: audioActionShell
+                    style: sendingAudioShell
                         ? mainButtonStyle.copyWith(
                             backgroundColor: const WidgetStatePropertyAll(
                               Colors.transparent,
@@ -1686,12 +1684,10 @@ class _ComposerState extends State<_Composer> {
                     label: Text(label),
                   ),
                 );
-                final actionButton = audioActionShell
+                final actionButton = sendingAudioShell
                     ? _RecordingButton(
                         sendWipe: sendingAudioShell,
-                        waveformLevel: recordingShell
-                            ? widget.recordingWaveformLevel
-                            : 0,
+                        waveformLevel: 0,
                         child: mainButton,
                       )
                     : mainButton;
@@ -2111,24 +2107,18 @@ class _MessageTileState extends State<_MessageTile>
     if (voiceWaveform) {
       final bubbleColor = colorScheme.primaryContainer;
       final waveformColor = colorScheme.onPrimaryContainer;
-      return Align(
-        alignment: Alignment.centerRight,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 260),
-          child: SizedBox(
-            height: 48,
-            width: 210,
-            child: _RecordingButton(
-              sendWipe: false,
-              waveformLevel: widget.message.kind == 'recording'
-                  ? widget.recordingWaveformLevel
-                  : 0.18,
-              backgroundColor: bubbleColor,
-              foregroundColor: waveformColor,
-              waveformColor: waveformColor,
-              child: const SizedBox.expand(),
-            ),
-          ),
+      return SizedBox(
+        height: 48,
+        width: double.infinity,
+        child: _RecordingButton(
+          sendWipe: false,
+          waveformLevel: widget.message.kind == 'recording'
+              ? widget.recordingWaveformLevel
+              : 0.18,
+          backgroundColor: bubbleColor,
+          foregroundColor: waveformColor,
+          waveformColor: waveformColor,
+          child: const SizedBox.expand(),
         ),
       );
     }
