@@ -1750,7 +1750,7 @@ class _RecordingButton extends StatefulWidget {
 class _RecordingButtonState extends State<_RecordingButton>
     with TickerProviderStateMixin {
   static const _waveSampleRate = 96.0;
-  static const _waveSampleCount = 180;
+  static const _waveSampleCount = 360;
 
   late final AnimationController _wipeController;
   late final Animation<double> _wipeAnimation;
@@ -1824,7 +1824,7 @@ class _RecordingButtonState extends State<_RecordingButton>
 
   void _pushWaveSample() {
     final level = widget.waveformLevel.clamp(0.0, 1.0);
-    _smoothedWaveLevel += (level - _smoothedWaveLevel) * 0.18;
+    _smoothedWaveLevel += (level - _smoothedWaveLevel) * 0.35;
     final envelope = 0.05 + _smoothedWaveLevel * 0.95;
     final previous = _waveSamples.isEmpty ? 0.0 : _waveSamples.last;
     final noise = _waveRandom.nextDouble() * 2 - 1;
@@ -1917,7 +1917,7 @@ class _RecordingWaveformPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
-      ..strokeWidth = 1.3;
+      ..strokeWidth = 1.8;
     canvas.drawPath(_recordingWaveformPath(size, samples, progress), paint);
   }
 
