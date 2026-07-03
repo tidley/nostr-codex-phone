@@ -483,6 +483,8 @@ class _SettingsPage extends StatelessWidget {
     required this.rate,
     required this.pitch,
     required this.volume,
+    required this.checkingRelays,
+    required this.relayResults,
     required this.messagesInActiveConversation,
     required this.onTargetChanged,
     required this.onSaveTarget,
@@ -493,6 +495,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onSecretChanged,
     required this.onConnect,
     required this.onDisconnect,
+    required this.onCheckRelayStatus,
     required this.onStop,
     required this.onReplay,
     required this.onAutoSpeakChanged,
@@ -536,6 +539,8 @@ class _SettingsPage extends StatelessWidget {
   final double rate;
   final double pitch;
   final double volume;
+  final bool checkingRelays;
+  final List<_RelayProbeResult> relayResults;
   final int messagesInActiveConversation;
   final ValueChanged<String?> onTargetChanged;
   final VoidCallback onSaveTarget;
@@ -546,6 +551,7 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<String> onSecretChanged;
   final VoidCallback onConnect;
   final VoidCallback onDisconnect;
+  final VoidCallback onCheckRelayStatus;
   final VoidCallback onStop;
   final VoidCallback onReplay;
   final ValueChanged<bool> onAutoSpeakChanged;
@@ -593,6 +599,8 @@ class _SettingsPage extends StatelessWidget {
             rate: rate,
             pitch: pitch,
             volume: volume,
+            checkingRelays: checkingRelays,
+            relayResults: relayResults,
             onTargetChanged: onTargetChanged,
             onSaveTarget: onSaveTarget,
             onNewTarget: onNewTarget,
@@ -602,6 +610,7 @@ class _SettingsPage extends StatelessWidget {
             onSecretChanged: onSecretChanged,
             onConnect: onConnect,
             onDisconnect: onDisconnect,
+            onCheckRelayStatus: onCheckRelayStatus,
             onStop: onStop,
             onReplay: onReplay,
             onAutoSpeakChanged: onAutoSpeakChanged,
@@ -920,6 +929,8 @@ class _ConnectionPanel extends StatelessWidget {
     required this.rate,
     required this.pitch,
     required this.volume,
+    required this.checkingRelays,
+    required this.relayResults,
     required this.onTargetChanged,
     required this.onSaveTarget,
     required this.onNewTarget,
@@ -929,6 +940,7 @@ class _ConnectionPanel extends StatelessWidget {
     required this.onSecretChanged,
     required this.onConnect,
     required this.onDisconnect,
+    required this.onCheckRelayStatus,
     required this.onStop,
     required this.onReplay,
     required this.onAutoSpeakChanged,
@@ -963,6 +975,8 @@ class _ConnectionPanel extends StatelessWidget {
   final double rate;
   final double pitch;
   final double volume;
+  final bool checkingRelays;
+  final List<_RelayProbeResult> relayResults;
   final ValueChanged<String?> onTargetChanged;
   final VoidCallback onSaveTarget;
   final VoidCallback onNewTarget;
@@ -972,6 +986,7 @@ class _ConnectionPanel extends StatelessWidget {
   final ValueChanged<String> onSecretChanged;
   final VoidCallback onConnect;
   final VoidCallback onDisconnect;
+  final VoidCallback onCheckRelayStatus;
   final VoidCallback onStop;
   final VoidCallback onReplay;
   final ValueChanged<bool> onAutoSpeakChanged;
@@ -1120,6 +1135,41 @@ class _ConnectionPanel extends StatelessWidget {
                 labelText: 'Relays',
               ),
             ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: checkingRelays ? null : onCheckRelayStatus,
+              icon: checkingRelays
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.network_check),
+              label: Text(checkingRelays ? 'Checking relays' : 'Check relays'),
+            ),
+            if (relayResults.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              for (final result in relayResults)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    _relayProbeIcon(result),
+                    color: _relayProbeColor(colorScheme, result),
+                  ),
+                  title: Text(
+                    result.relay,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: Text(
+                    result.error == null
+                        ? result.label
+                        : '${result.label}: ${result.error}',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+            ],
             const SizedBox(height: 12),
             TextField(
               controller: blossomServerController,
@@ -1290,6 +1340,24 @@ class _ConnectionPanel extends StatelessWidget {
   }
 }
 
+IconData _relayProbeIcon(_RelayProbeResult result) {
+  return switch (result.strength) {
+    _RelayProbeStrength.strong => Icons.check_circle,
+    _RelayProbeStrength.fair => Icons.check_circle_outline,
+    _RelayProbeStrength.weak => Icons.speed,
+    _RelayProbeStrength.offline => Icons.error_outline,
+  };
+}
+
+Color _relayProbeColor(ColorScheme colorScheme, _RelayProbeResult result) {
+  return switch (result.strength) {
+    _RelayProbeStrength.strong => colorScheme.primary,
+    _RelayProbeStrength.fair => colorScheme.secondary,
+    _RelayProbeStrength.weak => colorScheme.tertiary,
+    _RelayProbeStrength.offline => colorScheme.error,
+  };
+}
+
 class _SpeechSlider extends StatefulWidget {
   const _SpeechSlider({
     required this.label,
@@ -1408,6 +1476,7 @@ class _Composer extends StatefulWidget {
     required this.activeSendBlocked,
     required this.recording,
     required this.recordingDurationLabel,
+    required this.recordingWaveformLevel,
     required this.wavRetryRequested,
     required this.hasPendingMedia,
     required this.pendingMediaName,
@@ -1428,6 +1497,7 @@ class _Composer extends StatefulWidget {
   final bool activeSendBlocked;
   final bool recording;
   final String recordingDurationLabel;
+  final double recordingWaveformLevel;
   final bool wavRetryRequested;
   final bool hasPendingMedia;
   final String? pendingMediaName;
@@ -1616,6 +1686,9 @@ class _ComposerState extends State<_Composer> {
                 final actionButton = recordingShell
                     ? _RecordingButton(
                         sendWipe: widget.sendingAudio && !widget.recording,
+                        waveformLevel: widget.recording
+                            ? widget.recordingWaveformLevel
+                            : 0,
                         child: mainButton,
                       )
                     : mainButton;
@@ -1646,19 +1719,25 @@ class _ComposerState extends State<_Composer> {
 }
 
 class _RecordingButton extends StatefulWidget {
-  const _RecordingButton({required this.child, required this.sendWipe});
+  const _RecordingButton({
+    required this.child,
+    required this.sendWipe,
+    required this.waveformLevel,
+  });
 
   final Widget child;
   final bool sendWipe;
+  final double waveformLevel;
 
   @override
   State<_RecordingButton> createState() => _RecordingButtonState();
 }
 
 class _RecordingButtonState extends State<_RecordingButton>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final AnimationController _wipeController;
   late final Animation<double> _wipeAnimation;
+  late final AnimationController _waveController;
 
   @override
   void initState() {
@@ -1671,6 +1750,10 @@ class _RecordingButtonState extends State<_RecordingButton>
       parent: _wipeController,
       curve: Curves.easeOutCubic,
     );
+    _waveController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1450),
+    )..repeat();
     if (widget.sendWipe) {
       _wipeController.value = 1;
     }
@@ -1688,18 +1771,36 @@ class _RecordingButtonState extends State<_RecordingButton>
 
   @override
   void dispose() {
+    _waveController.dispose();
     _wipeController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    const ink = Color(0xff1b140f);
+    const orange = Color(0xffdfa257);
+    final showWaveform = !widget.sendWipe;
     return ClipRRect(
       borderRadius: BorderRadius.circular(28),
       child: Stack(
         fit: StackFit.passthrough,
         children: [
-          const Positioned.fill(child: ColoredBox(color: Color(0xffdfa257))),
+          const Positioned.fill(child: ColoredBox(color: orange)),
+          if (showWaveform)
+            Positioned.fill(
+              child: AnimatedBuilder(
+                animation: _waveController,
+                builder: (context, _) {
+                  return CustomPaint(
+                    painter: _RecordingWaveformPainter(
+                      level: widget.waveformLevel,
+                      progress: _waveController.value,
+                    ),
+                  );
+                },
+              ),
+            ),
           Positioned.fill(
             child: AnimatedBuilder(
               animation: _wipeAnimation,
@@ -1720,15 +1821,115 @@ class _RecordingButtonState extends State<_RecordingButton>
             data: FilledButtonThemeData(
               style: FilledButton.styleFrom(
                 backgroundColor: Colors.transparent,
-                foregroundColor: const Color(0xff1b140f),
+                foregroundColor: ink,
               ),
             ),
             child: widget.child,
           ),
+          if (showWaveform)
+            Positioned.fill(
+              child: AnimatedBuilder(
+                animation: _waveController,
+                builder: (context, _) {
+                  return ClipPath(
+                    clipper: _RecordingWaveformClipper(
+                      level: widget.waveformLevel,
+                      progress: _waveController.value,
+                    ),
+                    child: IgnorePointer(
+                      child: FilledButtonTheme(
+                        data: FilledButtonThemeData(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.transparent,
+                            foregroundColor: orange,
+                          ),
+                        ),
+                        child: widget.child,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
         ],
       ),
     );
   }
+}
+
+class _RecordingWaveformPainter extends CustomPainter {
+  const _RecordingWaveformPainter({
+    required this.level,
+    required this.progress,
+  });
+
+  final double level;
+  final double progress;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = const Color(0xff1b140f);
+    canvas.drawPath(_recordingWaveformPath(size, level, progress), paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _RecordingWaveformPainter oldDelegate) {
+    return oldDelegate.level != level || oldDelegate.progress != progress;
+  }
+}
+
+class _RecordingWaveformClipper extends CustomClipper<Path> {
+  const _RecordingWaveformClipper({
+    required this.level,
+    required this.progress,
+  });
+
+  final double level;
+  final double progress;
+
+  @override
+  Path getClip(Size size) => _recordingWaveformPath(size, level, progress);
+
+  @override
+  bool shouldReclip(covariant _RecordingWaveformClipper oldClipper) {
+    return oldClipper.level != level || oldClipper.progress != progress;
+  }
+}
+
+Path _recordingWaveformPath(Size size, double level, double progress) {
+  final path = Path();
+  final activeLevel = level.clamp(0.0, 1.0);
+  final centerY = size.height / 2;
+  final width = size.width;
+  final sampleCount = 32;
+  final bleed = width * 0.18;
+  final drift = progress * math.pi * 2;
+
+  double waveHeight(double x) {
+    final phase = (x / width) * math.pi * 5.6 + drift;
+    final groove =
+        0.56 +
+        0.24 * math.sin(phase) +
+        0.20 * math.sin(phase * 1.9 + math.pi / 2.7);
+    return size.height * (0.18 + activeLevel * groove.clamp(0.0, 1.0) * 0.64);
+  }
+
+  for (var i = 0; i <= sampleCount; i++) {
+    final x = -bleed + (width + bleed * 2) * i / sampleCount;
+    final y = centerY - waveHeight(x) / 2;
+    if (i == 0) {
+      path.moveTo(x, y);
+    } else {
+      path.lineTo(x, y);
+    }
+  }
+
+  for (var i = sampleCount; i >= 0; i--) {
+    final x = -bleed + (width + bleed * 2) * i / sampleCount;
+    path.lineTo(x, centerY + waveHeight(x) / 2);
+  }
+
+  return path..close();
 }
 
 class _MessageTile extends StatefulWidget {

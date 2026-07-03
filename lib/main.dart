@@ -34,10 +34,41 @@ part 'src/main_widgets.dart';
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
+const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.1.134+134';
+const _appVersion = '0.1.135+135';
 
 enum _PendingMessageCompletion { transcript, response }
+
+enum _RelayProbeStrength { strong, fair, weak, offline }
+
+class _RelayProbeResult {
+  const _RelayProbeResult({
+    required this.relay,
+    required this.strength,
+    this.latency,
+    this.error,
+  });
+
+  final String relay;
+  final _RelayProbeStrength strength;
+  final Duration? latency;
+  final String? error;
+
+  bool get online => strength != _RelayProbeStrength.offline;
+
+  String get label {
+    final latency = this.latency;
+    if (latency == null) return 'Offline';
+    final ms = latency.inMilliseconds;
+    return switch (strength) {
+      _RelayProbeStrength.strong => 'Good ($ms ms)',
+      _RelayProbeStrength.fair => 'Okay ($ms ms)',
+      _RelayProbeStrength.weak => 'Slow ($ms ms)',
+      _RelayProbeStrength.offline => 'Offline',
+    };
+  }
+}
 
 class _PendingProcessingMessage {
   const _PendingProcessingMessage({
@@ -190,6 +221,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Completer<void>? _mediaUploadCancelCompleter;
   DateTime? _recordingStartedAt;
   Timer? _recordingTimer;
+  StreamSubscription<Amplitude>? _recordingAmplitudeSubscription;
+  double _recordingWaveformLevel = 0;
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   final _completedVoiceEventIds = <String>{};
   Completer<List<RepoChoice>>? _pendingRepoListCompleter;
@@ -367,6 +400,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (recordingPath != null) {
       unawaited(_deleteTempAudio(recordingPath));
     }
+    unawaited(_recordingAmplitudeSubscription?.cancel());
     _recordingTimer?.cancel();
     _tts.stop();
     _chatScrollController.dispose();
@@ -2037,6 +2071,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     var settingsRate = _ttsRate;
     var settingsPitch = _ttsPitch;
     var settingsVolume = _ttsVolume;
+    var settingsCheckingRelays = false;
+    var settingsRelayResults = const <_RelayProbeResult>[];
 
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
@@ -2068,6 +2104,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             rate: settingsRate,
             pitch: settingsPitch,
             volume: settingsVolume,
+            checkingRelays: settingsCheckingRelays,
+            relayResults: settingsRelayResults,
             onTargetChanged: (value) {
               if (value != null) unawaited(_selectRepoTarget(value));
             },
@@ -2109,6 +2147,38 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                     settingsConnecting = _connecting;
                   });
                 }),
+              );
+            },
+            onCheckRelayStatus: () {
+              final relays = _relayLines();
+              if (relays.isEmpty) {
+                _showError('Add at least one relay to check');
+                return;
+              }
+              refreshSettings(() {
+                settingsCheckingRelays = true;
+                settingsRelayResults = const [];
+              });
+              unawaited(
+                _checkRelayStatus(relays)
+                    .then((results) {
+                      if (!settingsContext.mounted) return;
+                      final online = results
+                          .where((result) => result.online)
+                          .length;
+                      refreshSettings(() {
+                        settingsCheckingRelays = false;
+                        settingsRelayResults = results;
+                      });
+                      _showStatus(
+                        'Relay check: $online/${results.length} online',
+                      );
+                    })
+                    .catchError((Object error) {
+                      if (!settingsContext.mounted) return;
+                      refreshSettings(() => settingsCheckingRelays = false);
+                      _showError('Relay check failed: $error');
+                    }),
               );
             },
             onStop: _stopSpeaking,
@@ -4099,6 +4169,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             : 'Recording voice query...';
       });
       _startRecordingTimer();
+      _startRecordingAmplitude();
     } catch (error) {
       if (path != null) unawaited(_deleteTempAudio(path));
       if (!mounted) return;
@@ -4313,6 +4384,22 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   void _stopRecordingTimer() {
     _recordingTimer?.cancel();
     _recordingTimer = null;
+    unawaited(_recordingAmplitudeSubscription?.cancel());
+    _recordingAmplitudeSubscription = null;
+    _recordingWaveformLevel = 0;
+  }
+
+  void _startRecordingAmplitude() {
+    unawaited(_recordingAmplitudeSubscription?.cancel());
+    _recordingAmplitudeSubscription = _recorder
+        .onAmplitudeChanged(const Duration(milliseconds: 120))
+        .listen((amplitude) {
+          if (!_recording || !mounted) return;
+          final current = amplitude.current;
+          if (!current.isFinite) return;
+          final level = ((current + 45) / 45).clamp(0.0, 1.0).toDouble();
+          setState(() => _recordingWaveformLevel = level);
+        }, onError: (_) {});
   }
 
   Future<BridgeAudioReference> _uploadAudioToBlossom(
@@ -4523,6 +4610,39 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         await file.delete();
       }
     } catch (_) {}
+  }
+
+  Future<List<_RelayProbeResult>> _checkRelayStatus(List<String> relays) {
+    return Future.wait(relays.map(_probeRelay));
+  }
+
+  Future<_RelayProbeResult> _probeRelay(String relay) async {
+    final stopwatch = Stopwatch()..start();
+    try {
+      final socket = await WebSocket.connect(relay).timeout(_relayProbeTimeout);
+      await socket.close(WebSocketStatus.normalClosure, 'relay probe complete');
+      stopwatch.stop();
+      final latency = stopwatch.elapsed;
+      return _RelayProbeResult(
+        relay: relay,
+        strength: _relayStrength(latency),
+        latency: latency,
+      );
+    } catch (error) {
+      stopwatch.stop();
+      return _RelayProbeResult(
+        relay: relay,
+        strength: _RelayProbeStrength.offline,
+        error: error.toString(),
+      );
+    }
+  }
+
+  _RelayProbeStrength _relayStrength(Duration latency) {
+    final ms = latency.inMilliseconds;
+    if (ms < 400) return _RelayProbeStrength.strong;
+    if (ms < 900) return _RelayProbeStrength.fair;
+    return _RelayProbeStrength.weak;
   }
 
   List<String> _relayLines() {
@@ -4843,6 +4963,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               activeSendBlocked: _activeConversationSendBlocked,
               recording: _recording,
               recordingDurationLabel: _recordingDurationLabel,
+              recordingWaveformLevel: _recordingWaveformLevel,
               wavRetryRequested: _wavRetryRequested,
               hasPendingMedia: _hasPendingMediaAttachment,
               pendingMediaName: _pendingMediaFileName,
