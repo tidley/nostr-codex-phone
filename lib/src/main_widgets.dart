@@ -1735,9 +1735,17 @@ class _RecordingButton extends StatefulWidget {
 
 class _RecordingButtonState extends State<_RecordingButton>
     with TickerProviderStateMixin {
+  static const _waveSampleRate = 96.0;
+  static const _waveSampleCount = 180;
+
   late final AnimationController _wipeController;
   late final Animation<double> _wipeAnimation;
   late final AnimationController _waveController;
+  final _waveRandom = math.Random();
+  final _waveSamples = List<double>.filled(_waveSampleCount, 0);
+  double _lastWaveProgress = 0;
+  double _waveSampleCarry = 0;
+  double _smoothedWaveLevel = 0;
 
   @override
   void initState() {
@@ -1753,7 +1761,9 @@ class _RecordingButtonState extends State<_RecordingButton>
     _waveController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1450),
-    )..repeat();
+    )
+      ..addListener(_advanceWaveform)
+      ..repeat();
     if (widget.sendWipe) {
       _wipeController.value = 1;
     }
@@ -1776,6 +1786,36 @@ class _RecordingButtonState extends State<_RecordingButton>
     super.dispose();
   }
 
+  void _advanceWaveform() {
+    if (widget.sendWipe) {
+      _lastWaveProgress = _waveController.value;
+      return;
+    }
+
+    final progress = _waveController.value;
+    var delta = progress - _lastWaveProgress;
+    if (delta < 0) delta += 1;
+    _lastWaveProgress = progress;
+
+    _waveSampleCarry += delta * _waveSampleRate;
+    while (_waveSampleCarry >= 1) {
+      _waveSampleCarry -= 1;
+      _pushWaveSample();
+    }
+  }
+
+  void _pushWaveSample() {
+    final level = widget.waveformLevel.clamp(0.0, 1.0);
+    _smoothedWaveLevel += (level - _smoothedWaveLevel) * 0.18;
+    final envelope = 0.05 + _smoothedWaveLevel * 0.95;
+    final previous = _waveSamples.isEmpty ? 0.0 : _waveSamples.last;
+    final noise = _waveRandom.nextDouble() * 2 - 1;
+    _waveSamples.add((previous * 0.28 + noise * 0.72) * envelope);
+    if (_waveSamples.length > _waveSampleCount) {
+      _waveSamples.removeRange(0, _waveSamples.length - _waveSampleCount);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     const ink = Color(0xff1b140f);
@@ -1794,7 +1834,7 @@ class _RecordingButtonState extends State<_RecordingButton>
                 builder: (context, _) {
                   return CustomPaint(
                     painter: _RecordingWaveformPainter(
-                      level: widget.waveformLevel,
+                      samples: _waveSamples,
                       progress: _waveController.value,
                     ),
                   );
@@ -1833,7 +1873,7 @@ class _RecordingButtonState extends State<_RecordingButton>
                 builder: (context, _) {
                   return ClipPath(
                     clipper: _RecordingWaveformClipper(
-                      level: widget.waveformLevel,
+                      samples: _waveSamples,
                       progress: _waveController.value,
                     ),
                     child: IgnorePointer(
@@ -1859,77 +1899,118 @@ class _RecordingButtonState extends State<_RecordingButton>
 
 class _RecordingWaveformPainter extends CustomPainter {
   const _RecordingWaveformPainter({
-    required this.level,
+    required this.samples,
     required this.progress,
   });
 
-  final double level;
+  final List<double> samples;
   final double progress;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = const Color(0xff1b140f);
-    canvas.drawPath(_recordingWaveformPath(size, level, progress), paint);
+    final paint = Paint()
+      ..color = const Color(0xff1b140f)
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..strokeWidth = 1.6;
+    canvas.drawPath(_recordingWaveformPath(size, samples, progress), paint);
   }
 
   @override
   bool shouldRepaint(covariant _RecordingWaveformPainter oldDelegate) {
-    return oldDelegate.level != level || oldDelegate.progress != progress;
+    return oldDelegate.samples != samples || oldDelegate.progress != progress;
   }
 }
 
 class _RecordingWaveformClipper extends CustomClipper<Path> {
   const _RecordingWaveformClipper({
-    required this.level,
+    required this.samples,
     required this.progress,
   });
 
-  final double level;
+  final List<double> samples;
   final double progress;
 
   @override
-  Path getClip(Size size) => _recordingWaveformPath(size, level, progress);
+  Path getClip(Size size) {
+    return _recordingWaveformStrokePath(size, samples, progress, 3.4);
+  }
 
   @override
   bool shouldReclip(covariant _RecordingWaveformClipper oldClipper) {
-    return oldClipper.level != level || oldClipper.progress != progress;
+    return oldClipper.samples != samples || oldClipper.progress != progress;
   }
 }
 
-Path _recordingWaveformPath(Size size, double level, double progress) {
+Path _recordingWaveformPath(
+  Size size,
+  List<double> samples,
+  double progress,
+) {
   final path = Path();
-  final activeLevel = level.clamp(0.0, 1.0);
-  final centerY = size.height / 2;
-  final width = size.width;
-  final sampleCount = 32;
-  final bleed = width * 0.18;
-  final drift = progress * math.pi * 2;
+  final points = _recordingWaveformPoints(size, samples, progress);
 
-  double waveHeight(double x) {
-    final phase = (x / width) * math.pi * 5.6 + drift;
-    final groove =
-        0.56 +
-        0.24 * math.sin(phase) +
-        0.20 * math.sin(phase * 1.9 + math.pi / 2.7);
-    return size.height * (0.18 + activeLevel * groove.clamp(0.0, 1.0) * 0.64);
-  }
-
-  for (var i = 0; i <= sampleCount; i++) {
-    final x = -bleed + (width + bleed * 2) * i / sampleCount;
-    final y = centerY - waveHeight(x) / 2;
+  for (var i = 0; i < points.length; i++) {
+    final point = points[i];
     if (i == 0) {
-      path.moveTo(x, y);
+      path.moveTo(point.dx, point.dy);
     } else {
-      path.lineTo(x, y);
+      path.lineTo(point.dx, point.dy);
     }
   }
 
-  for (var i = sampleCount; i >= 0; i--) {
-    final x = -bleed + (width + bleed * 2) * i / sampleCount;
-    path.lineTo(x, centerY + waveHeight(x) / 2);
+  return path;
+}
+
+Path _recordingWaveformStrokePath(
+  Size size,
+  List<double> samples,
+  double progress,
+  double strokeWidth,
+) {
+  final points = _recordingWaveformPoints(size, samples, progress);
+  final halfStroke = strokeWidth / 2;
+  final path = Path();
+
+  for (var i = 0; i < points.length; i++) {
+    final point = points[i];
+    final y = point.dy - halfStroke;
+    if (i == 0) {
+      path.moveTo(point.dx, y);
+    } else {
+      path.lineTo(point.dx, y);
+    }
+  }
+  for (var i = points.length - 1; i >= 0; i--) {
+    final point = points[i];
+    path.lineTo(point.dx, point.dy + halfStroke);
   }
 
   return path..close();
+}
+
+List<Offset> _recordingWaveformPoints(
+  Size size,
+  List<double> samples,
+  double progress,
+) {
+  final centerY = size.height / 2;
+  final width = size.width;
+  final values = samples.isEmpty ? const [0.0] : samples;
+  final sampleCount = values.length;
+  final step = sampleCount <= 1 ? width : width / (sampleCount - 1);
+  final amplitude = size.height * 0.36;
+  final scroll = progress * step;
+  final points = <Offset>[];
+
+  for (var i = 0; i < sampleCount; i++) {
+    final x = width - (sampleCount - 1 - i) * step - scroll;
+    final y = centerY - values[i].clamp(-1.0, 1.0) * amplitude;
+    points.add(Offset(x, y));
+  }
+
+  return points;
 }
 
 class _MessageTile extends StatefulWidget {
