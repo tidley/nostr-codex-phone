@@ -1751,7 +1751,7 @@ class _RecordingButtonState extends State<_RecordingButton>
   late final Animation<double> _wipeAnimation;
   late final AnimationController _waveController;
   final _waveRandom = math.Random();
-  final _waveSamples = List<double>.filled(_waveSampleCount, 0);
+  final _waveSamples = List<double>.filled(_waveSampleCount, 0, growable: true);
   double _lastWaveProgress = 0;
   double _waveSampleCarry = 0;
   double _smoothedWaveLevel = 0;
@@ -1938,33 +1938,6 @@ Path _recordingWaveformPath(Size size, List<double> samples, double progress) {
   }
 
   return path;
-}
-
-Path _recordingWaveformStrokePath(
-  Size size,
-  List<double> samples,
-  double progress,
-  double strokeWidth,
-) {
-  final points = _recordingWaveformPoints(size, samples, progress);
-  final halfStroke = strokeWidth / 2;
-  final path = Path();
-
-  for (var i = 0; i < points.length; i++) {
-    final point = points[i];
-    final y = point.dy - halfStroke;
-    if (i == 0) {
-      path.moveTo(point.dx, y);
-    } else {
-      path.lineTo(point.dx, y);
-    }
-  }
-  for (var i = points.length - 1; i >= 0; i--) {
-    final point = points[i];
-    path.lineTo(point.dx, point.dy + halfStroke);
-  }
-
-  return path..close();
 }
 
 List<Offset> _recordingWaveformPoints(
