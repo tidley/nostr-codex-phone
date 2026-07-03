@@ -1349,7 +1349,6 @@ async fn process_media_bundle_turn(
             }
 
             transcripts.push(format!("{label}:\n{transcript}"));
-            local_texts.push(format!("{label}:\n{transcript}"));
 
             if let Err(err) = messenger
                 .send_transcript_for_event_to(
@@ -3142,7 +3141,7 @@ fn load_codex_session(
     memory: &Option<MemoryStore>,
     peer_pubkey: &str,
     workdir: &Path,
-    request: &str,
+    _request: &str,
 ) -> Option<String> {
     let stored =
         memory
@@ -3156,10 +3155,6 @@ fn load_codex_session(
             });
 
     if !env_bool("CODEX_RESUME_LATEST_BY_WORKDIR", true) {
-        return stored;
-    }
-
-    if stored.is_some() && !should_refresh_codex_session_for_request(request) {
         return stored;
     }
 
@@ -3180,22 +3175,6 @@ fn load_codex_session(
             stored
         }
     }
-}
-
-fn should_refresh_codex_session_for_request(request: &str) -> bool {
-    let normalized = request.to_ascii_lowercase();
-    [
-        "last issue",
-        "latest issue",
-        "recent issue",
-        "most recent",
-        "progress",
-        "worked on",
-        "last task",
-        "latest task",
-    ]
-    .iter()
-    .any(|marker| normalized.contains(marker))
 }
 
 fn latest_codex_session_for_workdir(workdir: &Path) -> Result<Option<String>> {
@@ -3262,9 +3241,9 @@ fn collect_latest_codex_session(
     match best {
         Some(best_session)
             if (
-                best_session.started_at.as_str(),
                 best_session.last_timestamp.as_str(),
-            ) >= (session.started_at.as_str(), session.last_timestamp.as_str()) => {}
+                best_session.started_at.as_str(),
+            ) >= (session.last_timestamp.as_str(), session.started_at.as_str()) => {}
         _ => *best = Some(session),
     }
     Ok(())
@@ -4209,7 +4188,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_saved_codex_session_from_memory_by_peer_and_workdir() {
+    fn loads_saved_codex_session_from_memory_when_no_workdir_session_exists() {
         let temp_dir = tempfile::tempdir().unwrap();
         let workdir = temp_dir.path().join("repo");
         fs::create_dir_all(&workdir).unwrap();
@@ -4264,7 +4243,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_issue_request_refreshes_older_saved_codex_session() {
+    fn adopts_latest_workdir_session_over_older_saved_codex_session() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let previous_sessions_dir = env::var_os("CODEX_SESSIONS_DIR");
 
@@ -4304,18 +4283,40 @@ mod tests {
             .save_codex_session("peer-1", &workdir, "stored-session")
             .unwrap();
 
-        let session = load_codex_session(
-            &Some(memory),
-            "peer-1",
-            &workdir,
-            "How is progress with the last issue?",
-        );
+        let session = load_codex_session(&Some(memory), "peer-1", &workdir, "continue");
         match previous_sessions_dir {
             Some(value) => env::set_var("CODEX_SESSIONS_DIR", value),
             None => env::remove_var("CODEX_SESSIONS_DIR"),
         }
 
         assert_eq!(session.as_deref(), Some("newer-session"));
+    }
+
+    #[test]
+    fn latest_codex_session_uses_last_activity_before_start_time() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("sessions");
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(sessions_dir.join("2026/06/16")).unwrap();
+        fs::create_dir_all(&workdir).unwrap();
+
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/started-later.jsonl"),
+            "started-later-session",
+            &workdir,
+            "2026-06-16T11:00:00Z",
+            "2026-06-16T11:01:00Z",
+        );
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/active-later.jsonl"),
+            "active-later-session",
+            &workdir,
+            "2026-06-16T10:00:00Z",
+            "2026-06-16T11:05:00Z",
+        );
+
+        let session = latest_codex_session_for_workdir_in(&sessions_dir, &workdir).unwrap();
+        assert_eq!(session.as_deref(), Some("active-later-session"));
     }
 
     fn write_session_fixture(
