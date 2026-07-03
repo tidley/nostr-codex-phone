@@ -1758,12 +1758,13 @@ class _RecordingButtonState extends State<_RecordingButton>
       parent: _wipeController,
       curve: Curves.easeOutCubic,
     );
-    _waveController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1450),
-    )
-      ..addListener(_advanceWaveform)
-      ..repeat();
+    _waveController =
+        AnimationController(
+            vsync: this,
+            duration: const Duration(milliseconds: 1450),
+          )
+          ..addListener(_advanceWaveform)
+          ..repeat();
     if (widget.sendWipe) {
       _wipeController.value = 1;
     }
@@ -1834,7 +1835,7 @@ class _RecordingButtonState extends State<_RecordingButton>
                 builder: (context, _) {
                   return CustomPaint(
                     painter: _RecordingWaveformPainter(
-                      samples: _waveSamples,
+                      samples: List<double>.of(_waveSamples),
                       progress: _waveController.value,
                     ),
                   );
@@ -1873,7 +1874,7 @@ class _RecordingButtonState extends State<_RecordingButton>
                 builder: (context, _) {
                   return ClipPath(
                     clipper: _RecordingWaveformClipper(
-                      samples: _waveSamples,
+                      samples: List<double>.of(_waveSamples),
                       progress: _waveController.value,
                     ),
                     child: IgnorePointer(
@@ -1943,11 +1944,7 @@ class _RecordingWaveformClipper extends CustomClipper<Path> {
   }
 }
 
-Path _recordingWaveformPath(
-  Size size,
-  List<double> samples,
-  double progress,
-) {
+Path _recordingWaveformPath(Size size, List<double> samples, double progress) {
   final path = Path();
   final points = _recordingWaveformPoints(size, samples, progress);
 
@@ -2020,6 +2017,7 @@ class _MessageTile extends StatefulWidget {
     required this.speaking,
     required this.workingAnimationStyle,
     required this.workingAnimationSpeed,
+    required this.recordingWaveformLevel,
     required this.stopSpeakingOnTap,
     required this.onSpeak,
     required this.onStopSpeaking,
@@ -2032,6 +2030,7 @@ class _MessageTile extends StatefulWidget {
   final bool speaking;
   final WorkingAnimationStyle workingAnimationStyle;
   final double workingAnimationSpeed;
+  final double recordingWaveformLevel;
   final bool stopSpeakingOnTap;
   final VoidCallback? onSpeak;
   final VoidCallback? onStopSpeaking;
@@ -2152,6 +2151,22 @@ class _MessageTileState extends State<_MessageTile>
         ? colorScheme.primaryContainer
         : colorScheme.surfaceContainerHigh;
     final flashColor = Color.lerp(baseColor, colorScheme.primary, 0.16)!;
+    final voiceWaveform =
+        widget.message.kind == 'recording' ||
+        (processing && widget.message.text.trim().isEmpty);
+
+    if (voiceWaveform) {
+      return Card(
+        color: Colors.transparent,
+        child: _RecordingButton(
+          sendWipe: false,
+          waveformLevel: widget.message.kind == 'recording'
+              ? widget.recordingWaveformLevel
+              : 0.18,
+          child: const SizedBox(height: 54, width: double.infinity),
+        ),
+      );
+    }
 
     if (widget.message.kind == 'processing') {
       if (!widget.workingAnimationStyle.enabled) {

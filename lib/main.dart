@@ -250,6 +250,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   DateTime? _autoSpeakSuppressedUntil;
   String? _lastSpokenText;
   String? _recordingPath;
+  String? _recordingConversationKey;
+  String? _recordingMessageId;
   VoiceRecordingFormat? _activeRecordingFormat;
   String? _ownPubkey;
   String? _status;
@@ -1690,6 +1692,76 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   ) {
     final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
     messages.insert(0, message);
+    unawaited(_saveConversationHistoryForKey(conversationKey));
+    if (conversationKey == _activeConversationKey) {
+      _scrollToLatestMessage();
+    }
+  }
+
+  void _appendRecordingMessageForConversation(
+    String conversationKey,
+    String eventId,
+  ) {
+    final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
+    messages.insert(
+      0,
+      ConversationMessage(
+        direction: MessageDirection.outgoing,
+        kind: 'recording',
+        text: '',
+        eventId: eventId,
+        timestamp: DateTime.now(),
+      ),
+    );
+    if (conversationKey == _activeConversationKey) {
+      _scrollToLatestMessage();
+    }
+  }
+
+  void _removeRecordingMessage({String? conversationKey, String? eventId}) {
+    final targetConversationKey = conversationKey ?? _recordingConversationKey;
+    final targetEventId = eventId ?? _recordingMessageId;
+    if (targetConversationKey == null || targetEventId == null) return;
+    final messages = _messagesByTarget[targetConversationKey];
+    if (messages == null) return;
+    messages.removeWhere(
+      (message) =>
+          message.kind == 'recording' && message.eventId == targetEventId,
+    );
+  }
+
+  void _replaceRecordingMessageWithPendingTranscription({
+    required String conversationKey,
+    required String recordingMessageId,
+    required String eventId,
+    required String label,
+    _PendingMessageCompletion completion = _PendingMessageCompletion.transcript,
+  }) {
+    _pendingProcessingMessages.add(
+      _PendingProcessingMessage(
+        conversationKey: conversationKey,
+        eventId: eventId,
+        completion: completion,
+        label: label,
+      ),
+    );
+    final replacement = ConversationMessage(
+      direction: MessageDirection.outgoing,
+      kind: 'transcribing',
+      text: label,
+      eventId: eventId,
+      timestamp: DateTime.now(),
+    );
+    final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
+    final index = messages.indexWhere(
+      (message) =>
+          message.kind == 'recording' && message.eventId == recordingMessageId,
+    );
+    if (index >= 0) {
+      messages[index] = replacement;
+    } else {
+      messages.insert(0, replacement);
+    }
     unawaited(_saveConversationHistoryForKey(conversationKey));
     if (conversationKey == _activeConversationKey) {
       _scrollToLatestMessage();
@@ -4144,6 +4216,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       final recordingFormat = _wavRetryRequested
           ? wavVoiceFormat
           : opusVoiceFormat;
+      final conversationKey = _activeConversationKey;
+      final recordingMessageId = 'recording-$timestamp';
       path =
           '${directory.path}/nostr_codex_voice_$timestamp.${recordingFormat.extension}';
       await _recorder.start(
@@ -4162,8 +4236,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       setState(() {
         _recording = true;
         _recordingPath = path;
+        _recordingConversationKey = conversationKey;
+        _recordingMessageId = recordingMessageId;
         _activeRecordingFormat = recordingFormat;
         _recordingStartedAt = DateTime.now();
+        _appendRecordingMessageForConversation(
+          conversationKey,
+          recordingMessageId,
+        );
         _status = recordingFormat.format == VoiceFormat.wav
             ? 'Recording WAV retry...'
             : 'Recording voice query...';
@@ -4176,6 +4256,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       setState(() {
         _recording = false;
         _recordingPath = null;
+        _removeRecordingMessage();
+        _recordingConversationKey = null;
+        _recordingMessageId = null;
         _activeRecordingFormat = null;
         _recordingStartedAt = null;
         _stopRecordingTimer();
@@ -4202,9 +4285,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _stopAndSendRecording() async {
-    final conversationKey = _activeConversationKey;
+    final conversationKey = _recordingConversationKey ?? _activeConversationKey;
     final sendTarget = _targetById(_repoTargets, _selectedRepoTargetId);
     final fallbackPath = _recordingPath;
+    final recordingMessageId = _recordingMessageId;
     final recordingFormat = _activeRecordingFormat ?? opusVoiceFormat;
     final recordingStartedAt = _recordingStartedAt;
     String? path;
@@ -4214,8 +4298,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     } catch (error) {
       if (mounted) {
         setState(() {
+          _removeRecordingMessage(
+            conversationKey: conversationKey,
+            eventId: recordingMessageId,
+          );
           _recording = false;
           _recordingPath = null;
+          _recordingConversationKey = null;
+          _recordingMessageId = null;
           _activeRecordingFormat = null;
           _recordingStartedAt = null;
           _stopRecordingTimer();
@@ -4232,8 +4322,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (recordingDuration != null &&
         recordingDuration < minimumVoiceRecordingDuration) {
       setState(() {
+        _removeRecordingMessage(
+          conversationKey: conversationKey,
+          eventId: recordingMessageId,
+        );
         _recording = false;
         _recordingPath = null;
+        _recordingConversationKey = null;
+        _recordingMessageId = null;
         _activeRecordingFormat = null;
         _recordingStartedAt = null;
         _stopRecordingTimer();
@@ -4246,6 +4342,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     setState(() {
       _recording = false;
       _recordingPath = null;
+      _recordingConversationKey = null;
+      _recordingMessageId = null;
       _activeRecordingFormat = null;
       _recordingStartedAt = null;
       _stopRecordingTimer();
@@ -4258,6 +4356,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _showError('Recording did not produce an audio file');
       if (mounted) {
         setState(() {
+          _removeRecordingMessage(
+            conversationKey: conversationKey,
+            eventId: recordingMessageId,
+          );
           _sendingAudio = false;
           _sendingAudioConversationKey = null;
         });
@@ -4268,6 +4370,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     try {
       setState(() => _status = 'Preparing voice session...');
       if (!await _ensureConnectedForVoiceSend(sendTarget)) {
+        if (mounted) {
+          setState(
+            () => _removeRecordingMessage(
+              conversationKey: conversationKey,
+              eventId: recordingMessageId,
+            ),
+          );
+        }
         return;
       }
       if (!mounted) return;
@@ -4297,14 +4407,31 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         if (recordingFormat.format == VoiceFormat.wav) {
           _wavRetryRequested = false;
         }
-        _appendPendingTranscriptionMessage(
-          conversationKey: conversationKey,
-          eventId: eventId,
-          label: 'Transcribing...',
-        );
+        if (recordingMessageId == null) {
+          _appendPendingTranscriptionMessage(
+            conversationKey: conversationKey,
+            eventId: eventId,
+            label: '',
+          );
+        } else {
+          _replaceRecordingMessageWithPendingTranscription(
+            conversationKey: conversationKey,
+            recordingMessageId: recordingMessageId,
+            eventId: eventId,
+            label: '',
+          );
+        }
         _status = 'Voice query sent';
       });
     } catch (error) {
+      if (mounted) {
+        setState(
+          () => _removeRecordingMessage(
+            conversationKey: conversationKey,
+            eventId: recordingMessageId,
+          ),
+        );
+      }
       _showError('Voice query failed: $error');
     } finally {
       unawaited(_deleteTempAudio(path));
@@ -4341,8 +4468,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     if (!mounted) return;
     setState(() {
+      _removeRecordingMessage();
       _recording = false;
       _recordingPath = null;
+      _recordingConversationKey = null;
+      _recordingMessageId = null;
       _activeRecordingFormat = null;
       _recordingStartedAt = null;
       _stopRecordingTimer();
@@ -4922,6 +5052,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                                   message.eventId == _speakingMessageEventId,
                               workingAnimationStyle: _workingAnimationStyle,
                               workingAnimationSpeed: _workingAnimationSpeed,
+                              recordingWaveformLevel: _recordingWaveformLevel,
                               stopSpeakingOnTap:
                                   _speaking &&
                                   message.direction ==
