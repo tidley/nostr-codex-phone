@@ -1616,8 +1616,10 @@ class _ComposerState extends State<_Composer> {
                         minimumSize: const Size(48, 48),
                       )
                     : IconButton.styleFrom(minimumSize: const Size(48, 48));
+                final recordingShell = widget.recording;
                 final sendingAudioShell =
                     widget.sendingAudio && !widget.recording;
+                final audioActionShell = recordingShell || sendingAudioShell;
 
                 final icon = busy
                     ? SizedBox.square(
@@ -1669,7 +1671,7 @@ class _ComposerState extends State<_Composer> {
                 final mainButton = Tooltip(
                   message: tooltip,
                   child: FilledButton.icon(
-                    style: sendingAudioShell
+                    style: audioActionShell
                         ? mainButtonStyle.copyWith(
                             backgroundColor: const WidgetStatePropertyAll(
                               Colors.transparent,
@@ -1684,10 +1686,12 @@ class _ComposerState extends State<_Composer> {
                     label: Text(label),
                   ),
                 );
-                final actionButton = sendingAudioShell
+                final actionButton = audioActionShell
                     ? _RecordingButton(
-                        sendWipe: true,
-                        waveformLevel: 0,
+                        sendWipe: sendingAudioShell,
+                        waveformLevel: recordingShell
+                            ? widget.recordingWaveformLevel
+                            : 0,
                         child: mainButton,
                       )
                     : mainButton;
@@ -1772,6 +1776,8 @@ class _RecordingButtonState extends State<_RecordingButton>
           ..repeat();
     if (widget.sendWipe) {
       _wipeController.value = 1;
+    } else {
+      _seedWaveSamples();
     }
   }
 
@@ -1782,6 +1788,7 @@ class _RecordingButtonState extends State<_RecordingButton>
       _wipeController.forward(from: 0);
     } else if (!widget.sendWipe && oldWidget.sendWipe) {
       _wipeController.value = 0;
+      _seedWaveSamples();
     }
   }
 
@@ -1820,6 +1827,16 @@ class _RecordingButtonState extends State<_RecordingButton>
     if (_waveSamples.length > _waveSampleCount) {
       _waveSamples.removeRange(0, _waveSamples.length - _waveSampleCount);
     }
+  }
+
+  void _seedWaveSamples() {
+    _waveSamples
+      ..clear()
+      ..addAll(
+        List<double>.generate(_waveSampleCount, (_) {
+          return (_waveRandom.nextDouble() * 2 - 1) * 0.04;
+        }),
+      );
   }
 
   @override
@@ -1871,31 +1888,6 @@ class _RecordingButtonState extends State<_RecordingButton>
             ),
             child: widget.child,
           ),
-          if (showWaveform)
-            Positioned.fill(
-              child: AnimatedBuilder(
-                animation: _waveController,
-                builder: (context, _) {
-                  return ClipPath(
-                    clipper: _RecordingWaveformClipper(
-                      samples: List<double>.of(_waveSamples),
-                      progress: _waveController.value,
-                    ),
-                    child: IgnorePointer(
-                      child: FilledButtonTheme(
-                        data: FilledButtonThemeData(
-                          style: FilledButton.styleFrom(
-                            backgroundColor: Colors.transparent,
-                            foregroundColor: widget.backgroundColor,
-                          ),
-                        ),
-                        child: widget.child,
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
         ],
       ),
     );
@@ -1916,11 +1908,11 @@ class _RecordingWaveformPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = color
+      ..color = color.withValues(alpha: 0.28)
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
-      ..strokeWidth = 1.6;
+      ..strokeWidth = 1.3;
     canvas.drawPath(_recordingWaveformPath(size, samples, progress), paint);
   }
 
@@ -1929,26 +1921,6 @@ class _RecordingWaveformPainter extends CustomPainter {
     return oldDelegate.samples != samples ||
         oldDelegate.progress != progress ||
         oldDelegate.color != color;
-  }
-}
-
-class _RecordingWaveformClipper extends CustomClipper<Path> {
-  const _RecordingWaveformClipper({
-    required this.samples,
-    required this.progress,
-  });
-
-  final List<double> samples;
-  final double progress;
-
-  @override
-  Path getClip(Size size) {
-    return _recordingWaveformStrokePath(size, samples, progress, 3.4);
-  }
-
-  @override
-  bool shouldReclip(covariant _RecordingWaveformClipper oldClipper) {
-    return oldClipper.samples != samples || oldClipper.progress != progress;
   }
 }
 
