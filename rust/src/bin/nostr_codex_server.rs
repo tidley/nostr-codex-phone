@@ -3206,6 +3206,7 @@ fn latest_codex_session_for_workdir_in(
 struct CodexSessionCandidate {
     started_at: String,
     last_timestamp: String,
+    cwd: String,
     session_id: String,
 }
 
@@ -3243,7 +3244,14 @@ fn collect_latest_codex_session(
             if (
                 best_session.last_timestamp.as_str(),
                 best_session.started_at.as_str(),
-            ) >= (session.last_timestamp.as_str(), session.started_at.as_str()) => {}
+                best_session.cwd.as_str(),
+                best_session.session_id.as_str(),
+            ) >= (
+                session.last_timestamp.as_str(),
+                session.started_at.as_str(),
+                session.cwd.as_str(),
+                session.session_id.as_str(),
+            ) => {}
         _ => *best = Some(session),
     }
     Ok(())
@@ -3330,6 +3338,7 @@ fn parse_codex_session_file(
     Ok(Some(CodexSessionCandidate {
         started_at: started_at.to_string(),
         last_timestamp,
+        cwd: cwd.to_string(),
         session_id: session_id.to_string(),
     }))
 }
@@ -4317,6 +4326,33 @@ mod tests {
 
         let session = latest_codex_session_for_workdir_in(&sessions_dir, &workdir).unwrap();
         assert_eq!(session.as_deref(), Some("active-later-session"));
+    }
+
+    #[test]
+    fn latest_codex_session_tie_breaks_like_codex_sessions_script() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("sessions");
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(sessions_dir.join("2026/06/16")).unwrap();
+        fs::create_dir_all(&workdir).unwrap();
+
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/a.jsonl"),
+            "aaa-session",
+            &workdir,
+            "2026-06-16T10:00:00Z",
+            "2026-06-16T10:05:00Z",
+        );
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/z.jsonl"),
+            "zzz-session",
+            &workdir,
+            "2026-06-16T10:00:00Z",
+            "2026-06-16T10:05:00Z",
+        );
+
+        let session = latest_codex_session_for_workdir_in(&sessions_dir, &workdir).unwrap();
+        assert_eq!(session.as_deref(), Some("zzz-session"));
     }
 
     fn write_session_fixture(

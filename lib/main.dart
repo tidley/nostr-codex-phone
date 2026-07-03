@@ -36,7 +36,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.1.135+135';
+const _appVersion = '0.1.140+140';
 
 enum _PendingMessageCompletion { transcript, response }
 
