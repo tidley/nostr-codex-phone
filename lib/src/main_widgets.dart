@@ -1904,7 +1904,7 @@ class _RecordingWaveformPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = color.withValues(alpha: 0.28)
+      ..color = color.withValues(alpha: 0.62)
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
@@ -2117,7 +2117,7 @@ class _MessageTileState extends State<_MessageTile>
               : 0.18,
           backgroundColor: bubbleColor,
           foregroundColor: waveformColor,
-          waveformColor: waveformColor,
+          waveformColor: const Color(0xff07140f),
           child: const SizedBox.expand(),
         ),
       );
