@@ -1,6 +1,6 @@
 use std::env;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
@@ -28,6 +29,8 @@ pub struct CodexRunResult {
     pub response: String,
     pub session_id: Option<String>,
 }
+
+pub type CodexJsonEventSender = mpsc::UnboundedSender<Value>;
 
 #[derive(Debug, Clone, Default)]
 pub struct CodexCancelToken {
@@ -107,7 +110,7 @@ pub async fn run_codex_with_cancel(
     cancel_token: Option<&CodexCancelToken>,
 ) -> Result<String> {
     let args = codex_stdin_args(config.args.clone());
-    let output = run_codex_command(prompt, config, args, cancel_token).await?;
+    let output = run_codex_command(prompt, config, args, cancel_token, None).await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -137,6 +140,16 @@ pub async fn run_codex_session_with_cancel(
     session_id: Option<&str>,
     cancel_token: Option<&CodexCancelToken>,
 ) -> Result<CodexRunResult> {
+    run_codex_session_with_cancel_and_events(prompt, config, session_id, cancel_token, None).await
+}
+
+pub async fn run_codex_session_with_cancel_and_events(
+    prompt: &str,
+    config: &CodexConfig,
+    session_id: Option<&str>,
+    cancel_token: Option<&CodexCancelToken>,
+    event_sender: Option<CodexJsonEventSender>,
+) -> Result<CodexRunResult> {
     if !config.persist_sessions {
         return run_codex_with_cancel(prompt, config, cancel_token)
             .await
@@ -147,7 +160,7 @@ pub async fn run_codex_session_with_cancel(
     }
 
     let args = codex_json_session_args(&config.args, session_id);
-    let output = run_codex_command(prompt, config, args, cancel_token).await?;
+    let output = run_codex_command(prompt, config, args, cancel_token, event_sender).await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -164,7 +177,8 @@ async fn run_codex_command(
     config: &CodexConfig,
     args: Vec<String>,
     cancel_token: Option<&CodexCancelToken>,
-) -> Result<std::process::Output> {
+    event_sender: Option<CodexJsonEventSender>,
+) -> Result<Output> {
     let mut command = Command::new(&config.bin);
     command
         .args(args)
@@ -195,21 +209,113 @@ async fn run_codex_command(
         .context("failed to close Codex stdin")?;
     drop(stdin);
 
-    let wait_for_output = child.wait_with_output();
-    tokio::pin!(wait_for_output);
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to open Codex stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("failed to open Codex stderr"))?;
+    let stdout_task = tokio::spawn(read_stdout(stdout, event_sender));
+    let stderr_task = tokio::spawn(read_output(stderr));
 
-    tokio::time::timeout(config.timeout, async {
-        tokio::select! {
-            output = &mut wait_for_output => {
-                output.context("failed to wait for Codex output")
-            }
-            _ = wait_for_cancel(cancel_token), if cancel_token.is_some() => {
-                Err(anyhow!("Codex cancelled"))
-            }
+    let status_result = tokio::select! {
+        status = child.wait() => status.context("failed to wait for Codex output"),
+        _ = wait_for_cancel(cancel_token), if cancel_token.is_some() => {
+            let _ = child.kill().await;
+            Err(anyhow!("Codex cancelled"))
         }
+        _ = sleep(config.timeout) => {
+            let _ = child.kill().await;
+            Err(anyhow!("Codex timed out after {}s", config.timeout.as_secs()))
+        }
+    };
+
+    let status = match status_result {
+        Ok(status) => status,
+        Err(err) => {
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(err);
+        }
+    };
+
+    let stdout = stdout_task
+        .await
+        .context("failed to join Codex stdout reader")??;
+    let stderr = stderr_task
+        .await
+        .context("failed to join Codex stderr reader")??;
+
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
     })
-    .await
-    .map_err(|_| anyhow!("Codex timed out after {}s", config.timeout.as_secs()))?
+}
+
+async fn read_stdout<R>(reader: R, event_sender: Option<CodexJsonEventSender>) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    if event_sender.is_none() {
+        return read_output(reader).await;
+    }
+
+    let event_sender = event_sender.expect("checked above");
+    let mut reader = reader;
+    let mut output = Vec::new();
+    let mut pending_line = Vec::new();
+    let mut buffer = [0_u8; 8192];
+
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .context("failed to read Codex stdout")?;
+        if read == 0 {
+            break;
+        }
+        output.extend_from_slice(&buffer[..read]);
+        pending_line.extend_from_slice(&buffer[..read]);
+
+        while let Some(index) = pending_line.iter().position(|byte| *byte == b'\n') {
+            let line = pending_line.drain(..=index).collect::<Vec<_>>();
+            emit_codex_json_event(&event_sender, &line);
+        }
+    }
+
+    if !pending_line.is_empty() {
+        emit_codex_json_event(&event_sender, &pending_line);
+    }
+
+    Ok(output)
+}
+
+async fn read_output<R>(mut reader: R) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut output = Vec::new();
+    reader
+        .read_to_end(&mut output)
+        .await
+        .context("failed to read Codex output")?;
+    Ok(output)
+}
+
+fn emit_codex_json_event(sender: &CodexJsonEventSender, line: &[u8]) {
+    let Ok(text) = std::str::from_utf8(line) else {
+        return;
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        let _ = sender.send(value);
+    }
 }
 
 async fn wait_for_cancel(cancel_token: Option<&CodexCancelToken>) {
@@ -488,6 +594,20 @@ mod tests {
         assert!(!is_codex_usage_limit_message(
             "Codex exited with status exit status: 1"
         ));
+    }
+
+    #[test]
+    fn emits_live_json_events() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        emit_codex_json_event(&tx, br#"{"type":"turn.started"}"#);
+        emit_codex_json_event(&tx, b"not json");
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(
+            event.get("type").and_then(Value::as_str),
+            Some("turn.started")
+        );
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

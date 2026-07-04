@@ -1559,23 +1559,14 @@ class _ComposerState extends State<_Composer> {
                   ],
                 ),
               ),
-            Stack(
-              children: [
-                TextField(
-                  controller: widget.controller,
-                  focusNode: widget.focusNode,
-                  autofocus: false,
-                  minLines: 1,
-                  maxLines: 4,
-                  decoration: const InputDecoration(
-                    border: OutlineInputBorder(),
-                    labelText: 'Query',
-                    hintText: 'Type a message, or record',
-                  ),
-                ),
-                if (widget.recording)
-                  Positioned.fill(
-                    child: IgnorePointer(
+            widget.recording
+                ? SizedBox(
+                    height: 64,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        border: Border.all(color: theme.colorScheme.outline),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
                       child: Padding(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 12,
@@ -1593,9 +1584,19 @@ class _ComposerState extends State<_Composer> {
                         ),
                       ),
                     ),
+                  )
+                : TextField(
+                    controller: widget.controller,
+                    focusNode: widget.focusNode,
+                    autofocus: false,
+                    minLines: 1,
+                    maxLines: 4,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      labelText: 'Query',
+                      hintText: 'Type a message, or record',
+                    ),
                   ),
-              ],
-            ),
             const SizedBox(height: 10),
             ValueListenableBuilder<TextEditingValue>(
               valueListenable: widget.controller,
@@ -1712,11 +1713,11 @@ class _ComposerState extends State<_Composer> {
                     label: Text(label),
                   ),
                 );
-                final actionButton = sendingAudioShell
+                final actionButton = (widget.recording || sendingAudioShell)
                     ? _RecordingButton(
                         sendWipe: sendingAudioShell,
-                        backgroundColor: _recordingButtonColor,
-                        wipeColor: sentButtonColor,
+                        backgroundColor: sentButtonColor,
+                        wipeColor: _recordingButtonColor,
                         showWaveform: false,
                         waveformLevel: 0,
                         child: mainButton,
@@ -1848,7 +1849,8 @@ class _RecordingButtonState extends State<_RecordingButton>
 
   void _pushWaveSample() {
     final level = widget.waveformLevel.clamp(0.0, 1.0);
-    _smoothedWaveLevel += (level - _smoothedWaveLevel) * 0.35;
+    final responsiveLevel = math.pow(level, 0.55).toDouble();
+    _smoothedWaveLevel += (responsiveLevel - _smoothedWaveLevel) * 0.5;
     final envelope = 0.05 + _smoothedWaveLevel * 0.95;
     final previous = _waveSamples.isEmpty ? 0.0 : _waveSamples.last;
     final noise = _waveRandom.nextDouble() * 2 - 1;
@@ -2127,7 +2129,10 @@ class _MessageTileState extends State<_MessageTile>
   Widget build(BuildContext context) {
     final incoming = widget.message.direction == MessageDirection.incoming;
     final transcript = widget.message.kind == 'transcript';
-    final processing = widget.message.kind == 'transcribing';
+    final transcribing =
+        widget.message.kind == 'transcribing' ||
+        widget.message.kind == 'recording';
+    final processing = widget.message.kind == 'processing';
     final userSide = !incoming || transcript;
     final canFlashOnTap = widget.stopSpeakingOnTap;
     final colorScheme = Theme.of(context).colorScheme;
@@ -2136,34 +2141,28 @@ class _MessageTileState extends State<_MessageTile>
         ? outgoingBubbleColor
         : colorScheme.surfaceContainerHigh;
     final flashColor = Color.lerp(baseColor, colorScheme.primary, 0.16)!;
-    final transcribingLabel = widget.message.text.trim();
-    final voiceWaveform =
-        widget.message.kind == 'recording' ||
-        (processing &&
-            transcribingLabel.toLowerCase().startsWith('transcribing'));
+    final transcribingLabel = widget.message.text.trim().isEmpty
+        ? 'Transcribing'
+        : widget.message.text.trim();
 
-    if (voiceWaveform) {
+    if (transcribing) {
       return SizedBox(
         height: 48,
         width: double.infinity,
-        child: _RecordingButton(
-          sendWipe: false,
-          backgroundColor: outgoingBubbleColor,
-          wipeColor: outgoingBubbleColor,
-          waveformLevel: widget.message.kind == 'recording'
-              ? widget.recordingWaveformLevel
-              : 0.18,
-          child: widget.message.kind == 'recording'
-              ? const SizedBox.expand()
-              : Center(
-                  child: Text(
-                    transcribingLabel,
-                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      color: colorScheme.onPrimaryContainer,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: outgoingBubbleColor,
+            borderRadius: BorderRadius.circular(28),
+          ),
+          child: Center(
+            child: Text(
+              transcribingLabel,
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                color: colorScheme.onPrimaryContainer,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
         ),
       );
     }

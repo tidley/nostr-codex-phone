@@ -4204,6 +4204,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
     _tapHapticFeedback();
     _clearAutoSpeakSuppression();
+    _dismissQueryKeyboard();
 
     String? path;
     try {
@@ -4530,7 +4531,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           if (!_recording || !mounted) return;
           final current = amplitude.current;
           if (!current.isFinite) return;
-          final level = ((current + 45) / 45).clamp(0.0, 1.0).toDouble();
+          final normalized = ((current + 45) / 45).clamp(0.0, 1.0).toDouble();
+          final level = 1 - math.pow(1 - normalized, 2).toDouble();
           setState(() => _recordingWaveformLevel = level);
         }, onError: (_) {});
   }
