@@ -1,5 +1,7 @@
 part of '../main.dart';
 
+const _recordingButtonColor = Color(0xffc96b14);
+
 class _SessionDrawer extends StatelessWidget {
   const _SessionDrawer({
     required this.targets,
@@ -1475,8 +1477,8 @@ class _Composer extends StatefulWidget {
     required this.sendingMedia,
     required this.activeSendBlocked,
     required this.recording,
-    required this.recordingDurationLabel,
     required this.recordingWaveformLevel,
+    required this.recordingDurationLabel,
     required this.wavRetryRequested,
     required this.hasPendingMedia,
     required this.pendingMediaName,
@@ -1496,8 +1498,8 @@ class _Composer extends StatefulWidget {
   final bool sendingMedia;
   final bool activeSendBlocked;
   final bool recording;
-  final String recordingDurationLabel;
   final double recordingWaveformLevel;
+  final String recordingDurationLabel;
   final bool wavRetryRequested;
   final bool hasPendingMedia;
   final String? pendingMediaName;
@@ -1557,17 +1559,42 @@ class _ComposerState extends State<_Composer> {
                   ],
                 ),
               ),
-            TextField(
-              controller: widget.controller,
-              focusNode: widget.focusNode,
-              autofocus: false,
-              minLines: 1,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: 'Query',
-                hintText: 'Type a message, or record',
-              ),
+            Stack(
+              children: [
+                TextField(
+                  controller: widget.controller,
+                  focusNode: widget.focusNode,
+                  autofocus: false,
+                  minLines: 1,
+                  maxLines: 4,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    labelText: 'Query',
+                    hintText: 'Type a message, or record',
+                  ),
+                ),
+                if (widget.recording)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        child: _RecordingButton(
+                          sendWipe: false,
+                          backgroundColor: Colors.transparent,
+                          wipeColor: Colors.transparent,
+                          waveformColor:
+                              theme.textTheme.bodyLarge?.color ??
+                              theme.colorScheme.onSurface,
+                          waveformLevel: widget.recordingWaveformLevel,
+                          child: const SizedBox.expand(),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
             const SizedBox(height: 10),
             ValueListenableBuilder<TextEditingValue>(
@@ -1618,6 +1645,7 @@ class _ComposerState extends State<_Composer> {
                     : IconButton.styleFrom(minimumSize: const Size(48, 48));
                 final sendingAudioShell =
                     widget.sendingAudio && !widget.recording;
+                final sentButtonColor = theme.colorScheme.primaryContainer;
 
                 final icon = busy
                     ? SizedBox.square(
@@ -1625,7 +1653,7 @@ class _ComposerState extends State<_Composer> {
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
                           color: sendingAudioShell
-                              ? const Color(0xff1b140f)
+                              ? Colors.white
                               : theme.colorScheme.onPrimary,
                         ),
                       )
@@ -1675,16 +1703,7 @@ class _ComposerState extends State<_Composer> {
                               Colors.transparent,
                             ),
                             foregroundColor: const WidgetStatePropertyAll(
-                              Color(0xff1b140f),
-                            ),
-                          )
-                        : widget.recording
-                        ? mainButtonStyle.copyWith(
-                            backgroundColor: const WidgetStatePropertyAll(
-                              Color(0xffdfa257),
-                            ),
-                            foregroundColor: const WidgetStatePropertyAll(
-                              Color(0xff1b140f),
+                              Colors.white,
                             ),
                           )
                         : mainButtonStyle,
@@ -1696,6 +1715,9 @@ class _ComposerState extends State<_Composer> {
                 final actionButton = sendingAudioShell
                     ? _RecordingButton(
                         sendWipe: sendingAudioShell,
+                        backgroundColor: _recordingButtonColor,
+                        wipeColor: sentButtonColor,
+                        showWaveform: false,
                         waveformLevel: 0,
                         child: mainButton,
                       )
@@ -1730,18 +1752,20 @@ class _RecordingButton extends StatefulWidget {
   const _RecordingButton({
     required this.child,
     required this.sendWipe,
+    required this.backgroundColor,
+    required this.wipeColor,
+    this.waveformColor = Colors.white,
     required this.waveformLevel,
-    this.backgroundColor = const Color(0xffdfa257),
-    this.foregroundColor = const Color(0xff1b140f),
-    this.waveformColor = const Color(0xff1b140f),
+    this.showWaveform = true,
   });
 
   final Widget child;
   final bool sendWipe;
-  final double waveformLevel;
   final Color backgroundColor;
-  final Color foregroundColor;
+  final Color wipeColor;
   final Color waveformColor;
+  final double waveformLevel;
+  final bool showWaveform;
 
   @override
   State<_RecordingButton> createState() => _RecordingButtonState();
@@ -1846,7 +1870,7 @@ class _RecordingButtonState extends State<_RecordingButton>
 
   @override
   Widget build(BuildContext context) {
-    final showWaveform = !widget.sendWipe;
+    final showWaveform = widget.showWaveform && !widget.sendWipe;
     return ClipRRect(
       borderRadius: BorderRadius.circular(28),
       child: Stack(
@@ -1878,7 +1902,7 @@ class _RecordingButtonState extends State<_RecordingButton>
                     heightFactor: _wipeAnimation.value,
                     widthFactor: 1,
                     alignment: Alignment.bottomCenter,
-                    child: const ColoredBox(color: Color(0xff68d49f)),
+                    child: ColoredBox(color: widget.wipeColor),
                   ),
                 );
               },
@@ -1888,7 +1912,7 @@ class _RecordingButtonState extends State<_RecordingButton>
             data: FilledButtonThemeData(
               style: FilledButton.styleFrom(
                 backgroundColor: Colors.transparent,
-                foregroundColor: widget.foregroundColor,
+                foregroundColor: Colors.white,
               ),
             ),
             child: widget.child,
@@ -1976,6 +2000,7 @@ class _MessageTile extends StatefulWidget {
     required this.workingAnimationStyle,
     required this.workingAnimationSpeed,
     required this.recordingWaveformLevel,
+    required this.recording,
     required this.stopSpeakingOnTap,
     required this.onSpeak,
     required this.onStopSpeaking,
@@ -1989,6 +2014,7 @@ class _MessageTile extends StatefulWidget {
   final WorkingAnimationStyle workingAnimationStyle;
   final double workingAnimationSpeed;
   final double recordingWaveformLevel;
+  final bool recording;
   final bool stopSpeakingOnTap;
   final VoidCallback? onSpeak;
   final VoidCallback? onStopSpeaking;
@@ -2105,29 +2131,39 @@ class _MessageTileState extends State<_MessageTile>
     final userSide = !incoming || transcript;
     final canFlashOnTap = widget.stopSpeakingOnTap;
     final colorScheme = Theme.of(context).colorScheme;
+    final outgoingBubbleColor = colorScheme.primaryContainer;
     final baseColor = userSide
-        ? colorScheme.primaryContainer
+        ? outgoingBubbleColor
         : colorScheme.surfaceContainerHigh;
     final flashColor = Color.lerp(baseColor, colorScheme.primary, 0.16)!;
+    final transcribingLabel = widget.message.text.trim();
     final voiceWaveform =
         widget.message.kind == 'recording' ||
-        (processing && widget.message.text.trim().isEmpty);
+        (processing &&
+            transcribingLabel.toLowerCase().startsWith('transcribing'));
 
     if (voiceWaveform) {
-      const bubbleColor = Color(0xffdfa257);
-      const waveformColor = Color(0xff1b140f);
       return SizedBox(
         height: 48,
         width: double.infinity,
         child: _RecordingButton(
           sendWipe: false,
+          backgroundColor: outgoingBubbleColor,
+          wipeColor: outgoingBubbleColor,
           waveformLevel: widget.message.kind == 'recording'
               ? widget.recordingWaveformLevel
               : 0.18,
-          backgroundColor: bubbleColor,
-          foregroundColor: waveformColor,
-          waveformColor: waveformColor,
-          child: const SizedBox.expand(),
+          child: widget.message.kind == 'recording'
+              ? const SizedBox.expand()
+              : Center(
+                  child: Text(
+                    transcribingLabel,
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      color: colorScheme.onPrimaryContainer,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
         ),
       );
     }
@@ -2143,7 +2179,7 @@ class _MessageTileState extends State<_MessageTile>
           curve: Curves.easeOut,
           width: 58,
           decoration: BoxDecoration(
-            color: baseColor,
+            color: outgoingBubbleColor,
             borderRadius: BorderRadius.circular(12),
           ),
           clipBehavior: Clip.antiAlias,
@@ -2174,7 +2210,7 @@ class _MessageTileState extends State<_MessageTile>
                 child: DigitalThinkingIndicator(
                   width: 34,
                   height: 20,
-                  color: colorScheme.primary,
+                  color: colorScheme.onPrimaryContainer,
                   style: widget.workingAnimationStyle,
                   speed: widget.workingAnimationSpeed,
                 ),

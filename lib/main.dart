@@ -1698,26 +1698,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
   }
 
-  void _appendRecordingMessageForConversation(
-    String conversationKey,
-    String eventId,
-  ) {
-    final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
-    messages.insert(
-      0,
-      ConversationMessage(
-        direction: MessageDirection.outgoing,
-        kind: 'recording',
-        text: '',
-        eventId: eventId,
-        timestamp: DateTime.now(),
-      ),
-    );
-    if (conversationKey == _activeConversationKey) {
-      _scrollToLatestMessage();
-    }
-  }
-
   void _removeRecordingMessage({String? conversationKey, String? eventId}) {
     final targetConversationKey = conversationKey ?? _recordingConversationKey;
     final targetEventId = eventId ?? _recordingMessageId;
@@ -1755,7 +1735,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
     final index = messages.indexWhere(
       (message) =>
-          message.kind == 'recording' && message.eventId == recordingMessageId,
+          (message.kind == 'recording' || message.kind == 'transcribing') &&
+          message.eventId == recordingMessageId,
     );
     if (index >= 0) {
       messages[index] = replacement;
@@ -3916,6 +3897,28 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _pendingMediaFileName = null;
   }
 
+  void _showRecordingMessageAsTranscribing({
+    required String conversationKey,
+    required String? recordingMessageId,
+  }) {
+    if (recordingMessageId == null) return;
+    final messages = _messagesByTarget[conversationKey];
+    if (messages == null) return;
+    final index = messages.indexWhere(
+      (message) =>
+          message.kind == 'recording' && message.eventId == recordingMessageId,
+    );
+    if (index < 0) return;
+    final recording = messages[index];
+    messages[index] = ConversationMessage(
+      direction: recording.direction,
+      kind: 'transcribing',
+      text: 'Transcribing',
+      eventId: recording.eventId,
+      timestamp: recording.timestamp,
+    );
+  }
+
   bool _isResendableMessage(ConversationMessage message) {
     if (message.kind == 'query' &&
         message.direction == MessageDirection.outgoing &&
@@ -4240,10 +4243,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _recordingMessageId = recordingMessageId;
         _activeRecordingFormat = recordingFormat;
         _recordingStartedAt = DateTime.now();
-        _appendRecordingMessageForConversation(
-          conversationKey,
-          recordingMessageId,
-        );
         _status = recordingFormat.format == VoiceFormat.wav
             ? 'Recording WAV retry...'
             : 'Recording voice query...';
@@ -4340,6 +4339,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
 
     setState(() {
+      _showRecordingMessageAsTranscribing(
+        conversationKey: conversationKey,
+        recordingMessageId: recordingMessageId,
+      );
       _recording = false;
       _recordingPath = null;
       _recordingConversationKey = null;
@@ -4411,14 +4414,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           _appendPendingTranscriptionMessage(
             conversationKey: conversationKey,
             eventId: eventId,
-            label: '',
+            label: 'Transcribing',
           );
         } else {
           _replaceRecordingMessageWithPendingTranscription(
             conversationKey: conversationKey,
             recordingMessageId: recordingMessageId,
             eventId: eventId,
-            label: '',
+            label: 'Transcribing',
           );
         }
         _status = 'Voice query sent';
@@ -5053,6 +5056,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                               workingAnimationStyle: _workingAnimationStyle,
                               workingAnimationSpeed: _workingAnimationSpeed,
                               recordingWaveformLevel: _recordingWaveformLevel,
+                              recording: _recording,
                               stopSpeakingOnTap:
                                   _speaking &&
                                   message.direction ==
@@ -5093,8 +5097,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               sendingMedia: _sendingMediaInActiveConversation,
               activeSendBlocked: _activeConversationSendBlocked,
               recording: _recording,
-              recordingDurationLabel: _recordingDurationLabel,
               recordingWaveformLevel: _recordingWaveformLevel,
+              recordingDurationLabel: _recordingDurationLabel,
               wavRetryRequested: _wavRetryRequested,
               hasPendingMedia: _hasPendingMediaAttachment,
               pendingMediaName: _pendingMediaFileName,

@@ -100,17 +100,6 @@ struct RepoTargetContext {
     relays: Vec<String>,
 }
 
-struct RepoWorkerContext {
-    workdir: PathBuf,
-    env_file: WorkerEnvFile,
-    secret_key: String,
-    public_key: String,
-    public_key_hex: String,
-    relays: Vec<String>,
-    relay_csv: String,
-    memory_db: PathBuf,
-}
-
 struct WorkerRuntimeConfig {
     messenger: Arc<NostrMessenger>,
     worker_env: WorkerEnvFile,
@@ -187,12 +176,6 @@ impl WorkerEnvFile {
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_worker_env_path(workdir));
         Self { path }
-    }
-
-    fn default_for_workdir(workdir: &Path) -> Self {
-        Self {
-            path: worker_state_path(workdir, ".env.server"),
-        }
     }
 
     fn load_missing(&self) -> Result<()> {
@@ -404,14 +387,6 @@ fn upsert_env_file_values(path: &Path, values: &[(&str, &str)]) -> Result<()> {
     set_private_file_permissions(path);
 
     Ok(())
-}
-
-fn upsert_env_file_owned(path: &Path, values: &[(String, String)]) -> Result<()> {
-    let borrowed = values
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
-    upsert_env_file_values(path, &borrowed)
 }
 
 fn format_env_value(value: &str) -> String {
@@ -1650,37 +1625,6 @@ fn repo_target_context(
     Ok(RepoTargetContext { workdir, relays })
 }
 
-fn repo_worker_context(
-    request: &SpawnWorkerRequest,
-    relays: &[String],
-    current_workdir: &Path,
-) -> Result<RepoWorkerContext> {
-    let workdir = resolve_spawn_workdir(request, current_workdir)?;
-    let env_file = WorkerEnvFile::default_for_workdir(&workdir);
-    let secret_key = ensure_child_worker_secret(&env_file)?;
-    let keys = Keys::parse(secret_key.trim()).context("invalid child worker secret key")?;
-    let public_key = keys.public_key().to_bech32()?;
-    let public_key_hex = keys.public_key().to_hex();
-    let relays = if relays.is_empty() {
-        default_relays()
-    } else {
-        relays.to_vec()
-    };
-    let relay_csv = relays.join(",");
-    let memory_db = worker_state_path(&workdir, "memory.sqlite3");
-
-    Ok(RepoWorkerContext {
-        workdir,
-        env_file,
-        secret_key,
-        public_key,
-        public_key_hex,
-        relays,
-        relay_csv,
-        memory_db,
-    })
-}
-
 fn acquire_worker_process_lock(workdir: &Path) -> Result<WorkerProcessLock> {
     let path = worker_state_path(workdir, WORKER_LOCK_FILE);
     let pid = std::process::id().to_string();
@@ -1876,31 +1820,6 @@ fn list_repo_root(worker_root: &Path, root: &Path) -> Result<RepoListRoot> {
         root: root.to_string_lossy().to_string(),
         repos,
     })
-}
-
-fn ensure_child_worker_secret(env_file: &WorkerEnvFile) -> Result<String> {
-    if let Some(secret_key) = env_file
-        .read_values()?
-        .get("NOSTR_SECRET_KEY")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        return Ok(secret_key);
-    }
-
-    let keys = Keys::generate();
-    let secret_key = keys.secret_key().to_bech32()?;
-    let public_key = keys.public_key().to_bech32()?;
-    let public_key_hex = keys.public_key().to_hex();
-    upsert_env_file_values(
-        &env_file.path,
-        &[
-            ("NOSTR_SECRET_KEY", secret_key.as_str()),
-            ("NOSTR_PUBLIC_KEY", public_key.as_str()),
-            ("NOSTR_PUBLIC_KEY_HEX", public_key_hex.as_str()),
-        ],
-    )?;
-    Ok(secret_key)
 }
 
 fn resolve_spawn_workdir(request: &SpawnWorkerRequest, current_workdir: &Path) -> Result<PathBuf> {
