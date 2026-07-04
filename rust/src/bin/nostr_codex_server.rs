@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use futures_util::FutureExt;
@@ -19,8 +19,8 @@ use rand::{rngs::OsRng, RngCore};
 mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
 use rust_lib_nostr_codex_phone::codex::{
-    is_codex_usage_limit_error, run_codex, run_codex_session_with_cancel, CodexCancelToken,
-    CodexConfig, CodexRunResult,
+    is_codex_usage_limit_error, run_codex, run_codex_session_with_cancel_and_events,
+    CodexCancelToken, CodexConfig, CodexRunResult,
 };
 use rust_lib_nostr_codex_phone::nostr_client::{
     default_relays, IncomingMessage, NostrConfig, NostrMessenger,
@@ -41,6 +41,7 @@ const WORKER_STATE_DIR: &str = ".nostr-codex";
 const WORKER_REGISTRY_FILE: &str = "workers.json";
 const WORKER_LOCK_FILE: &str = "worker.lock";
 const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(45);
+const CODEX_STATUS_MIN_INTERVAL: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestClass {
@@ -3418,11 +3419,13 @@ async fn run_codex_and_report(
     cancel_token: &CodexCancelToken,
 ) -> std::result::Result<String, ()> {
     let first_attempt_config = codex_config_for_first_attempt(codex_config, session_id);
-    let result = match run_codex_session_with_cancel(
+    let result = match run_codex_session_with_status(
+        messenger,
+        receiver_pubkey,
         prompt,
         &first_attempt_config,
         session_id,
-        Some(cancel_token),
+        cancel_token,
     )
     .await
     {
@@ -3432,6 +3435,8 @@ async fn run_codex_and_report(
         }
         Err(err) if is_codex_usage_limit_error(&err) => {
             match retry_codex_with_usage_limit_fallback(
+                messenger,
+                receiver_pubkey,
                 prompt,
                 codex_config,
                 session_id,
@@ -3449,6 +3454,12 @@ async fn run_codex_and_report(
         }
         Err(err) if session_id.is_some() => {
             warn!("Codex resume failed; clearing session and retrying once: {err:#}");
+            send_status(
+                messenger,
+                receiver_pubkey,
+                "Resume failed; starting a fresh Codex turn.",
+            )
+            .await;
             if let Some(memory) = memory.as_mut() {
                 if let Err(clear_err) =
                     memory.clear_codex_session(receiver_pubkey, &codex_config.working_dir)
@@ -3456,8 +3467,15 @@ async fn run_codex_and_report(
                     warn!("failed to clear Codex session: {clear_err:#}");
                 }
             }
-            match run_codex_session_with_cancel(prompt, codex_config, None, Some(cancel_token))
-                .await
+            match run_codex_session_with_status(
+                messenger,
+                receiver_pubkey,
+                prompt,
+                codex_config,
+                None,
+                cancel_token,
+            )
+            .await
             {
                 Ok(result) => result,
                 Err(err) if is_codex_cancelled_error(&err) => {
@@ -3465,6 +3483,8 @@ async fn run_codex_and_report(
                 }
                 Err(err) if is_codex_usage_limit_error(&err) => {
                     match retry_codex_with_usage_limit_fallback(
+                        messenger,
+                        receiver_pubkey,
                         prompt,
                         codex_config,
                         None,
@@ -3510,6 +3530,150 @@ async fn run_codex_and_report(
     Ok(result.response)
 }
 
+async fn run_codex_session_with_status(
+    messenger: &NostrMessenger,
+    receiver_pubkey: &str,
+    prompt: &str,
+    codex_config: &CodexConfig,
+    session_id: Option<&str>,
+    cancel_token: &CodexCancelToken,
+) -> Result<CodexRunResult> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut reporter = CodexStatusReporter::new();
+    reporter
+        .send(
+            messenger,
+            receiver_pubkey,
+            if session_id.is_some() {
+                "Resuming Codex session..."
+            } else {
+                "Starting Codex..."
+            },
+            true,
+        )
+        .await;
+
+    let run = run_codex_session_with_cancel_and_events(
+        prompt,
+        codex_config,
+        session_id,
+        Some(cancel_token),
+        Some(tx),
+    );
+    tokio::pin!(run);
+
+    let mut events_open = true;
+    loop {
+        tokio::select! {
+            result = &mut run => return result,
+            event = rx.recv(), if events_open => {
+                match event {
+                    Some(event) => {
+                        reporter.handle(messenger, receiver_pubkey, &event).await;
+                    }
+                    None => events_open = false,
+                }
+            }
+        }
+    }
+}
+
+struct CodexStatusReporter {
+    last_sent_at: Option<Instant>,
+    last_message: Option<&'static str>,
+}
+
+impl CodexStatusReporter {
+    fn new() -> Self {
+        Self {
+            last_sent_at: None,
+            last_message: None,
+        }
+    }
+
+    async fn handle(
+        &mut self,
+        messenger: &NostrMessenger,
+        receiver_pubkey: &str,
+        event: &serde_json::Value,
+    ) {
+        let Some((message, force)) = codex_status_from_event(event) else {
+            return;
+        };
+        self.send(messenger, receiver_pubkey, message, force).await;
+    }
+
+    async fn send(
+        &mut self,
+        messenger: &NostrMessenger,
+        receiver_pubkey: &str,
+        message: &'static str,
+        force: bool,
+    ) {
+        if self.last_message == Some(message) {
+            return;
+        }
+        if !force {
+            if let Some(last_sent_at) = self.last_sent_at {
+                if last_sent_at.elapsed() < CODEX_STATUS_MIN_INTERVAL {
+                    return;
+                }
+            }
+        }
+        send_status(messenger, receiver_pubkey, message).await;
+        self.last_sent_at = Some(Instant::now());
+        self.last_message = Some(message);
+    }
+}
+
+fn codex_status_from_event(event: &serde_json::Value) -> Option<(&'static str, bool)> {
+    match event.get("type").and_then(serde_json::Value::as_str) {
+        Some("turn.started") => Some(("Codex started.", false)),
+        Some("turn.completed") => Some(("Codex finished; sending response.", true)),
+        Some("turn.failed") | Some("error") => Some(("Codex failed.", true)),
+        Some("item.started") => codex_item_status(event).map(|message| (message, false)),
+        _ => None,
+    }
+}
+
+fn codex_item_status(event: &serde_json::Value) -> Option<&'static str> {
+    let text = event.to_string().to_ascii_lowercase();
+    if text.contains("flutter analyze")
+        || text.contains("cargo test")
+        || text.contains("cargo clippy")
+        || text.contains("dart format")
+        || text.contains("cargo fmt")
+    {
+        return Some("Running checks.");
+    }
+    if text.contains("flutter build") || text.contains("cargo build") {
+        return Some("Building.");
+    }
+    if text.contains("apply_patch") || text.contains("patch") {
+        return Some("Editing files.");
+    }
+    if text.contains("\"rg\"")
+        || text.contains("rg ")
+        || text.contains("rg -")
+        || text.contains("git status")
+        || text.contains("\"sed\"")
+        || text.contains("sed ")
+        || text.contains("sed -")
+        || text.contains("\"cat\"")
+        || text.contains("cat ")
+        || text.contains("\"ls\"")
+        || text.contains("ls ")
+        || text.contains("\"grep\"")
+        || text.contains("grep ")
+    {
+        return Some("Inspecting code.");
+    }
+    if text.contains("tool") || text.contains("function_call") || text.contains("exec") {
+        return Some("Using tools.");
+    }
+    None
+}
+
 fn codex_config_for_first_attempt(
     codex_config: &CodexConfig,
     session_id: Option<&str>,
@@ -3524,6 +3688,8 @@ fn codex_config_for_first_attempt(
 }
 
 async fn retry_codex_with_usage_limit_fallback(
+    messenger: &NostrMessenger,
+    receiver_pubkey: &str,
     prompt: &str,
     codex_config: &CodexConfig,
     session_id: Option<&str>,
@@ -3538,15 +3704,28 @@ async fn retry_codex_with_usage_limit_fallback(
         "Codex usage limit hit; retrying turn with fallback model `{}`",
         fallback_model
     );
+    send_status(
+        messenger,
+        receiver_pubkey,
+        "Usage limit hit; trying fallback model.",
+    )
+    .await;
     let fallback_config = codex_config.with_model_override(fallback_model);
 
-    run_codex_session_with_cancel(prompt, &fallback_config, session_id, Some(cancel_token))
-        .await
-        .with_context(|| {
-            format!(
-                "Codex fallback model `{fallback_model}` failed after usage-limit error: {original}"
-            )
-        })
+    run_codex_session_with_status(
+        messenger,
+        receiver_pubkey,
+        prompt,
+        &fallback_config,
+        session_id,
+        cancel_token,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Codex fallback model `{fallback_model}` failed after usage-limit error: {original}"
+        )
+    })
 }
 
 fn is_codex_cancelled_error(err: &anyhow::Error) -> bool {
@@ -3637,6 +3816,29 @@ mod tests {
             classify_request("fix the Android voice recording path"),
             RequestClass::Coding
         );
+    }
+
+    #[test]
+    fn maps_codex_events_to_sparse_statuses() {
+        let started = serde_json::json!({"type": "turn.started"});
+        let check = serde_json::json!({
+            "type": "item.started",
+            "item": {"type": "tool_call", "command": "flutter analyze"}
+        });
+        let final_message = serde_json::json!({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "Done"}
+        });
+
+        assert_eq!(
+            codex_status_from_event(&started).map(|(message, _)| message),
+            Some("Codex started.")
+        );
+        assert_eq!(
+            codex_status_from_event(&check).map(|(message, _)| message),
+            Some("Running checks.")
+        );
+        assert_eq!(codex_status_from_event(&final_message), None);
     }
 
     #[test]
