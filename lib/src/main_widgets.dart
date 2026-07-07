@@ -1479,6 +1479,7 @@ class _Composer extends StatefulWidget {
     required this.recording,
     required this.recordingWaveformLevel,
     required this.recordingDurationLabel,
+    required this.voiceSendWipeDuration,
     required this.wavRetryRequested,
     required this.hasPendingMedia,
     required this.pendingMediaName,
@@ -1500,6 +1501,7 @@ class _Composer extends StatefulWidget {
   final bool recording;
   final double recordingWaveformLevel;
   final String recordingDurationLabel;
+  final Duration voiceSendWipeDuration;
   final bool wavRetryRequested;
   final bool hasPendingMedia;
   final String? pendingMediaName;
@@ -1718,6 +1720,7 @@ class _ComposerState extends State<_Composer> {
                         sendWipe: sendingAudioShell,
                         backgroundColor: sentButtonColor,
                         wipeColor: _recordingButtonColor,
+                        wipeDuration: widget.voiceSendWipeDuration,
                         showWaveform: false,
                         waveformLevel: 0,
                         child: mainButton,
@@ -1755,6 +1758,7 @@ class _RecordingButton extends StatefulWidget {
     required this.sendWipe,
     required this.backgroundColor,
     required this.wipeColor,
+    this.wipeDuration = const Duration(milliseconds: 1040),
     this.waveformColor = Colors.white,
     required this.waveformLevel,
     this.showWaveform = true,
@@ -1764,6 +1768,7 @@ class _RecordingButton extends StatefulWidget {
   final bool sendWipe;
   final Color backgroundColor;
   final Color wipeColor;
+  final Duration wipeDuration;
   final Color waveformColor;
   final double waveformLevel;
   final bool showWaveform;
@@ -1791,7 +1796,7 @@ class _RecordingButtonState extends State<_RecordingButton>
     super.initState();
     _wipeController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1040),
+      duration: widget.wipeDuration,
     );
     _wipeAnimation = CurvedAnimation(
       parent: _wipeController,
@@ -1814,6 +1819,9 @@ class _RecordingButtonState extends State<_RecordingButton>
   @override
   void didUpdateWidget(covariant _RecordingButton oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.wipeDuration != oldWidget.wipeDuration) {
+      _wipeController.duration = widget.wipeDuration;
+    }
     if (widget.sendWipe && !oldWidget.sendWipe) {
       _wipeController.forward(from: 0);
     } else if (!widget.sendWipe && oldWidget.sendWipe) {

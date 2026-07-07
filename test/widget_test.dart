@@ -8,6 +8,7 @@ import 'package:nostr_codex_phone/src/bridge_json.dart';
 import 'package:nostr_codex_phone/src/repo_choice.dart';
 import 'package:nostr_codex_phone/src/repo_target.dart';
 import 'package:nostr_codex_phone/src/text_utils.dart';
+import 'package:nostr_codex_phone/src/voice_recording.dart';
 
 void main() {
   test('app widget is available', () {
@@ -35,6 +36,40 @@ Use [the docs](https://example.com).
     expect(spoken, contains('the docs'));
   });
 
+  test('preprocesses technical text before text to speech', () {
+    final spoken = cleanTextForSpeech('''
+Zero-quality GGA means no GNSS fix.
+quality = 0
+validFix = false
+arr[6]
+Number(validFix)
+!validFix || validFix && quality >= 0 <= 1
+lastGnssDataAt
+no_fix_watchdog
+100ms
+115200 baud
+repo API JSON RS232 I2C UART CAN BLE
+''');
+
+    expect(spoken, contains('G G A'));
+    expect(spoken, contains('G N S S'));
+    expect(spoken, contains('quality equals zero'));
+    expect(spoken, contains('valid fix equals false'));
+    expect(spoken, contains('array index six'));
+    expect(spoken, contains('Number of valid fix'));
+    expect(spoken, contains('not valid fix or valid fix and quality'));
+    expect(spoken, contains('greater than or equal to zero'));
+    expect(spoken, contains('less than or equal to one'));
+    expect(spoken, contains('last G N S S data at'));
+    expect(spoken, contains('no fix watchdog'));
+    expect(spoken, contains('one hundred milliseconds'));
+    expect(spoken, contains('one fifteen two hundred baud'));
+    expect(spoken, contains('repository A P I jay-son'));
+    expect(spoken, contains('R S two thirty two'));
+    expect(spoken, contains('I squared C'));
+    expect(spoken, contains('you-art CAN bus B L E'));
+  });
+
   test('converts bridge unsigned integers before json encoding', () {
     final converted = bridgeUIntToJsonInt(BigInt.from(90281152));
 
@@ -46,6 +81,20 @@ Use [the docs](https://example.com).
     final negative = BigInt.from(-1);
 
     expect(() => bridgeUIntToJsonInt(negative), throwsArgumentError);
+  });
+
+  test('estimates voice transcription duration from audio length', () {
+    final short = estimateVoiceTranscriptionDuration(
+      const Duration(seconds: 1),
+    );
+    final medium = estimateVoiceTranscriptionDuration(
+      const Duration(seconds: 30),
+    );
+    final long = estimateVoiceTranscriptionDuration(const Duration(minutes: 5));
+
+    expect(short, const Duration(milliseconds: 4804));
+    expect(medium, greaterThan(short));
+    expect(long, const Duration(seconds: 90));
   });
 
   test('round trips extracted repo target and repo choice models', () {
