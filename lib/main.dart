@@ -36,7 +36,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.1.144+144';
+const _appVersion = '0.1.147+147';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -253,6 +253,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   String? _recordingConversationKey;
   String? _recordingMessageId;
   VoiceRecordingFormat? _activeRecordingFormat;
+  Duration _voiceSendWipeDuration = defaultVoiceTranscriptionEstimate;
   String? _ownPubkey;
   String? _status;
   MediaSelection? _pendingMediaAttachment;
@@ -4319,6 +4320,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final recordingDuration = recordingStartedAt == null
         ? null
         : DateTime.now().difference(recordingStartedAt);
+    final estimatedTranscriptionDuration = estimateVoiceTranscriptionDuration(
+      recordingDuration,
+    );
     if (recordingDuration != null &&
         recordingDuration < minimumVoiceRecordingDuration) {
       setState(() {
@@ -4353,6 +4357,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _stopRecordingTimer();
       _sendingAudio = true;
       _sendingAudioConversationKey = conversationKey;
+      _voiceSendWipeDuration = estimatedTranscriptionDuration;
       _status = 'Uploading voice note to Blossom...';
     });
 
@@ -5101,6 +5106,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               recording: _recording,
               recordingWaveformLevel: _recordingWaveformLevel,
               recordingDurationLabel: _recordingDurationLabel,
+              voiceSendWipeDuration: _voiceSendWipeDuration,
               wavRetryRequested: _wavRetryRequested,
               hasPendingMedia: _hasPendingMediaAttachment,
               pendingMediaName: _pendingMediaFileName,
