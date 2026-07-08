@@ -181,7 +181,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _unreadCountsStorageKey,
     _repoChoicesStorageKey,
   ];
-  static const _recentMessagesWindow = Duration(hours: 1);
+  static const _recentMessagesWindow = Duration(days: 4);
   static const _maxConversationMessages = 200;
   static const _maxSeenIncomingEventIds = 5000;
   static const _catchUpLookback = Duration(days: 4);
@@ -4957,38 +4957,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               tooltip: hasMenuNotification
                   ? 'Open sessions with notifications'
                   : 'Open sessions',
-              icon: SizedBox.square(
-                dimension: 28,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    const Center(child: Icon(Icons.menu)),
-                    if (hasMenuNotification)
-                      Positioned(
-                        top: 4,
-                        right: 3,
-                        child: AnimatedBuilder(
-                          animation: _menuNotificationPulseController,
-                          builder: (context, child) {
-                            final value =
-                                _menuNotificationPulseController.value;
-                            final scale = 1 + (math.sin(value * math.pi) * 0.7);
-                            return Transform.scale(scale: scale, child: child);
-                          },
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              color: const Color(0xffff9f1c),
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: Theme.of(context).colorScheme.surface,
-                                width: 1.5,
-                              ),
-                            ),
-                            child: const SizedBox.square(dimension: 8),
-                          ),
-                        ),
-                      ),
-                  ],
+              icon: Center(
+                child: AnimatedBuilder(
+                  animation: _menuNotificationPulseController,
+                  builder: (context, child) {
+                    final value = _menuNotificationPulseController.value;
+                    final scale = hasMenuNotification
+                        ? 1 + (math.sin(value * math.pi) * 0.08)
+                        : 1.0;
+                    return Transform.scale(scale: scale, child: child);
+                  },
+                  child: Icon(
+                    Icons.menu,
+                    color: hasMenuNotification ? const Color(0xffff9f1c) : null,
+                  ),
                 ),
               ),
               onPressed: () => unawaited(_openSessionsMenu(context)),
@@ -5040,7 +5022,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           children: [
             Expanded(
               child: _recentMessagesForActiveConversation.isEmpty
-                  ? const Center(child: Text('No messages in last hour'))
+                  ? const Center(child: Text('No messages in last 4 days'))
                   : ScrollConfiguration(
                       behavior: ScrollConfiguration.of(
                         context,
