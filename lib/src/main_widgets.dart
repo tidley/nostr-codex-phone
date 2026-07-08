@@ -1,6 +1,7 @@
 part of '../main.dart';
 
-const _recordingButtonColor = Color(0xffc96b14);
+const _recordingButtonColor = Color(0xffffc078);
+const _recordingButtonForegroundColor = Colors.black;
 
 class _SessionDrawer extends StatelessWidget {
   const _SessionDrawer({
@@ -1656,7 +1657,7 @@ class _ComposerState extends State<_Composer> {
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
                           color: sendingAudioShell
-                              ? Colors.white
+                              ? _recordingButtonForegroundColor
                               : theme.colorScheme.onPrimary,
                         ),
                       )
@@ -1706,7 +1707,7 @@ class _ComposerState extends State<_Composer> {
                               Colors.transparent,
                             ),
                             foregroundColor: const WidgetStatePropertyAll(
-                              Colors.white,
+                              _recordingButtonForegroundColor,
                             ),
                           )
                         : mainButtonStyle,
@@ -1718,8 +1719,9 @@ class _ComposerState extends State<_Composer> {
                 final actionButton = (widget.recording || sendingAudioShell)
                     ? _RecordingButton(
                         sendWipe: sendingAudioShell,
-                        backgroundColor: sentButtonColor,
-                        wipeColor: _recordingButtonColor,
+                        backgroundColor: _recordingButtonColor,
+                        foregroundColor: _recordingButtonForegroundColor,
+                        wipeColor: sentButtonColor,
                         wipeDuration: widget.voiceSendWipeDuration,
                         showWaveform: false,
                         waveformLevel: 0,
@@ -1758,6 +1760,7 @@ class _RecordingButton extends StatefulWidget {
     required this.sendWipe,
     required this.backgroundColor,
     required this.wipeColor,
+    this.foregroundColor = Colors.white,
     this.wipeDuration = const Duration(milliseconds: 1040),
     this.waveformColor = Colors.white,
     required this.waveformLevel,
@@ -1767,6 +1770,7 @@ class _RecordingButton extends StatefulWidget {
   final Widget child;
   final bool sendWipe;
   final Color backgroundColor;
+  final Color foregroundColor;
   final Color wipeColor;
   final Duration wipeDuration;
   final Color waveformColor;
@@ -1922,7 +1926,7 @@ class _RecordingButtonState extends State<_RecordingButton>
             data: FilledButtonThemeData(
               style: FilledButton.styleFrom(
                 backgroundColor: Colors.transparent,
-                foregroundColor: Colors.white,
+                foregroundColor: widget.foregroundColor,
               ),
             ),
             child: widget.child,
