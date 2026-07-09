@@ -306,6 +306,19 @@ pub async fn list_opencode_sessions(config: &CodexConfig) -> Result<Vec<OpenCode
     list_opencode_sessions_with_client(&client, config).await
 }
 
+pub async fn ensure_opencode_session(config: &CodexConfig) -> Result<String> {
+    if config.backend != AgentBackend::OpenCode {
+        return Err(anyhow!("OpenCode sessions require AGENT_BACKEND=opencode"));
+    }
+
+    let client = reqwest::Client::new();
+    ensure_opencode_available(&client, config).await?;
+    match latest_opencode_session_id(&client, config).await? {
+        Some(session_id) => Ok(session_id),
+        None => create_opencode_session(&client, config).await,
+    }
+}
+
 async fn run_opencode_session(
     prompt: &str,
     config: &CodexConfig,
@@ -436,11 +449,15 @@ async fn list_opencode_sessions_with_client(
 }
 
 async fn create_opencode_session(client: &reqwest::Client, config: &CodexConfig) -> Result<String> {
-    let response = opencode_request(client, config, reqwest::Method::POST, "/session")
-        .json(&json!({ "title": "OpenCode Remote" }))
-        .send()
-        .await
-        .context("failed to create OpenCode session")?;
+    let response = timeout(
+        OPENCODE_CONTROL_TIMEOUT,
+        opencode_request(client, config, reqwest::Method::POST, "/session")
+            .json(&json!({ "title": "OpenCode Remote" }))
+            .send(),
+    )
+    .await
+    .context("timed out creating OpenCode session")?
+    .context("failed to create OpenCode session")?;
     let value = opencode_json_response(response).await?;
     value
         .get("id")
