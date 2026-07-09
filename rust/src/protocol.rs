@@ -11,18 +11,46 @@ pub type AttachmentReference = MediaReference;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WireMessage {
-    Query { query: String },
-    Cancel { cancel_request: CancelRequest },
-    Audio { audio: AudioReference },
-    MediaBundle { media_bundle: MediaBundle },
-    AudioRetry { audio_retry: AudioRetryRequest },
-    TargetInvite { target_invite: TargetInvite },
-    RepoList { repo_list: RepoList },
-    Transcript { transcript: String },
-    Status { status: String },
-    Response { response: String },
-    RoutedResponse { response: String, workdir: String },
-    Error { error: String },
+    Query {
+        query: String,
+    },
+    Cancel {
+        cancel_request: CancelRequest,
+    },
+    Audio {
+        audio: AudioReference,
+    },
+    MediaBundle {
+        media_bundle: MediaBundle,
+    },
+    AudioRetry {
+        audio_retry: AudioRetryRequest,
+    },
+    TargetInvite {
+        target_invite: TargetInvite,
+    },
+    RepoList {
+        repo_list: RepoList,
+    },
+    OpenCodeSessionList {
+        opencode_sessions: OpenCodeSessionList,
+    },
+    Transcript {
+        transcript: String,
+    },
+    Status {
+        status: String,
+    },
+    Response {
+        response: String,
+    },
+    RoutedResponse {
+        response: String,
+        workdir: String,
+    },
+    Error {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +160,26 @@ pub struct RepoListEntry {
     pub is_git_repo: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenCodeSessionList {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+    #[serde(default)]
+    pub sessions: Vec<OpenCodeSessionListEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenCodeSessionListEntry {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
 impl WireMessage {
     pub fn query<S: Into<String>>(query: S) -> Self {
         Self::Query {
@@ -168,6 +216,10 @@ impl WireMessage {
 
     pub fn repo_list(repo_list: RepoList) -> Self {
         Self::RepoList { repo_list }
+    }
+
+    pub fn opencode_sessions(opencode_sessions: OpenCodeSessionList) -> Self {
+        Self::OpenCodeSessionList { opencode_sessions }
     }
 
     pub fn response<S: Into<String>>(response: S) -> Self {
@@ -210,6 +262,7 @@ impl WireMessage {
             Self::AudioRetry { .. } => "audio_retry",
             Self::TargetInvite { .. } => "target_invite",
             Self::RepoList { .. } => "repo_list",
+            Self::OpenCodeSessionList { .. } => "opencode_sessions",
             Self::Transcript { .. } => "transcript",
             Self::Status { .. } => "status",
             Self::Response { .. } | Self::RoutedResponse { .. } => "response",
@@ -228,6 +281,7 @@ impl WireMessage {
             Self::AudioRetry { audio_retry } => &audio_retry.reason,
             Self::TargetInvite { target_invite } => &target_invite.name,
             Self::RepoList { .. } => "repo list",
+            Self::OpenCodeSessionList { .. } => "OpenCode sessions",
             Self::Transcript { transcript } => transcript,
             Self::Status { status } => status,
             Self::Response { response } | Self::RoutedResponse { response, .. } => response,
@@ -260,6 +314,9 @@ impl WireMessage {
             Self::AudioRetry { audio_retry } => json!({ "audio_retry": audio_retry }),
             Self::TargetInvite { target_invite } => json!({ "target_invite": target_invite }),
             Self::RepoList { repo_list } => json!({ "repo_list": repo_list }),
+            Self::OpenCodeSessionList { opencode_sessions } => {
+                json!({ "opencode_sessions": opencode_sessions })
+            }
             Self::Transcript { transcript } => json!({ "transcript": transcript }),
             Self::Status { status } => json!({ "status": status }),
             Self::Response { response } => json!({ "response": response }),
@@ -348,6 +405,14 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
         return Ok(WireMessage::repo_list(repo_list));
     }
 
+    if let Some(opencode_sessions) = object.get("opencode_sessions") {
+        let opencode_sessions: OpenCodeSessionList =
+            serde_json::from_value(opencode_sessions.clone())
+                .map_err(|err| anyhow!("field `opencode_sessions` is invalid: {err}"))?;
+        validate_opencode_session_list(&opencode_sessions)?;
+        return Ok(WireMessage::opencode_sessions(opencode_sessions));
+    }
+
     if let Some(response) = object.get("response") {
         return response
             .as_str()
@@ -377,7 +442,7 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `message`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `repo_list`, object `media_bundle`, object `cancel_request`, or object `attachments` field"
+        "message must contain a string `query`, `message`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `repo_list`, object `opencode_sessions`, object `media_bundle`, object `cancel_request`, or object `attachments` field"
     ))
 }
 
@@ -614,6 +679,22 @@ fn validate_repo_list(repo_list: &RepoList) -> Result<()> {
                     "field `repo_list.roots[].repos[].relative_path` must be non-empty"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_opencode_session_list(session_list: &OpenCodeSessionList) -> Result<()> {
+    for session in &session_list.sessions {
+        if session.id.trim().is_empty() {
+            return Err(anyhow!(
+                "field `opencode_sessions.sessions[].id` must be non-empty"
+            ));
+        }
+        if session.title.trim().is_empty() {
+            return Err(anyhow!(
+                "field `opencode_sessions.sessions[].title` must be non-empty"
+            ));
         }
     }
     Ok(())
@@ -913,6 +994,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_opencode_session_list_contract() {
+        let parsed = parse_wire_message(
+            r#"{
+                "opencode_sessions": {
+                    "workdir": "/home/tom/code/phone",
+                    "sessions": [
+                        {
+                            "id": "ses_123",
+                            "title": "Fix APK release",
+                            "directory": "/home/tom/code/phone",
+                            "updated_at": "2026-07-09T12:00:00Z"
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.kind(), "opencode_sessions");
+        assert_eq!(parsed.text(), "OpenCode sessions");
+        assert_eq!(
+            parsed.to_json().unwrap(),
+            r#"{"opencode_sessions":{"sessions":[{"directory":"/home/tom/code/phone","id":"ses_123","title":"Fix APK release","updated_at":"2026-07-09T12:00:00Z"}],"workdir":"/home/tom/code/phone"}}"#
+        );
+    }
+
+    #[test]
     fn rejects_malformed_payloads() {
         assert!(parse_wire_message(r#"{ "query": 42 }"#).is_err());
         assert!(parse_wire_message(r#"{ "message": 42 }"#).is_err());
@@ -932,6 +1040,10 @@ mod tests {
         assert!(parse_wire_message(r#"{ "target_invite": { "type": "nostr_codex_target", "version": 1, "name": "repo", "pubkey": "npub123", "relays": [] } }"#).is_err());
         assert!(parse_wire_message(
             r#"{ "repo_list": { "roots": [ { "root": "", "repos": [] } ] } }"#
+        )
+        .is_err());
+        assert!(parse_wire_message(
+            r#"{ "opencode_sessions": { "sessions": [ { "id": "", "title": "bad" } ] } }"#
         )
         .is_err());
         assert!(parse_wire_message("hello").is_err());

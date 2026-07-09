@@ -105,6 +105,8 @@ repo API JSON RS232 I2C UART CAN BLE
       'relays': [' wss://relay.example ', ''],
       'workdir': '/home/tom/code/phone',
       'parent_relays': ['wss://parent.example'],
+      'opencode_session_id': 'ses_123',
+      'opencode_session_title': 'Release work',
       'is_master_session': true,
     });
     final choice = RepoChoice.fromJson({
@@ -117,6 +119,8 @@ repo API JSON RS232 I2C UART CAN BLE
     expect(target, isNotNull);
     expect(target!.displayName, 'npub123456...123456');
     expect(target.toJson()['relays'], ['wss://relay.example']);
+    expect(target.toJson()['opencode_session_id'], 'ses_123');
+    expect(target.toJson()['opencode_session_title'], 'Release work');
     expect(target.toJson()['is_master_session'], true);
     expect(choice?.displayName, 'phone');
     expect(choice?.toJson()['is_git_repo'], true);

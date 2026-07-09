@@ -66,11 +66,11 @@ struct MemoryTags {
 }
 
 impl MemoryConfig {
-    pub fn from_env(working_dir: &Path) -> Self {
+    pub fn from_env(working_dir: &Path, default_enabled: bool) -> Self {
         let enabled = env::var("CODEX_MEMORY")
             .ok()
             .map(|value| !is_falsey(&value))
-            .unwrap_or(true);
+            .unwrap_or(default_enabled);
         let db_path = env::var("CODEX_MEMORY_DB")
             .map(PathBuf::from)
             .unwrap_or_else(|_| working_dir.join(".nostr-codex").join("memory.sqlite3"));
@@ -205,11 +205,6 @@ impl MemoryStore {
             params![peer_pubkey],
             |row| row.get(0),
         )?;
-        let cached_transcripts: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM audio_transcripts", [], |row| {
-                    row.get(0)
-                })?;
         let active_sessions: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM codex_sessions WHERE peer_pubkey = ?1",
             params![peer_pubkey],
@@ -223,7 +218,7 @@ impl MemoryStore {
         };
 
         Ok(format!(
-            "Memory is enabled.\nStored messages for this peer: {message_count}\nActive agent sessions for this peer: {active_sessions}\nCached audio transcripts: {cached_transcripts}\nSummarized through message id: {}\n\nSummary:\n{summary}",
+            "Memory is enabled.\nStored messages for this peer: {message_count}\nActive agent sessions for this peer: {active_sessions}\nSummarized through message id: {}\n\nSummary:\n{summary}",
             state.summarized_message_id
         ))
     }
@@ -307,31 +302,6 @@ impl MemoryStore {
         self.conn.execute(
             "DELETE FROM codex_sessions WHERE peer_pubkey = ?1 AND workdir = ?2",
             params![peer_pubkey, workdir.to_string_lossy().as_ref()],
-        )?;
-        Ok(())
-    }
-
-    pub fn cached_transcript(&self, audio_hash: &str) -> Result<Option<String>> {
-        self.conn
-            .query_row(
-                "SELECT transcript
-                 FROM audio_transcripts
-                 WHERE audio_hash = ?1",
-                params![audio_hash],
-                |row| row.get(0),
-            )
-            .optional()
-            .context("failed to load cached transcript")
-    }
-
-    pub fn save_transcript_cache(&mut self, audio_hash: &str, transcript: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO audio_transcripts (audio_hash, transcript, created_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(audio_hash)
-             DO UPDATE SET transcript = excluded.transcript,
-                           created_at = excluded.created_at",
-            params![audio_hash, transcript, now_unix()],
         )?;
         Ok(())
     }
@@ -443,11 +413,6 @@ impl MemoryStore {
                    codex_session_id TEXT NOT NULL,
                    updated_at INTEGER NOT NULL,
                    PRIMARY KEY (peer_pubkey, workdir)
-                 );
-                 CREATE TABLE IF NOT EXISTS audio_transcripts (
-                   audio_hash TEXT PRIMARY KEY,
-                   transcript TEXT NOT NULL,
-                   created_at INTEGER NOT NULL
                  );
                  CREATE TABLE IF NOT EXISTS jobs (
                    id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1048,18 +1013,5 @@ mod tests {
         );
         store.clear_codex_session("peer", workdir).unwrap();
         assert!(store.codex_session("peer", workdir).unwrap().is_none());
-    }
-
-    #[test]
-    fn caches_transcripts_by_audio_hash() {
-        let mut store = test_store();
-        assert!(store.cached_transcript("hash").unwrap().is_none());
-        store
-            .save_transcript_cache("hash", "turn lights on")
-            .unwrap();
-        assert_eq!(
-            store.cached_transcript("hash").unwrap().as_deref(),
-            Some("turn lights on")
-        );
     }
 }

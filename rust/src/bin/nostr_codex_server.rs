@@ -19,15 +19,17 @@ use rand::{rngs::OsRng, RngCore};
 mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
 use rust_lib_nostr_codex_phone::codex::{
-    is_codex_usage_limit_error, run_codex, run_codex_session_with_cancel_and_events, AgentBackend,
-    CodexCancelToken, CodexConfig, CodexRunResult,
+    is_codex_usage_limit_error, list_opencode_sessions, run_codex,
+    run_codex_session_with_cancel_and_events, AgentBackend, CodexCancelToken, CodexConfig,
+    CodexRunResult, OpenCodeSessionInfo,
 };
 use rust_lib_nostr_codex_phone::nostr_client::{
     default_relays, IncomingMessage, NostrConfig, NostrMessenger,
 };
 use rust_lib_nostr_codex_phone::protocol::{
     parse_media_bundle_query, parse_wire_message, AudioReference, MediaBundle, MediaReference,
-    RepoList, RepoListEntry, RepoListRoot, TargetInvite, TargetParent, WireMessage,
+    OpenCodeSessionList, OpenCodeSessionListEntry, RepoList, RepoListEntry, RepoListRoot,
+    TargetInvite, TargetParent, WireMessage,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
@@ -68,6 +70,7 @@ struct CancelRequest {
 enum NonblockingControlRequest {
     Spawn(SpawnWorkerRequest),
     RepoList,
+    OpenCodeSessions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -566,7 +569,10 @@ async fn main() -> Result<()> {
     let nostr_config = nostr_config_from_env(&worker_env)?;
     let audio_config = AudioConfig::from_env();
     let transcribe_config = TranscribeConfig::from_env()?;
-    let memory_config = MemoryConfig::from_env(&codex_config.working_dir);
+    let memory_config = MemoryConfig::from_env(
+        &codex_config.working_dir,
+        codex_config.backend == AgentBackend::Codex,
+    );
     let memory_probe = open_memory_store(memory_config.clone());
     let messenger = Arc::new(NostrMessenger::connect(nostr_config.clone()).await?);
     let owner_peer_hex = nostr_config
@@ -893,6 +899,31 @@ async fn process_nonblocking_control_message(
             process_repo_list_request(messenger, &message.sender_pubkey_hex).await;
             true
         }
+        Some(NonblockingControlRequest::OpenCodeSessions) => {
+            info!(
+                "processing OpenCode session list request event {} while codex task is active",
+                message.event_id
+            );
+            let codex_config = match routed_codex_config(codex_config, message) {
+                Ok(config) => config,
+                Err(err) => {
+                    send_response(
+                        messenger,
+                        &message.sender_pubkey_hex,
+                        format!("Invalid route: {err:#}"),
+                    )
+                    .await;
+                    return true;
+                }
+            };
+            process_opencode_session_list_request(
+                messenger,
+                &message.sender_pubkey_hex,
+                &codex_config,
+            )
+            .await;
+            true
+        }
         None => false,
     }
 }
@@ -906,6 +937,9 @@ fn nonblocking_control_request(kind: &str, text: &str) -> Option<NonblockingCont
     }
     if is_repo_list_request(text) {
         return Some(NonblockingControlRequest::RepoList);
+    }
+    if is_opencode_session_list_request(text) {
+        return Some(NonblockingControlRequest::OpenCodeSessions);
     }
     None
 }
@@ -1025,6 +1059,16 @@ async fn process_message(
 
             if is_repo_list_request(&message.text) {
                 process_repo_list_request(messenger, &message.sender_pubkey_hex).await;
+                return;
+            }
+
+            if is_opencode_session_list_request(&message.text) {
+                process_opencode_session_list_request(
+                    messenger,
+                    &message.sender_pubkey_hex,
+                    &codex_config,
+                )
+                .await;
                 return;
             }
 
@@ -1581,6 +1625,48 @@ async fn process_repo_list_request(messenger: &NostrMessenger, owner_pubkey_hex:
     }
 }
 
+async fn process_opencode_session_list_request(
+    messenger: &NostrMessenger,
+    owner_pubkey_hex: &str,
+    codex_config: &CodexConfig,
+) {
+    match list_opencode_sessions(codex_config).await {
+        Ok(sessions) => {
+            let session_list = OpenCodeSessionList {
+                workdir: Some(codex_config.working_dir.to_string_lossy().to_string()),
+                sessions: sessions.into_iter().map(opencode_session_entry).collect(),
+            };
+            if let Err(err) = messenger
+                .send_wire_to_pubkey(
+                    owner_pubkey_hex,
+                    WireMessage::opencode_sessions(session_list),
+                )
+                .await
+            {
+                error!("failed to send OpenCode session list DM: {err:#}");
+            }
+        }
+        Err(err) => {
+            send_response(
+                messenger,
+                owner_pubkey_hex,
+                format!("Could not list OpenCode sessions: {err:#}"),
+            )
+            .await;
+        }
+    }
+}
+
+fn opencode_session_entry(session: OpenCodeSessionInfo) -> OpenCodeSessionListEntry {
+    OpenCodeSessionListEntry {
+        id: session.id,
+        title: session.title,
+        directory: session.directory,
+        created_at: session.created_at,
+        updated_at: session.updated_at,
+    }
+}
+
 async fn start_repo_worker(
     request: &SpawnWorkerRequest,
     _owner_pubkey: &str,
@@ -1781,6 +1867,22 @@ fn is_repo_list_request(request: &str) -> bool {
     value
         .as_object()
         .is_some_and(|object| object.contains_key("repo_list_request"))
+}
+
+fn is_opencode_session_list_request(request: &str) -> bool {
+    let trimmed = request.trim();
+    if matches!(
+        trimmed,
+        "/opencode-sessions" | "/opencode_sessions" | "/sessions"
+    ) {
+        return true;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return false;
+    };
+    value
+        .as_object()
+        .is_some_and(|object| object.contains_key("opencode_session_list_request"))
 }
 
 fn build_repo_list() -> Result<RepoList> {
@@ -2129,12 +2231,6 @@ async fn extract_local_text_attachment(
     audio_config: &AudioConfig,
     messenger: &NostrMessenger,
 ) -> Option<String> {
-    let cache_key = text_attachment_cache_key(attachment);
-    if let Some(cached) = cached_text_attachment(memory, &cache_key) {
-        info!("used cached text attachment for blob hash {cache_key}");
-        return Some(cached);
-    }
-
     let extension = text_attachment_extension(&attachment.media_type, attachment.name.as_deref());
     let reference = media_reference_to_audio(attachment);
     let downloaded = match download_blossom_attachment(&reference, &extension, audio_config).await {
@@ -2216,7 +2312,6 @@ async fn extract_local_text_attachment(
         extracted
     };
 
-    save_text_attachment_cache(memory, &cache_key, &extracted);
     Some(extracted)
 }
 
@@ -2346,34 +2441,6 @@ fn text_attachment_extension(media_type: &str, name: Option<&str>) -> String {
     }
 }
 
-fn text_attachment_cache_key(attachment: &MediaReference) -> String {
-    attachment
-        .encryption
-        .as_ref()
-        .map(|encryption| encryption.plaintext_sha256.clone())
-        .unwrap_or_else(|| attachment.sha256.clone())
-}
-
-fn cached_text_attachment(memory: &Option<MemoryStore>, cache_key: &str) -> Option<String> {
-    memory
-        .as_ref()
-        .and_then(|memory| match memory.cached_transcript(cache_key) {
-            Ok(transcript) => transcript,
-            Err(err) => {
-                warn!("failed to load cached text attachment: {err:#}");
-                None
-            }
-        })
-}
-
-fn save_text_attachment_cache(memory: &mut Option<MemoryStore>, cache_key: &str, text: &str) {
-    if let Some(memory) = memory.as_mut() {
-        if let Err(err) = memory.save_transcript_cache(cache_key, text) {
-            warn!("failed to save text attachment cache: {err:#}");
-        }
-    }
-}
-
 async fn process_text_turn(
     messenger: &NostrMessenger,
     memory: &mut Option<MemoryStore>,
@@ -2386,7 +2453,7 @@ async fn process_text_turn(
 ) {
     let session_id = if explicit_session_id.is_some() {
         explicit_session_id.map(ToOwned::to_owned)
-    } else if codex_config.persist_sessions {
+    } else if codex_config.backend == AgentBackend::Codex && codex_config.persist_sessions {
         load_codex_session(
             memory,
             peer_pubkey,
@@ -2397,7 +2464,7 @@ async fn process_text_turn(
     } else {
         None
     };
-    let memory_context = if session_id.is_none() {
+    let memory_context = if codex_config.backend == AgentBackend::Codex && session_id.is_none() {
         memory_context(memory, peer_pubkey, recorded_id, request)
     } else {
         None
@@ -2443,12 +2510,6 @@ async fn transcribe_or_load_cached(
     transcribe_config: &TranscribeConfig,
     messenger: &NostrMessenger,
 ) -> Option<String> {
-    let cache_key = audio_cache_key(audio);
-    if let Some(transcript) = cached_transcript(memory, &cache_key) {
-        info!("used cached transcript for audio hash {cache_key}");
-        return Some(transcript);
-    }
-
     let downloaded = match download_blossom_audio(audio, audio_config).await {
         Ok(downloaded) => downloaded,
         Err(err) => {
@@ -2497,7 +2558,6 @@ async fn transcribe_or_load_cached(
         }
     };
 
-    save_transcript_cache(memory, &cache_key, &transcript);
     Some(transcript)
 }
 
@@ -3080,6 +3140,10 @@ fn load_codex_session(
     _request: &str,
     backend: AgentBackend,
 ) -> Option<String> {
+    if backend == AgentBackend::OpenCode {
+        return None;
+    }
+
     let stored =
         memory
             .as_ref()
@@ -3090,10 +3154,6 @@ fn load_codex_session(
                     None
                 }
             });
-
-    if backend == AgentBackend::OpenCode {
-        return stored;
-    }
 
     if !env_bool("CODEX_RESUME_LATEST_BY_WORKDIR", true) {
         return stored;
@@ -3297,34 +3357,6 @@ fn canonical_path_key(path: &Path) -> String {
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .to_string()
-}
-
-fn cached_transcript(memory: &Option<MemoryStore>, audio_hash: &str) -> Option<String> {
-    memory
-        .as_ref()
-        .and_then(|memory| match memory.cached_transcript(audio_hash) {
-            Ok(transcript) => transcript,
-            Err(err) => {
-                warn!("failed to load cached transcript: {err:#}");
-                None
-            }
-        })
-}
-
-fn save_transcript_cache(memory: &mut Option<MemoryStore>, audio_hash: &str, transcript: &str) {
-    if let Some(memory) = memory.as_mut() {
-        if let Err(err) = memory.save_transcript_cache(audio_hash, transcript) {
-            warn!("failed to save transcript cache: {err:#}");
-        }
-    }
-}
-
-fn audio_cache_key(audio: &AudioReference) -> String {
-    audio
-        .encryption
-        .as_ref()
-        .map(|encryption| encryption.plaintext_sha256.clone())
-        .unwrap_or_else(|| audio.sha256.clone())
 }
 
 async fn send_response(messenger: &NostrMessenger, receiver_pubkey: &str, response: String) {
@@ -3531,19 +3563,21 @@ async fn run_codex_and_report(
         }
     };
 
-    if let Some(next_session_id) = result
-        .session_id
-        .as_deref()
-        .or(session_id)
-        .filter(|value| !value.trim().is_empty())
-    {
-        if let Some(memory) = memory.as_mut() {
-            if let Err(err) = memory.save_codex_session(
-                receiver_pubkey,
-                &codex_config.working_dir,
-                next_session_id,
-            ) {
-                warn!("failed to save agent session: {err:#}");
+    if codex_config.backend == AgentBackend::Codex {
+        if let Some(next_session_id) = result
+            .session_id
+            .as_deref()
+            .or(session_id)
+            .filter(|value| !value.trim().is_empty())
+        {
+            if let Some(memory) = memory.as_mut() {
+                if let Err(err) = memory.save_codex_session(
+                    receiver_pubkey,
+                    &codex_config.working_dir,
+                    next_session_id,
+                ) {
+                    warn!("failed to save agent session: {err:#}");
+                }
             }
         }
     }
@@ -3704,7 +3738,10 @@ fn codex_config_for_first_attempt(
     codex_config: &CodexConfig,
     session_id: Option<&str>,
 ) -> CodexConfig {
-    if session_id.is_none() || codex_config.timeout <= CODEX_RESUME_TIMEOUT {
+    if codex_config.backend != AgentBackend::Codex
+        || session_id.is_none()
+        || codex_config.timeout <= CODEX_RESUME_TIMEOUT
+    {
         return codex_config.clone();
     }
 
@@ -3955,6 +3992,10 @@ mod tests {
             Some(NonblockingControlRequest::RepoList)
         );
         assert_eq!(
+            nonblocking_control_request("query", r#"{"opencode_session_list_request":{}}"#),
+            Some(NonblockingControlRequest::OpenCodeSessions)
+        );
+        assert_eq!(
             nonblocking_control_request(
                 "query",
                 r#"{"spawn_session":{"workdir":"/home/tom/code/repo"}}"#
@@ -3967,6 +4008,10 @@ mod tests {
         );
         assert_eq!(
             nonblocking_control_request("audio", r#"{"repo_list_request":{}}"#),
+            None
+        );
+        assert_eq!(
+            nonblocking_control_request("audio", r#"{"opencode_session_list_request":{}}"#),
             None
         );
     }
@@ -3998,6 +4043,15 @@ mod tests {
         );
         assert_eq!(
             codex_config_for_first_attempt(&config, None).timeout,
+            Duration::from_secs(300)
+        );
+
+        let opencode_config = CodexConfig {
+            backend: AgentBackend::OpenCode,
+            ..config
+        };
+        assert_eq!(
+            codex_config_for_first_attempt(&opencode_config, Some("session")).timeout,
             Duration::from_secs(300)
         );
     }
@@ -4092,6 +4146,15 @@ mod tests {
         ));
         assert!(!is_repo_list_request("/repo"));
         assert!(!is_repo_list_request("list repos"));
+    }
+
+    #[test]
+    fn detects_opencode_session_list_requests() {
+        assert!(is_opencode_session_list_request("/opencode-sessions"));
+        assert!(is_opencode_session_list_request(
+            r#"{"opencode_session_list_request":{}}"#
+        ));
+        assert!(!is_opencode_session_list_request("list sessions"));
     }
 
     #[test]
@@ -4384,6 +4447,36 @@ mod tests {
             AgentBackend::Codex,
         );
         assert_eq!(session.as_deref(), Some("stored-session"));
+    }
+
+    #[test]
+    fn opencode_ignores_saved_sqlite_session() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(&workdir).unwrap();
+        let mut memory = MemoryStore::open(MemoryConfig {
+            enabled: true,
+            db_path: temp_dir.path().join("memory.sqlite3"),
+            recent_messages: 12,
+            compact_after_messages: 16,
+            summary_max_chars: 5000,
+            compaction_max_chars: 12000,
+        })
+        .unwrap()
+        .unwrap();
+        memory
+            .save_codex_session("peer-1", &workdir, "stored-session")
+            .unwrap();
+
+        let session = load_codex_session(
+            &Some(memory),
+            "peer-1",
+            &workdir,
+            "continue",
+            AgentBackend::OpenCode,
+        );
+
+        assert_eq!(session, None);
     }
 
     #[test]

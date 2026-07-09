@@ -234,9 +234,10 @@ Set `NOSTR_CODEX_QR_PRINT=0` to stop printing the terminal QR, set
 payload is saved, or set `NOSTR_CODEX_QR_OPEN=1` to best-effort open the SVG
 with `xdg-open`.
 
-The worker stores the OpenCode session id in SQLite per phone peer and workdir.
-Follow-up turns resume that OpenCode session. Route workdirs from the phone are
-passed to OpenCode through its `directory` query parameter.
+The worker asks OpenCode for sessions in the routed workdir. Follow-up turns
+adopt the latest OpenCode session for that directory unless the phone sends a
+specific `session_id` from the OpenCode session picker. If OpenCode has no
+session for that directory yet, the worker creates one.
 
 Manual environment:
 
@@ -266,7 +267,6 @@ export OPENCODE_MODEL='anthropic/claude-sonnet-4-5'
 export OPENCODE_AUTO_START=1
 export AGENT_WORKDIR="$PWD"
 export AGENT_TIMEOUT_SECS=180
-export AGENT_PERSIST_SESSIONS=1
 ```
 
 OpenCode's `build` agent can edit files, run builds, commit, and push according
@@ -287,13 +287,12 @@ export CODEX_MEMORY_SUMMARY_MAX_CHARS=5000
 export CODEX_MEMORY_COMPACTION_MAX_CHARS=12000
 ```
 
-Memory is enabled by default. The server stores per-peer message history in
-SQLite, stores the agent session id per peer/workdir, caches transcripts by
-audio hash, adds lightweight topic metadata, and injects selectively retrieved
-memory only when a fresh agent session needs fallback context. It periodically
-compacts older turns into a summary in the background. The database contains
-decrypted queries, transcripts, responses, and session ids, so keep it local; the
-default hidden database path is gitignored.
+SQLite memory is off by default for OpenCode and still defaults on for the
+legacy Codex backend. When enabled, it stores per-peer message history, Codex
+session ids, lightweight topic metadata, and compact summaries. OpenCode session
+ids and audio transcripts are not cached in SQLite. The database contains
+decrypted queries, transcripts, responses, and Codex session ids, so keep it
+local; the default hidden database path is gitignored.
 
 Send `/memory` or `/summary` from the phone to inspect the current compact
 summary. Send `/forget`, `/reset`, or `/reset memory` to clear memory for that
