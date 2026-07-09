@@ -25,6 +25,11 @@ if [[ ! -f "$env_file" && -f "$root/.env.server" ]]; then
   env_file="$root/.env.server"
 fi
 
+opencode_bin="${OPENCODE_BIN:-opencode}"
+if [[ -z "${OPENCODE_BIN:-}" && -n "${HOME:-}" && -x "$HOME/.opencode/bin/opencode" ]]; then
+  opencode_bin="$HOME/.opencode/bin/opencode"
+fi
+
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 unit="$unit_dir/nostr-codex-server.service"
 mkdir -p "$unit_dir"
@@ -41,7 +46,7 @@ WorkingDirectory=$root
 Environment=AGENT_BACKEND=opencode
 Environment=AGENT_WORKDIR=$root
 Environment=OPENCODE_URL=http://127.0.0.1:4096
-Environment=OPENCODE_BIN=opencode
+Environment=OPENCODE_BIN=$opencode_bin
 Environment=OPENCODE_AGENT=build
 EnvironmentFile=-$env_file
 Environment=NOSTR_CODEX_ENV_FILE=$env_file
