@@ -19,7 +19,7 @@ use rand::{rngs::OsRng, RngCore};
 mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
 use rust_lib_nostr_codex_phone::codex::{
-    is_codex_usage_limit_error, run_codex, run_codex_session_with_cancel_and_events,
+    is_codex_usage_limit_error, run_codex, run_codex_session_with_cancel_and_events, AgentBackend,
     CodexCancelToken, CodexConfig, CodexRunResult,
 };
 use rust_lib_nostr_codex_phone::nostr_client::{
@@ -586,19 +586,29 @@ async fn main() -> Result<()> {
         ),
     }
     info!("relays: {}", nostr_config.relays.join(", "));
+    match codex_config.backend {
+        AgentBackend::OpenCode => {
+            info!(
+                "agent backend: opencode {} agent={}",
+                codex_config.opencode.base_url, codex_config.opencode.agent
+            );
+        }
+        AgentBackend::Codex => {
+            info!(
+                "agent backend: codex {} {}",
+                codex_config.bin,
+                codex_config.args.join(" ")
+            );
+            match &codex_config.usage_limit_fallback_model {
+                Some(model) => info!("codex usage-limit fallback model: {model}"),
+                None => info!("codex usage-limit fallback model: disabled"),
+            }
+        }
+    }
     info!(
-        "codex command: {} {}",
-        codex_config.bin,
-        codex_config.args.join(" ")
-    );
-    info!(
-        "persistent codex sessions: {}",
+        "persistent agent sessions: {}",
         codex_config.persist_sessions
     );
-    match &codex_config.usage_limit_fallback_model {
-        Some(model) => info!("codex usage-limit fallback model: {model}"),
-        None => info!("codex usage-limit fallback model: disabled"),
-    }
     info!(
         "transcribe command: {} {}",
         transcribe_config.bin,
@@ -2377,7 +2387,13 @@ async fn process_text_turn(
     let session_id = if explicit_session_id.is_some() {
         explicit_session_id.map(ToOwned::to_owned)
     } else if codex_config.persist_sessions {
-        load_codex_session(memory, peer_pubkey, &codex_config.working_dir, request)
+        load_codex_session(
+            memory,
+            peer_pubkey,
+            &codex_config.working_dir,
+            request,
+            codex_config.backend,
+        )
     } else {
         None
     };
@@ -2781,7 +2797,7 @@ fn local_status_text(memory: &Option<MemoryStore>, peer_pubkey: &str, workdir: &
                 .ok()
                 .flatten()
                 .unwrap_or_else(|| "none".to_string());
-            status.push_str(&format!("\nCodex session: {session}"));
+            status.push_str(&format!("\nAgent session: {session}"));
         }
         None => status.push_str("\nMemory is disabled."),
     }
@@ -3062,6 +3078,7 @@ fn load_codex_session(
     peer_pubkey: &str,
     workdir: &Path,
     _request: &str,
+    backend: AgentBackend,
 ) -> Option<String> {
     let stored =
         memory
@@ -3073,6 +3090,10 @@ fn load_codex_session(
                     None
                 }
             });
+
+    if backend == AgentBackend::OpenCode {
+        return stored;
+    }
 
     if !env_bool("CODEX_RESUME_LATEST_BY_WORKDIR", true) {
         return stored;
@@ -3453,18 +3474,18 @@ async fn run_codex_and_report(
             }
         }
         Err(err) if session_id.is_some() => {
-            warn!("Codex resume failed; clearing session and retrying once: {err:#}");
+            warn!("agent resume failed; clearing session and retrying once: {err:#}");
             send_status(
                 messenger,
                 receiver_pubkey,
-                "Resume failed; starting a fresh Codex turn.",
+                "Resume failed; starting a fresh agent turn.",
             )
             .await;
             if let Some(memory) = memory.as_mut() {
                 if let Err(clear_err) =
                     memory.clear_codex_session(receiver_pubkey, &codex_config.working_dir)
                 {
-                    warn!("failed to clear Codex session: {clear_err:#}");
+                    warn!("failed to clear agent session: {clear_err:#}");
                 }
             }
             match run_codex_session_with_status(
@@ -3522,7 +3543,7 @@ async fn run_codex_and_report(
                 &codex_config.working_dir,
                 next_session_id,
             ) {
-                warn!("failed to save Codex session: {err:#}");
+                warn!("failed to save agent session: {err:#}");
             }
         }
     }
@@ -3544,11 +3565,7 @@ async fn run_codex_session_with_status(
         .send(
             messenger,
             receiver_pubkey,
-            if session_id.is_some() {
-                "Resuming Codex session..."
-            } else {
-                "Starting Codex..."
-            },
+            agent_start_status(codex_config.backend, session_id.is_some()),
             true,
         )
         .await;
@@ -3575,6 +3592,15 @@ async fn run_codex_session_with_status(
                 }
             }
         }
+    }
+}
+
+fn agent_start_status(backend: AgentBackend, resume: bool) -> &'static str {
+    match (backend, resume) {
+        (AgentBackend::OpenCode, true) => "Resuming OpenCode session...",
+        (AgentBackend::OpenCode, false) => "Starting OpenCode...",
+        (AgentBackend::Codex, true) => "Resuming Codex session...",
+        (AgentBackend::Codex, false) => "Starting Codex...",
     }
 }
 
@@ -3748,7 +3774,7 @@ async fn report_codex_error(
 ) -> std::result::Result<String, ()> {
     error!("codex failed: {err:#}");
     if let Err(send_err) = messenger
-        .send_error_to(receiver_pubkey, format!("Codex failed: {err:#}"))
+        .send_error_to(receiver_pubkey, format!("Agent failed: {err:#}"))
         .await
     {
         error!("failed to send error DM: {send_err:#}");
@@ -3786,6 +3812,7 @@ fn nostr_config_from_env(worker_env: &WorkerEnvFile) -> Result<NostrConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_lib_nostr_codex_phone::codex::OpenCodeConfig;
 
     static ENV_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
         once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
@@ -3947,12 +3974,22 @@ mod tests {
     #[test]
     fn caps_resume_attempt_timeout_only() {
         let config = CodexConfig {
+            backend: AgentBackend::Codex,
             bin: "codex".to_string(),
             args: vec!["exec".to_string()],
             working_dir: PathBuf::from("/tmp"),
             timeout: Duration::from_secs(300),
             persist_sessions: true,
             usage_limit_fallback_model: None,
+            opencode: OpenCodeConfig {
+                base_url: "http://127.0.0.1:4096".to_string(),
+                bin: "opencode".to_string(),
+                auto_start: true,
+                username: None,
+                password: None,
+                agent: "build".to_string(),
+                model: None,
+            },
         };
 
         assert_eq!(
@@ -4339,8 +4376,49 @@ mod tests {
             .save_codex_session("peer-2", &workdir, "other-peer-session")
             .unwrap();
 
-        let session = load_codex_session(&Some(memory), "peer-1", &workdir, "continue");
+        let session = load_codex_session(
+            &Some(memory),
+            "peer-1",
+            &workdir,
+            "continue",
+            AgentBackend::Codex,
+        );
         assert_eq!(session.as_deref(), Some("stored-session"));
+    }
+
+    #[test]
+    fn opencode_does_not_adopt_codex_session_files() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_sessions_dir = env::var_os("CODEX_SESSIONS_DIR");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sessions_dir = temp_dir.path().join("sessions");
+        let workdir = temp_dir.path().join("repo");
+        fs::create_dir_all(sessions_dir.join("2026/06/16")).unwrap();
+        fs::create_dir_all(&workdir).unwrap();
+        env::set_var("CODEX_SESSIONS_DIR", &sessions_dir);
+
+        write_session_fixture(
+            &sessions_dir.join("2026/06/16/session.jsonl"),
+            "codex-session",
+            &workdir,
+            "2026-06-16T10:00:00Z",
+            "2026-06-16T10:05:00Z",
+        );
+
+        let session = load_codex_session(
+            &None,
+            "peer-1",
+            &workdir,
+            "continue",
+            AgentBackend::OpenCode,
+        );
+        match previous_sessions_dir {
+            Some(value) => env::set_var("CODEX_SESSIONS_DIR", value),
+            None => env::remove_var("CODEX_SESSIONS_DIR"),
+        }
+
+        assert_eq!(session, None);
     }
 
     #[test]
@@ -4363,7 +4441,8 @@ mod tests {
             "2026-06-16T10:05:00Z",
         );
 
-        let session = load_codex_session(&None, "peer-1", &workdir, "continue");
+        let session =
+            load_codex_session(&None, "peer-1", &workdir, "continue", AgentBackend::Codex);
         match previous_sessions_dir {
             Some(value) => env::set_var("CODEX_SESSIONS_DIR", value),
             None => env::remove_var("CODEX_SESSIONS_DIR"),
@@ -4413,7 +4492,13 @@ mod tests {
             .save_codex_session("peer-1", &workdir, "stored-session")
             .unwrap();
 
-        let session = load_codex_session(&Some(memory), "peer-1", &workdir, "continue");
+        let session = load_codex_session(
+            &Some(memory),
+            "peer-1",
+            &workdir,
+            "continue",
+            AgentBackend::Codex,
+        );
         match previous_sessions_dir {
             Some(value) => env::set_var("CODEX_SESSIONS_DIR", value),
             None => env::remove_var("CODEX_SESSIONS_DIR"),

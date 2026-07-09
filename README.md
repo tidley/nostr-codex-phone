@@ -1,6 +1,6 @@
 # Code Call
 
-Bidirectional voice query client and Rust server over encrypted Nostr GiftWrapped DMs.
+Phone remote for OpenCode over encrypted Nostr GiftWrapped DMs.
 
 ## Message Contract
 
@@ -116,7 +116,7 @@ optional fast path, but server-side STT is the reliable default.
 
 The server listens for `{ "query": "..." }`, `{ "audio": { ... } }`, and
 `{ "media_bundle": { ... } }` (one or more encrypted attachments),
-runs Codex non-interactively, and replies with `{ "response": "..." }` or
+sends prompts to OpenCode's HTTP server, and replies with `{ "response": "..." }` or
 `{ "error": "..." }`. For compressed audio transcription failures, it can also
 reply with `{ "audio_retry": { "format": "wav", "reason": "..." } }`. When a
 root worker opens another repo session, it sends `{ "target_invite": { ... } }`
@@ -198,11 +198,19 @@ Create a per-repo env file such as `/path/to/repo/.nostr-codex/.env.server`:
 NOSTR_SECRET_KEY='nsec...from nostr-keygen, optional...'
 NOSTR_PEER_PUBKEY='npub...mobile public key, optional...'
 NOSTR_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://nostr.mom'
-CODEX_BIN='/home/tom/.nvm/versions/node/v24.12.0/bin/codex'
-CODEX_ARGS='--ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=medium exec --skip-git-repo-check'
+AGENT_BACKEND='opencode'
+OPENCODE_URL='http://127.0.0.1:4096'
+OPENCODE_BIN='opencode'
+OPENCODE_AGENT='build'
+AGENT_WORKDIR='/path/to/repo'
 TRANSCRIBE_BIN='/home/tom/.local/bin/whisper-cpp'
 TRANSCRIBE_ARGS='-m /home/tom/code/phone/models/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/transcript -nt'
 ```
+
+With the default local `OPENCODE_URL`, the worker starts `opencode serve
+--hostname 127.0.0.1 --port 4096` if it is not already running. For a different
+URL, start OpenCode yourself. Set `OPENCODE_SERVER_PASSWORD` on both the worker
+and OpenCode server when exposing the server beyond localhost.
 
 On startup the worker also prints a QR code, saves an SVG target card to
 `.nostr-codex/target.svg`, and writes the raw target payload to
@@ -226,11 +234,9 @@ Set `NOSTR_CODEX_QR_PRINT=0` to stop printing the terminal QR, set
 payload is saved, or set `NOSTR_CODEX_QR_OPEN=1` to best-effort open the SVG
 with `xdg-open`.
 
-If the phone has no stored Codex session for a worker yet, the server
-looks in `CODEX_SESSIONS_DIR` or `~/.codex/sessions` and adopts the newest
-Codex session whose `session_meta.payload.cwd` matches `CODEX_WORKDIR`. This
-uses Codex's normal session files. Disable it with
-`CODEX_RESUME_LATEST_BY_WORKDIR=0`.
+The worker stores the OpenCode session id in SQLite per phone peer and workdir.
+Follow-up turns resume that OpenCode session. Route workdirs from the phone are
+passed to OpenCode through its `directory` query parameter.
 
 Manual environment:
 
@@ -249,30 +255,26 @@ restrict processing to one phone key before first contact:
 export NOSTR_PEER_PUBKEY='npub...'
 ```
 
-Optional Codex configuration:
+Optional OpenCode configuration:
 
 ```bash
-export CODEX_BIN='/home/tom/.nvm/versions/node/v24.12.0/bin/codex'
-export CODEX_ARGS='--ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=medium exec --skip-git-repo-check'
-export CODEX_WORKDIR="$PWD"
-export CODEX_TIMEOUT_SECS=180
-export CODEX_PERSIST_SESSIONS=1
-export CODEX_USAGE_LIMIT_FALLBACK_MODEL='gpt-5.5'
+export AGENT_BACKEND='opencode'
+export OPENCODE_URL='http://127.0.0.1:4096'
+export OPENCODE_BIN='opencode'
+export OPENCODE_AGENT='build'
+export OPENCODE_MODEL='anthropic/claude-sonnet-4-5'
+export OPENCODE_AUTO_START=1
+export AGENT_WORKDIR="$PWD"
+export AGENT_TIMEOUT_SECS=180
+export AGENT_PERSIST_SESSIONS=1
 ```
 
-`danger-full-access` lets the DM-driven Codex session edit files, run builds,
-commit, and push. Use it only with a trusted `NOSTR_PEER_PUBKEY` and relays you
-are comfortable using for this control path. Switch the sandbox back to
-`read-only` when you only want remote inspection.
+OpenCode's `build` agent can edit files, run builds, commit, and push according
+to your OpenCode permissions and config. Use this bridge only with a trusted
+`NOSTR_PEER_PUBKEY` and relays you are comfortable using for this control path.
 
-For user turns, the server uses `codex exec --json` and stores the returned
-Codex `thread_id` in SQLite per phone peer and workdir. Follow-up turns resume
-that session with `codex exec resume <thread_id>` instead of rebuilding the full
-prompt every time. If a stored session cannot be resumed, it is cleared and the
-turn is retried once as a fresh session. Existing `--ephemeral` entries in
-`CODEX_ARGS` are stripped for session-backed user turns. If Codex reports a
-model usage-limit error such as `Switch to another model now`, the same turn is
-retried with `CODEX_USAGE_LIMIT_FALLBACK_MODEL`, defaulting to `gpt-5.5`.
+Codex is still available during the transition with `AGENT_BACKEND=codex` and
+the old `CODEX_BIN`/`CODEX_ARGS` settings.
 
 Optional SQLite memory configuration:
 
@@ -286,9 +288,9 @@ export CODEX_MEMORY_COMPACTION_MAX_CHARS=12000
 ```
 
 Memory is enabled by default. The server stores per-peer message history in
-SQLite, stores the Codex session id per peer/workdir, caches transcripts by
+SQLite, stores the agent session id per peer/workdir, caches transcripts by
 audio hash, adds lightweight topic metadata, and injects selectively retrieved
-memory only when a fresh Codex session needs fallback context. It periodically
+memory only when a fresh agent session needs fallback context. It periodically
 compacts older turns into a summary in the background. The database contains
 decrypted queries, transcripts, responses, and session ids, so keep it local; the
 default hidden database path is gitignored.
@@ -333,7 +335,7 @@ printf 'This is a local-machine test reply.' \
 The phone receives that as `{ "response": "..." }`, so Auto speak reads it
 through TTS.
 
-`codex exec` and the configured transcriber must be installed and authenticated
+`opencode` and the configured transcriber must be installed and authenticated
 on the server. If either is missing or fails, the peer receives a JSON error DM
 instead of the server crashing.
 
@@ -359,13 +361,13 @@ is empty, changes to `Send` while recording, and sends typed text when text is
 present. The cancel button discards a recording locally without uploading.
 Message actions allow copying incoming text and resending typed queries,
 uploaded audio references, or returned transcripts. Returned transcripts are
-styled as user-side speech bubbles next to the audio message, while Codex
+styled as user-side speech bubbles next to the audio message, while agent
 responses remain visually distinct.
 
 After connecting, the relay/key setup panel collapses into a compact expandable
 header so the conversation controls stay near the top of the screen.
 
-Incoming response bodies render as GitHub-style Markdown, so Codex output such
+Incoming response bodies render as GitHub-style Markdown, so agent output such
 as `**bold**`, lists, and code blocks is formatted on screen. Auto-speak strips
 Markdown markers before sending text to TTS, and the playback bar can stop or
 replay the last spoken response.
@@ -390,12 +392,12 @@ For a more Nostr-native media setup, clients can also publish and read
 voice-note uploads so a missing or failing default server does not block the
 query path.
 
-The server handles local/no-heavy-Codex requests directly, including `/summary`,
+The server handles local/no-heavy-agent requests directly, including `/summary`,
 `/memory`, `/forget`, `repeat last`, `status`, and `what repo am I in?`. It also
-routes obvious no-op filler such as "thanks" without invoking Codex.
+routes obvious no-op filler such as "thanks" without invoking the agent.
 
 Incoming Nostr DMs are dispatched to per-peer worker queues. The relay listener
-keeps receiving while Whisper/Codex work runs, and each peer's messages are still
+keeps receiving while Whisper/agent work runs, and each peer's messages are still
 processed in order.
 
 Run:

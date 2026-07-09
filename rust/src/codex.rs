@@ -8,6 +8,9 @@ use std::sync::{
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use reqwest::StatusCode;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -16,12 +19,39 @@ use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
+    pub backend: AgentBackend,
     pub bin: String,
     pub args: Vec<String>,
     pub working_dir: PathBuf,
     pub timeout: Duration,
     pub persist_sessions: bool,
     pub usage_limit_fallback_model: Option<String>,
+    pub opencode: OpenCodeConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentBackend {
+    OpenCode,
+    Codex,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenCodeConfig {
+    pub base_url: String,
+    pub bin: String,
+    pub auto_start: bool,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub agent: String,
+    pub model: Option<OpenCodeModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenCodeModel {
+    #[serde(rename = "providerID")]
+    pub provider_id: String,
+    #[serde(rename = "modelID")]
+    pub model_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +83,7 @@ impl CodexCancelToken {
 
 impl CodexConfig {
     pub fn from_env() -> Result<Self> {
+        let backend = agent_backend_from_env();
         let bin = env::var("CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
         let args = match env::var("CODEX_ARGS") {
             Ok(raw) if !raw.trim().is_empty() => shell_words::split(&raw)
@@ -66,14 +97,20 @@ impl CodexConfig {
                 "--skip-git-repo-check".to_string(),
             ],
         };
-        let working_dir = env::var("CODEX_WORKDIR")
+        let working_dir = env::var("AGENT_WORKDIR")
+            .or_else(|_| env::var("OPENCODE_WORKDIR"))
+            .or_else(|_| env::var("CODEX_WORKDIR"))
             .map(PathBuf::from)
             .unwrap_or(env::current_dir().context("failed to resolve current directory")?);
-        let timeout_secs = env::var("CODEX_TIMEOUT_SECS")
+        let timeout_secs = env::var("AGENT_TIMEOUT_SECS")
+            .or_else(|_| env::var("OPENCODE_TIMEOUT_SECS"))
+            .or_else(|_| env::var("CODEX_TIMEOUT_SECS"))
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(180);
-        let persist_sessions = env::var("CODEX_PERSIST_SESSIONS")
+        let persist_sessions = env::var("AGENT_PERSIST_SESSIONS")
+            .or_else(|_| env::var("OPENCODE_PERSIST_SESSIONS"))
+            .or_else(|_| env::var("CODEX_PERSIST_SESSIONS"))
             .ok()
             .map(|value| !is_falsey(&value))
             .unwrap_or(true);
@@ -81,22 +118,79 @@ impl CodexConfig {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty() && !is_falsey(value))
-            .or_else(|| Some("gpt-5.5".to_string()));
+            .or_else(|| (backend == AgentBackend::Codex).then(|| "gpt-5.5".to_string()));
+        let opencode = OpenCodeConfig::from_env()?;
 
         Ok(Self {
+            backend,
             bin,
             args,
             working_dir,
             timeout: Duration::from_secs(timeout_secs),
             persist_sessions,
             usage_limit_fallback_model,
+            opencode,
         })
     }
 
     pub fn with_model_override(&self, model: &str) -> Self {
         let mut config = self.clone();
-        config.args = codex_args_with_model_override(&config.args, model);
+        match config.backend {
+            AgentBackend::Codex => {
+                config.args = codex_args_with_model_override(&config.args, model);
+            }
+            AgentBackend::OpenCode => {
+                config.opencode.model = parse_opencode_model(model).or(config.opencode.model);
+            }
+        }
         config
+    }
+}
+
+impl OpenCodeConfig {
+    fn from_env() -> Result<Self> {
+        let base_url = env::var("OPENCODE_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:4096".to_string())
+            .trim_end_matches('/')
+            .to_string();
+        let bin = env::var("OPENCODE_BIN").unwrap_or_else(|_| "opencode".to_string());
+        let auto_start = env::var("OPENCODE_AUTO_START")
+            .ok()
+            .map(|value| !is_falsey(&value))
+            .unwrap_or(true);
+        let password = env::var("OPENCODE_PASSWORD")
+            .or_else(|_| env::var("OPENCODE_SERVER_PASSWORD"))
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let username = env::var("OPENCODE_USERNAME")
+            .or_else(|_| env::var("OPENCODE_SERVER_USERNAME"))
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| password.as_ref().map(|_| "opencode".to_string()));
+        let agent = env::var("OPENCODE_AGENT")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "build".to_string());
+        let model = env::var("OPENCODE_MODEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                parse_opencode_model(&value)
+                    .ok_or_else(|| anyhow!("OPENCODE_MODEL must be `provider/model`"))
+            })
+            .transpose()?;
+
+        Ok(Self {
+            base_url,
+            bin,
+            auto_start,
+            username,
+            password,
+            agent,
+            model,
+        })
     }
 }
 
@@ -109,6 +203,12 @@ pub async fn run_codex_with_cancel(
     config: &CodexConfig,
     cancel_token: Option<&CodexCancelToken>,
 ) -> Result<String> {
+    if config.backend == AgentBackend::OpenCode {
+        return run_opencode_session(prompt, config, None, cancel_token)
+            .await
+            .map(|result| result.response);
+    }
+
     let args = codex_stdin_args(config.args.clone());
     let output = run_codex_command(prompt, config, args, cancel_token, None).await?;
 
@@ -150,6 +250,10 @@ pub async fn run_codex_session_with_cancel_and_events(
     cancel_token: Option<&CodexCancelToken>,
     event_sender: Option<CodexJsonEventSender>,
 ) -> Result<CodexRunResult> {
+    if config.backend == AgentBackend::OpenCode {
+        return run_opencode_session(prompt, config, session_id, cancel_token).await;
+    }
+
     if !config.persist_sessions {
         return run_codex_with_cancel(prompt, config, cancel_token)
             .await
@@ -170,6 +274,213 @@ pub async fn run_codex_session_with_cancel_and_events(
     }
 
     parse_codex_json_output(&stdout)
+}
+
+async fn run_opencode_session(
+    prompt: &str,
+    config: &CodexConfig,
+    session_id: Option<&str>,
+    cancel_token: Option<&CodexCancelToken>,
+) -> Result<CodexRunResult> {
+    let client = reqwest::Client::new();
+    ensure_opencode_available(&client, config).await?;
+    let session_id = match session_id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(session_id) => session_id.to_string(),
+        None => create_opencode_session(&client, config).await?,
+    };
+    let body = opencode_prompt_body(prompt, &config.opencode);
+    let request = opencode_request(
+        &client,
+        config,
+        reqwest::Method::POST,
+        &format!("/session/{session_id}/message"),
+    )
+    .json(&body);
+
+    let response = tokio::select! {
+        response = request.send() => response.context("failed to send prompt to OpenCode")?,
+        _ = wait_for_cancel(cancel_token), if cancel_token.is_some() => {
+            let _ = abort_opencode_session(&client, config, &session_id).await;
+            return Err(anyhow!("Codex cancelled"));
+        }
+        _ = sleep(config.timeout) => {
+            let _ = abort_opencode_session(&client, config, &session_id).await;
+            return Err(anyhow!("OpenCode timed out after {}s", config.timeout.as_secs()));
+        }
+    };
+    let value = opencode_json_response(response).await?;
+    Ok(CodexRunResult {
+        response: opencode_response_text(&value)?,
+        session_id: Some(session_id),
+    })
+}
+
+async fn ensure_opencode_available(client: &reqwest::Client, config: &CodexConfig) -> Result<()> {
+    if opencode_health(client, config).await.is_ok() {
+        return Ok(());
+    }
+    if !config.opencode.auto_start || !can_autostart_opencode(&config.opencode.base_url) {
+        opencode_health(client, config).await?;
+        return Ok(());
+    }
+
+    Command::new(&config.opencode.bin)
+        .args(["serve", "--hostname", "127.0.0.1", "--port", "4096"])
+        .current_dir(&config.working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(false)
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to start `{} serve`; install OpenCode or set OPENCODE_URL to a running server",
+                config.opencode.bin
+            )
+        })?;
+
+    for _ in 0..20 {
+        sleep(Duration::from_millis(250)).await;
+        if opencode_health(client, config).await.is_ok() {
+            return Ok(());
+        }
+    }
+
+    opencode_health(client, config).await
+}
+
+async fn opencode_health(client: &reqwest::Client, config: &CodexConfig) -> Result<()> {
+    let response = opencode_request(client, config, reqwest::Method::GET, "/global/health")
+        .send()
+        .await
+        .context("OpenCode server is not reachable")?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    Err(anyhow!(
+        "OpenCode health check failed with {status}: {body}"
+    ))
+}
+
+fn can_autostart_opencode(base_url: &str) -> bool {
+    matches!(
+        base_url.trim_end_matches('/'),
+        "http://127.0.0.1:4096" | "http://localhost:4096"
+    )
+}
+
+async fn create_opencode_session(client: &reqwest::Client, config: &CodexConfig) -> Result<String> {
+    let response = opencode_request(client, config, reqwest::Method::POST, "/session")
+        .json(&json!({ "title": "Code Call" }))
+        .send()
+        .await
+        .context("failed to create OpenCode session")?;
+    let value = opencode_json_response(response).await?;
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow!("OpenCode session create response did not include `id`: {value}"))
+}
+
+async fn abort_opencode_session(
+    client: &reqwest::Client,
+    config: &CodexConfig,
+    session_id: &str,
+) -> Result<()> {
+    let response = opencode_request(
+        client,
+        config,
+        reqwest::Method::POST,
+        &format!("/session/{session_id}/abort"),
+    )
+    .send()
+    .await
+    .context("failed to abort OpenCode session")?;
+    let status = response.status();
+    if !status.is_success() && status != StatusCode::NOT_FOUND {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("OpenCode abort failed with {status}: {body}"));
+    }
+    Ok(())
+}
+
+fn opencode_request(
+    client: &reqwest::Client,
+    config: &CodexConfig,
+    method: reqwest::Method,
+    path: &str,
+) -> reqwest::RequestBuilder {
+    let url = format!("{}{}", config.opencode.base_url, path);
+    let mut request = client
+        .request(method, url)
+        .query(&[("directory", config.working_dir.to_string_lossy().as_ref())]);
+    if let Some(password) = config.opencode.password.as_deref() {
+        request = request.basic_auth(
+            config.opencode.username.as_deref().unwrap_or("opencode"),
+            Some(password),
+        );
+    }
+    request
+}
+
+fn opencode_prompt_body(prompt: &str, opencode: &OpenCodeConfig) -> Value {
+    let mut body = json!({
+        "agent": &opencode.agent,
+        "parts": [{ "type": "text", "text": prompt }],
+    });
+    if let Some(model) = &opencode.model {
+        body["model"] = serde_json::to_value(model).expect("model serializes");
+    }
+    body
+}
+
+async fn opencode_json_response(response: reqwest::Response) -> Result<Value> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read OpenCode response")?;
+    if !status.is_success() {
+        return Err(anyhow!("OpenCode returned {status}: {body}"));
+    }
+    serde_json::from_str(&body).with_context(|| format!("OpenCode returned invalid JSON: {body}"))
+}
+
+fn opencode_response_text(value: &Value) -> Result<String> {
+    let text = value
+        .get("parts")
+        .and_then(Value::as_array)
+        .and_then(|parts| {
+            parts.iter().rev().find_map(|part| {
+                if part.get("type").and_then(Value::as_str) == Some("text") {
+                    part.get("text").and_then(Value::as_str)
+                } else {
+                    None
+                }
+            })
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    if let Some(text) = text {
+        return Ok(text);
+    }
+
+    if let Some(error) = value
+        .get("info")
+        .and_then(|info| info.get("error"))
+        .or_else(|| value.get("error"))
+    {
+        return Err(anyhow!("OpenCode failed: {error}"));
+    }
+
+    Err(anyhow!(
+        "OpenCode completed but produced no text response: {value}"
+    ))
 }
 
 async fn run_codex_command(
@@ -502,6 +813,29 @@ fn is_falsey(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "0" | "false" | "no" | "off" | "disabled"
     )
+}
+
+fn agent_backend_from_env() -> AgentBackend {
+    let raw = env::var("AGENT_BACKEND")
+        .or_else(|_| env::var("AI_BACKEND"))
+        .unwrap_or_else(|_| "opencode".to_string());
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "codex" => AgentBackend::Codex,
+        _ => AgentBackend::OpenCode,
+    }
+}
+
+fn parse_opencode_model(value: &str) -> Option<OpenCodeModel> {
+    let (provider_id, model_id) = value.split_once('/')?;
+    let provider_id = provider_id.trim();
+    let model_id = model_id.trim();
+    if provider_id.is_empty() || model_id.is_empty() {
+        return None;
+    }
+    Some(OpenCodeModel {
+        provider_id: provider_id.to_string(),
+        model_id: model_id.to_string(),
+    })
 }
 
 #[cfg(test)]
