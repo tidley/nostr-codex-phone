@@ -108,6 +108,7 @@ struct WorkerRuntimeConfig {
     messenger: Arc<NostrMessenger>,
     worker_env: WorkerEnvFile,
     owner_peer_hex: Option<String>,
+    allowed_owner_hexes: Vec<String>,
     pairing_secret: Option<String>,
     control: RuntimeControl,
     memory_config: MemoryConfig,
@@ -425,11 +426,18 @@ fn pubkey_to_hex(pubkey: &str) -> Result<String> {
 fn accept_or_claim_owner(
     env_file: &WorkerEnvFile,
     owner_peer_hex: &mut Option<String>,
+    allowed_owner_hexes: &[String],
     pairing_secret: &Option<String>,
     message: &IncomingMessage,
 ) -> bool {
     match owner_peer_hex.as_deref() {
         Some(owner) if owner != message.sender_pubkey_hex => {
+            if allowed_owner_hexes
+                .iter()
+                .any(|allowed| allowed == &message.sender_pubkey_hex)
+            {
+                return true;
+            }
             warn!(
                 "ignored DM from non-owner {}; owner is {}",
                 message.sender_pubkey_hex, owner
@@ -580,6 +588,11 @@ async fn main() -> Result<()> {
         .as_deref()
         .map(pubkey_to_hex)
         .transpose()?;
+    let allowed_owner_hexes = nostr_config
+        .receive_pubkeys
+        .iter()
+        .map(|pubkey| pubkey_to_hex(pubkey))
+        .collect::<Result<Vec<_>>>()?;
     let pairing_secret = owner_peer_hex.is_none().then(generate_pairing_secret);
 
     let server_pubkey = messenger.public_key_bech32()?;
@@ -645,6 +658,7 @@ async fn main() -> Result<()> {
         messenger,
         worker_env,
         owner_peer_hex,
+        allowed_owner_hexes,
         pairing_secret,
         control: RuntimeControl::new(true),
         memory_config,
@@ -675,6 +689,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         if !accept_or_claim_owner(
             &config.worker_env,
             &mut config.owner_peer_hex,
+            &config.allowed_owner_hexes,
             &config.pairing_secret,
             &message,
         ) {
@@ -1963,7 +1978,11 @@ fn list_repo_root(worker_root: &Path, root: &Path) -> Result<RepoListRoot> {
 }
 
 fn resolve_spawn_workdir(request: &SpawnWorkerRequest, current_workdir: &Path) -> Result<PathBuf> {
-    let worker_root = canonical_spawn_root_dir(current_workdir)?;
+    let allowed_roots = canonical_spawn_root_dirs(current_workdir)?;
+    let worker_root = allowed_roots
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no allowed worker root configured"))?;
     let requested = expand_home_path(clean_path_argument(&request.workdir));
     let path = if requested.is_absolute() {
         requested
@@ -1971,7 +1990,7 @@ fn resolve_spawn_workdir(request: &SpawnWorkerRequest, current_workdir: &Path) -
         worker_root.join(requested)
     };
     if request.create && !path.exists() {
-        ensure_spawn_create_allowed(&path, &worker_root)?;
+        ensure_spawn_create_allowed(&path, &allowed_roots)?;
         fs::create_dir_all(&path)
             .with_context(|| format!("failed to create `{}`", path.display()))?;
     }
@@ -1981,33 +2000,39 @@ fn resolve_spawn_workdir(request: &SpawnWorkerRequest, current_workdir: &Path) -
     if !canonical.is_dir() {
         anyhow::bail!("`{}` is not a directory", canonical.display());
     }
-    ensure_spawn_existing_allowed(&canonical, &worker_root)?;
+    ensure_spawn_existing_allowed(&canonical, &allowed_roots)?;
     Ok(canonical)
 }
 
-fn ensure_spawn_existing_allowed(path: &Path, worker_root: &Path) -> Result<()> {
-    if path == worker_root || path.starts_with(worker_root) {
+fn ensure_spawn_existing_allowed(path: &Path, allowed_roots: &[PathBuf]) -> Result<()> {
+    if allowed_roots
+        .iter()
+        .any(|root| path == root || path.starts_with(root))
+    {
         return Ok(());
     }
     anyhow::bail!(
-        "`{}` is outside the allowed folders (`{}` and folders inside it)",
+        "`{}` is outside the allowed folders ({})",
         path.display(),
-        worker_root.display()
+        allowed_roots_text(allowed_roots)
     )
 }
 
-fn ensure_spawn_create_allowed(path: &Path, worker_root: &Path) -> Result<()> {
+fn ensure_spawn_create_allowed(path: &Path, allowed_roots: &[PathBuf]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("new folder path must have a parent"))?
         .canonicalize()
         .with_context(|| format!("failed to resolve parent of `{}`", path.display()))?;
-    if parent == worker_root || parent.starts_with(worker_root) {
+    if allowed_roots
+        .iter()
+        .any(|root| parent == *root || parent.starts_with(root))
+    {
         return Ok(());
     }
     anyhow::bail!(
-        "new folders may only be created inside `{}`",
-        worker_root.display()
+        "new folders may only be created inside the allowed folders ({})",
+        allowed_roots_text(allowed_roots)
     )
 }
 
@@ -2026,6 +2051,30 @@ fn canonical_spawn_root_dir(current_workdir: &Path) -> Result<PathBuf> {
         .unwrap_or_else(|_| current_workdir.to_path_buf());
     root.canonicalize()
         .with_context(|| format!("failed to resolve worker root `{}`", root.display()))
+}
+
+fn canonical_spawn_root_dirs(current_workdir: &Path) -> Result<Vec<PathBuf>> {
+    let mut roots = vec![canonical_spawn_root_dir(current_workdir)?];
+    for root in env_csv("NOSTR_SPAWN_ROOTS")
+        .or_else(|| env_csv("NOSTR_ALLOWED_WORKDIR_ROOTS"))
+        .unwrap_or_default()
+    {
+        let canonical = PathBuf::from(&root)
+            .canonicalize()
+            .with_context(|| format!("failed to resolve allowed worker root `{root}`"))?;
+        if !roots.iter().any(|existing| existing == &canonical) {
+            roots.push(canonical);
+        }
+    }
+    Ok(roots)
+}
+
+fn allowed_roots_text(allowed_roots: &[PathBuf]) -> String {
+    allowed_roots
+        .iter()
+        .map(|root| format!("`{}`", root.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn expand_home_path(path: &str) -> PathBuf {
@@ -4261,6 +4310,40 @@ mod tests {
     }
 
     #[test]
+    fn owner_gate_accepts_configured_receive_peer() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let env_file = WorkerEnvFile {
+            path: temp_dir.path().join(".env.server"),
+        };
+        let mut owner = Some("owner-hex".to_string());
+        let message = IncomingMessage {
+            sender_pubkey: "npub-extra".to_string(),
+            sender_pubkey_hex: "extra-hex".to_string(),
+            kind: "query".to_string(),
+            text: "hello".to_string(),
+            raw_json: r#"{"message":"hello"}"#.to_string(),
+            event_id: "event-1".to_string(),
+        };
+
+        assert!(accept_or_claim_owner(
+            &env_file,
+            &mut owner,
+            &["owner-hex".to_string(), "extra-hex".to_string()],
+            &None,
+            &message,
+        ));
+        assert_eq!(owner.as_deref(), Some("owner-hex"));
+
+        assert!(!accept_or_claim_owner(
+            &env_file,
+            &mut owner,
+            &["owner-hex".to_string()],
+            &None,
+            &message,
+        ));
+    }
+
+    #[test]
     fn parses_worker_env_assignments() {
         assert_eq!(
             parse_env_assignment("NOSTR_SECRET_KEY='nsec123'"),
@@ -4380,6 +4463,49 @@ mod tests {
         assert!(error
             .to_string()
             .contains("new folders may only be created"));
+    }
+
+    #[test]
+    fn allows_spawn_create_inside_configured_extra_root() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_workdir = env::var_os("CODEX_WORKDIR");
+        let previous_spawn_roots = env::var_os("NOSTR_SPAWN_ROOTS");
+        let previous_allowed_roots = env::var_os("NOSTR_ALLOWED_WORKDIR_ROOTS");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let current_workdir = temp_dir.path().join("worker-root");
+        let extra_root = temp_dir.path().join("tmp-root");
+        fs::create_dir_all(&current_workdir).unwrap();
+        fs::create_dir_all(&extra_root).unwrap();
+        env::remove_var("CODEX_WORKDIR");
+        env::set_var("NOSTR_SPAWN_ROOTS", &extra_root);
+        env::remove_var("NOSTR_ALLOWED_WORKDIR_ROOTS");
+
+        let request = SpawnWorkerRequest {
+            workdir: extra_root.join("new-repo").to_string_lossy().to_string(),
+            create: true,
+            silent: false,
+        };
+        let resolved = resolve_spawn_workdir(&request, &current_workdir).unwrap();
+
+        match previous_workdir {
+            Some(value) => env::set_var("CODEX_WORKDIR", value),
+            None => env::remove_var("CODEX_WORKDIR"),
+        }
+        match previous_spawn_roots {
+            Some(value) => env::set_var("NOSTR_SPAWN_ROOTS", value),
+            None => env::remove_var("NOSTR_SPAWN_ROOTS"),
+        }
+        match previous_allowed_roots {
+            Some(value) => env::set_var("NOSTR_ALLOWED_WORKDIR_ROOTS", value),
+            None => env::remove_var("NOSTR_ALLOWED_WORKDIR_ROOTS"),
+        }
+
+        assert_eq!(
+            resolved,
+            extra_root.join("new-repo").canonicalize().unwrap()
+        );
+        assert!(resolved.is_dir());
     }
 
     #[test]
