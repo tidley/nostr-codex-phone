@@ -44,13 +44,18 @@ if [[ -z "$transcribe_args" ]]; then
   transcribe_args="-m /home/tom/code/phone/models/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/transcript -nt"
 fi
 
+default_opencode_bin="opencode"
+if [[ -n "${HOME:-}" && -x "$HOME/.opencode/bin/opencode" ]]; then
+  default_opencode_bin="$HOME/.opencode/bin/opencode"
+fi
+
 export RUST_LOG="${RUST_LOG:-info,nostr_codex_server=debug,nostr_sdk=info,nostr=info}"
 export NOSTR_RELAYS="${NOSTR_RELAYS:-wss://relay.damus.io,wss://nos.lol,wss://nostr.mom}"
 export NOSTR_CODEX_ENV_FILE="${NOSTR_CODEX_ENV_FILE:-$state_dir/.env.server}"
 export CODEX_MEMORY_DB="${CODEX_MEMORY_DB:-$state_dir/memory.sqlite3}"
 export AGENT_BACKEND="${AGENT_BACKEND:-opencode}"
 export OPENCODE_URL="${OPENCODE_URL:-http://127.0.0.1:4096}"
-export OPENCODE_BIN="${OPENCODE_BIN:-opencode}"
+export OPENCODE_BIN="${OPENCODE_BIN:-$default_opencode_bin}"
 export OPENCODE_AGENT="${OPENCODE_AGENT:-build}"
 export CODEX_BIN="${CODEX_BIN:-codex}"
 export CODEX_ARGS="$codex_args"

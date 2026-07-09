@@ -171,7 +171,7 @@ impl OpenCodeConfig {
             .unwrap_or_else(|_| "http://127.0.0.1:4096".to_string())
             .trim_end_matches('/')
             .to_string();
-        let bin = env::var("OPENCODE_BIN").unwrap_or_else(|_| "opencode".to_string());
+        let bin = env::var("OPENCODE_BIN").unwrap_or_else(|_| default_opencode_bin());
         let auto_start = env::var("OPENCODE_AUTO_START")
             .ok()
             .map(|value| !is_falsey(&value))
@@ -936,6 +936,22 @@ fn is_falsey(value: &str) -> bool {
     )
 }
 
+fn default_opencode_bin() -> String {
+    default_opencode_bin_for_home(env::var_os("HOME").map(PathBuf::from))
+}
+
+fn default_opencode_bin_for_home(home: Option<PathBuf>) -> String {
+    let Some(home) = home else {
+        return "opencode".to_string();
+    };
+    let candidate = home.join(".opencode").join("bin").join("opencode");
+    if candidate.is_file() {
+        candidate.to_string_lossy().into_owned()
+    } else {
+        "opencode".to_string()
+    }
+}
+
 fn agent_backend_from_env() -> AgentBackend {
     let raw = env::var("AGENT_BACKEND")
         .or_else(|_| env::var("AI_BACKEND"))
@@ -1106,5 +1122,20 @@ mod tests {
         assert_eq!(sessions[0].id, "newer");
         assert_eq!(sessions[0].directory.as_deref(), Some("/repo"));
         assert_eq!(sessions[1].updated_at.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn defaults_to_user_opencode_install_when_present() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let bin_dir = temp_dir.path().join(".opencode").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let opencode = bin_dir.join("opencode");
+        std::fs::write(&opencode, "").unwrap();
+
+        assert_eq!(
+            default_opencode_bin_for_home(Some(temp_dir.path().to_path_buf())),
+            opencode.to_string_lossy()
+        );
+        assert_eq!(default_opencode_bin_for_home(None), "opencode");
     }
 }

@@ -36,7 +36,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.1+201';
+const _appVersion = '0.2.2+202';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -3848,7 +3848,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
     final existing = _pendingRepoListCompleter;
     if (existing != null && !existing.isCompleted) {
-      existing.completeError(StateError('Repo list request replaced'));
+      return existing.future;
     }
     final completer = Completer<List<RepoChoice>>();
     _pendingRepoListCompleter = completer;
@@ -3899,7 +3899,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     final existing = _pendingOpenCodeSessionsCompleter;
     if (existing != null && !existing.isCompleted) {
-      existing.completeError(StateError('OpenCode session request replaced'));
+      return existing.future;
     }
     final completer = Completer<List<_OpenCodeSessionChoice>>();
     _pendingOpenCodeSessionsCompleter = completer;
