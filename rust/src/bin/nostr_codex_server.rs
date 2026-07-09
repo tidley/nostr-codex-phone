@@ -19,7 +19,7 @@ use rand::{rngs::OsRng, RngCore};
 mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
 use rust_lib_nostr_codex_phone::codex::{
-    is_codex_usage_limit_error, list_opencode_sessions, run_codex,
+    ensure_opencode_session, is_codex_usage_limit_error, list_opencode_sessions, run_codex,
     run_codex_session_with_cancel_and_events, AgentBackend, CodexCancelToken, CodexConfig,
     CodexRunResult, OpenCodeSessionInfo,
 };
@@ -1686,12 +1686,22 @@ async fn start_repo_worker(
     current_workdir: &Path,
     parent_pubkey: &str,
     parent_pubkey_hex: &str,
-    _codex_config: &CodexConfig,
+    codex_config: &CodexConfig,
     _audio_config: &AudioConfig,
     _transcribe_config: &TranscribeConfig,
     _manager: &RepoRuntimeManager,
 ) -> Result<(TargetInvite, u32, bool)> {
     let context = repo_target_context(request, relays, current_workdir)?;
+
+    if codex_config.backend == AgentBackend::OpenCode {
+        let mut target_config = codex_config.clone();
+        target_config.working_dir = context.workdir.clone();
+        let session_id = ensure_opencode_session(&target_config).await?;
+        info!(
+            "ensured OpenCode session {session_id} for {}",
+            context.workdir.display()
+        );
+    }
 
     let target = TargetInvite {
         target_type: "nostr_codex_target".to_string(),
