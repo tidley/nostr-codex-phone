@@ -591,6 +591,12 @@ async fn main() -> Result<()> {
             "peer pubkey not configured; first DM must include the QR pairing secret to claim ownership"
         ),
     }
+    if !nostr_config.receive_pubkeys.is_empty() {
+        info!(
+            "accepted peer pubkeys: {}",
+            nostr_config.receive_pubkeys.join(", ")
+        );
+    }
     info!("relays: {}", nostr_config.relays.join(", "));
     match codex_config.backend {
         AgentBackend::OpenCode => {
@@ -3847,6 +3853,14 @@ fn nostr_config_from_env(worker_env: &WorkerEnvFile) -> Result<NostrConfig> {
         .ok()
         .map(|peer| peer.trim().to_string())
         .filter(|peer| !peer.is_empty());
+    let mut receive_pubkeys = env_csv("NOSTR_RECEIVE_PUBKEYS")
+        .or_else(|| env_csv("NOSTR_ALLOWED_PUBKEYS"))
+        .unwrap_or_default();
+    if let Some(peer) = &peer_pubkey {
+        if !receive_pubkeys.iter().any(|existing| existing == peer) {
+            receive_pubkeys.push(peer.clone());
+        }
+    }
     let relays = env::var("NOSTR_RELAYS")
         .ok()
         .map(|raw| {
@@ -3861,10 +3875,23 @@ fn nostr_config_from_env(worker_env: &WorkerEnvFile) -> Result<NostrConfig> {
 
     Ok(NostrConfig {
         secret_key,
-        receive_pubkeys: peer_pubkey.iter().cloned().collect(),
+        receive_pubkeys,
         peer_pubkey,
         relays,
     })
+}
+
+fn env_csv(name: &str) -> Option<Vec<String>> {
+    env::var(name)
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
 }
 
 #[cfg(test)]
@@ -4179,6 +4206,58 @@ mod tests {
             r#"{"workdir":"/home/tom/code/phone","opencode_session_list_request":{}}"#
         ));
         assert!(!is_opencode_session_list_request("list sessions"));
+    }
+
+    #[test]
+    fn nostr_config_accepts_extra_receive_pubkeys() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_secret = env::var_os("NOSTR_SECRET_KEY");
+        let previous_peer = env::var_os("NOSTR_PEER_PUBKEY");
+        let previous_mobile = env::var_os("NOSTR_MOBILE_PUBKEY");
+        let previous_receive = env::var_os("NOSTR_RECEIVE_PUBKEYS");
+        let previous_allowed = env::var_os("NOSTR_ALLOWED_PUBKEYS");
+
+        env::set_var("NOSTR_SECRET_KEY", "secret");
+        env::set_var("NOSTR_PEER_PUBKEY", "npub-current");
+        env::set_var(
+            "NOSTR_RECEIVE_PUBKEYS",
+            "npub-old, npub-current, npub-extra",
+        );
+        env::remove_var("NOSTR_MOBILE_PUBKEY");
+        env::remove_var("NOSTR_ALLOWED_PUBKEYS");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = nostr_config_from_env(&WorkerEnvFile {
+            path: temp_dir.path().join(".env.server"),
+        })
+        .unwrap();
+
+        assert_eq!(config.peer_pubkey.as_deref(), Some("npub-current"));
+        assert_eq!(
+            config.receive_pubkeys,
+            vec!["npub-old", "npub-current", "npub-extra"]
+        );
+
+        match previous_secret {
+            Some(value) => env::set_var("NOSTR_SECRET_KEY", value),
+            None => env::remove_var("NOSTR_SECRET_KEY"),
+        }
+        match previous_peer {
+            Some(value) => env::set_var("NOSTR_PEER_PUBKEY", value),
+            None => env::remove_var("NOSTR_PEER_PUBKEY"),
+        }
+        match previous_mobile {
+            Some(value) => env::set_var("NOSTR_MOBILE_PUBKEY", value),
+            None => env::remove_var("NOSTR_MOBILE_PUBKEY"),
+        }
+        match previous_receive {
+            Some(value) => env::set_var("NOSTR_RECEIVE_PUBKEYS", value),
+            None => env::remove_var("NOSTR_RECEIVE_PUBKEYS"),
+        }
+        match previous_allowed {
+            Some(value) => env::set_var("NOSTR_ALLOWED_PUBKEYS", value),
+            None => env::remove_var("NOSTR_ALLOWED_PUBKEYS"),
+        }
     }
 
     #[test]
