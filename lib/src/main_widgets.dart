@@ -338,9 +338,6 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
     final cleaned = value.trim();
     if (cleaned.isEmpty) return 'Path is required';
     if (cleaned.contains('\x00')) return 'Path contains an invalid character';
-    if (cleaned.startsWith('/') || cleaned.startsWith('~')) {
-      return 'Use a folder name under the worker root';
-    }
     if (cleaned.split('/').any((part) => part == '..')) {
       return 'Folder name cannot contain ..';
     }
@@ -419,7 +416,7 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
                 onSubmitted: (_) => _submit(),
                 decoration: InputDecoration(
                   border: const OutlineInputBorder(),
-                  helperText: 'Under worker root',
+                  helperText: 'Worker root or allowed path',
                   labelText: _create ? 'New folder' : 'Folder',
                   hintText: _create ? 'my-new-project' : 'phone',
                 ),
