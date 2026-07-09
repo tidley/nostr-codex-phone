@@ -864,7 +864,7 @@ fn panic_payload_description(payload: &(dyn Any + Send)) -> String {
 
 async fn process_nonblocking_control_message(
     message: &IncomingMessage,
-    messenger: &NostrMessenger,
+    messenger: &Arc<NostrMessenger>,
     relays: &[String],
     codex_config: &CodexConfig,
     audio_config: &AudioConfig,
@@ -878,7 +878,7 @@ async fn process_nonblocking_control_message(
                 message.event_id
             );
             process_spawn_worker_request(
-                messenger,
+                messenger.as_ref(),
                 &message.sender_pubkey,
                 &message.sender_pubkey_hex,
                 &spawn_request,
@@ -896,7 +896,7 @@ async fn process_nonblocking_control_message(
                 "processing repo list request event {} while codex task is active",
                 message.event_id
             );
-            process_repo_list_request(messenger, &message.sender_pubkey_hex).await;
+            process_repo_list_request(messenger.as_ref(), &message.sender_pubkey_hex).await;
             true
         }
         Some(NonblockingControlRequest::OpenCodeSessions) => {
@@ -908,7 +908,7 @@ async fn process_nonblocking_control_message(
                 Ok(config) => config,
                 Err(err) => {
                     send_response(
-                        messenger,
+                        messenger.as_ref(),
                         &message.sender_pubkey_hex,
                         format!("Invalid route: {err:#}"),
                     )
@@ -916,12 +916,16 @@ async fn process_nonblocking_control_message(
                     return true;
                 }
             };
-            process_opencode_session_list_request(
-                messenger,
-                &message.sender_pubkey_hex,
-                &codex_config,
-            )
-            .await;
+            let messenger = Arc::clone(messenger);
+            let owner_pubkey_hex = message.sender_pubkey_hex.clone();
+            tokio::spawn(async move {
+                process_opencode_session_list_request(
+                    messenger.as_ref(),
+                    &owner_pubkey_hex,
+                    &codex_config,
+                )
+                .await;
+            });
             true
         }
         None => false,
@@ -1630,12 +1634,17 @@ async fn process_opencode_session_list_request(
     owner_pubkey_hex: &str,
     codex_config: &CodexConfig,
 ) {
+    info!(
+        "listing OpenCode sessions for {}",
+        codex_config.working_dir.display()
+    );
     match list_opencode_sessions(codex_config).await {
         Ok(sessions) => {
             let session_list = OpenCodeSessionList {
                 workdir: Some(codex_config.working_dir.to_string_lossy().to_string()),
                 sessions: sessions.into_iter().map(opencode_session_entry).collect(),
             };
+            let session_count = session_list.sessions.len();
             if let Err(err) = messenger
                 .send_wire_to_pubkey(
                     owner_pubkey_hex,
@@ -1644,6 +1653,8 @@ async fn process_opencode_session_list_request(
                 .await
             {
                 error!("failed to send OpenCode session list DM: {err:#}");
+            } else {
+                info!("sent {session_count} OpenCode sessions");
             }
         }
         Err(err) => {
@@ -4153,6 +4164,9 @@ mod tests {
         assert!(is_opencode_session_list_request("/opencode-sessions"));
         assert!(is_opencode_session_list_request(
             r#"{"opencode_session_list_request":{}}"#
+        ));
+        assert!(is_opencode_session_list_request(
+            r#"{"workdir":"/home/tom/code/phone","opencode_session_list_request":{}}"#
         ));
         assert!(!is_opencode_session_list_request("list sessions"));
     }

@@ -15,7 +15,9 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
+
+const OPENCODE_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
@@ -392,10 +394,13 @@ async fn ensure_opencode_available(client: &reqwest::Client, config: &CodexConfi
 }
 
 async fn opencode_health(client: &reqwest::Client, config: &CodexConfig) -> Result<()> {
-    let response = opencode_request(client, config, reqwest::Method::GET, "/global/health")
-        .send()
-        .await
-        .context("OpenCode server is not reachable")?;
+    let response = timeout(
+        OPENCODE_CONTROL_TIMEOUT,
+        opencode_request(client, config, reqwest::Method::GET, "/global/health").send(),
+    )
+    .await
+    .context("timed out checking OpenCode health")?
+    .context("OpenCode server is not reachable")?;
     let status = response.status();
     if status.is_success() {
         return Ok(());
@@ -417,11 +422,15 @@ async fn list_opencode_sessions_with_client(
     client: &reqwest::Client,
     config: &CodexConfig,
 ) -> Result<Vec<OpenCodeSessionInfo>> {
-    let response = opencode_request(client, config, reqwest::Method::GET, "/session")
-        .query(&[("limit", "50")])
-        .send()
-        .await
-        .context("failed to list OpenCode sessions")?;
+    let response = timeout(
+        OPENCODE_CONTROL_TIMEOUT,
+        opencode_request(client, config, reqwest::Method::GET, "/session")
+            .query(&[("limit", "50")])
+            .send(),
+    )
+    .await
+    .context("timed out listing OpenCode sessions")?
+    .context("failed to list OpenCode sessions")?;
     let value = opencode_json_response(response).await?;
     parse_opencode_session_list(&value)
 }
