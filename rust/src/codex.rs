@@ -55,6 +55,24 @@ pub struct OpenCodeModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenCodeSessionInfo {
+    pub id: String,
+    pub title: String,
+    pub directory: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+impl OpenCodeSessionInfo {
+    fn sort_key(&self) -> &str {
+        self.updated_at
+            .as_deref()
+            .or(self.created_at.as_deref())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexRunResult {
     pub response: String,
     pub session_id: Option<String>,
@@ -276,6 +294,16 @@ pub async fn run_codex_session_with_cancel_and_events(
     parse_codex_json_output(&stdout)
 }
 
+pub async fn list_opencode_sessions(config: &CodexConfig) -> Result<Vec<OpenCodeSessionInfo>> {
+    if config.backend != AgentBackend::OpenCode {
+        return Err(anyhow!("OpenCode sessions require AGENT_BACKEND=opencode"));
+    }
+
+    let client = reqwest::Client::new();
+    ensure_opencode_available(&client, config).await?;
+    list_opencode_sessions_with_client(&client, config).await
+}
+
 async fn run_opencode_session(
     prompt: &str,
     config: &CodexConfig,
@@ -286,7 +314,10 @@ async fn run_opencode_session(
     ensure_opencode_available(&client, config).await?;
     let session_id = match session_id.map(str::trim).filter(|value| !value.is_empty()) {
         Some(session_id) => session_id.to_string(),
-        None => create_opencode_session(&client, config).await?,
+        None => match latest_opencode_session_id(&client, config).await? {
+            Some(session_id) => session_id,
+            None => create_opencode_session(&client, config).await?,
+        },
     };
     let body = opencode_prompt_body(prompt, &config.opencode);
     let request = opencode_request(
@@ -313,6 +344,17 @@ async fn run_opencode_session(
         response: opencode_response_text(&value)?,
         session_id: Some(session_id),
     })
+}
+
+async fn latest_opencode_session_id(
+    client: &reqwest::Client,
+    config: &CodexConfig,
+) -> Result<Option<String>> {
+    Ok(list_opencode_sessions_with_client(client, config)
+        .await?
+        .into_iter()
+        .next()
+        .map(|session| session.id))
 }
 
 async fn ensure_opencode_available(client: &reqwest::Client, config: &CodexConfig) -> Result<()> {
@@ -371,9 +413,22 @@ fn can_autostart_opencode(base_url: &str) -> bool {
     )
 }
 
+async fn list_opencode_sessions_with_client(
+    client: &reqwest::Client,
+    config: &CodexConfig,
+) -> Result<Vec<OpenCodeSessionInfo>> {
+    let response = opencode_request(client, config, reqwest::Method::GET, "/session")
+        .query(&[("limit", "50")])
+        .send()
+        .await
+        .context("failed to list OpenCode sessions")?;
+    let value = opencode_json_response(response).await?;
+    parse_opencode_session_list(&value)
+}
+
 async fn create_opencode_session(client: &reqwest::Client, config: &CodexConfig) -> Result<String> {
     let response = opencode_request(client, config, reqwest::Method::POST, "/session")
-        .json(&json!({ "title": "Code Call" }))
+        .json(&json!({ "title": "OpenCode Remote" }))
         .send()
         .await
         .context("failed to create OpenCode session")?;
@@ -424,6 +479,72 @@ fn opencode_request(
         );
     }
     request
+}
+
+fn parse_opencode_session_list(value: &Value) -> Result<Vec<OpenCodeSessionInfo>> {
+    let sessions = value
+        .as_array()
+        .or_else(|| value.get("sessions").and_then(Value::as_array))
+        .or_else(|| value.get("items").and_then(Value::as_array))
+        .ok_or_else(|| anyhow!("OpenCode session list response was not an array: {value}"))?;
+
+    let mut sessions = sessions
+        .iter()
+        .filter_map(opencode_session_info_from_value)
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| right.sort_key().cmp(left.sort_key()));
+    Ok(sessions)
+}
+
+fn opencode_session_info_from_value(value: &Value) -> Option<OpenCodeSessionInfo> {
+    let id = json_string_at(value, &["id"])
+        .or_else(|| json_string_at(value, &["sessionID"]))
+        .or_else(|| json_string_at(value, &["sessionId"]))?;
+    let title = json_string_at(value, &["title"])
+        .or_else(|| json_string_at(value, &["name"]))
+        .unwrap_or_else(|| id.clone());
+    let directory = json_string_at(value, &["directory"])
+        .or_else(|| json_string_at(value, &["workspaceDir"]))
+        .or_else(|| json_string_at(value, &["workspace_dir"]))
+        .or_else(|| json_string_at(value, &["cwd"]))
+        .or_else(|| json_string_at(value, &["path", "cwd"]))
+        .or_else(|| json_string_at(value, &["path", "root"]));
+    let created_at = json_string_at(value, &["createdAt"])
+        .or_else(|| json_string_at(value, &["created_at"]))
+        .or_else(|| json_string_at(value, &["time", "created"]));
+    let updated_at = json_string_at(value, &["updatedAt"])
+        .or_else(|| json_string_at(value, &["updated_at"]))
+        .or_else(|| json_string_at(value, &["time", "updated"]))
+        .or_else(|| json_string_at(value, &["time", "modified"]));
+
+    Some(OpenCodeSessionInfo {
+        id,
+        title,
+        directory,
+        created_at,
+        updated_at,
+    })
+}
+
+fn json_string_at(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    match current {
+        Value::String(value) => non_empty_string(value),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn opencode_prompt_body(prompt: &str, opencode: &OpenCodeConfig) -> Value {
@@ -959,5 +1080,31 @@ mod tests {
             parsed.session_id.as_deref(),
             Some("0199a213-81c0-7800-8aa1-bbab2a035a53")
         );
+    }
+
+    #[test]
+    fn parses_opencode_sessions_from_array_or_object() {
+        let value = json!({
+            "sessions": [
+                {
+                    "id": "older",
+                    "title": "Older",
+                    "directory": "/repo",
+                    "time": { "updated": 1, "created": 1 }
+                },
+                {
+                    "id": "newer",
+                    "title": "Newer",
+                    "path": { "cwd": "/repo" },
+                    "updatedAt": "2026-07-09T12:00:00Z"
+                }
+            ]
+        });
+
+        let sessions = parse_opencode_session_list(&value).unwrap();
+
+        assert_eq!(sessions[0].id, "newer");
+        assert_eq!(sessions[0].directory.as_deref(), Some("/repo"));
+        assert_eq!(sessions[1].updated_at.as_deref(), Some("1"));
     }
 }

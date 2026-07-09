@@ -12,6 +12,8 @@ class RepoTarget {
     this.parentWorkdir,
     this.parentName,
     this.pairingSecret,
+    this.opencodeSessionId,
+    this.opencodeSessionTitle,
     this.isMasterSession = false,
   });
 
@@ -25,6 +27,8 @@ class RepoTarget {
   final String? parentWorkdir;
   final String? parentName;
   final String? pairingSecret;
+  final String? opencodeSessionId;
+  final String? opencodeSessionTitle;
   final bool isMasterSession;
 
   String get displayName {
@@ -49,6 +53,10 @@ class RepoTarget {
       'parent_name': parentName,
     if (pairingSecret != null && pairingSecret!.trim().isNotEmpty)
       'pairing_secret': pairingSecret,
+    if (opencodeSessionId != null && opencodeSessionId!.trim().isNotEmpty)
+      'opencode_session_id': opencodeSessionId,
+    if (opencodeSessionTitle != null && opencodeSessionTitle!.trim().isNotEmpty)
+      'opencode_session_title': opencodeSessionTitle,
     if (isMasterSession) 'is_master_session': true,
   };
 
@@ -63,8 +71,11 @@ class RepoTarget {
     String? parentWorkdir,
     String? parentName,
     String? pairingSecret,
+    String? opencodeSessionId,
+    String? opencodeSessionTitle,
     bool? isMasterSession,
     bool clearPairingSecret = false,
+    bool clearOpenCodeSession = false,
   }) {
     return RepoTarget(
       id: id ?? this.id,
@@ -79,6 +90,12 @@ class RepoTarget {
       pairingSecret: clearPairingSecret
           ? null
           : pairingSecret ?? this.pairingSecret,
+      opencodeSessionId: clearOpenCodeSession
+          ? null
+          : opencodeSessionId ?? this.opencodeSessionId,
+      opencodeSessionTitle: clearOpenCodeSession
+          ? null
+          : opencodeSessionTitle ?? this.opencodeSessionTitle,
       isMasterSession: isMasterSession ?? this.isMasterSession,
     );
   }
@@ -93,6 +110,10 @@ class RepoTarget {
     final parentWorkdir = raw['parent_workdir']?.toString().trim();
     final parentName = raw['parent_name']?.toString().trim();
     final pairingSecret = raw['pairing_secret']?.toString().trim();
+    final opencodeSessionId = raw['opencode_session_id']?.toString().trim();
+    final opencodeSessionTitle = raw['opencode_session_title']
+        ?.toString()
+        .trim();
     final isMasterSession = raw['is_master_session'] == true;
     final rawRelays = raw['relays'];
     final relays = rawRelays is Iterable
@@ -126,6 +147,13 @@ class RepoTarget {
       pairingSecret: pairingSecret == null || pairingSecret.isEmpty
           ? null
           : pairingSecret,
+      opencodeSessionId: opencodeSessionId == null || opencodeSessionId.isEmpty
+          ? null
+          : opencodeSessionId,
+      opencodeSessionTitle:
+          opencodeSessionTitle == null || opencodeSessionTitle.isEmpty
+          ? null
+          : opencodeSessionTitle,
       isMasterSession: isMasterSession,
     );
   }
