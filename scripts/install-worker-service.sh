@@ -38,6 +38,11 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$root
+Environment=AGENT_BACKEND=opencode
+Environment=AGENT_WORKDIR=$root
+Environment=OPENCODE_URL=http://127.0.0.1:4096
+Environment=OPENCODE_BIN=opencode
+Environment=OPENCODE_AGENT=build
 EnvironmentFile=-$env_file
 Environment=NOSTR_CODEX_ENV_FILE=$env_file
 Environment=PATH=$PATH

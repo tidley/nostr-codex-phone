@@ -2,6 +2,7 @@
 set -euo pipefail
 
 export CODEX_WORKDIR="${CODEX_WORKDIR:-$PWD}"
+export AGENT_WORKDIR="${AGENT_WORKDIR:-$CODEX_WORKDIR}"
 
 state_dir="$CODEX_WORKDIR/.nostr-codex"
 mkdir -p "$state_dir"
@@ -47,7 +48,11 @@ export RUST_LOG="${RUST_LOG:-info,nostr_codex_server=debug,nostr_sdk=info,nostr=
 export NOSTR_RELAYS="${NOSTR_RELAYS:-wss://relay.damus.io,wss://nos.lol,wss://nostr.mom}"
 export NOSTR_CODEX_ENV_FILE="${NOSTR_CODEX_ENV_FILE:-$state_dir/.env.server}"
 export CODEX_MEMORY_DB="${CODEX_MEMORY_DB:-$state_dir/memory.sqlite3}"
-export CODEX_BIN="${CODEX_BIN:-/home/tom/.nvm/versions/node/v24.12.0/bin/codex}"
+export AGENT_BACKEND="${AGENT_BACKEND:-opencode}"
+export OPENCODE_URL="${OPENCODE_URL:-http://127.0.0.1:4096}"
+export OPENCODE_BIN="${OPENCODE_BIN:-opencode}"
+export OPENCODE_AGENT="${OPENCODE_AGENT:-build}"
+export CODEX_BIN="${CODEX_BIN:-codex}"
 export CODEX_ARGS="$codex_args"
 export TRANSCRIBE_BIN="${TRANSCRIBE_BIN:-/home/tom/.local/bin/whisper-cpp}"
 export TRANSCRIBE_ARGS="$transcribe_args"
