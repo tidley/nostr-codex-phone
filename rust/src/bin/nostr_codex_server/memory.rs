@@ -240,6 +240,33 @@ impl MemoryStore {
             .context("failed to load last response")
     }
 
+    pub fn history_text(&self, peer_pubkey: &str, limit: usize) -> Result<String> {
+        let limit = limit.max(1).min(30) as i64;
+        let mut statement = self.conn.prepare(
+            "SELECT id, direction, kind, content, topic, repo, cwd, task, entities
+             FROM (
+               SELECT id, direction, kind, content, topic, repo, cwd, task, entities
+               FROM conversation_messages
+               WHERE peer_pubkey = ?1
+                 AND kind IN ('query', 'transcript', 'response', 'error')
+               ORDER BY id DESC
+               LIMIT ?2
+             )
+             ORDER BY id ASC",
+        )?;
+        let rows = statement.query_map(params![peer_pubkey, limit], memory_message_from_row)?;
+        let messages = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load task history")?;
+        if messages.is_empty() {
+            return Ok("No task history for this peer yet.".to_string());
+        }
+        Ok(format!(
+            "Recent task history:\n{}",
+            render_messages(&messages, 700)
+        ))
+    }
+
     pub fn clear_peer(&mut self, peer_pubkey: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(

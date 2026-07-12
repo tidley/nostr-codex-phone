@@ -215,6 +215,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _seenIncomingEventIdsStorageKey = 'seen_incoming_event_ids_v1';
   static const _unreadCountsStorageKey = 'unread_counts_v1';
   static const _repoChoicesStorageKey = 'repo_choices_v1';
+  static const _recentSessionIdsStorageKey = 'recent_session_ids_v1';
   static const _profileStorageKeys = <String>[
     _secretKeyStorageKey,
     _peerPubkeyStorageKey,
@@ -236,6 +237,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _seenIncomingEventIdsStorageKey,
     _unreadCountsStorageKey,
     _repoChoicesStorageKey,
+    _recentSessionIdsStorageKey,
   ];
   static const _recentMessagesWindow = Duration(days: 4);
   static const _maxConversationMessages = 200;
@@ -248,12 +250,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _relayController = TextEditingController();
   final _blossomServerController = TextEditingController();
   final _queryController = TextEditingController();
+  final _readFileController = TextEditingController();
   final _queryFocusNode = FocusNode();
   final _recorder = AudioRecorder();
   final _tts = FlutterTts();
   final _messagesByTarget = <String, List<ConversationMessage>>{};
   final _seenIncomingEventIds = <String>{};
   final _unreadCountsByTarget = <String, int>{};
+  List<String> _recentSessionIds = const [];
   final _pendingReplyTargetIds = <String>{};
   final _pendingTargetInvites = <RepoTarget>[];
   final ScrollController _chatScrollController = ScrollController();
@@ -525,6 +529,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _relayController.dispose();
     _blossomServerController.dispose();
     _queryController.dispose();
+    _readFileController.dispose();
     _queryFocusNode.dispose();
     _menuNotificationPulseController.dispose();
     unawaited(nostrStop());
@@ -570,6 +575,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     );
     final unreadCounts = await _storage.read(key: _unreadCountsStorageKey);
     final repoChoices = await _storage.read(key: _repoChoicesStorageKey);
+    final recentSessionIds = await _storage.read(
+      key: _recentSessionIdsStorageKey,
+    );
 
     final migratedRelays = relays?.replaceAll(',', '\n') ?? defaultRelays;
     final targets = _decodeRepoTargets(repoTargets);
@@ -621,6 +629,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         ..clear()
         ..addAll(_decodeUnreadCounts(unreadCounts));
       _cachedRepoChoices = _decodeRepoChoicesCache(repoChoices);
+      _recentSessionIds = _decodeStringList(recentSessionIds);
       _loadingSettings = false;
     });
     await _loadConversationHistoryForActiveSession();
@@ -1060,6 +1069,27 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _cachedRepoChoices.map((item) => item.toJson()).toList(),
       ),
     );
+  }
+
+  Future<void> _saveRecentSessionIds() async {
+    await _storage.write(
+      key: _recentSessionIdsStorageKey,
+      value: jsonEncode(_recentSessionIds.take(20).toList()),
+    );
+  }
+
+  List<String> _decodeStringList(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Iterable) return const [];
+      return decoded
+          .map((item) => item.toString().trim())
+          .where((item) => item.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return const [];
+    }
   }
 
   RepoTarget? _targetById(List<RepoTarget> targets, String? id) {
@@ -1740,6 +1770,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     setState(() {
       _clearPendingMediaAttachment();
       _applyRepoTargetFields(target);
+      _recentSessionIds = [
+        target.id,
+        ..._recentSessionIds.where((id) => id != target.id),
+      ].take(20).toList();
       _messagesByTarget.putIfAbsent(targetKey, () => []);
       _wavRetryRequested = false;
       _unreadCountsByTarget.remove(targetKey);
@@ -1748,6 +1782,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           : 'Selected ${target.displayName}';
     });
     await _saveSettings();
+    await _saveRecentSessionIds();
     await _saveUnreadCounts();
     await _loadConversationHistoryForActiveSession();
     if (reconnect && mounted) {
@@ -2475,6 +2510,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _targetNameController.text = cleaned;
       }
       _status = 'Renamed session';
+    });
+    await _saveSettings();
+  }
+
+  Future<void> _togglePinRepoTarget(RepoTarget target) async {
+    final targets = [..._repoTargets];
+    final index = targets.indexWhere((item) => item.id == target.id);
+    if (index == -1) return;
+    targets[index] = target.copyWith(isMasterSession: !target.isMasterSession);
+    setState(() {
+      _repoTargets = targets;
+      _status = target.isMasterSession ? 'Session unpinned' : 'Session pinned';
     });
     await _saveSettings();
   }
@@ -3811,6 +3858,174 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         });
       }
       _showError('Cancel failed: $error');
+    }
+  }
+
+  Future<void> _stopCurrentTask() async {
+    if (!await _ensureConnectedForSend()) return;
+    try {
+      setState(() => _status = 'Stopping current task...');
+      await _sendWithAutoRecovery(
+        label: 'stop task request',
+        sender: () => nostrSendQuery(
+          query: jsonEncode(_withActiveRoute({'cancel_request': true})),
+        ),
+      );
+      if (mounted) setState(() => _status = 'Stop requested');
+    } catch (error) {
+      _showError('Stop failed: $error');
+    }
+  }
+
+  Future<void> _sendToolRequest(
+    String tool, {
+    Map<String, dynamic> extra = const {},
+    String? visibleText,
+  }) async {
+    if (_sending || !await _ensureConnectedForSend()) return;
+    final conversationKey = _activeConversationKey;
+    final label = visibleText ?? tool.replaceAll('_', ' ');
+    final payload = jsonEncode(
+      _withActiveRoute({'tool_request': tool, ...extra}),
+    );
+    setState(() {
+      _sending = true;
+      _sendingConversationKey = conversationKey;
+      _status = 'Requesting $label...';
+    });
+    try {
+      final eventId = await _sendWithAutoRecovery(
+        label: '$label request',
+        sender: () => nostrSendQuery(query: payload),
+      );
+      if (!mounted) return;
+      setState(() {
+        _appendMessageForConversation(
+          conversationKey,
+          ConversationMessage(
+            direction: MessageDirection.outgoing,
+            kind: 'query',
+            text: label,
+            eventId: eventId,
+            timestamp: DateTime.now(),
+          ),
+        );
+        _appendIncomingProcessingPlaceholder(conversationKey, eventId);
+        _status = '$label requested';
+      });
+    } catch (error) {
+      _showError('Tool request failed: $error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _sending = false;
+          _sendingConversationKey = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _promptReadFile() async {
+    final path = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Read file'),
+        content: TextField(
+          controller: _readFileController,
+          autofocus: true,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            labelText: 'Path in repo',
+            hintText: 'lib/main.dart',
+          ),
+          onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.of(context).pop(_readFileController.text.trim()),
+            child: const Text('Read'),
+          ),
+        ],
+      ),
+    );
+    if (path == null || path.trim().isEmpty) return;
+    await _sendToolRequest(
+      'read_file',
+      extra: {'path': path},
+      visibleText: 'read $path',
+    );
+  }
+
+  Future<void> _openToolsSheet() async {
+    final tool = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(title: Text('OpenCode tools')),
+            ListTile(
+              leading: const Icon(Icons.info_outline),
+              title: const Text('Session status'),
+              onTap: () => Navigator.of(context).pop('status'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.stop_circle_outlined),
+              title: const Text('Stop current task'),
+              onTap: () => Navigator.of(context).pop('stop'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.account_tree_outlined),
+              title: const Text('Git status'),
+              onTap: () => Navigator.of(context).pop('git_status'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.difference_outlined),
+              title: const Text('File diff'),
+              onTap: () => Navigator.of(context).pop('diff'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.description_outlined),
+              title: const Text('Read file'),
+              onTap: () => Navigator.of(context).pop('read_file'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.history),
+              title: const Text('Task history'),
+              onTap: () => Navigator.of(context).pop('history'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.memory),
+              title: const Text('Model config'),
+              onTap: () => Navigator.of(context).pop('model_config'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.commit),
+              title: const Text('Commit prep'),
+              onTap: () => Navigator.of(context).pop('commit_help'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.rocket_launch_outlined),
+              title: const Text('Release workflow'),
+              onTap: () => Navigator.of(context).pop('release_help'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (tool == null || !mounted) return;
+    if (tool == 'stop') {
+      await _stopCurrentTask();
+    } else if (tool == 'read_file') {
+      await _promptReadFile();
+    } else {
+      await _sendToolRequest(tool);
     }
   }
 
@@ -5333,9 +5548,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           },
         ),
         title: _buildSessionTitle(activeTargets),
+        actions: [
+          IconButton(
+            tooltip: 'OpenCode tools',
+            onPressed: _connected && !_connecting
+                ? () => unawaited(_openToolsSheet())
+                : null,
+            icon: const Icon(Icons.construction_outlined),
+          ),
+        ],
       ),
       drawer: _SessionDrawer(
         targets: _repoTargets,
+        recentTargetIds: _recentSessionIds,
         selectedTargetId: _selectedRepoTargetId,
         connectedTargetId: _connected ? _selectedRepoTargetId : null,
         canSelectTargets: !_sessionSwitchBlocked,
@@ -5349,6 +5574,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         onOpenCodeSessions: () => unawaited(_openOpenCodeSessions()),
         onRestartTarget: (target) => unawaited(_restartRepoTarget(target)),
         onRenameTarget: (target) => unawaited(_renameRepoTarget(target)),
+        onTogglePinTarget: (target) => unawaited(_togglePinRepoTarget(target)),
         onOpenSettings: () => unawaited(_openSettings()),
         onDeleteTarget: (targetId) {
           unawaited(() async {
