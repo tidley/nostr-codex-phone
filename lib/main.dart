@@ -210,6 +210,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _workingAnimationStorageKey = 'working_animation_style';
   static const _workingAnimationSpeedStorageKey = 'working_animation_speed';
   static const _hapticFeedbackStorageKey = 'haptic_feedback_enabled';
+  static const _receiveVibrationStorageKey = 'receive_vibration_enabled';
   static const _conversationHistoryStorageKey = 'conversation_history_v1';
   static const _seenIncomingEventIdsStorageKey = 'seen_incoming_event_ids_v1';
   static const _unreadCountsStorageKey = 'unread_counts_v1';
@@ -230,6 +231,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _workingAnimationStorageKey,
     _workingAnimationSpeedStorageKey,
     _hapticFeedbackStorageKey,
+    _receiveVibrationStorageKey,
     _conversationHistoryStorageKey,
     _seenIncomingEventIdsStorageKey,
     _unreadCountsStorageKey,
@@ -296,6 +298,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       WorkingAnimationStyle.digitalFlow;
   double _workingAnimationSpeed = 1.0;
   bool _hapticFeedbackEnabled = true;
+  bool _receiveVibrationEnabled = true;
   String _ttsLanguage = 'en-US';
   String? _ttsEngine;
   List<String> _ttsLanguages = const ['en-US'];
@@ -362,7 +365,51 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               message.timestamp.isAtSameMomentAs(cutoff),
         )
         .toList();
-    return sortConversationMessagesChronological(filtered);
+    return _sortVisibleConversationMessages(filtered);
+  }
+
+  List<ConversationMessage> _sortVisibleConversationMessages(
+    Iterable<ConversationMessage> messages,
+  ) {
+    final sorted = sortConversationMessagesChronological(messages);
+    final pendingEventIds = sorted
+        .where(
+          (message) =>
+              message.direction == MessageDirection.incoming &&
+              message.kind == 'processing' &&
+              message.eventId.trim().isNotEmpty,
+        )
+        .map((message) => message.eventId)
+        .toSet();
+    if (pendingEventIds.isEmpty) return sorted;
+
+    return sorted..sort((left, right) {
+      final pendingCompare = _visibleMessagePendingRank(
+        left,
+        pendingEventIds,
+      ).compareTo(_visibleMessagePendingRank(right, pendingEventIds));
+      if (pendingCompare != 0) return pendingCompare;
+      return compareConversationMessagesChronological(left, right);
+    });
+  }
+
+  int _visibleMessagePendingRank(
+    ConversationMessage message,
+    Set<String> pendingEventIds,
+  ) {
+    final eventId = message.eventId.trim();
+    if (eventId.isEmpty || !pendingEventIds.contains(eventId)) return 0;
+    if (message.direction == MessageDirection.outgoing &&
+        (message.kind == 'query' ||
+            message.kind == 'transcript' ||
+            message.kind == 'audio')) {
+      return 1;
+    }
+    if (message.direction == MessageDirection.incoming &&
+        message.kind == 'processing') {
+      return 2;
+    }
+    return 0;
   }
 
   Future<void> _loadConversationHistoryForActiveSession() async {
@@ -515,6 +562,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       key: _workingAnimationSpeedStorageKey,
     );
     final hapticFeedback = await _storage.read(key: _hapticFeedbackStorageKey);
+    final receiveVibration = await _storage.read(
+      key: _receiveVibrationStorageKey,
+    );
     final seenEventIds = await _storage.read(
       key: _seenIncomingEventIdsStorageKey,
     );
@@ -563,6 +613,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         5.0,
       );
       _hapticFeedbackEnabled = _storedBool(hapticFeedback, true);
+      _receiveVibrationEnabled = _storedBool(receiveVibration, true);
       _seenIncomingEventIds
         ..clear()
         ..addAll(_decodeSeenEventIds(seenEventIds));
@@ -644,6 +695,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _saveTtsSettings();
     await _saveWorkingAnimationStyle();
     await _saveHapticFeedbackEnabled();
+    await _saveReceiveVibrationEnabled();
   }
 
   Future<void> _exportProfile() async {
@@ -2249,6 +2301,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             workingAnimationStyle: _workingAnimationStyle,
             workingAnimationSpeed: _workingAnimationSpeed,
             hapticFeedbackEnabled: _hapticFeedbackEnabled,
+            receiveVibrationEnabled: _receiveVibrationEnabled,
             language: _ttsLanguage,
             languages: _ttsLanguages,
             engine: _ttsEngine,
@@ -2343,6 +2396,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onWorkingAnimationChanged: _setWorkingAnimationStyle,
             onWorkingAnimationSpeedChanged: _setWorkingAnimationSpeed,
             onHapticFeedbackChanged: _setHapticFeedbackEnabled,
+            onReceiveVibrationChanged: _setReceiveVibrationEnabled,
             onLanguageChanged: _setTtsLanguage,
             onEngineChanged: _setTtsEngine,
             onRateChanged: (value) {
@@ -2475,6 +2529,21 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     unawaited(_saveHapticFeedbackEnabled(enabled));
     if (enabled) {
       unawaited(_performTapHapticFeedback());
+    }
+  }
+
+  Future<void> _saveReceiveVibrationEnabled([bool? enabled]) async {
+    await _storage.write(
+      key: _receiveVibrationStorageKey,
+      value: (enabled ?? _receiveVibrationEnabled).toString(),
+    );
+  }
+
+  void _setReceiveVibrationEnabled(bool enabled) {
+    setState(() => _receiveVibrationEnabled = enabled);
+    unawaited(_saveReceiveVibrationEnabled(enabled));
+    if (enabled) {
+      unawaited(_replyVibrate());
     }
   }
 
@@ -3371,6 +3440,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         setState(() {
           _status = 'Transcription received';
         });
+        _vibrateForLiveIncomingMessage(message, fromCatchUp: fromCatchUp);
         return true;
       }
     }
@@ -3468,14 +3538,24 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         ),
       );
     }
-    if (!fromCatchUp && completesPendingRequest) {
-      unawaited(_vibrateForReplyReceived());
-    }
+    _vibrateForLiveIncomingMessage(message, fromCatchUp: fromCatchUp);
     return true;
   }
 
-  Future<void> _vibrateForReplyReceived() async {
-    if (!_hapticFeedbackEnabled || !Platform.isAndroid) return;
+  void _vibrateForLiveIncomingMessage(
+    BridgeIncomingMessage message, {
+    required bool fromCatchUp,
+  }) {
+    if (!_receiveVibrationEnabled ||
+        fromCatchUp ||
+        message.kind == 'status' ||
+        !Platform.isAndroid) {
+      return;
+    }
+    unawaited(_replyVibrate());
+  }
+
+  Future<void> _replyVibrate() async {
     try {
       await _ttsControlChannel.invokeMethod<void>('replyVibrate');
     } catch (_) {}
@@ -5104,6 +5184,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             )
           : _buildSessionDropdownLabel(selected, titleStyle, compact: true);
     }
+    final orderedTargets = [
+      selected,
+      for (final target in activeTargets)
+        if (target.id != selected.id) target,
+    ];
 
     return DropdownButtonHideUnderline(
       child: DropdownButton<String>(
@@ -5112,11 +5197,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         iconEnabledColor: Theme.of(context).colorScheme.onSurface,
         style: titleStyle,
         selectedItemBuilder: (context) => [
-          for (final target in activeTargets)
+          for (final target in orderedTargets)
             _buildSessionDropdownLabel(target, titleStyle, compact: true),
         ],
         items: [
-          for (final target in activeTargets)
+          for (final target in orderedTargets)
             DropdownMenuItem<String>(
               value: target.id,
               child: _buildSessionDropdownLabel(target, titleStyle),

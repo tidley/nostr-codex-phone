@@ -183,6 +183,10 @@ async fn uploads_random_300kb_blobs_for_text_and_audio_notes() {
 
         assert!(!attachment.sha256.is_empty(), "{label}: missing sha256");
         assert!(attachment.size > 0, "{label}: expected non-empty upload");
+        assert_eq!(
+            attachment.media_type,
+            content_type.split(';').next().unwrap()
+        );
         assert!(
             elapsed < Duration::from_secs(10),
             "{label} upload took too long: {elapsed:?}"
@@ -199,8 +203,14 @@ async fn uploads_random_300kb_blobs_for_text_and_audio_notes() {
     assert_eq!(observed.len(), 2, "expected two uploads");
     assert_eq!(observed[0].path, "/upload");
     assert_eq!(observed[1].path, "/upload");
-    assert_eq!(observed[0].content_type.as_deref(), Some("text/plain"));
-    assert_eq!(observed[1].content_type.as_deref(), Some("audio/ogg"));
+    assert_eq!(
+        observed[0].content_type.as_deref(),
+        Some("application/octet-stream")
+    );
+    assert_eq!(
+        observed[1].content_type.as_deref(),
+        Some("application/octet-stream")
+    );
     assert!(observed[0].content_length >= SIZE);
     assert!(observed[1].content_length >= SIZE);
     assert_ne!(observed[0].x_sha256, None);

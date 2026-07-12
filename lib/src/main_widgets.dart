@@ -509,6 +509,7 @@ class _SettingsPage extends StatelessWidget {
     required this.workingAnimationStyle,
     required this.workingAnimationSpeed,
     required this.hapticFeedbackEnabled,
+    required this.receiveVibrationEnabled,
     required this.language,
     required this.languages,
     required this.engine,
@@ -535,6 +536,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onWorkingAnimationChanged,
     required this.onWorkingAnimationSpeedChanged,
     required this.onHapticFeedbackChanged,
+    required this.onReceiveVibrationChanged,
     required this.onLanguageChanged,
     required this.onEngineChanged,
     required this.onRateChanged,
@@ -565,6 +567,7 @@ class _SettingsPage extends StatelessWidget {
   final WorkingAnimationStyle workingAnimationStyle;
   final double workingAnimationSpeed;
   final bool hapticFeedbackEnabled;
+  final bool receiveVibrationEnabled;
   final String language;
   final List<String> languages;
   final String? engine;
@@ -591,6 +594,7 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<WorkingAnimationStyle> onWorkingAnimationChanged;
   final ValueChanged<double> onWorkingAnimationSpeedChanged;
   final ValueChanged<bool> onHapticFeedbackChanged;
+  final ValueChanged<bool> onReceiveVibrationChanged;
   final ValueChanged<String> onLanguageChanged;
   final ValueChanged<String?> onEngineChanged;
   final ValueChanged<double> onRateChanged;
@@ -665,7 +669,9 @@ class _SettingsPage extends StatelessWidget {
           const SizedBox(height: 16),
           _HapticFeedbackSettings(
             initialEnabled: hapticFeedbackEnabled,
+            initialReceiveVibrationEnabled: receiveVibrationEnabled,
             onChanged: onHapticFeedbackChanged,
+            onReceiveVibrationChanged: onReceiveVibrationChanged,
           ),
           const SizedBox(height: 16),
           Card(
@@ -848,11 +854,15 @@ class _WorkingAnimationSettingsState extends State<_WorkingAnimationSettings> {
 class _HapticFeedbackSettings extends StatefulWidget {
   const _HapticFeedbackSettings({
     required this.initialEnabled,
+    required this.initialReceiveVibrationEnabled,
     required this.onChanged,
+    required this.onReceiveVibrationChanged,
   });
 
   final bool initialEnabled;
+  final bool initialReceiveVibrationEnabled;
   final ValueChanged<bool> onChanged;
+  final ValueChanged<bool> onReceiveVibrationChanged;
 
   @override
   State<_HapticFeedbackSettings> createState() =>
@@ -861,11 +871,13 @@ class _HapticFeedbackSettings extends StatefulWidget {
 
 class _HapticFeedbackSettingsState extends State<_HapticFeedbackSettings> {
   late bool _enabled;
+  late bool _receiveVibrationEnabled;
 
   @override
   void initState() {
     super.initState();
     _enabled = widget.initialEnabled;
+    _receiveVibrationEnabled = widget.initialReceiveVibrationEnabled;
   }
 
   @override
@@ -874,20 +886,39 @@ class _HapticFeedbackSettingsState extends State<_HapticFeedbackSettings> {
     if (oldWidget.initialEnabled != widget.initialEnabled) {
       _enabled = widget.initialEnabled;
     }
+    if (oldWidget.initialReceiveVibrationEnabled !=
+        widget.initialReceiveVibrationEnabled) {
+      _receiveVibrationEnabled = widget.initialReceiveVibrationEnabled;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Card(
-      child: SwitchListTile(
-        secondary: const Icon(Icons.vibration),
-        title: const Text('Haptic feedback'),
-        subtitle: const Text('Record start and send taps'),
-        value: _enabled,
-        onChanged: (enabled) {
-          setState(() => _enabled = enabled);
-          widget.onChanged(enabled);
-        },
+      child: Column(
+        children: [
+          SwitchListTile(
+            secondary: const Icon(Icons.vibration),
+            title: const Text('Haptic feedback'),
+            subtitle: const Text('Record start and send taps'),
+            value: _enabled,
+            onChanged: (enabled) {
+              setState(() => _enabled = enabled);
+              widget.onChanged(enabled);
+            },
+          ),
+          const Divider(height: 1),
+          SwitchListTile(
+            secondary: const Icon(Icons.notifications_active_outlined),
+            title: const Text('Vibrate on received messages'),
+            subtitle: const Text('Live session replies and transcripts'),
+            value: _receiveVibrationEnabled,
+            onChanged: (enabled) {
+              setState(() => _receiveVibrationEnabled = enabled);
+              widget.onReceiveVibrationChanged(enabled);
+            },
+          ),
+        ],
       ),
     );
   }
@@ -2220,7 +2251,7 @@ class _MessageTileState extends State<_MessageTile>
           curve: Curves.easeOut,
           width: 58,
           decoration: BoxDecoration(
-            color: outgoingBubbleColor,
+            color: colorScheme.surfaceContainerHigh,
             borderRadius: BorderRadius.circular(12),
           ),
           clipBehavior: Clip.antiAlias,
@@ -2251,7 +2282,7 @@ class _MessageTileState extends State<_MessageTile>
                 child: DigitalThinkingIndicator(
                   width: 34,
                   height: 20,
-                  color: colorScheme.onPrimaryContainer,
+                  color: colorScheme.primary,
                   style: widget.workingAnimationStyle,
                   speed: widget.workingAnimationSpeed,
                 ),
