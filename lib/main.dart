@@ -374,6 +374,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _messagesByTarget[activeKey] ?? const [],
         loaded,
       );
+      _syncPendingReplyTarget(activeKey);
     });
     _scrollToLatestMessage();
   }
@@ -389,6 +390,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     return sortConversationMessagesNewestFirst(
       byKey.values,
     ).take(_maxConversationMessages).toList();
+  }
+
+  bool _isVolatileConversationMessage(ConversationMessage message) {
+    if (message.direction == MessageDirection.incoming &&
+        message.kind == 'processing') {
+      return true;
+    }
+    return message.direction == MessageDirection.outgoing &&
+        (message.kind == 'recording' || message.kind == 'transcribing');
   }
 
   String _conversationMessageMergeKey(ConversationMessage message) {
@@ -1732,11 +1742,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (rawMessages is! List) return [];
 
     final messages = <ConversationMessage>[];
+    var removedVolatile = false;
     for (final item in rawMessages) {
       final conversationMessage = ConversationMessage.fromJson(item);
-      if (conversationMessage != null) {
+      if (conversationMessage == null) continue;
+      if (_isVolatileConversationMessage(conversationMessage)) {
+        removedVolatile = true;
+      } else {
         messages.add(conversationMessage);
       }
+    }
+    if (removedVolatile) {
+      store[conversationKey] = messages.map((item) => item.toJson()).toList();
+      unawaited(_writeConversationHistoryStore(store));
     }
     return sortConversationMessagesNewestFirst(messages);
   }
@@ -1754,7 +1772,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final messages = _messagesByTarget[conversationKey];
     if (messages == null) return;
     final trimmed = sortConversationMessagesNewestFirst(
-      messages,
+      messages.where((message) => !_isVolatileConversationMessage(message)),
     ).take(_maxConversationMessages).toList();
     final store = await _readConversationHistoryStore();
     store[conversationKey] = trimmed.map((item) => item.toJson()).toList();
@@ -3450,7 +3468,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         ),
       );
     }
+    if (!fromCatchUp && completesPendingRequest) {
+      unawaited(_vibrateForReplyReceived());
+    }
     return true;
+  }
+
+  Future<void> _vibrateForReplyReceived() async {
+    if (!_hapticFeedbackEnabled || !Platform.isAndroid) return;
+    try {
+      await _ttsControlChannel.invokeMethod<void>('replyVibrate');
+    } catch (_) {}
   }
 
   bool _rememberIncomingEventId(String eventId) {
