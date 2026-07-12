@@ -1,6 +1,7 @@
 package com.tidley.nostrcodexphone
 
 import android.content.Context
+import android.media.AudioManager
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -27,6 +28,10 @@ class MainActivity : FlutterActivity() {
                 }
                 "hapticTap" -> {
                     hapticTap()
+                    result.success(null)
+                }
+                "replyVibrate" -> {
+                    replyVibrate()
                     result.success(null)
                 }
 
@@ -69,6 +74,23 @@ class MainActivity : FlutterActivity() {
         } else {
             @Suppress("DEPRECATION")
             vibrator.vibrate(48)
+        }
+    }
+
+    private fun replyVibrate() {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        if (audioManager?.ringerMode == AudioManager.RINGER_MODE_SILENT) return
+
+        val vibrator = currentVibrator() ?: return
+        if (!vibrator.hasVibrator()) return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vibrator.vibrate(
+                VibrationEffect.createOneShot(160, VibrationEffect.DEFAULT_AMPLITUDE)
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(160)
         }
     }
 
