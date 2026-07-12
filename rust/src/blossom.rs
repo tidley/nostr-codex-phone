@@ -10,11 +10,11 @@ use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::audio_crypto::encrypt_audio_payload;
+use crate::audio_crypto::{encrypt_audio_payload, wrap_encrypted_payload_as_png};
 use crate::protocol::AudioReference;
 
 const BLOSSOM_AUTH_KIND: u16 = 24_242;
-const ENCRYPTED_BLOB_CONTENT_TYPE: &str = "application/octet-stream";
+const ENCRYPTED_BLOB_CONTENT_TYPE: &str = "image/png";
 const BLOSSOM_UPLOAD_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Clone)]
@@ -44,7 +44,8 @@ pub async fn upload_audio(config: BlossomUploadConfig) -> Result<AudioReference>
     }
 
     let content_type = clean_content_type(&config.content_type);
-    let (upload_bytes, encryption) = encrypt_audio_payload(&plaintext, &content_type)?;
+    let (ciphertext, encryption) = encrypt_audio_payload(&plaintext, &content_type)?;
+    let upload_bytes = wrap_encrypted_payload_as_png(&ciphertext);
     let sha256 = sha256_hex(&upload_bytes);
     let upload_len = upload_bytes.len();
     let upload_url = upload_url(&config.server_url)?;

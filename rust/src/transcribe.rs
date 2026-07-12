@@ -22,7 +22,7 @@ use symphonia::default::{get_codecs, get_probe};
 use tempfile::TempDir;
 use tokio::process::Command;
 
-use crate::audio_crypto::decrypt_audio_payload;
+use crate::audio_crypto::{decrypt_audio_payload, unwrap_encrypted_payload};
 use crate::blossom::sha256_hex;
 use crate::protocol::AudioReference;
 
@@ -148,7 +148,8 @@ pub async fn download_blossom_attachment(
     }
 
     let (attachment_bytes, attachment_hash) = if let Some(encryption) = &attachment.encryption {
-        let plaintext = decrypt_audio_payload(&bytes, encryption)?;
+        let ciphertext = unwrap_encrypted_payload(&bytes)?;
+        let plaintext = decrypt_audio_payload(&ciphertext, encryption)?;
         if plaintext.len() as u64 > config.max_bytes {
             return Err(anyhow!(
                 "decrypted attachment is too large: {} bytes > {} byte limit",
