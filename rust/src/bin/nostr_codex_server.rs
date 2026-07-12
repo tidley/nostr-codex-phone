@@ -2812,6 +2812,10 @@ fn handle_local_request(
     let normalized = normalize_transcript(request);
     let request_class = classify_request(request);
 
+    if let Some(response) = handle_tool_request(memory, peer_pubkey, request, workdir) {
+        return Some(response);
+    }
+
     match command.as_str() {
         "/memory" | "/summary" => {
             return Some(match memory.as_ref() {
@@ -2833,6 +2837,15 @@ fn handle_local_request(
         "/workers" | "/sessions" => {
             return Some(worker_registry_status_text(workdir));
         }
+        "/status" | "/agent-status" => {
+            return Some(local_status_text(memory, peer_pubkey, workdir));
+        }
+        "/git" | "/git-status" => return Some(git_status_text(workdir)),
+        "/diff" => return Some(git_diff_text(workdir)),
+        "/history" | "/task-history" => return Some(task_history_text(memory, peer_pubkey)),
+        "/model" | "/models" | "/config" => return Some(agent_config_text()),
+        "/commit" => return Some(commit_help_text(workdir)),
+        "/release" => return Some(release_help_text()),
         _ => {}
     }
 
@@ -2872,6 +2885,175 @@ fn handle_local_request(
         | RequestClass::Coding
         | RequestClass::Clarification
         | RequestClass::MemoryLookup => None,
+    }
+}
+
+fn handle_tool_request(
+    memory: &mut Option<MemoryStore>,
+    peer_pubkey: &str,
+    request: &str,
+    workdir: &Path,
+) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(request.trim()).ok()?;
+    let object = value.as_object()?;
+    let tool = object
+        .get("tool_request")
+        .or_else(|| object.get("tool"))
+        .and_then(|value| value.as_str())?
+        .trim();
+    match tool {
+        "status" => Some(local_status_text(memory, peer_pubkey, workdir)),
+        "git_status" => Some(git_status_text(workdir)),
+        "diff" => Some(git_diff_text(workdir)),
+        "history" => Some(task_history_text(memory, peer_pubkey)),
+        "model_config" => Some(agent_config_text()),
+        "commit_help" => Some(commit_help_text(workdir)),
+        "release_help" => Some(release_help_text()),
+        "read_file" => Some(read_file_request_text(object, workdir)),
+        _ => Some(format!("Unknown tool request `{tool}`.")),
+    }
+}
+
+fn git_status_text(workdir: &Path) -> String {
+    let branch = run_git(workdir, &["branch", "--show-current"]).unwrap_or_else(|err| err);
+    let latest = run_git(workdir, &["log", "--oneline", "-1"]).unwrap_or_else(|err| err);
+    let porcelain = run_git(workdir, &["status", "--short"]).unwrap_or_else(|err| err);
+    let staged = run_git(workdir, &["diff", "--cached", "--stat"]).unwrap_or_else(|err| err);
+    format!(
+        "Git status\nBranch: {}\nLatest: {}\n\nDirty files:\n{}\n\nStaged:\n{}",
+        branch.trim().if_empty("unknown"),
+        latest.trim().if_empty("none"),
+        porcelain.trim().if_empty("clean"),
+        staged.trim().if_empty("none")
+    )
+}
+
+fn git_diff_text(workdir: &Path) -> String {
+    let stat = run_git(workdir, &["diff", "--stat"]).unwrap_or_else(|err| err);
+    let diff = run_git(workdir, &["diff", "--", "."]).unwrap_or_else(|err| err);
+    format!(
+        "Git diff\n{}\n\n{}",
+        stat.trim().if_empty("No unstaged diff."),
+        truncate_text(diff.trim().if_empty("No patch."), 18000)
+    )
+}
+
+fn commit_help_text(workdir: &Path) -> String {
+    let status = git_status_text(workdir);
+    let diff = run_git(workdir, &["diff", "--stat"]).unwrap_or_else(|err| err);
+    format!(
+        "Commit prep only. Review this, edit a commit message on the phone, then ask OpenCode to commit.\n\n{}\n\nSuggested message:\n{}",
+        status,
+        suggest_commit_message(&diff)
+    )
+}
+
+fn release_help_text() -> String {
+    "Release workflow buttons send prompts only; the agent still performs checks. Typical flow: analyze/test, build APK, package assets, create GitHub release, install worker, restart service.".to_string()
+}
+
+fn agent_config_text() -> String {
+    let backend = env::var("AGENT_BACKEND").unwrap_or_else(|_| "opencode".to_string());
+    let opencode_url =
+        env::var("OPENCODE_URL").unwrap_or_else(|_| "http://127.0.0.1:4096".to_string());
+    let agent = env::var("OPENCODE_AGENT").unwrap_or_else(|_| "build".to_string());
+    let model = env::var("OPENCODE_MODEL").unwrap_or_else(|_| "default".to_string());
+    format!(
+        "Agent config\nBackend: {backend}\nOpenCode URL: {opencode_url}\nAgent: {agent}\nModel: {model}\n\nSubagents are configured in OpenCode config/skills; this app can show current env-selected agent/model."
+    )
+}
+
+fn task_history_text(memory: &Option<MemoryStore>, peer_pubkey: &str) -> String {
+    match memory.as_ref() {
+        Some(memory) => memory
+            .history_text(peer_pubkey, 12)
+            .unwrap_or_else(|err| format!("Task history failed: {err:#}")),
+        None => "Task history requires memory to be enabled.".to_string(),
+    }
+}
+
+fn read_file_request_text(
+    object: &serde_json::Map<String, serde_json::Value>,
+    workdir: &Path,
+) -> String {
+    let Some(path) = object.get("path").and_then(|value| value.as_str()) else {
+        return "Read file requires a `path`.".to_string();
+    };
+    read_file_text(workdir, path)
+}
+
+fn read_file_text(workdir: &Path, requested: &str) -> String {
+    let path = PathBuf::from(clean_path_argument(requested));
+    let path = if path.is_absolute() {
+        path
+    } else {
+        workdir.join(path)
+    };
+    let canonical = match path.canonicalize() {
+        Ok(path) => path,
+        Err(err) => return format!("Could not read `{requested}`: {err}"),
+    };
+    let root = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf());
+    if !canonical.starts_with(&root) {
+        return format!("Refusing to read outside `{}`.", root.display());
+    }
+    match fs::read_to_string(&canonical) {
+        Ok(raw) => format!("{}\n\n{}", canonical.display(), truncate_text(&raw, 18000)),
+        Err(err) => format!("Could not read `{}`: {err}", canonical.display()),
+    }
+}
+
+fn run_git(workdir: &Path, args: &[&str]) -> std::result::Result<String, String> {
+    let output = StdCommand::new("git")
+        .args(args)
+        .current_dir(workdir)
+        .output()
+        .map_err(|err| format!("git {} failed: {err}", args.join(" ")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        Ok(stdout)
+    } else if stderr.is_empty() {
+        Err(format!(
+            "git {} exited with {}",
+            args.join(" "),
+            output.status
+        ))
+    } else {
+        Err(stderr)
+    }
+}
+
+fn suggest_commit_message(diff_stat: &str) -> &'static str {
+    if diff_stat.trim().is_empty() {
+        "chore: no changes to commit"
+    } else {
+        "feat: update mobile OpenCode tools"
+    }
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut output = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        output.push_str("\n[truncated]");
+    }
+    output
+}
+
+trait IfEmpty {
+    fn if_empty<'a>(&'a self, fallback: &'a str) -> &'a str;
+}
+
+impl IfEmpty for str {
+    fn if_empty<'a>(&'a self, fallback: &'a str) -> &'a str {
+        if self.is_empty() {
+            fallback
+        } else {
+            self
+        }
     }
 }
 
@@ -3951,6 +4133,13 @@ mod tests {
     static ENV_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
         once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
 
+    fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
+        match value {
+            Some(value) => env::set_var(key, value),
+            None => env::remove_var(key),
+        }
+    }
+
     #[test]
     fn rejects_low_information_transcripts() {
         let response = low_information_transcript_response("You").unwrap();
@@ -4412,6 +4601,8 @@ mod tests {
     fn rejects_existing_spawn_outside_worker_root() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let previous_workdir = env::var_os("CODEX_WORKDIR");
+        let previous_spawn_roots = env::var_os("NOSTR_SPAWN_ROOTS");
+        let previous_allowed_roots = env::var_os("NOSTR_ALLOWED_WORKDIR_ROOTS");
 
         let temp_dir = tempfile::tempdir().unwrap();
         let current_workdir = temp_dir.path().join("worker-root");
@@ -4419,6 +4610,8 @@ mod tests {
         fs::create_dir_all(&current_workdir).unwrap();
         fs::create_dir_all(&outside).unwrap();
         env::remove_var("CODEX_WORKDIR");
+        env::remove_var("NOSTR_SPAWN_ROOTS");
+        env::remove_var("NOSTR_ALLOWED_WORKDIR_ROOTS");
 
         let request = SpawnWorkerRequest {
             workdir: outside.to_string_lossy().to_string(),
@@ -4432,6 +4625,8 @@ mod tests {
             Some(value) => env::set_var("CODEX_WORKDIR", value),
             None => env::remove_var("CODEX_WORKDIR"),
         }
+        restore_env_var("NOSTR_SPAWN_ROOTS", previous_spawn_roots);
+        restore_env_var("NOSTR_ALLOWED_WORKDIR_ROOTS", previous_allowed_roots);
 
         assert!(error.to_string().contains("outside the allowed folders"));
     }
@@ -4440,12 +4635,16 @@ mod tests {
     fn rejects_spawn_create_outside_worker_root() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let previous_workdir = env::var_os("CODEX_WORKDIR");
+        let previous_spawn_roots = env::var_os("NOSTR_SPAWN_ROOTS");
+        let previous_allowed_roots = env::var_os("NOSTR_ALLOWED_WORKDIR_ROOTS");
 
         let temp_dir = tempfile::tempdir().unwrap();
         let current_workdir = temp_dir.path().join("worker-root");
         fs::create_dir_all(&current_workdir).unwrap();
         fs::create_dir_all(temp_dir.path().join("tmp")).unwrap();
         env::remove_var("CODEX_WORKDIR");
+        env::remove_var("NOSTR_SPAWN_ROOTS");
+        env::remove_var("NOSTR_ALLOWED_WORKDIR_ROOTS");
 
         let request = SpawnWorkerRequest {
             workdir: "../tmp/new-repo".to_string(),
@@ -4459,6 +4658,8 @@ mod tests {
             Some(value) => env::set_var("CODEX_WORKDIR", value),
             None => env::remove_var("CODEX_WORKDIR"),
         }
+        restore_env_var("NOSTR_SPAWN_ROOTS", previous_spawn_roots);
+        restore_env_var("NOSTR_ALLOWED_WORKDIR_ROOTS", previous_allowed_roots);
 
         assert!(error
             .to_string()

@@ -6,6 +6,7 @@ const _recordingButtonForegroundColor = Colors.black;
 class _SessionDrawer extends StatelessWidget {
   const _SessionDrawer({
     required this.targets,
+    required this.recentTargetIds,
     required this.selectedTargetId,
     required this.connectedTargetId,
     required this.canSelectTargets,
@@ -19,11 +20,13 @@ class _SessionDrawer extends StatelessWidget {
     required this.onOpenCodeSessions,
     required this.onRestartTarget,
     required this.onRenameTarget,
+    required this.onTogglePinTarget,
     required this.onOpenSettings,
     required this.onDeleteTarget,
   });
 
   final List<RepoTarget> targets;
+  final List<String> recentTargetIds;
   final String? selectedTargetId;
   final String? connectedTargetId;
   final bool canSelectTargets;
@@ -37,6 +40,7 @@ class _SessionDrawer extends StatelessWidget {
   final VoidCallback onOpenCodeSessions;
   final ValueChanged<RepoTarget> onRestartTarget;
   final ValueChanged<RepoTarget> onRenameTarget;
+  final ValueChanged<RepoTarget> onTogglePinTarget;
   final VoidCallback onOpenSettings;
   final ValueChanged<String> onDeleteTarget;
 
@@ -53,6 +57,23 @@ class _SessionDrawer extends StatelessWidget {
         canSelectTargets && selectedTarget?.workdir?.trim().isNotEmpty == true;
     final selectedOpenCodeSession = selectedTarget?.opencodeSessionTitle
         ?.trim();
+    final recentRank = {
+      for (var i = 0; i < recentTargetIds.length; i++) recentTargetIds[i]: i,
+    };
+    final sortedTargets = [...targets]
+      ..sort((left, right) {
+        if (left.isMasterSession != right.isMasterSession) {
+          return left.isMasterSession ? -1 : 1;
+        }
+        final recent = (recentRank[left.id] ?? 9999).compareTo(
+          recentRank[right.id] ?? 9999,
+        );
+        if (recent != 0) return recent;
+        return left.displayName.toLowerCase().compareTo(
+          right.displayName.toLowerCase(),
+        );
+      });
+    var sessionSearchQuery = '';
 
     return Drawer(
       child: SafeArea(
@@ -93,165 +114,249 @@ class _SessionDrawer extends StatelessWidget {
             ),
             const Divider(height: 1),
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.only(top: 8),
-                children: [
-                  for (final target in targets)
-                    Builder(
-                      builder: (context) {
-                        final theme = Theme.of(context);
-                        final dark = theme.brightness == Brightness.dark;
-                        final activeColor = dark
-                            ? const Color(0xff81c784)
-                            : const Color(0xff2e7d32);
-                        final loadedColor = dark
-                            ? const Color(0xff90caf9)
-                            : const Color(0xff1565c0);
-                        final unreadCount =
-                            unreadCountsByTarget[target.id] ?? 0;
-                        final hasWorkdir =
-                            target.workdir?.trim().isNotEmpty == true;
-                        final selected = target.id == selectedTargetId;
-                        final connected = target.id == connectedTargetId;
-                        final loaded = loadedTargetIds.contains(target.id);
-                        final pending = pendingReplyTargetIds.contains(
-                          target.id,
-                        );
-                        final statusColor = selected
-                            ? activeColor
-                            : connected || loaded
-                            ? loadedColor
-                            : null;
-                        final tileColor = selected
-                            ? activeColor.withValues(alpha: 0.12)
-                            : connected || loaded
-                            ? loadedColor.withValues(alpha: 0.08)
-                            : null;
-                        final menu = PopupMenuButton<_SessionDrawerAction>(
-                          onSelected: (action) async {
-                            if (action == _SessionDrawerAction.restart) {
-                              onRestartTarget(target);
-                            } else if (action == _SessionDrawerAction.rename) {
-                              onRenameTarget(target);
-                            } else if (action == _SessionDrawerAction.delete) {
-                              final shouldDelete = await _confirmDelete(
-                                context,
-                                target,
-                              );
-                              if (shouldDelete && context.mounted) {
-                                onDeleteTarget(target.id);
-                              }
-                            }
-                          },
-                          itemBuilder: (context) => [
-                            PopupMenuItem(
-                              value: _SessionDrawerAction.restart,
-                              enabled: hasWorkdir,
-                              child: const ListTile(
-                                dense: true,
-                                contentPadding: EdgeInsets.zero,
-                                leading: Icon(Icons.restart_alt),
-                                title: Text('Restart'),
+              child: StatefulBuilder(
+                builder: (context, refreshSessions) {
+                  final query = sessionSearchQuery.trim().toLowerCase();
+                  final visibleTargets = query.isEmpty
+                      ? sortedTargets
+                      : sortedTargets.where((target) {
+                          return target.displayName.toLowerCase().contains(
+                                query,
+                              ) ||
+                              (target.workdir ?? '').toLowerCase().contains(
+                                query,
+                              ) ||
+                              target.pubkey.toLowerCase().contains(query);
+                        }).toList();
+                  return Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                        child: TextField(
+                          decoration: const InputDecoration(
+                            prefixIcon: Icon(Icons.search),
+                            labelText: 'Search sessions',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          onChanged: (value) =>
+                              refreshSessions(() => sessionSearchQuery = value),
+                        ),
+                      ),
+                      Expanded(
+                        child: ListView(
+                          padding: const EdgeInsets.only(top: 4),
+                          children: [
+                            if (visibleTargets.isEmpty)
+                              const ListTile(
+                                leading: Icon(Icons.search_off),
+                                title: Text('No matching sessions'),
                               ),
-                            ),
-                            const PopupMenuItem(
-                              value: _SessionDrawerAction.rename,
-                              child: ListTile(
-                                dense: true,
-                                contentPadding: EdgeInsets.zero,
-                                leading: Icon(Icons.edit),
-                                title: Text('Rename'),
-                              ),
-                            ),
-                            const PopupMenuItem(
-                              value: _SessionDrawerAction.delete,
-                              child: ListTile(
-                                dense: true,
-                                contentPadding: EdgeInsets.zero,
-                                leading: Icon(Icons.delete_outline),
-                                title: Text('Delete'),
-                              ),
-                            ),
-                          ],
-                        );
-                        return ListTile(
-                          selected: selected,
-                          selectedColor: activeColor,
-                          selectedTileColor: tileColor,
-                          tileColor: selected ? null : tileColor,
-                          leading: Badge(
-                            isLabelVisible: unreadCount > 0,
-                            smallSize: 9,
-                            child: SizedBox.square(
-                              dimension: 30,
-                              child: Stack(
-                                alignment: Alignment.center,
-                                children: [
-                                  if (pending)
-                                    SizedBox.square(
-                                      dimension: 28,
-                                      child: Center(
-                                        child: workingAnimationStyle.enabled
-                                            ? DigitalThinkingIndicator(
-                                                width: 28,
-                                                height: 16,
-                                                color:
-                                                    statusColor ?? loadedColor,
-                                                style: workingAnimationStyle,
-                                                speed: workingAnimationSpeed,
+                            for (final target in visibleTargets)
+                              Builder(
+                                builder: (context) {
+                                  final theme = Theme.of(context);
+                                  final dark =
+                                      theme.brightness == Brightness.dark;
+                                  final activeColor = dark
+                                      ? const Color(0xff81c784)
+                                      : const Color(0xff2e7d32);
+                                  final loadedColor = dark
+                                      ? const Color(0xff90caf9)
+                                      : const Color(0xff1565c0);
+                                  final unreadCount =
+                                      unreadCountsByTarget[target.id] ?? 0;
+                                  final hasWorkdir =
+                                      target.workdir?.trim().isNotEmpty == true;
+                                  final selected =
+                                      target.id == selectedTargetId;
+                                  final connected =
+                                      target.id == connectedTargetId;
+                                  final loaded = loadedTargetIds.contains(
+                                    target.id,
+                                  );
+                                  final pending = pendingReplyTargetIds
+                                      .contains(target.id);
+                                  final statusColor = selected
+                                      ? activeColor
+                                      : connected || loaded
+                                      ? loadedColor
+                                      : null;
+                                  final tileColor = selected
+                                      ? activeColor.withValues(alpha: 0.12)
+                                      : connected || loaded
+                                      ? loadedColor.withValues(alpha: 0.08)
+                                      : null;
+                                  final menu =
+                                      PopupMenuButton<_SessionDrawerAction>(
+                                        onSelected: (action) async {
+                                          if (action ==
+                                              _SessionDrawerAction.restart) {
+                                            onRestartTarget(target);
+                                          } else if (action ==
+                                              _SessionDrawerAction.pin) {
+                                            onTogglePinTarget(target);
+                                          } else if (action ==
+                                              _SessionDrawerAction.rename) {
+                                            onRenameTarget(target);
+                                          } else if (action ==
+                                              _SessionDrawerAction.delete) {
+                                            final shouldDelete =
+                                                await _confirmDelete(
+                                                  context,
+                                                  target,
+                                                );
+                                            if (shouldDelete &&
+                                                context.mounted) {
+                                              onDeleteTarget(target.id);
+                                            }
+                                          }
+                                        },
+                                        itemBuilder: (context) => [
+                                          PopupMenuItem(
+                                            value: _SessionDrawerAction.pin,
+                                            child: ListTile(
+                                              dense: true,
+                                              contentPadding: EdgeInsets.zero,
+                                              leading: Icon(
+                                                target.isMasterSession
+                                                    ? Icons.push_pin
+                                                    : Icons.push_pin_outlined,
+                                              ),
+                                              title: Text(
+                                                target.isMasterSession
+                                                    ? 'Unpin'
+                                                    : 'Pin',
+                                              ),
+                                            ),
+                                          ),
+                                          PopupMenuItem(
+                                            value: _SessionDrawerAction.restart,
+                                            enabled: hasWorkdir,
+                                            child: const ListTile(
+                                              dense: true,
+                                              contentPadding: EdgeInsets.zero,
+                                              leading: Icon(Icons.restart_alt),
+                                              title: Text('Restart'),
+                                            ),
+                                          ),
+                                          const PopupMenuItem(
+                                            value: _SessionDrawerAction.rename,
+                                            child: ListTile(
+                                              dense: true,
+                                              contentPadding: EdgeInsets.zero,
+                                              leading: Icon(Icons.edit),
+                                              title: Text('Rename'),
+                                            ),
+                                          ),
+                                          const PopupMenuItem(
+                                            value: _SessionDrawerAction.delete,
+                                            child: ListTile(
+                                              dense: true,
+                                              contentPadding: EdgeInsets.zero,
+                                              leading: Icon(
+                                                Icons.delete_outline,
+                                              ),
+                                              title: Text('Delete'),
+                                            ),
+                                          ),
+                                        ],
+                                      );
+                                  return ListTile(
+                                    selected: selected,
+                                    selectedColor: activeColor,
+                                    selectedTileColor: tileColor,
+                                    tileColor: selected ? null : tileColor,
+                                    leading: Badge(
+                                      isLabelVisible: unreadCount > 0,
+                                      smallSize: 9,
+                                      child: SizedBox.square(
+                                        dimension: 30,
+                                        child: Stack(
+                                          alignment: Alignment.center,
+                                          children: [
+                                            if (pending)
+                                              SizedBox.square(
+                                                dimension: 28,
+                                                child: Center(
+                                                  child:
+                                                      workingAnimationStyle
+                                                          .enabled
+                                                      ? DigitalThinkingIndicator(
+                                                          width: 28,
+                                                          height: 16,
+                                                          color:
+                                                              statusColor ??
+                                                              loadedColor,
+                                                          style:
+                                                              workingAnimationStyle,
+                                                          speed:
+                                                              workingAnimationSpeed,
+                                                        )
+                                                      : Icon(
+                                                          connected
+                                                              ? Icons
+                                                                    .cloud_done_outlined
+                                                              : Icons
+                                                                    .chat_bubble_outline,
+                                                          color: statusColor,
+                                                        ),
+                                                ),
                                               )
-                                            : Icon(
+                                            else
+                                              Icon(
                                                 connected
                                                     ? Icons.cloud_done_outlined
                                                     : Icons.chat_bubble_outline,
                                                 color: statusColor,
                                               ),
+                                          ],
+                                        ),
                                       ),
-                                    )
-                                  else
-                                    Icon(
-                                      connected
-                                          ? Icons.cloud_done_outlined
-                                          : Icons.chat_bubble_outline,
-                                      color: statusColor,
                                     ),
-                                ],
+                                    title: Text(
+                                      target.isMasterSession
+                                          ? 'Pinned ${target.displayName}'
+                                          : target.displayName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: statusColor == null
+                                          ? null
+                                          : TextStyle(
+                                              color: statusColor,
+                                              fontWeight: selected || connected
+                                                  ? FontWeight.w700
+                                                  : FontWeight.w600,
+                                            ),
+                                    ),
+                                    subtitle: Text(
+                                      target.workdir?.trim().isNotEmpty == true
+                                          ? target.workdir!
+                                          : compactIdentifier(target.pubkey),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    trailing: unreadCount > 0
+                                        ? Badge(
+                                            label: Text('$unreadCount'),
+                                            child: menu,
+                                          )
+                                        : menu,
+                                    onTap: canSelectTargets
+                                        ? () {
+                                            Navigator.of(context).pop();
+                                            onSelectTarget(target.id);
+                                          }
+                                        : null,
+                                  );
+                                },
                               ),
-                            ),
-                          ),
-                          title: Text(
-                            target.displayName,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: statusColor == null
-                                ? null
-                                : TextStyle(
-                                    color: statusColor,
-                                    fontWeight: selected || connected
-                                        ? FontWeight.w700
-                                        : FontWeight.w600,
-                                  ),
-                          ),
-                          subtitle: Text(
-                            target.workdir?.trim().isNotEmpty == true
-                                ? target.workdir!
-                                : compactIdentifier(target.pubkey),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: unreadCount > 0
-                              ? Badge(label: Text('$unreadCount'), child: menu)
-                              : menu,
-                          onTap: canSelectTargets
-                              ? () {
-                                  Navigator.of(context).pop();
-                                  onSelectTarget(target.id);
-                                }
-                              : null,
-                        );
-                      },
-                    ),
-                ],
+                          ],
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
             ),
             const Divider(height: 1),
@@ -294,7 +399,7 @@ class _SessionDrawer extends StatelessWidget {
   }
 }
 
-enum _SessionDrawerAction { restart, rename, delete }
+enum _SessionDrawerAction { pin, restart, rename, delete }
 
 class _SpawnSessionRequest {
   const _SpawnSessionRequest({required this.path, required this.create});
@@ -1653,6 +1758,7 @@ class _ComposerState extends State<_Composer> {
                     controller: widget.controller,
                     focusNode: widget.focusNode,
                     autofocus: false,
+                    textCapitalization: TextCapitalization.sentences,
                     minLines: 1,
                     maxLines: 4,
                     decoration: const InputDecoration(
