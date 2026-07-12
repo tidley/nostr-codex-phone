@@ -1,6 +1,7 @@
 package com.tidley.nostrcodexphone
 
 import android.content.Context
+import android.media.AudioAttributes
 import android.media.AudioManager
 import android.os.Build
 import android.os.VibrationEffect
@@ -85,12 +86,17 @@ class MainActivity : FlutterActivity() {
         if (!vibrator.hasVibrator()) return
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val attributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
             vibrator.vibrate(
-                VibrationEffect.createOneShot(160, VibrationEffect.DEFAULT_AMPLITUDE)
+                VibrationEffect.createWaveform(longArrayOf(0, 180, 70, 120), -1),
+                attributes
             )
         } else {
             @Suppress("DEPRECATION")
-            vibrator.vibrate(160)
+            vibrator.vibrate(longArrayOf(0, 180, 70, 120), -1)
         }
     }
 
