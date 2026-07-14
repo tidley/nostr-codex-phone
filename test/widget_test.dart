@@ -8,6 +8,7 @@ import 'package:nostr_codex_phone/src/bridge_json.dart';
 import 'package:nostr_codex_phone/src/repo_choice.dart';
 import 'package:nostr_codex_phone/src/repo_target.dart';
 import 'package:nostr_codex_phone/src/text_utils.dart';
+import 'package:nostr_codex_phone/src/tool_result_models.dart';
 import 'package:nostr_codex_phone/src/voice_recording.dart';
 
 void main() {
@@ -124,5 +125,49 @@ repo API JSON RS232 I2C UART CAN BLE
     expect(target.toJson()['is_master_session'], true);
     expect(choice?.displayName, 'phone');
     expect(choice?.toJson()['is_git_repo'], true);
+  });
+
+  test('decodes structured git and file tool results', () {
+    final payload = ToolResultPayload.fromJson({
+      'tool': 'git_status',
+      'request_id': 'request-1',
+      'workdir': '/repo',
+      'data': {
+        'branch': 'main',
+        'clean': false,
+        'latest': {'hash': 'abc123', 'subject': 'Change files'},
+        'files': [
+          {
+            'path': 'lib/main.dart',
+            'index_status': 'M',
+            'worktree_status': ' ',
+            'staged': true,
+            'untracked': false,
+          },
+        ],
+      },
+    });
+
+    expect(payload, isNotNull);
+    final status = GitStatusResult.fromPayload(payload!);
+    expect(status.branch, 'main');
+    expect(status.files.single.path, 'lib/main.dart');
+    expect(status.files.single.statusLabel, 'Staged');
+
+    final file = FileContentResult.fromPayload(
+      ToolResultPayload(
+        tool: 'read_file',
+        requestId: 'request-2',
+        workdir: '/repo',
+        data: const {
+          'path': 'README.md',
+          'content': '# Hello',
+          'line_count': 1,
+          'truncated': false,
+        },
+      ),
+    );
+    expect(file.path, 'README.md');
+    expect(file.lineCount, 1);
   });
 }

@@ -29,7 +29,7 @@ use rust_lib_nostr_codex_phone::nostr_client::{
 use rust_lib_nostr_codex_phone::protocol::{
     parse_media_bundle_query, parse_wire_message, AudioReference, MediaBundle, MediaReference,
     OpenCodeSessionList, OpenCodeSessionListEntry, RepoList, RepoListEntry, RepoListRoot,
-    TargetInvite, TargetParent, WireMessage,
+    TargetInvite, TargetParent, ToolResult, WireMessage,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
@@ -1094,6 +1094,21 @@ async fn process_message(
                     &codex_config,
                 )
                 .await;
+                return;
+            }
+
+            if let Some(tool_result) =
+                structured_tool_result(&message.text, &codex_config.working_dir)
+            {
+                if let Err(err) = messenger
+                    .send_wire_to_pubkey(
+                        &message.sender_pubkey_hex,
+                        WireMessage::tool_result(tool_result),
+                    )
+                    .await
+                {
+                    error!("failed to send structured tool result: {err:#}");
+                }
                 return;
             }
 
@@ -2903,6 +2918,7 @@ fn handle_tool_request(
         .trim();
     match tool {
         "status" => Some(local_status_text(memory, peer_pubkey, workdir)),
+        "git_status" | "diff" | "read_file" if object.get("request_id").is_some() => None,
         "git_status" => Some(git_status_text(workdir)),
         "diff" => Some(git_diff_text(workdir)),
         "history" => Some(task_history_text(memory, peer_pubkey)),
@@ -2911,6 +2927,169 @@ fn handle_tool_request(
         "release_help" => Some(release_help_text()),
         "read_file" => Some(read_file_request_text(object, workdir)),
         _ => Some(format!("Unknown tool request `{tool}`.")),
+    }
+}
+
+fn structured_tool_result(request: &str, workdir: &Path) -> Option<ToolResult> {
+    let value = serde_json::from_str::<serde_json::Value>(request.trim()).ok()?;
+    let object = value.as_object()?;
+    let tool = object.get("tool_request")?.as_str()?.trim();
+    if !matches!(tool, "git_status" | "diff" | "read_file") {
+        return None;
+    }
+    let request_id = object.get("request_id")?.as_str()?.trim();
+    if request_id.is_empty() {
+        return None;
+    }
+
+    let data = match tool {
+        "git_status" => git_status_data(workdir),
+        "diff" => git_diff_data(workdir),
+        "read_file" => object
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(|path| read_file_data(workdir, path))
+            .unwrap_or_else(|| serde_json::json!({ "error": "A file path is required." })),
+        _ => unreachable!(),
+    };
+
+    Some(ToolResult {
+        tool: tool.to_string(),
+        request_id: request_id.to_string(),
+        workdir: workdir.to_string_lossy().to_string(),
+        data,
+    })
+}
+
+fn git_status_data(workdir: &Path) -> serde_json::Value {
+    let branch = run_git(workdir, &["branch", "--show-current"]).unwrap_or_default();
+    let latest_hash = run_git(workdir, &["log", "-1", "--format=%h"]).unwrap_or_default();
+    let latest_subject = run_git(workdir, &["log", "-1", "--format=%s"]).unwrap_or_default();
+    let status = match run_git(
+        workdir,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    ) {
+        Ok(status) => status,
+        Err(error) => return serde_json::json!({ "error": error }),
+    };
+    let files = status
+        .lines()
+        .filter(|line| line.len() >= 3)
+        .take(500)
+        .map(|line| {
+            let index_status = &line[0..1];
+            let worktree_status = &line[1..2];
+            let path = line[3..].split(" -> ").last().unwrap_or_default();
+            serde_json::json!({
+                "path": path,
+                "index_status": index_status,
+                "worktree_status": worktree_status,
+                "staged": index_status != " " && index_status != "?",
+                "untracked": index_status == "?" && worktree_status == "?",
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "branch": branch,
+        "clean": files.is_empty(),
+        "latest": { "hash": latest_hash, "subject": latest_subject },
+        "files": files,
+    })
+}
+
+fn git_diff_data(workdir: &Path) -> serde_json::Value {
+    let name_status = run_git(workdir, &["diff", "HEAD", "--name-status", "--", "."])
+        .or_else(|_| run_git(workdir, &["diff", "--name-status", "--", "."]));
+    let name_status = match name_status {
+        Ok(value) => value,
+        Err(error) => return serde_json::json!({ "error": error }),
+    };
+    let numstat = run_git(workdir, &["diff", "HEAD", "--numstat", "--", "."])
+        .or_else(|_| run_git(workdir, &["diff", "--numstat", "--", "."]))
+        .unwrap_or_default();
+    let stats = numstat
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            Some((
+                parts.next()?.to_string(),
+                parts.next()?.to_string(),
+                parts.next()?.to_string(),
+            ))
+        })
+        .map(|(additions, deletions, path)| (path, (additions, deletions)))
+        .collect::<HashMap<_, _>>();
+
+    let mut remaining_patch_chars = 36000_usize;
+    let files = name_status
+        .lines()
+        .take(100)
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let status = parts.next()?.to_string();
+            let path = parts.last()?.to_string();
+            let patch = run_git(workdir, &["diff", "HEAD", "--", &path])
+                .or_else(|_| run_git(workdir, &["diff", "--", &path]))
+                .unwrap_or_default();
+            let patch = if remaining_patch_chars == 0 {
+                "[patch omitted: result size limit reached]".to_string()
+            } else {
+                let patch = truncate_text(&patch, remaining_patch_chars.min(12000));
+                remaining_patch_chars = remaining_patch_chars.saturating_sub(patch.chars().count());
+                patch
+            };
+            let (additions, deletions) = stats
+                .get(&path)
+                .cloned()
+                .unwrap_or_else(|| ("0".to_string(), "0".to_string()));
+            Some(serde_json::json!({
+                "path": path,
+                "status": status,
+                "additions": additions,
+                "deletions": deletions,
+                "patch": patch,
+            }))
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({ "files": files })
+}
+
+fn read_file_data(workdir: &Path, requested: &str) -> serde_json::Value {
+    let path = PathBuf::from(clean_path_argument(requested));
+    let path = if path.is_absolute() {
+        path
+    } else {
+        workdir.join(path)
+    };
+    let canonical = match path.canonicalize() {
+        Ok(path) => path,
+        Err(error) => {
+            return serde_json::json!({ "error": format!("Could not read `{requested}`: {error}") })
+        }
+    };
+    let root = workdir
+        .canonicalize()
+        .unwrap_or_else(|_| workdir.to_path_buf());
+    if !canonical.starts_with(&root) {
+        return serde_json::json!({ "error": format!("Refusing to read outside `{}`.", root.display()) });
+    }
+    match fs::read_to_string(&canonical) {
+        Ok(content) => {
+            let relative = canonical.strip_prefix(&root).unwrap_or(&canonical);
+            let line_count = content.lines().count();
+            let truncated = content.chars().count() > 40000;
+            serde_json::json!({
+                "path": relative.to_string_lossy(),
+                "content": truncate_text(&content, 40000),
+                "line_count": line_count,
+                "truncated": truncated,
+            })
+        }
+        Err(error) => {
+            serde_json::json!({ "error": format!("Could not read `{}`: {error}", canonical.display()) })
+        }
     }
 }
 
@@ -4166,6 +4345,26 @@ mod tests {
             classify_request("fix the Android voice recording path"),
             RequestClass::Coding
         );
+    }
+
+    #[test]
+    fn builds_structured_read_file_tool_result() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        fs::write(temp_dir.path().join("README.md"), "first\nsecond\n").unwrap();
+        let request = serde_json::json!({
+            "tool_request": "read_file",
+            "request_id": "request-1",
+            "path": "README.md",
+        })
+        .to_string();
+
+        let result = structured_tool_result(&request, temp_dir.path()).unwrap();
+
+        assert_eq!(result.tool, "read_file");
+        assert_eq!(result.request_id, "request-1");
+        assert_eq!(result.data["path"], "README.md");
+        assert_eq!(result.data["line_count"], 2);
+        assert_eq!(result.data["content"], "first\nsecond\n");
     }
 
     #[test]

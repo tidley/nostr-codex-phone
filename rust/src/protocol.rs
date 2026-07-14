@@ -35,6 +35,9 @@ pub enum WireMessage {
     OpenCodeSessionList {
         opencode_sessions: OpenCodeSessionList,
     },
+    ToolResult {
+        tool_result: ToolResult,
+    },
     Transcript {
         transcript: String,
     },
@@ -180,6 +183,14 @@ pub struct OpenCodeSessionListEntry {
     pub updated_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResult {
+    pub tool: String,
+    pub request_id: String,
+    pub workdir: String,
+    pub data: Value,
+}
+
 impl WireMessage {
     pub fn query<S: Into<String>>(query: S) -> Self {
         Self::Query {
@@ -220,6 +231,10 @@ impl WireMessage {
 
     pub fn opencode_sessions(opencode_sessions: OpenCodeSessionList) -> Self {
         Self::OpenCodeSessionList { opencode_sessions }
+    }
+
+    pub fn tool_result(tool_result: ToolResult) -> Self {
+        Self::ToolResult { tool_result }
     }
 
     pub fn response<S: Into<String>>(response: S) -> Self {
@@ -263,6 +278,7 @@ impl WireMessage {
             Self::TargetInvite { .. } => "target_invite",
             Self::RepoList { .. } => "repo_list",
             Self::OpenCodeSessionList { .. } => "opencode_sessions",
+            Self::ToolResult { .. } => "tool_result",
             Self::Transcript { .. } => "transcript",
             Self::Status { .. } => "status",
             Self::Response { .. } | Self::RoutedResponse { .. } => "response",
@@ -282,6 +298,7 @@ impl WireMessage {
             Self::TargetInvite { target_invite } => &target_invite.name,
             Self::RepoList { .. } => "repo list",
             Self::OpenCodeSessionList { .. } => "OpenCode sessions",
+            Self::ToolResult { tool_result } => &tool_result.tool,
             Self::Transcript { transcript } => transcript,
             Self::Status { status } => status,
             Self::Response { response } | Self::RoutedResponse { response, .. } => response,
@@ -317,6 +334,7 @@ impl WireMessage {
             Self::OpenCodeSessionList { opencode_sessions } => {
                 json!({ "opencode_sessions": opencode_sessions })
             }
+            Self::ToolResult { tool_result } => json!({ "tool_result": tool_result }),
             Self::Transcript { transcript } => json!({ "transcript": transcript }),
             Self::Status { status } => json!({ "status": status }),
             Self::Response { response } => json!({ "response": response }),
@@ -413,6 +431,20 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
         return Ok(WireMessage::opencode_sessions(opencode_sessions));
     }
 
+    if let Some(tool_result) = object.get("tool_result") {
+        let tool_result: ToolResult = serde_json::from_value(tool_result.clone())
+            .map_err(|err| anyhow!("field `tool_result` is invalid: {err}"))?;
+        if tool_result.tool.trim().is_empty()
+            || tool_result.request_id.trim().is_empty()
+            || tool_result.workdir.trim().is_empty()
+        {
+            return Err(anyhow!(
+                "tool_result requires non-empty `tool`, `request_id`, and `workdir`"
+            ));
+        }
+        return Ok(WireMessage::tool_result(tool_result));
+    }
+
     if let Some(response) = object.get("response") {
         return response
             .as_str()
@@ -442,7 +474,7 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     }
 
     Err(anyhow!(
-        "message must contain a string `query`, `message`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `repo_list`, object `opencode_sessions`, object `media_bundle`, object `cancel_request`, or object `attachments` field"
+        "message must contain a string `query`, `message`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `repo_list`, object `opencode_sessions`, object `tool_result`, object `media_bundle`, object `cancel_request`, or object `attachments` field"
     ))
 }
 
@@ -1018,6 +1050,25 @@ mod tests {
             parsed.to_json().unwrap(),
             r#"{"opencode_sessions":{"sessions":[{"directory":"/home/tom/code/phone","id":"ses_123","title":"Fix APK release","updated_at":"2026-07-09T12:00:00Z"}],"workdir":"/home/tom/code/phone"}}"#
         );
+    }
+
+    #[test]
+    fn parses_tool_result_contract() {
+        let parsed = parse_wire_message(
+            r#"{
+                "tool_result": {
+                    "tool": "git_status",
+                    "request_id": "request-1",
+                    "workdir": "/repo",
+                    "data": { "branch": "main", "files": [] }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.kind(), "tool_result");
+        assert_eq!(parsed.text(), "git_status");
+        assert!(parsed.to_json().unwrap().contains("request-1"));
     }
 
     #[test]
