@@ -174,3 +174,39 @@ class FileContentResult {
     );
   }
 }
+
+class FileBrowserEntry {
+  const FileBrowserEntry({required this.path, required this.isDirectory});
+
+  final String path;
+  final bool isDirectory;
+
+  String get name => path.split('/').last;
+
+  static FileBrowserEntry? fromJson(dynamic raw) {
+    if (raw is! Map) return null;
+    final path = raw['path']?.toString().trim() ?? '';
+    if (path.isEmpty) return null;
+    return FileBrowserEntry(path: path, isDirectory: raw['is_dir'] == true);
+  }
+}
+
+class FileBrowserResult {
+  const FileBrowserResult({required this.entries, required this.truncated});
+
+  final List<FileBrowserEntry> entries;
+  final bool truncated;
+
+  factory FileBrowserResult.fromPayload(ToolResultPayload payload) {
+    final rawEntries = payload.data['entries'];
+    return FileBrowserResult(
+      entries: rawEntries is Iterable
+          ? rawEntries
+                .map(FileBrowserEntry.fromJson)
+                .whereType<FileBrowserEntry>()
+                .toList()
+          : const [],
+      truncated: payload.data['truncated'] == true,
+    );
+  }
+}

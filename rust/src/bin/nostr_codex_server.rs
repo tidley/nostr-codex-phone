@@ -2918,7 +2918,11 @@ fn handle_tool_request(
         .trim();
     match tool {
         "status" => Some(local_status_text(memory, peer_pubkey, workdir)),
-        "git_status" | "diff" | "read_file" if object.get("request_id").is_some() => None,
+        "git_status" | "diff" | "read_file" | "file_browser"
+            if object.get("request_id").is_some() =>
+        {
+            None
+        }
         "git_status" => Some(git_status_text(workdir)),
         "diff" => Some(git_diff_text(workdir)),
         "history" => Some(task_history_text(memory, peer_pubkey)),
@@ -2934,7 +2938,7 @@ fn structured_tool_result(request: &str, workdir: &Path) -> Option<ToolResult> {
     let value = serde_json::from_str::<serde_json::Value>(request.trim()).ok()?;
     let object = value.as_object()?;
     let tool = object.get("tool_request")?.as_str()?.trim();
-    if !matches!(tool, "git_status" | "diff" | "read_file") {
+    if !matches!(tool, "git_status" | "diff" | "read_file" | "file_browser") {
         return None;
     }
     let request_id = object.get("request_id")?.as_str()?.trim();
@@ -2950,6 +2954,7 @@ fn structured_tool_result(request: &str, workdir: &Path) -> Option<ToolResult> {
             .and_then(serde_json::Value::as_str)
             .map(|path| read_file_data(workdir, path))
             .unwrap_or_else(|| serde_json::json!({ "error": "A file path is required." })),
+        "file_browser" => file_browser_data(workdir),
         _ => unreachable!(),
     };
 
@@ -3091,6 +3096,142 @@ fn read_file_data(workdir: &Path, requested: &str) -> serde_json::Value {
             serde_json::json!({ "error": format!("Could not read `{}`: {error}", canonical.display()) })
         }
     }
+}
+
+fn file_browser_data(workdir: &Path) -> serde_json::Value {
+    const MAX_ENTRIES: usize = 750;
+    const MAX_PATH_CHARS: usize = 32000;
+    let root = match workdir.canonicalize() {
+        Ok(root) => root,
+        Err(error) => {
+            return serde_json::json!({ "error": format!("Could not open repo: {error}") })
+        }
+    };
+    let mut entries = Vec::new();
+    let mut path_chars = 0;
+    let mut truncated = false;
+    collect_file_browser_entries(
+        &root,
+        &root,
+        0,
+        MAX_ENTRIES,
+        MAX_PATH_CHARS,
+        &mut path_chars,
+        &mut truncated,
+        &mut entries,
+    );
+    serde_json::json!({
+        "entries": entries,
+        "truncated": truncated,
+    })
+}
+
+fn collect_file_browser_entries(
+    root: &Path,
+    directory: &Path,
+    depth: usize,
+    max_entries: usize,
+    max_path_chars: usize,
+    path_chars: &mut usize,
+    truncated: &mut bool,
+    entries: &mut Vec<serde_json::Value>,
+) {
+    if depth >= 16 || entries.len() >= max_entries || *path_chars >= max_path_chars {
+        *truncated = true;
+        return;
+    }
+    let Ok(read_dir) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut children = read_dir.filter_map(|entry| entry.ok()).collect::<Vec<_>>();
+    children.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
+
+    for entry in children {
+        if entries.len() >= max_entries {
+            *truncated = true;
+            return;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() || file_browser_entry_excluded(&name, file_type.is_dir()) {
+            continue;
+        }
+        let path = entry.path();
+        let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+        let relative_chars = relative.chars().count();
+        if *path_chars + relative_chars > max_path_chars {
+            *truncated = true;
+            return;
+        }
+        *path_chars += relative_chars;
+        if file_type.is_dir() {
+            entries.push(serde_json::json!({ "path": relative, "is_dir": true }));
+            collect_file_browser_entries(
+                root,
+                &path,
+                depth + 1,
+                max_entries,
+                max_path_chars,
+                path_chars,
+                truncated,
+                entries,
+            );
+        } else if file_type.is_file() {
+            entries.push(serde_json::json!({ "path": relative, "is_dir": false }));
+        }
+    }
+}
+
+fn file_browser_entry_excluded(name: &str, is_dir: bool) -> bool {
+    if is_dir
+        && matches!(
+            name,
+            ".git"
+                | ".nostr-codex"
+                | ".dart_tool"
+                | ".gradle"
+                | ".idea"
+                | "build"
+                | "target"
+                | "node_modules"
+                | "Pods"
+        )
+    {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    !is_dir
+        && (name == ".env"
+            || name.starts_with(".env.")
+            || name.ends_with(".key")
+            || name.ends_with(".pem")
+            || [
+                ".apk",
+                ".aab",
+                ".bin",
+                ".db",
+                ".gif",
+                ".ico",
+                ".jpeg",
+                ".jpg",
+                ".keystore",
+                ".mp3",
+                ".mp4",
+                ".ogg",
+                ".pdf",
+                ".png",
+                ".sqlite",
+                ".sqlite3",
+                ".wav",
+                ".webm",
+                ".webp",
+                ".zip",
+            ]
+            .iter()
+            .any(|extension| lower.ends_with(extension)))
 }
 
 fn git_status_text(workdir: &Path) -> String {
@@ -4365,6 +4506,48 @@ mod tests {
         assert_eq!(result.data["path"], "README.md");
         assert_eq!(result.data["line_count"], 2);
         assert_eq!(result.data["content"], "first\nsecond\n");
+    }
+
+    #[test]
+    fn file_browser_excludes_generated_and_secret_paths() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp_dir.path().join("lib")).unwrap();
+        fs::create_dir_all(temp_dir.path().join(".git")).unwrap();
+        fs::create_dir_all(temp_dir.path().join("node_modules/package")).unwrap();
+        fs::create_dir_all(temp_dir.path().join(".nostr-codex")).unwrap();
+        fs::write(temp_dir.path().join("README.md"), "readme").unwrap();
+        fs::write(temp_dir.path().join("lib/main.dart"), "void main() {}").unwrap();
+        fs::write(temp_dir.path().join(".env"), "SECRET=value").unwrap();
+        fs::write(temp_dir.path().join("image.png"), [0_u8, 1, 2]).unwrap();
+        fs::write(temp_dir.path().join(".git/config"), "git").unwrap();
+        fs::write(
+            temp_dir.path().join("node_modules/package/index.js"),
+            "module",
+        )
+        .unwrap();
+        fs::write(temp_dir.path().join(".nostr-codex/.env.server"), "secret").unwrap();
+        let request = serde_json::json!({
+            "tool_request": "file_browser",
+            "request_id": "request-2",
+        })
+        .to_string();
+
+        let result = structured_tool_result(&request, temp_dir.path()).unwrap();
+        let paths = result.data["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["path"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&"README.md"));
+        assert!(paths.contains(&"lib"));
+        assert!(paths.contains(&"lib/main.dart"));
+        assert!(!paths.iter().any(|path| path.starts_with(".git")));
+        assert!(!paths.iter().any(|path| path.starts_with("node_modules")));
+        assert!(!paths.iter().any(|path| path.starts_with(".nostr-codex")));
+        assert!(!paths.contains(&".env"));
+        assert!(!paths.contains(&"image.png"));
     }
 
     #[test]

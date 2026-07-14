@@ -169,5 +169,22 @@ repo API JSON RS232 I2C UART CAN BLE
     );
     expect(file.path, 'README.md');
     expect(file.lineCount, 1);
+
+    final browser = FileBrowserResult.fromPayload(
+      ToolResultPayload(
+        tool: 'file_browser',
+        requestId: 'request-3',
+        workdir: '/repo',
+        data: const {
+          'entries': [
+            {'path': 'lib', 'is_dir': true},
+            {'path': 'lib/main.dart', 'is_dir': false},
+          ],
+          'truncated': false,
+        },
+      ),
+    );
+    expect(browser.entries.first.isDirectory, true);
+    expect(browser.entries.last.name, 'main.dart');
   });
 }
