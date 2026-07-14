@@ -1100,6 +1100,12 @@ async fn process_message(
             if let Some(tool_result) =
                 structured_tool_result(&message.text, &codex_config.working_dir)
             {
+                let delivery_error = ToolResult {
+                    data: serde_json::json!({
+                        "error": "The tool result could not be delivered. Please retry."
+                    }),
+                    ..tool_result.clone()
+                };
                 if let Err(err) = messenger
                     .send_wire_to_pubkey(
                         &message.sender_pubkey_hex,
@@ -1108,6 +1114,15 @@ async fn process_message(
                     .await
                 {
                     error!("failed to send structured tool result: {err:#}");
+                    if let Err(fallback_err) = messenger
+                        .send_wire_to_pubkey(
+                            &message.sender_pubkey_hex,
+                            WireMessage::tool_result(delivery_error),
+                        )
+                        .await
+                    {
+                        error!("failed to send tool delivery error: {fallback_err:#}");
+                    }
                 }
                 return;
             }
@@ -3099,8 +3114,8 @@ fn read_file_data(workdir: &Path, requested: &str) -> serde_json::Value {
 }
 
 fn file_browser_data(workdir: &Path) -> serde_json::Value {
-    const MAX_ENTRIES: usize = 750;
-    const MAX_PATH_CHARS: usize = 32000;
+    const MAX_ENTRIES: usize = 500;
+    const MAX_SERIALIZED_ENTRY_BYTES: usize = 16000;
     let root = match workdir.canonicalize() {
         Ok(root) => root,
         Err(error) => {
@@ -3108,15 +3123,15 @@ fn file_browser_data(workdir: &Path) -> serde_json::Value {
         }
     };
     let mut entries = Vec::new();
-    let mut path_chars = 0;
+    let mut serialized_entry_bytes = 0;
     let mut truncated = false;
     collect_file_browser_entries(
         &root,
         &root,
         0,
         MAX_ENTRIES,
-        MAX_PATH_CHARS,
-        &mut path_chars,
+        MAX_SERIALIZED_ENTRY_BYTES,
+        &mut serialized_entry_bytes,
         &mut truncated,
         &mut entries,
     );
@@ -3131,12 +3146,15 @@ fn collect_file_browser_entries(
     directory: &Path,
     depth: usize,
     max_entries: usize,
-    max_path_chars: usize,
-    path_chars: &mut usize,
+    max_serialized_entry_bytes: usize,
+    serialized_entry_bytes: &mut usize,
     truncated: &mut bool,
     entries: &mut Vec<serde_json::Value>,
 ) {
-    if depth >= 16 || entries.len() >= max_entries || *path_chars >= max_path_chars {
+    if depth >= 16
+        || entries.len() >= max_entries
+        || *serialized_entry_bytes >= max_serialized_entry_bytes
+    {
         *truncated = true;
         return;
     }
@@ -3161,26 +3179,30 @@ fn collect_file_browser_entries(
         }
         let path = entry.path();
         let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
-        let relative_chars = relative.chars().count();
-        if *path_chars + relative_chars > max_path_chars {
+        let value = serde_json::json!({
+            "path": relative,
+            "is_dir": file_type.is_dir(),
+        });
+        let value_bytes = value.to_string().len() + 1;
+        if *serialized_entry_bytes + value_bytes > max_serialized_entry_bytes {
             *truncated = true;
             return;
         }
-        *path_chars += relative_chars;
+        *serialized_entry_bytes += value_bytes;
         if file_type.is_dir() {
-            entries.push(serde_json::json!({ "path": relative, "is_dir": true }));
+            entries.push(value);
             collect_file_browser_entries(
                 root,
                 &path,
                 depth + 1,
                 max_entries,
-                max_path_chars,
-                path_chars,
+                max_serialized_entry_bytes,
+                serialized_entry_bytes,
                 truncated,
                 entries,
             );
         } else if file_type.is_file() {
-            entries.push(serde_json::json!({ "path": relative, "is_dir": false }));
+            entries.push(value);
         }
     }
 }
@@ -4548,6 +4570,25 @@ mod tests {
         assert!(!paths.iter().any(|path| path.starts_with(".nostr-codex")));
         assert!(!paths.contains(&".env"));
         assert!(!paths.contains(&"image.png"));
+    }
+
+    #[test]
+    fn file_browser_caps_serialized_payload() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        for index in 0..600 {
+            fs::write(
+                temp_dir
+                    .path()
+                    .join(format!("{index:04}-long-repository-file-name.txt")),
+                "content",
+            )
+            .unwrap();
+        }
+
+        let data = file_browser_data(temp_dir.path());
+
+        assert_eq!(data["truncated"], true);
+        assert!(data.to_string().len() <= 16100);
     }
 
     #[test]
