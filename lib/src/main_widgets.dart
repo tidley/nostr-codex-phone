@@ -1027,6 +1027,244 @@ class _LineNumber extends StatelessWidget {
   }
 }
 
+class _FileBrowserPage extends StatefulWidget {
+  const _FileBrowserPage({
+    required this.result,
+    required this.workdir,
+    required this.onReadFile,
+  });
+
+  final FileBrowserResult result;
+  final String workdir;
+  final Future<void> Function(String path) onReadFile;
+
+  @override
+  State<_FileBrowserPage> createState() => _FileBrowserPageState();
+}
+
+class _FileBrowserPageState extends State<_FileBrowserPage> {
+  final _searchController = TextEditingController();
+  String _directory = '';
+  String _query = '';
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  List<FileBrowserEntry> get _visibleEntries {
+    final query = _query.trim().toLowerCase();
+    final entries = query.isNotEmpty
+        ? widget.result.entries.where((entry) {
+            return entry.path.toLowerCase().contains(query);
+          }).toList()
+        : widget.result.entries.where((entry) {
+            final parent = entry.path.contains('/')
+                ? entry.path.substring(0, entry.path.lastIndexOf('/'))
+                : '';
+            return parent == _directory;
+          }).toList();
+    entries.sort((left, right) {
+      if (left.isDirectory != right.isDirectory) {
+        return left.isDirectory ? -1 : 1;
+      }
+      return left.name.toLowerCase().compareTo(right.name.toLowerCase());
+    });
+    return entries;
+  }
+
+  void _openDirectory(String path) {
+    setState(() {
+      _directory = path;
+      _query = '';
+      _searchController.clear();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = _visibleEntries;
+    final searching = _query.trim().isNotEmpty;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Choose a file'),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(68),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            child: TextField(
+              controller: _searchController,
+              onChanged: (value) => setState(() => _query = value),
+              decoration: InputDecoration(
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: 'Clear search',
+                        onPressed: () {
+                          _searchController.clear();
+                          setState(() => _query = '');
+                        },
+                        icon: const Icon(Icons.close),
+                      ),
+                hintText: 'Search repository files',
+                isDense: true,
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ),
+        ),
+      ),
+      body: Column(
+        children: [
+          if (!searching)
+            _FileBreadcrumbs(path: _directory, onOpen: _openDirectory),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            color: const Color(0xff111816),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    searching
+                        ? '${entries.length} search results'
+                        : entries.isEmpty
+                        ? 'Empty folder'
+                        : '${entries.length} items',
+                    style: Theme.of(context).textTheme.labelMedium,
+                  ),
+                ),
+                if (widget.result.truncated)
+                  const Tooltip(
+                    message: 'Large repository: showing a relay-safe subset',
+                    child: Icon(Icons.info_outline, size: 18),
+                  ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: entries.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          searching
+                              ? Icons.search_off
+                              : Icons.folder_off_outlined,
+                          size: 44,
+                          color: const Color(0xff71817b),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(searching ? 'No matching files' : 'No files here'),
+                      ],
+                    ),
+                  )
+                : ListView.separated(
+                    itemCount: entries.length,
+                    separatorBuilder: (_, _) =>
+                        const Divider(height: 1, indent: 64),
+                    itemBuilder: (context, index) {
+                      final entry = entries[index];
+                      return ListTile(
+                        leading: _BrowserFileIcon(entry: entry),
+                        title: Text(
+                          searching ? entry.path : entry.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: searching && entry.path != entry.name
+                            ? Text(
+                                entry.isDirectory ? 'Folder' : 'File',
+                                style: Theme.of(context).textTheme.labelSmall,
+                              )
+                            : null,
+                        trailing: Icon(
+                          entry.isDirectory
+                              ? Icons.chevron_right
+                              : Icons.open_in_new,
+                          size: 20,
+                        ),
+                        onTap: entry.isDirectory
+                            ? () => _openDirectory(entry.path)
+                            : () => widget.onReadFile(entry.path),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FileBreadcrumbs extends StatelessWidget {
+  const _FileBreadcrumbs({required this.path, required this.onOpen});
+
+  final String path;
+  final ValueChanged<String> onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final parts = path.isEmpty ? const <String>[] : path.split('/');
+    return SizedBox(
+      height: 48,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        children: [
+          TextButton.icon(
+            onPressed: () => onOpen(''),
+            icon: const Icon(Icons.account_tree_outlined, size: 18),
+            label: const Text('Repo'),
+          ),
+          for (var index = 0; index < parts.length; index++) ...[
+            const Icon(Icons.chevron_right, size: 18),
+            TextButton(
+              onPressed: () => onOpen(parts.take(index + 1).join('/')),
+              child: Text(parts[index]),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _BrowserFileIcon extends StatelessWidget {
+  const _BrowserFileIcon({required this.entry});
+
+  final FileBrowserEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    if (entry.isDirectory) {
+      return const Icon(Icons.folder_outlined, color: Color(0xffd29922));
+    }
+    final extension = entry.name.contains('.')
+        ? entry.name.split('.').last.toLowerCase()
+        : '';
+    final (icon, color) = switch (extension) {
+      'dart' => (Icons.flutter_dash, const Color(0xff58a6ff)),
+      'rs' => (Icons.settings_outlined, const Color(0xfff0883e)),
+      'md' => (Icons.article_outlined, const Color(0xffa5d6ff)),
+      'json' ||
+      'yaml' ||
+      'yml' ||
+      'toml' => (Icons.data_object, const Color(0xffd2a8ff)),
+      'png' ||
+      'jpg' ||
+      'jpeg' ||
+      'webp' ||
+      'svg' => (Icons.image_outlined, const Color(0xff3fb950)),
+      _ => (Icons.description_outlined, const Color(0xff8b949e)),
+    };
+    return Icon(icon, color: color);
+  }
+}
+
 class _FileViewerPage extends StatefulWidget {
   const _FileViewerPage({required this.result, required this.workdir});
 
@@ -1242,8 +1480,8 @@ class _FileViewerPageState extends State<_FileViewerPage> {
   }
 }
 
-class _SpawnSessionDialog extends StatefulWidget {
-  const _SpawnSessionDialog({
+class _SpawnSessionPage extends StatefulWidget {
+  const _SpawnSessionPage({
     required this.initialRepoChoices,
     required this.onLoadRepos,
   });
@@ -1252,13 +1490,15 @@ class _SpawnSessionDialog extends StatefulWidget {
   final Future<List<RepoChoice>> Function() onLoadRepos;
 
   @override
-  State<_SpawnSessionDialog> createState() => _SpawnSessionDialogState();
+  State<_SpawnSessionPage> createState() => _SpawnSessionPageState();
 }
 
-class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
+class _SpawnSessionPageState extends State<_SpawnSessionPage> {
   final _pathController = TextEditingController();
+  final _searchController = TextEditingController();
   bool _create = true;
   bool _loadingRepos = false;
+  String _searchQuery = '';
   List<RepoChoice> _repoChoices = const [];
 
   @override
@@ -1270,6 +1510,7 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
   @override
   void dispose() {
     _pathController.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
@@ -1315,21 +1556,23 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final dialogWidth = (MediaQuery.sizeOf(context).width - 64).clamp(
-      280.0,
-      480.0,
-    );
+    final query = _searchQuery.trim().toLowerCase();
+    final visibleChoices = query.isEmpty
+        ? _repoChoices
+        : _repoChoices.where((choice) {
+            return choice.displayName.toLowerCase().contains(query) ||
+                choice.relativePath.toLowerCase().contains(query);
+          }).toList();
 
-    return AlertDialog(
-      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
-      title: const Text('Spawn session'),
-      content: SizedBox(
-        width: dialogWidth,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SegmentedButton<bool>(
+    return Scaffold(
+      appBar: AppBar(title: const Text('Spawn session')),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<bool>(
                 segments: const [
                   ButtonSegment(
                     value: true,
@@ -1344,51 +1587,105 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
                 ],
                 selected: {_create},
                 onSelectionChanged: (selection) {
-                  setState(() => _create = selection.first);
+                  final create = selection.first;
+                  setState(() => _create = create);
+                  if (!create && _repoChoices.isEmpty && !_loadingRepos) {
+                    unawaited(_loadRepos());
+                  }
                 },
               ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _pathController,
-                autofocus: true,
-                textInputAction: TextInputAction.done,
-                onSubmitted: (_) => _submit(),
-                decoration: InputDecoration(
-                  border: const OutlineInputBorder(),
-                  helperText: 'Worker root or allowed path',
-                  labelText: _create ? 'New folder' : 'Folder',
-                  hintText: _create ? 'my-new-project' : 'phone',
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: TextField(
+              controller: _pathController,
+              autofocus: _create,
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => _submit(),
+              decoration: InputDecoration(
+                border: const OutlineInputBorder(),
+                helperText: _create
+                    ? 'Created inside an allowed worker root'
+                    : 'Select below or enter an allowed path',
+                labelText: _create ? 'New folder' : 'Selected folder',
+                hintText: _create ? 'my-new-project' : 'phone',
+              ),
+            ),
+          ),
+          if (_create)
+            const Expanded(
+              child: Center(
+                child: Padding(
+                  padding: EdgeInsets.all(32),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.create_new_folder_outlined, size: 64),
+                      SizedBox(height: 18),
+                      Text(
+                        'Create a new repo session',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      SizedBox(height: 8),
+                      Text(
+                        'The worker creates the folder, starts a routed session, and sends this phone a target invite.',
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
                 ),
               ),
-              if (!_create) ...[
-                const SizedBox(height: 12),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: OutlinedButton.icon(
+            )
+          else ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 8, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _searchController,
+                      onChanged: (value) =>
+                          setState(() => _searchQuery = value),
+                      decoration: const InputDecoration(
+                        prefixIcon: Icon(Icons.search),
+                        hintText: 'Search folders',
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Refresh folders',
                     onPressed: _loadingRepos ? null : _loadRepos,
                     icon: _loadingRepos
                         ? const SizedBox.square(
-                            dimension: 18,
+                            dimension: 20,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.refresh),
-                    label: Text(
-                      _repoChoices.isEmpty ? 'Get folders' : 'Refresh',
-                    ),
                   ),
-                ),
-                if (_repoChoices.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 240),
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: _repoChoices.length,
+                ],
+              ),
+            ),
+            Expanded(
+              child: _loadingRepos && _repoChoices.isEmpty
+                  ? const Center(child: CircularProgressIndicator())
+                  : visibleChoices.isEmpty
+                  ? const Center(child: Text('No matching folders'))
+                  : ListView.separated(
+                      itemCount: visibleChoices.length,
+                      separatorBuilder: (_, _) =>
+                          const Divider(height: 1, indent: 64),
                       itemBuilder: (context, index) {
-                        final choice = _repoChoices[index];
+                        final choice = visibleChoices[index];
+                        final selected =
+                            _pathController.text == choice.relativePath;
                         return ListTile(
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
+                          selected: selected,
                           leading: Icon(
                             choice.isGitRepo
                                 ? Icons.account_tree_outlined
@@ -1399,30 +1696,37 @@ class _SpawnSessionDialogState extends State<_SpawnSessionDialog> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
+                          subtitle: Text(
+                            choice.relativePath,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontFamily: 'monospace'),
+                          ),
+                          trailing: selected
+                              ? const Icon(Icons.check_circle)
+                              : const Icon(Icons.chevron_right),
                           onTap: () {
-                            _pathController.text = choice.relativePath;
+                            setState(
+                              () => _pathController.text = choice.relativePath,
+                            );
                           },
                         );
                       },
                     ),
-                  ),
-                ],
-              ],
-            ],
+            ),
+          ],
+        ],
+      ),
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: FilledButton.icon(
+            onPressed: _submit,
+            icon: Icon(_create ? Icons.add : Icons.folder_open),
+            label: Text(_create ? 'Create session' : 'Open session'),
           ),
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton.icon(
-          onPressed: _submit,
-          icon: const Icon(Icons.send),
-          label: const Text('Request'),
-        ),
-      ],
     );
   }
 }

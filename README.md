@@ -31,7 +31,7 @@ The session drawer contains:
 - Session pin/unpin.
 - Recent-first session ordering.
 - Session search.
-- `Spawn on computer` for creating/opening a repo worker.
+- `Spawn on computer` opens a full-screen Create/Open selector with folder search and a large repository list.
 - `OpenCode sessions` for choosing the OpenCode session attached to the selected repo.
 - Settings for keys, relays, Blossom, speech, haptics, and profile import/export.
 
@@ -51,6 +51,7 @@ Git status, file diffs, and file content open in dedicated mobile views:
 
 - Git status groups changed files into staged, working, and untracked filters.
 - Diff view provides a changed-file picker, previous/next navigation, line numbers, and colored additions/deletions.
+- Read File opens a repository browser for readable files with folders, breadcrumbs, search, and file-type icons.
 - File view provides line numbers, horizontal/vertical scrolling, selectable text, and find-in-file navigation.
 
 ## Security Model

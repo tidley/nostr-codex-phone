@@ -258,7 +258,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _relayController = TextEditingController();
   final _blossomServerController = TextEditingController();
   final _queryController = TextEditingController();
-  final _readFileController = TextEditingController();
   final _queryFocusNode = FocusNode();
   final _recorder = AudioRecorder();
   final _tts = FlutterTts();
@@ -538,7 +537,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _relayController.dispose();
     _blossomServerController.dispose();
     _queryController.dispose();
-    _readFileController.dispose();
     _queryFocusNode.dispose();
     _menuNotificationPulseController.dispose();
     unawaited(nostrStop());
@@ -3931,6 +3929,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       'git_status',
       'diff',
       'read_file',
+      'file_browser',
     }.contains(tool);
     final requestId = opensDedicatedView
         ? DateTime.now().microsecondsSinceEpoch.toRadixString(36)
@@ -4036,48 +4035,23 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           workdir: payload.workdir,
         );
         break;
+      case 'file_browser':
+        page = _FileBrowserPage(
+          result: FileBrowserResult.fromPayload(payload),
+          workdir: payload.workdir,
+          onReadFile: (path) => _sendToolRequest(
+            'read_file',
+            extra: {'path': path},
+            visibleText: 'read $path',
+          ),
+        );
+        break;
       default:
         return;
     }
     await Navigator.of(
       context,
     ).push<void>(MaterialPageRoute(builder: (_) => page));
-  }
-
-  Future<void> _promptReadFile() async {
-    final path = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Read file'),
-        content: TextField(
-          controller: _readFileController,
-          autofocus: true,
-          decoration: const InputDecoration(
-            border: OutlineInputBorder(),
-            labelText: 'Path in repo',
-            hintText: 'lib/main.dart',
-          ),
-          onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.of(context).pop(_readFileController.text.trim()),
-            child: const Text('Read'),
-          ),
-        ],
-      ),
-    );
-    if (path == null || path.trim().isEmpty) return;
-    await _sendToolRequest(
-      'read_file',
-      extra: {'path': path},
-      visibleText: 'read $path',
-    );
   }
 
   Future<void> _openToolsSheet() async {
@@ -4112,7 +4086,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             ListTile(
               leading: const Icon(Icons.description_outlined),
               title: const Text('Read file'),
-              onTap: () => Navigator.of(context).pop('read_file'),
+              onTap: () => Navigator.of(context).pop('file_browser'),
             ),
             ListTile(
               leading: const Icon(Icons.history),
@@ -4141,8 +4115,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (tool == null || !mounted) return;
     if (tool == 'stop') {
       await _stopCurrentTask();
-    } else if (tool == 'read_file') {
-      await _promptReadFile();
     } else {
       await _sendToolRequest(tool);
     }
@@ -4154,11 +4126,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return;
     }
     if (!mounted) return;
-    final request = await showDialog<_SpawnSessionRequest>(
-      context: context,
-      builder: (context) => _SpawnSessionDialog(
-        initialRepoChoices: _cachedRepoChoices,
-        onLoadRepos: _requestRepoChoices,
+    final request = await Navigator.of(context).push<_SpawnSessionRequest>(
+      MaterialPageRoute(
+        builder: (_) => _SpawnSessionPage(
+          initialRepoChoices: _cachedRepoChoices,
+          onLoadRepos: _requestRepoChoices,
+        ),
       ),
     );
     if (request == null || !mounted) return;
