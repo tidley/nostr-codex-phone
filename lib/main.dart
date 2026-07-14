@@ -23,6 +23,7 @@ import 'package:nostr_codex_phone/src/repo_choice.dart';
 import 'package:nostr_codex_phone/src/repo_target.dart';
 import 'package:nostr_codex_phone/src/media_models.dart';
 import 'package:nostr_codex_phone/src/text_utils.dart';
+import 'package:nostr_codex_phone/src/tool_result_models.dart';
 import 'package:nostr_codex_phone/src/working_animation.dart';
 import 'package:nostr_codex_phone/src/voice_recording.dart';
 import 'package:path_provider/path_provider.dart';
@@ -36,7 +37,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.9+209';
+const _appVersion = '0.2.10+210';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -143,6 +144,13 @@ class _PendingSessionStart {
 
   final String workdir;
   final Completer<RepoTarget> completer;
+}
+
+class _PendingToolView {
+  const _PendingToolView({required this.tool, required this.conversationKey});
+
+  final String tool;
+  final String conversationKey;
 }
 
 Future<void> main() async {
@@ -284,6 +292,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   StreamSubscription<Amplitude>? _recordingAmplitudeSubscription;
   double _recordingWaveformLevel = 0;
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
+  final _pendingToolViews = <String, _PendingToolView>{};
   final _completedVoiceEventIds = <String>{};
   Completer<List<RepoChoice>>? _pendingRepoListCompleter;
   Completer<List<_OpenCodeSessionChoice>>? _pendingOpenCodeSessionsCompleter;
@@ -1505,6 +1514,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         if (session != null) sessions.add(session);
       }
       return sessions;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  ToolResultPayload? _toolResultFromPayload(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      return ToolResultPayload.fromJson(decoded['tool_result']);
     } catch (_) {
       return null;
     }
@@ -3444,6 +3463,29 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return true;
     }
 
+    if (message.kind == 'tool_result') {
+      final result = _toolResultFromPayload(message.rawJson);
+      if (result == null) {
+        _showError('Received malformed tool result');
+        return true;
+      }
+      final pending = _pendingToolViews.remove(result.requestId);
+      final targetKey =
+          pending?.conversationKey ?? _conversationKeyForIncoming(message);
+      if (targetKey != null) {
+        _syncPendingReplyTarget(targetKey);
+      }
+      setState(() {
+        _status = result.error == null
+            ? 'Loaded ${result.tool.replaceAll('_', ' ')}'
+            : 'Tool request failed';
+      });
+      if (!fromCatchUp) {
+        unawaited(_openToolResult(result));
+      }
+      return true;
+    }
+
     final audioRetryRequested = message.kind == 'audio_retry';
     final completesPendingRequest =
         message.kind == 'response' ||
@@ -3885,9 +3927,27 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (_sending || !await _ensureConnectedForSend()) return;
     final conversationKey = _activeConversationKey;
     final label = visibleText ?? tool.replaceAll('_', ' ');
+    final opensDedicatedView = const {
+      'git_status',
+      'diff',
+      'read_file',
+    }.contains(tool);
+    final requestId = opensDedicatedView
+        ? DateTime.now().microsecondsSinceEpoch.toRadixString(36)
+        : null;
     final payload = jsonEncode(
-      _withActiveRoute({'tool_request': tool, ...extra}),
+      _withActiveRoute({
+        'tool_request': tool,
+        'request_id': ?requestId,
+        ...extra,
+      }),
     );
+    if (requestId != null) {
+      _pendingToolViews[requestId] = _PendingToolView(
+        tool: tool,
+        conversationKey: conversationKey,
+      );
+    }
     setState(() {
       _sending = true;
       _sendingConversationKey = conversationKey;
@@ -3900,6 +3960,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       );
       if (!mounted) return;
       setState(() {
+        if (opensDedicatedView) {
+          _status = 'Waiting for $label...';
+          return;
+        }
         _appendMessageForConversation(
           conversationKey,
           ConversationMessage(
@@ -3914,6 +3978,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _status = '$label requested';
       });
     } catch (error) {
+      if (requestId != null) _pendingToolViews.remove(requestId);
       _showError('Tool request failed: $error');
     } finally {
       if (mounted) {
@@ -3923,6 +3988,60 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         });
       }
     }
+  }
+
+  Future<void> _openToolResult(ToolResultPayload payload) async {
+    if (!mounted) return;
+    final error = payload.error;
+    if (error != null) {
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute(
+          builder: (_) => _ToolErrorPage(
+            title: payload.tool.replaceAll('_', ' '),
+            message: error,
+          ),
+        ),
+      );
+      return;
+    }
+
+    final Widget page;
+    switch (payload.tool) {
+      case 'git_status':
+        page = _GitStatusPage(
+          result: GitStatusResult.fromPayload(payload),
+          workdir: payload.workdir,
+          onViewDiff: () => _sendToolRequest('diff'),
+          onReadFile: (path) => _sendToolRequest(
+            'read_file',
+            extra: {'path': path},
+            visibleText: 'read $path',
+          ),
+        );
+        break;
+      case 'diff':
+        page = _DiffViewerPage(
+          result: DiffResult.fromPayload(payload),
+          workdir: payload.workdir,
+          onReadFile: (path) => _sendToolRequest(
+            'read_file',
+            extra: {'path': path},
+            visibleText: 'read $path',
+          ),
+        );
+        break;
+      case 'read_file':
+        page = _FileViewerPage(
+          result: FileContentResult.fromPayload(payload),
+          workdir: payload.workdir,
+        );
+        break;
+      default:
+        return;
+    }
+    await Navigator.of(
+      context,
+    ).push<void>(MaterialPageRoute(builder: (_) => page));
   }
 
   Future<void> _promptReadFile() async {

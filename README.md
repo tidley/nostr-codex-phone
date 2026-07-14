@@ -18,7 +18,7 @@ Code Call lets a phone talk to an OpenCode worker running on a computer. You can
 - Stores multiple repo targets and routes each request to the selected workdir.
 - Spawns or reopens repo workers from the phone through the session drawer.
 - Picks OpenCode sessions for the active repo.
-- Provides a mobile Tools menu for status, stop task, git status, diff, read file, task history, model config, commit prep, and release workflow help.
+- Provides a mobile Tools menu for status, stop task, Git inspection, file reading, task history, model config, commit prep, and release workflow help.
 - Renders responses as Markdown and can speak replies with Android TTS.
 
 ## Mobile UI
@@ -47,6 +47,12 @@ The Tools button in the top bar is enabled once connected. It sends optional wor
 - `Commit prep`
 - `Release workflow`
 
+Git status, file diffs, and file content open in dedicated mobile views:
+
+- Git status groups changed files into staged, working, and untracked filters.
+- Diff view provides a changed-file picker, previous/next navigation, line numbers, and colored additions/deletions.
+- File view provides line numbers, horizontal/vertical scrolling, selectable text, and find-in-file navigation.
+
 ## Security Model
 
 - Text, transcripts, responses, attachment URLs, and decryption keys are inside NIP-17/NIP-59 encrypted GiftWrapped DMs.
@@ -62,7 +68,7 @@ Download the latest APK from GitHub Releases:
 https://github.com/tidley/nostr-codex-phone/releases
 ```
 
-Install on Android, then scan the worker QR code or paste the worker target details in Settings.
+Install on Android, then scan the worker QR code or paste the worker target details in Settings. Keep the APK and worker on the same release version so structured tool views use the same wire contract.
 
 ## Start A Worker
 
@@ -97,28 +103,6 @@ TRANSCRIBE_ARGS='-m /path/to/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/
 ```
 
 With the default local OpenCode URL, the worker starts `opencode serve --hostname 127.0.0.1 --port 4096` if needed. For non-local URLs, start and secure OpenCode yourself.
-
-## Protocol Summary
-
-Every app/worker message is encrypted as a GiftWrapped DM. The decrypted JSON is one of these shapes:
-
-```json
-{ "message": "fix the failing tests", "workdir": "/path/to/repo", "session_id": "optional" }
-```
-
-```json
-{ "media_bundle": { "query": "review this", "attachments": [] } }
-```
-
-```json
-{ "cancel_request": true }
-```
-
-```json
-{ "tool_request": "git_status", "workdir": "/path/to/repo" }
-```
-
-Worker replies include `response`, `status`, `error`, `transcript`, `audio_retry`, `target_invite`, `repo_list`, and `opencode_sessions` payloads.
 
 ## Development
 

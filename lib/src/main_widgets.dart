@@ -408,6 +408,840 @@ class _SpawnSessionRequest {
   final bool create;
 }
 
+class _ToolErrorPage extends StatelessWidget {
+  const _ToolErrorPage({required this.title, required this.message});
+
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(title)),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.error_outline,
+                size: 48,
+                color: Theme.of(context).colorScheme.error,
+              ),
+              const SizedBox(height: 16),
+              SelectableText(message, textAlign: TextAlign.center),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum _GitStatusFilter { all, staged, working, untracked }
+
+class _GitStatusPage extends StatefulWidget {
+  const _GitStatusPage({
+    required this.result,
+    required this.workdir,
+    required this.onViewDiff,
+    required this.onReadFile,
+  });
+
+  final GitStatusResult result;
+  final String workdir;
+  final Future<void> Function() onViewDiff;
+  final Future<void> Function(String path) onReadFile;
+
+  @override
+  State<_GitStatusPage> createState() => _GitStatusPageState();
+}
+
+class _GitStatusPageState extends State<_GitStatusPage> {
+  _GitStatusFilter _filter = _GitStatusFilter.all;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final files = widget.result.files.where((file) {
+      return switch (_filter) {
+        _GitStatusFilter.all => true,
+        _GitStatusFilter.staged => file.staged,
+        _GitStatusFilter.working => !file.staged && !file.untracked,
+        _GitStatusFilter.untracked => file.untracked,
+      };
+    }).toList();
+    final staged = widget.result.files.where((file) => file.staged).length;
+    final untracked = widget.result.files
+        .where((file) => file.untracked)
+        .length;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Changes'),
+        actions: [
+          IconButton(
+            tooltip: 'View diff',
+            onPressed: widget.result.files.isEmpty
+                ? null
+                : () {
+                    Navigator.of(context).pop();
+                    widget.onViewDiff();
+                  },
+            icon: const Icon(Icons.difference_outlined),
+          ),
+        ],
+      ),
+      body: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(
+            child: Container(
+              margin: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xff111816),
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: const Color(0xff2b3935)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.account_tree_outlined, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          widget.result.branch.isEmpty
+                              ? 'Detached HEAD'
+                              : widget.result.branch,
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      _CountPill(
+                        label: widget.result.clean
+                            ? 'Clean'
+                            : '${widget.result.files.length} changed',
+                        color: widget.result.clean
+                            ? const Color(0xff3fb950)
+                            : const Color(0xffd29922),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    widget.workdir,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: const Color(0xff8b9a95),
+                    ),
+                  ),
+                  if (widget.result.latestSubject.isNotEmpty) ...[
+                    const Divider(height: 24),
+                    Text(
+                      '${widget.result.latestHash}  ${widget.result.latestSubject}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontFamily: 'monospace'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          SliverToBoxAdapter(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  _StatusFilterChip(
+                    label: 'All ${widget.result.files.length}',
+                    selected: _filter == _GitStatusFilter.all,
+                    onTap: () => setState(() => _filter = _GitStatusFilter.all),
+                  ),
+                  _StatusFilterChip(
+                    label: 'Staged $staged',
+                    selected: _filter == _GitStatusFilter.staged,
+                    onTap: () =>
+                        setState(() => _filter = _GitStatusFilter.staged),
+                  ),
+                  _StatusFilterChip(
+                    label:
+                        'Working ${widget.result.files.length - staged - untracked}',
+                    selected: _filter == _GitStatusFilter.working,
+                    onTap: () =>
+                        setState(() => _filter = _GitStatusFilter.working),
+                  ),
+                  _StatusFilterChip(
+                    label: 'Untracked $untracked',
+                    selected: _filter == _GitStatusFilter.untracked,
+                    onTap: () =>
+                        setState(() => _filter = _GitStatusFilter.untracked),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 8)),
+          if (files.isEmpty)
+            const SliverFillRemaining(
+              hasScrollBody: false,
+              child: Center(child: Text('No files in this view')),
+            )
+          else
+            SliverList.builder(
+              itemCount: files.length,
+              itemBuilder: (context, index) {
+                final file = files[index];
+                return ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                  leading: _FileStatusIcon(file: file),
+                  title: Text(
+                    file.path.split('/').last,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: Text(
+                    file.path,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                    ),
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: file.untracked
+                      ? null
+                      : () {
+                          Navigator.of(context).pop();
+                          widget.onReadFile(file.path);
+                        },
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CountPill extends StatelessWidget {
+  const _CountPill({required this.label, required this.color});
+
+  final String label;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(99),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusFilterChip extends StatelessWidget {
+  const _StatusFilterChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: ChoiceChip(
+        label: Text(label),
+        selected: selected,
+        onSelected: (_) => onTap(),
+      ),
+    );
+  }
+}
+
+class _FileStatusIcon extends StatelessWidget {
+  const _FileStatusIcon({required this.file});
+
+  final GitFileStatus file;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = file.untracked
+        ? const Color(0xff8b949e)
+        : file.staged
+        ? const Color(0xff3fb950)
+        : const Color(0xffd29922);
+    return Tooltip(
+      message: file.statusLabel,
+      child: Container(
+        width: 32,
+        height: 32,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.14),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          file.untracked
+              ? '?'
+              : file.staged
+              ? 'S'
+              : 'M',
+          style: TextStyle(color: color, fontWeight: FontWeight.w800),
+        ),
+      ),
+    );
+  }
+}
+
+class _DiffViewerPage extends StatefulWidget {
+  const _DiffViewerPage({
+    required this.result,
+    required this.workdir,
+    required this.onReadFile,
+  });
+
+  final DiffResult result;
+  final String workdir;
+  final Future<void> Function(String path) onReadFile;
+
+  @override
+  State<_DiffViewerPage> createState() => _DiffViewerPageState();
+}
+
+class _DiffViewerPageState extends State<_DiffViewerPage> {
+  final _verticalController = ScrollController();
+  final _horizontalController = ScrollController();
+  int _selectedIndex = 0;
+
+  @override
+  void dispose() {
+    _verticalController.dispose();
+    _horizontalController.dispose();
+    super.dispose();
+  }
+
+  void _selectFile(int index) {
+    setState(() => _selectedIndex = index);
+    if (_verticalController.hasClients) _verticalController.jumpTo(0);
+    if (_horizontalController.hasClients) _horizontalController.jumpTo(0);
+  }
+
+  Future<void> _showFilePicker() async {
+    final index = await showModalBottomSheet<int>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView.builder(
+          shrinkWrap: true,
+          itemCount: widget.result.files.length,
+          itemBuilder: (context, index) {
+            final file = widget.result.files[index];
+            return ListTile(
+              selected: index == _selectedIndex,
+              leading: const Icon(Icons.description_outlined),
+              title: Text(
+                file.path,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: Text('+${file.additions}  -${file.deletions}'),
+              onTap: () => Navigator.of(context).pop(index),
+            );
+          },
+        ),
+      ),
+    );
+    if (index != null) _selectFile(index);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.result.files.isEmpty) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Diff')),
+        body: const Center(child: Text('No tracked changes')),
+      );
+    }
+    final file = widget.result.files[_selectedIndex];
+    final lines = _parsePatchLines(file.patch);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              file.path.split('/').last,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            Text(
+              '${_selectedIndex + 1} of ${widget.result.files.length}',
+              style: Theme.of(context).textTheme.labelSmall,
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Open file',
+            onPressed: () {
+              Navigator.of(context).pop();
+              widget.onReadFile(file.path);
+            },
+            icon: const Icon(Icons.open_in_new),
+          ),
+          IconButton(
+            tooltip: 'Choose file',
+            onPressed: _showFilePicker,
+            icon: const Icon(Icons.list_alt),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+            decoration: const BoxDecoration(
+              color: Color(0xff111816),
+              border: Border(bottom: BorderSide(color: Color(0xff2b3935))),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    file.path,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+                Text(
+                  '+${file.additions}',
+                  style: const TextStyle(color: Color(0xff3fb950)),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  '-${file.deletions}',
+                  style: const TextStyle(color: Color(0xfff85149)),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: Scrollbar(
+              controller: _verticalController,
+              child: SingleChildScrollView(
+                controller: _verticalController,
+                child: Scrollbar(
+                  controller: _horizontalController,
+                  notificationPredicate: (notification) =>
+                      notification.metrics.axis == Axis.horizontal,
+                  child: SingleChildScrollView(
+                    controller: _horizontalController,
+                    scrollDirection: Axis.horizontal,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        minWidth: MediaQuery.sizeOf(context).width,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          for (final line in lines) _PatchLineRow(line: line),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+          child: Row(
+            children: [
+              IconButton.filledTonal(
+                tooltip: 'Previous file',
+                onPressed: _selectedIndex == 0
+                    ? null
+                    : () => _selectFile(_selectedIndex - 1),
+                icon: const Icon(Icons.chevron_left),
+              ),
+              Expanded(
+                child: TextButton.icon(
+                  onPressed: _showFilePicker,
+                  icon: const Icon(Icons.folder_open_outlined),
+                  label: Text('${widget.result.files.length} changed files'),
+                ),
+              ),
+              IconButton.filledTonal(
+                tooltip: 'Next file',
+                onPressed: _selectedIndex == widget.result.files.length - 1
+                    ? null
+                    : () => _selectFile(_selectedIndex + 1),
+                icon: const Icon(Icons.chevron_right),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PatchDisplayLine {
+  const _PatchDisplayLine({required this.text, this.oldLine, this.newLine});
+
+  final String text;
+  final int? oldLine;
+  final int? newLine;
+}
+
+List<_PatchDisplayLine> _parsePatchLines(String patch) {
+  var oldLine = 0;
+  var newLine = 0;
+  final output = <_PatchDisplayLine>[];
+  final hunk = RegExp(r'^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@');
+  for (final text in patch.split('\n')) {
+    final match = hunk.firstMatch(text);
+    if (match != null) {
+      oldLine = int.parse(match.group(1)!);
+      newLine = int.parse(match.group(2)!);
+      output.add(_PatchDisplayLine(text: text));
+    } else if (text.startsWith('+') && !text.startsWith('+++')) {
+      output.add(_PatchDisplayLine(text: text, newLine: newLine++));
+    } else if (text.startsWith('-') && !text.startsWith('---')) {
+      output.add(_PatchDisplayLine(text: text, oldLine: oldLine++));
+    } else if (text.startsWith(' ')) {
+      output.add(
+        _PatchDisplayLine(text: text, oldLine: oldLine++, newLine: newLine++),
+      );
+    } else {
+      output.add(_PatchDisplayLine(text: text));
+    }
+  }
+  return output;
+}
+
+class _PatchLineRow extends StatelessWidget {
+  const _PatchLineRow({required this.line});
+
+  final _PatchDisplayLine line;
+
+  @override
+  Widget build(BuildContext context) {
+    final added = line.text.startsWith('+') && !line.text.startsWith('+++');
+    final deleted = line.text.startsWith('-') && !line.text.startsWith('---');
+    final hunk = line.text.startsWith('@@');
+    final background = added
+        ? const Color(0xff12261b)
+        : deleted
+        ? const Color(0xff2d1719)
+        : hunk
+        ? const Color(0xff17263a)
+        : Colors.transparent;
+    final foreground = added
+        ? const Color(0xffaff5b4)
+        : deleted
+        ? const Color(0xffffb8b0)
+        : hunk
+        ? const Color(0xffa5d6ff)
+        : const Color(0xffd7e0dc);
+    return Container(
+      color: background,
+      constraints: const BoxConstraints(minHeight: 23),
+      child: Row(
+        children: [
+          _LineNumber(value: line.oldLine),
+          _LineNumber(value: line.newLine),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            child: SelectableText(
+              line.text,
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12.5,
+                color: foreground,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LineNumber extends StatelessWidget {
+  const _LineNumber({required this.value});
+
+  final int? value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 46,
+      alignment: Alignment.centerRight,
+      padding: const EdgeInsets.only(right: 7),
+      decoration: const BoxDecoration(
+        border: Border(right: BorderSide(color: Color(0xff27312e))),
+      ),
+      child: Text(
+        value?.toString() ?? '',
+        style: const TextStyle(
+          color: Color(0xff6e7b77),
+          fontFamily: 'monospace',
+          fontSize: 11,
+        ),
+      ),
+    );
+  }
+}
+
+class _FileViewerPage extends StatefulWidget {
+  const _FileViewerPage({required this.result, required this.workdir});
+
+  final FileContentResult result;
+  final String workdir;
+
+  @override
+  State<_FileViewerPage> createState() => _FileViewerPageState();
+}
+
+class _FileViewerPageState extends State<_FileViewerPage> {
+  static const _lineHeight = 23.0;
+  final _searchController = TextEditingController();
+  final _verticalController = ScrollController();
+  final _horizontalController = ScrollController();
+  late final List<String> _lines;
+  List<int> _matches = const [];
+  int _matchIndex = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _lines = widget.result.content.split('\n');
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _verticalController.dispose();
+    _horizontalController.dispose();
+    super.dispose();
+  }
+
+  void _search(String query) {
+    final cleaned = query.toLowerCase();
+    final matches = <int>[];
+    if (cleaned.isNotEmpty) {
+      for (var index = 0; index < _lines.length; index++) {
+        if (_lines[index].toLowerCase().contains(cleaned)) matches.add(index);
+      }
+    }
+    setState(() {
+      _matches = matches;
+      _matchIndex = 0;
+    });
+    if (matches.isNotEmpty) _jumpToMatch();
+  }
+
+  void _moveMatch(int direction) {
+    if (_matches.isEmpty) return;
+    setState(() {
+      _matchIndex = (_matchIndex + direction) % _matches.length;
+      if (_matchIndex < 0) _matchIndex += _matches.length;
+    });
+    _jumpToMatch();
+  }
+
+  void _jumpToMatch() {
+    if (!_verticalController.hasClients || _matches.isEmpty) return;
+    final offset = (_matches[_matchIndex] * _lineHeight).clamp(
+      0.0,
+      _verticalController.position.maxScrollExtent,
+    );
+    _verticalController.animateTo(
+      offset,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final matchSet = _matches.toSet();
+    final maxLineLength = _lines.fold<int>(
+      0,
+      (value, line) => math.max(value, line.length),
+    );
+    final contentWidth = math.max(
+      MediaQuery.sizeOf(context).width,
+      110 + maxLineLength * 7.7,
+    );
+    return Scaffold(
+      appBar: AppBar(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.result.path.split('/').last,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            Text(
+              '${widget.result.lineCount} lines',
+              style: Theme.of(context).textTheme.labelSmall,
+            ),
+          ],
+        ),
+      ),
+      body: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+            decoration: const BoxDecoration(
+              color: Color(0xff111816),
+              border: Border(bottom: BorderSide(color: Color(0xff2b3935))),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _searchController,
+                    onChanged: _search,
+                    decoration: const InputDecoration(
+                      prefixIcon: Icon(Icons.search),
+                      hintText: 'Find in file',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                SizedBox(
+                  width: 58,
+                  child: Text(
+                    _matches.isEmpty
+                        ? '0/0'
+                        : '${_matchIndex + 1}/${_matches.length}',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.labelSmall,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Previous match',
+                  onPressed: _matches.isEmpty ? null : () => _moveMatch(-1),
+                  icon: const Icon(Icons.keyboard_arrow_up),
+                ),
+                IconButton(
+                  tooltip: 'Next match',
+                  onPressed: _matches.isEmpty ? null : () => _moveMatch(1),
+                  icon: const Icon(Icons.keyboard_arrow_down),
+                ),
+              ],
+            ),
+          ),
+          if (widget.result.truncated)
+            const MaterialBanner(
+              content: Text('Large file: showing the first 40,000 characters.'),
+              actions: [SizedBox.shrink()],
+            ),
+          Expanded(
+            child: Scrollbar(
+              controller: _verticalController,
+              child: SingleChildScrollView(
+                controller: _verticalController,
+                child: Scrollbar(
+                  controller: _horizontalController,
+                  notificationPredicate: (notification) =>
+                      notification.metrics.axis == Axis.horizontal,
+                  child: SingleChildScrollView(
+                    controller: _horizontalController,
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(
+                      width: contentWidth,
+                      child: Column(
+                        children: [
+                          for (var index = 0; index < _lines.length; index++)
+                            Container(
+                              height: _lineHeight,
+                              color: matchSet.contains(index)
+                                  ? const Color(0xff342b10)
+                                  : index.isEven
+                                  ? const Color(0xff0d1311)
+                                  : const Color(0xff0f1513),
+                              child: Row(
+                                children: [
+                                  SizedBox(
+                                    width: 58,
+                                    child: Text(
+                                      '${index + 1}',
+                                      textAlign: TextAlign.right,
+                                      style: const TextStyle(
+                                        color: Color(0xff687570),
+                                        fontFamily: 'monospace',
+                                        fontSize: 11,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: SelectableText(
+                                      _lines[index],
+                                      maxLines: 1,
+                                      style: const TextStyle(
+                                        color: Color(0xffd7e0dc),
+                                        fontFamily: 'monospace',
+                                        fontSize: 12.5,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SpawnSessionDialog extends StatefulWidget {
   const _SpawnSessionDialog({
     required this.initialRepoChoices,
