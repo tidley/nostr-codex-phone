@@ -6,9 +6,36 @@ Code Call lets a phone talk to an OpenCode worker running on a computer. You can
 
 ## Screenshots
 
-| Chat and Composer | Session Drawer | Voice Recording |
+These screens were captured from a Pixel 5 connected to a temporary `code-call-demo` worker. The conversation, OpenCode session, repository files, and Git changes are real; no UI data was mocked.
+
+| Encrypted chat | Session drawer | Spawn session |
 | --- | --- | --- |
-| ![Code Call chat composer](screenshots/code-call-home.png) | ![Code Call sessions drawer](screenshots/code-call-sessions.png) | ![Code Call recording flow](screenshots/waveform_recording.png) |
+| ![Two encrypted request and response exchanges with a folder-scoped worker](screenshots/code-call-demo-chat.png) | ![Connected demo worker and computer service in the session drawer](screenshots/code-call-demo-sessions.png) | ![Full-screen repository search and spawn selector](screenshots/code-call-demo-spawn.png) |
+
+| OpenCode tools | Git status | Repository browser |
+| --- | --- | --- |
+| ![Mobile OpenCode tools menu](screenshots/code-call-demo-tools.png) | ![Staged working and untracked Git changes](screenshots/code-call-demo-git-status.png) | ![Folder and file browser for the selected repository](screenshots/code-call-demo-file-browser.png) |
+
+| File viewer | OpenCode sessions | Settings |
+| --- | --- | --- |
+| ![Line-numbered repository file viewer with search](screenshots/code-call-demo-file-view.png) | ![OpenCode session picker for the selected repository](screenshots/code-call-demo-opencode-sessions.png) | ![Worker target relay and speech settings](screenshots/code-call-demo-settings.png) |
+
+| Voice recording |
+| --- |
+| ![Push-to-talk waveform recording flow](screenshots/waveform_recording.png) |
+
+### Feature Tour
+
+- **Encrypted chat:** typed prompts and Markdown responses stay attached to the selected repository session, with resend, copy, read-aloud, and attachment actions.
+- **Session drawer:** search, select, pin, rename, restart, or remove saved worker targets; connected and loaded states are visible at a glance.
+- **Spawn session:** create a folder or search and open an existing repository through the computer service.
+- **OpenCode sessions:** use the latest session automatically or bind the repository target to a specific OpenCode session.
+- **Tools:** request status, stop work, inspect Git, read files, view history/configuration, prepare a commit, or start a release workflow.
+- **Git status and diff:** filter staged, working, and untracked files, then inspect changed files with patch navigation and line numbers.
+- **Repository browser:** navigate folders, search relative paths, and open readable files without typing a path.
+- **File viewer:** inspect selectable, line-numbered content with horizontal scrolling and find-in-file navigation.
+- **Voice and attachments:** record encrypted audio for Whisper transcription or send encrypted media/file references through Blossom.
+- **Settings:** manage worker targets, local keys, relays, Blossom, TTS, haptics, profile import/export, and connection diagnostics.
 
 ## What It Does
 
@@ -53,6 +80,8 @@ Git status, file diffs, and file content open in dedicated mobile views:
 - Diff view provides a changed-file picker, previous/next navigation, line numbers, and colored additions/deletions.
 - Read File opens a repository browser for readable files with folders, breadcrumbs, search, and file-type icons.
 - File view provides line numbers, horizontal/vertical scrolling, selectable text, and find-in-file navigation.
+
+The browser layout and file contents are returned as structured NIP-17/NIP-59 GiftWrapped DMs. Directory entries are capped by serialized payload size, and file content is truncated for reliable relay delivery; files are not uploaded to Blossom for these views.
 
 ## Security Model
 
