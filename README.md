@@ -22,7 +22,7 @@ These screens were captured from a Pixel 5 connected to a temporary `code-call-d
 
 | Voice recording |
 | --- |
-| ![Push-to-talk waveform recording flow](screenshots/waveform_recording.png) |
+| ![Push-to-talk waveform recording flow](screenshots/recording.png) |
 
 ### Feature Tour
 
