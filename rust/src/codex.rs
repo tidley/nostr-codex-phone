@@ -8,6 +8,7 @@ use std::sync::{
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -232,7 +233,7 @@ pub async fn run_codex_with_cancel(
     cancel_token: Option<&CodexCancelToken>,
 ) -> Result<String> {
     if config.backend == AgentBackend::OpenCode {
-        return run_opencode_session(prompt, config, None, cancel_token)
+        return run_opencode_session(prompt, config, None, cancel_token, None)
             .await
             .map(|result| result.response);
     }
@@ -279,7 +280,7 @@ pub async fn run_codex_session_with_cancel_and_events(
     event_sender: Option<CodexJsonEventSender>,
 ) -> Result<CodexRunResult> {
     if config.backend == AgentBackend::OpenCode {
-        return run_opencode_session(prompt, config, session_id, cancel_token).await;
+        return run_opencode_session(prompt, config, session_id, cancel_token, event_sender).await;
     }
 
     if !config.persist_sessions {
@@ -359,6 +360,7 @@ async fn run_opencode_session(
     config: &CodexConfig,
     session_id: Option<&str>,
     cancel_token: Option<&CodexCancelToken>,
+    event_sender: Option<CodexJsonEventSender>,
 ) -> Result<CodexRunResult> {
     let client = reqwest::Client::new();
     ensure_opencode_available(&client, config).await?;
@@ -378,22 +380,96 @@ async fn run_opencode_session(
     )
     .json(&body);
 
-    let response = tokio::select! {
-        response = request.send() => response.context("failed to send prompt to OpenCode")?,
+    let event_task = event_sender.map(|sender| {
+        let client = client.clone();
+        let config = config.clone();
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            let _ = stream_opencode_events(&client, &config, &session_id, sender).await;
+        })
+    });
+    let result = tokio::select! {
+        response = request.send() => response.context("failed to send prompt to OpenCode"),
         _ = wait_for_cancel(cancel_token), if cancel_token.is_some() => {
             let _ = abort_opencode_session(&client, config, &session_id).await;
-            return Err(anyhow!("Codex cancelled"));
+            Err(anyhow!("Codex cancelled"))
         }
         _ = sleep(config.timeout) => {
-            let _ = abort_opencode_session(&client, config, &session_id).await;
-            return Err(anyhow!("OpenCode timed out after {}s", config.timeout.as_secs()));
+            Err(anyhow!(
+                "OpenCode is still busy after {}s",
+                config.timeout.as_secs()
+            ))
         }
     };
+    if let Some(task) = event_task {
+        task.abort();
+    }
+    let response = result?;
     let value = opencode_json_response(response).await?;
     Ok(CodexRunResult {
         response: opencode_response_text(&value)?,
         session_id: Some(session_id),
     })
+}
+
+async fn stream_opencode_events(
+    client: &reqwest::Client,
+    config: &CodexConfig,
+    session_id: &str,
+    sender: CodexJsonEventSender,
+) -> Result<()> {
+    let response = opencode_request(client, config, reqwest::Method::GET, "/event")
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .context("failed to subscribe to OpenCode events")?;
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "OpenCode event subscription failed with {}",
+            response.status()
+        ));
+    }
+
+    let mut events = response.bytes_stream();
+    let mut buffer = String::new();
+    while let Some(chunk) = events.next().await {
+        buffer.push_str(&String::from_utf8_lossy(
+            &chunk.context("failed to read OpenCode events")?,
+        ));
+        while let Some(end) = buffer.find("\n\n") {
+            let event = buffer[..end].to_string();
+            buffer.drain(..end + 2);
+            if let Some(event) = opencode_sse_event_for_session(&event, session_id) {
+                let _ = sender.send(event);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn opencode_sse_event_for_session(raw: &str, session_id: &str) -> Option<Value> {
+    let data = raw
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(str::trim)
+        .collect::<String>();
+    let event: Value = serde_json::from_str(&data).ok()?;
+    let payload = event.get("payload")?;
+    let properties = payload.get("properties")?;
+    let event_session_id = properties
+        .get("sessionID")
+        .or_else(|| {
+            properties
+                .get("info")
+                .and_then(|info| info.get("sessionID"))
+        })
+        .or_else(|| {
+            properties
+                .get("part")
+                .and_then(|part| part.get("sessionID"))
+        })
+        .and_then(Value::as_str)?;
+    (event_session_id == session_id).then(|| payload.clone())
 }
 
 async fn latest_opencode_session_id(
@@ -1172,6 +1248,16 @@ mod tests {
             Some("turn.started")
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn filters_opencode_sse_events_by_session() {
+        let event = "data: {\"directory\":\"/tmp\",\"payload\":{\"type\":\"session.status\",\"properties\":{\"sessionID\":\"session-1\",\"status\":{\"type\":\"busy\"}}}}\n\n";
+
+        let payload = opencode_sse_event_for_session(event, "session-1").unwrap();
+
+        assert_eq!(payload["type"], "session.status");
+        assert!(opencode_sse_event_for_session(event, "session-2").is_none());
     }
 
     #[test]

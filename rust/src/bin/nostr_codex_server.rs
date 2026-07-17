@@ -4206,6 +4206,9 @@ async fn run_codex_and_report(
                 Err(err) => return report_codex_error(messenger, receiver_pubkey, err).await,
             }
         }
+        Err(err) if is_opencode_busy_error(&err) => {
+            return report_opencode_busy(messenger, receiver_pubkey, err).await;
+        }
         Err(err) if session_id.is_some() => {
             warn!("agent resume failed; clearing session and retrying once: {err:#}");
             send_status(
@@ -4300,7 +4303,7 @@ async fn run_codex_session_with_status(
         .send(
             messenger,
             receiver_pubkey,
-            agent_start_status(codex_config.backend, session_id.is_some()),
+            agent_start_status(codex_config.backend, session_id.is_some()).to_string(),
             true,
         )
         .await;
@@ -4341,7 +4344,7 @@ fn agent_start_status(backend: AgentBackend, resume: bool) -> &'static str {
 
 struct CodexStatusReporter {
     last_sent_at: Option<Instant>,
-    last_message: Option<&'static str>,
+    last_message: Option<String>,
 }
 
 impl CodexStatusReporter {
@@ -4368,10 +4371,10 @@ impl CodexStatusReporter {
         &mut self,
         messenger: &NostrMessenger,
         receiver_pubkey: &str,
-        message: &'static str,
+        message: String,
         force: bool,
     ) {
-        if self.last_message == Some(message) {
+        if self.last_message.as_deref() == Some(message.as_str()) {
             return;
         }
         if !force {
@@ -4381,20 +4384,118 @@ impl CodexStatusReporter {
                 }
             }
         }
-        send_status(messenger, receiver_pubkey, message).await;
+        send_status(messenger, receiver_pubkey, &message).await;
         self.last_sent_at = Some(Instant::now());
         self.last_message = Some(message);
     }
 }
 
-fn codex_status_from_event(event: &serde_json::Value) -> Option<(&'static str, bool)> {
+fn codex_status_from_event(event: &serde_json::Value) -> Option<(String, bool)> {
     match event.get("type").and_then(serde_json::Value::as_str) {
-        Some("turn.started") => Some(("Codex started.", false)),
-        Some("turn.completed") => Some(("Codex finished; sending response.", true)),
-        Some("turn.failed") | Some("error") => Some(("Codex failed.", true)),
-        Some("item.started") => codex_item_status(event).map(|message| (message, false)),
+        Some("session.status") => match event
+            .pointer("/properties/status/type")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("busy") => Some(("OpenCode is working.".to_string(), false)),
+            Some("retry") => Some((
+                format!(
+                    "OpenCode is retrying: {}",
+                    status_detail(
+                        event
+                            .pointer("/properties/status/message")
+                            .and_then(serde_json::Value::as_str)
+                    )
+                ),
+                true,
+            )),
+            Some("idle") => Some(("OpenCode is finishing.".to_string(), true)),
+            _ => None,
+        },
+        Some("message.part.updated") => {
+            let part = event.pointer("/properties/part")?;
+            match part.get("type").and_then(serde_json::Value::as_str) {
+                Some("tool") => {
+                    let state = part
+                        .pointer("/state/status")
+                        .and_then(serde_json::Value::as_str)?;
+                    let title = part
+                        .pointer("/state/title")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| part.get("tool").and_then(serde_json::Value::as_str))
+                        .unwrap_or("tool");
+                    match state {
+                        "running" => Some((
+                            format!("OpenCode: running {}.", status_detail(Some(title))),
+                            false,
+                        )),
+                        "completed" => Some((
+                            format!("OpenCode: finished {}.", status_detail(Some(title))),
+                            true,
+                        )),
+                        "error" => Some((
+                            format!("OpenCode: {} failed.", status_detail(Some(title))),
+                            true,
+                        )),
+                        _ => None,
+                    }
+                }
+                Some("text") | Some("reasoning")
+                    if event.pointer("/properties/delta").is_some() =>
+                {
+                    Some(("OpenCode is drafting a response.".to_string(), false))
+                }
+                _ => None,
+            }
+        }
+        Some("todo.updated") => {
+            let todos = event
+                .pointer("/properties/todos")
+                .and_then(serde_json::Value::as_array)?;
+            let completed = todos
+                .iter()
+                .filter(|todo| {
+                    todo.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+                })
+                .count();
+            Some((
+                format!(
+                    "OpenCode todo progress: {completed}/{} complete.",
+                    todos.len()
+                ),
+                false,
+            ))
+        }
+        Some("permission.updated") => Some((
+            format!(
+                "OpenCode needs permission: {}.",
+                status_detail(
+                    event
+                        .pointer("/properties/title")
+                        .and_then(serde_json::Value::as_str)
+                )
+            ),
+            true,
+        )),
+        Some("session.diff") => event
+            .pointer("/properties/diff")
+            .and_then(serde_json::Value::as_array)
+            .map(|files| (format!("OpenCode changed {} file(s).", files.len()), false)),
+        Some("turn.started") => Some(("Codex started.".to_string(), false)),
+        Some("turn.completed") => Some(("Codex finished; sending response.".to_string(), true)),
+        Some("turn.failed") | Some("error") => Some(("Codex failed.".to_string(), true)),
+        Some("item.started") => {
+            codex_item_status(event).map(|message| (message.to_string(), false))
+        }
         _ => None,
     }
+}
+
+fn status_detail(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(96).collect())
+        .unwrap_or_else(|| "working".to_string())
 }
 
 fn codex_item_status(event: &serde_json::Value) -> Option<&'static str> {
@@ -4496,12 +4597,31 @@ fn is_codex_cancelled_error(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains("Codex cancelled")
 }
 
+fn is_opencode_busy_error(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains("OpenCode is still busy after")
+}
+
 async fn report_codex_cancelled(
     messenger: &NostrMessenger,
     receiver_pubkey: &str,
 ) -> std::result::Result<String, ()> {
     info!("codex task cancelled for {receiver_pubkey}");
     send_status(messenger, receiver_pubkey, "Cancelled.").await;
+    Err(())
+}
+
+async fn report_opencode_busy(
+    messenger: &NostrMessenger,
+    receiver_pubkey: &str,
+    err: anyhow::Error,
+) -> std::result::Result<String, ()> {
+    warn!("OpenCode remains busy: {err:#}");
+    send_status(
+        messenger,
+        receiver_pubkey,
+        "OpenCode is still busy. It was not cancelled; open its session to follow the active work.",
+    )
+    .await;
     Err(())
 }
 
@@ -4708,13 +4828,34 @@ mod tests {
 
         assert_eq!(
             codex_status_from_event(&started).map(|(message, _)| message),
-            Some("Codex started.")
+            Some("Codex started.".to_string())
         );
         assert_eq!(
             codex_status_from_event(&check).map(|(message, _)| message),
-            Some("Running checks.")
+            Some("Running checks.".to_string())
         );
         assert_eq!(codex_status_from_event(&final_message), None);
+    }
+
+    #[test]
+    fn maps_opencode_events_to_statuses() {
+        let busy = serde_json::json!({
+            "type": "session.status",
+            "properties": {"status": {"type": "busy"}}
+        });
+        let tool = serde_json::json!({
+            "type": "message.part.updated",
+            "properties": {"part": {"type": "tool", "state": {"status": "running"}}}
+        });
+
+        assert_eq!(
+            codex_status_from_event(&busy).map(|(message, _)| message),
+            Some("OpenCode is working.".to_string())
+        );
+        assert_eq!(
+            codex_status_from_event(&tool).map(|(message, _)| message),
+            Some("OpenCode: running tool.".to_string())
+        );
     }
 
     #[test]
@@ -4887,6 +5028,16 @@ mod tests {
             codex_config_for_first_attempt(&opencode_config, Some("session")).timeout,
             Duration::from_secs(300)
         );
+    }
+
+    #[test]
+    fn recognizes_busy_opencode_timeout() {
+        assert!(is_opencode_busy_error(&anyhow::anyhow!(
+            "OpenCode is still busy after 300s"
+        )));
+        assert!(!is_opencode_busy_error(&anyhow::anyhow!(
+            "OpenCode connection failed"
+        )));
     }
 
     #[test]
