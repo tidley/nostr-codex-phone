@@ -125,6 +125,37 @@ class _OpenCodeSessionSelection {
   final _OpenCodeSessionChoice? session;
 }
 
+class _OpenCodeModelChoice {
+  const _OpenCodeModelChoice({
+    required this.providerId,
+    required this.providerName,
+    required this.modelId,
+    required this.modelName,
+  });
+
+  final String providerId;
+  final String providerName;
+  final String modelId;
+  final String modelName;
+
+  String get value => '$providerId/$modelId';
+
+  static _OpenCodeModelChoice? fromJson(dynamic raw) {
+    if (raw is! Map) return null;
+    final providerId = raw['provider_id']?.toString().trim() ?? '';
+    final providerName = raw['provider_name']?.toString().trim() ?? '';
+    final modelId = raw['model_id']?.toString().trim() ?? '';
+    final modelName = raw['model_name']?.toString().trim() ?? '';
+    if (providerId.isEmpty || modelId.isEmpty) return null;
+    return _OpenCodeModelChoice(
+      providerId: providerId,
+      providerName: providerName.isEmpty ? providerId : providerName,
+      modelId: modelId,
+      modelName: modelName.isEmpty ? modelId : modelName,
+    );
+  }
+}
+
 class _PendingProcessingMessage {
   const _PendingProcessingMessage({
     required this.conversationKey,
@@ -1142,6 +1173,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       pairingSecret: existing?.pairingSecret,
       opencodeSessionId: existing?.opencodeSessionId,
       opencodeSessionTitle: existing?.opencodeSessionTitle,
+      model: existing?.model,
       isMasterSession: existing?.isMasterSession ?? false,
     );
   }
@@ -1636,6 +1668,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             isMasterSession: targets[existingIndex].isMasterSession,
             opencodeSessionId: targets[existingIndex].opencodeSessionId,
             opencodeSessionTitle: targets[existingIndex].opencodeSessionTitle,
+            model: targets[existingIndex].model,
           );
     if (existingIndex == -1) {
       targets.add(savedTarget);
@@ -3479,7 +3512,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             : 'Tool request failed';
       });
       if (!fromCatchUp) {
-        unawaited(_openToolResult(result));
+        if (result.tool == 'model_list' && result.error == null) {
+          unawaited(_openModelPicker(result));
+        } else {
+          unawaited(_openToolResult(result));
+        }
       }
       return true;
     }
@@ -3925,59 +3962,34 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (_sending || !await _ensureConnectedForSend()) return;
     final conversationKey = _activeConversationKey;
     final label = visibleText ?? tool.replaceAll('_', ' ');
-    final opensDedicatedView = const {
-      'git_status',
-      'diff',
-      'read_file',
-      'file_browser',
-    }.contains(tool);
-    final requestId = opensDedicatedView
-        ? DateTime.now().microsecondsSinceEpoch.toRadixString(36)
-        : null;
+    final requestId = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
     final payload = jsonEncode(
       _withActiveRoute({
         'tool_request': tool,
-        'request_id': ?requestId,
+        'request_id': requestId,
         ...extra,
       }),
     );
-    if (requestId != null) {
-      _pendingToolViews[requestId] = _PendingToolView(
-        tool: tool,
-        conversationKey: conversationKey,
-      );
-    }
+    _pendingToolViews[requestId] = _PendingToolView(
+      tool: tool,
+      conversationKey: conversationKey,
+    );
     setState(() {
       _sending = true;
       _sendingConversationKey = conversationKey;
       _status = 'Requesting $label...';
     });
     try {
-      final eventId = await _sendWithAutoRecovery(
+      await _sendWithAutoRecovery(
         label: '$label request',
         sender: () => nostrSendQuery(query: payload),
       );
       if (!mounted) return;
       setState(() {
-        if (opensDedicatedView) {
-          _status = 'Waiting for $label...';
-          return;
-        }
-        _appendMessageForConversation(
-          conversationKey,
-          ConversationMessage(
-            direction: MessageDirection.outgoing,
-            kind: 'query',
-            text: label,
-            eventId: eventId,
-            timestamp: DateTime.now(),
-          ),
-        );
-        _appendIncomingProcessingPlaceholder(conversationKey, eventId);
-        _status = '$label requested';
+        _status = 'Waiting for $label...';
       });
     } catch (error) {
-      if (requestId != null) _pendingToolViews.remove(requestId);
+      _pendingToolViews.remove(requestId);
       _showError('Tool request failed: $error');
     } finally {
       if (mounted) {
@@ -4047,7 +4059,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         );
         break;
       default:
-        return;
+        page = _ToolTextPage(
+          title: payload.tool.replaceAll('_', ' '),
+          text: payload.data['text']?.toString() ?? 'No result returned.',
+        );
     }
     await Navigator.of(
       context,
@@ -4095,7 +4110,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             ),
             ListTile(
               leading: const Icon(Icons.memory),
-              title: const Text('Model config'),
+              title: const Text('Choose model'),
               onTap: () => Navigator.of(context).pop('model_config'),
             ),
             ListTile(
@@ -4115,9 +4130,55 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (tool == null || !mounted) return;
     if (tool == 'stop') {
       await _stopCurrentTask();
+    } else if (tool == 'model_config') {
+      await _chooseModel();
     } else {
       await _sendToolRequest(tool);
     }
+  }
+
+  Future<void> _chooseModel() => _sendToolRequest(
+    'model_list',
+    extra: {'opencode_model_list_request': true},
+    visibleText: 'OpenCode models',
+  );
+
+  Future<void> _openModelPicker(ToolResultPayload payload) async {
+    final target = _targetById(_repoTargets, _selectedRepoTargetId);
+    if (target == null) return;
+    final rawModels = payload.data['models'];
+    final models = rawModels is Iterable
+        ? rawModels
+              .map(_OpenCodeModelChoice.fromJson)
+              .whereType<_OpenCodeModelChoice>()
+              .toList()
+        : <_OpenCodeModelChoice>[];
+    if (models.isEmpty) {
+      _showError('OpenCode did not return any configured models');
+      return;
+    }
+    final model = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (_) => _OpenCodeModelPickerPage(
+          models: models,
+          selectedModel: target.model,
+        ),
+      ),
+    );
+    if (model == null || !mounted) return;
+    final updated = target.copyWith(
+      model: model.isEmpty ? null : model,
+      clearModel: model.isEmpty,
+    );
+    final targets = [..._repoTargets];
+    targets[targets.indexWhere((item) => item.id == target.id)] = updated;
+    setState(() {
+      _repoTargets = targets;
+      _status = model.isEmpty
+          ? 'Using the server default model'
+          : 'Using $model';
+    });
+    await _saveSettings();
   }
 
   Future<void> _requestSpawnSession() async {
@@ -4162,8 +4223,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _spawnAndOpenSession(
       path: workdir,
       create: false,
+      newSession: true,
       sendingStatus: 'Requesting session restart...',
-      waitingStatus: 'Waiting for restarted session...',
+      waitingStatus: 'Waiting for new session...',
       timeoutMessage: 'Session restart timed out',
     );
   }
@@ -4171,6 +4233,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Future<bool> _spawnAndOpenSession({
     required String path,
     required bool create,
+    bool newSession = false,
     required String sendingStatus,
     required String waitingStatus,
     required String timeoutMessage,
@@ -4190,6 +4253,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       if (!await _sendSpawnSessionRequest(
         path: path,
         create: create,
+        newSession: newSession,
         sendingStatus: sendingStatus,
         sentStatus: waitingStatus,
         silent: true,
@@ -4219,6 +4283,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Future<bool> _sendSpawnSessionRequest({
     required String path,
     required bool create,
+    bool newSession = false,
     required String sendingStatus,
     required String sentStatus,
     bool silent = false,
@@ -4227,6 +4292,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       'spawn_session': {
         'workdir': path,
         'create': create,
+        if (newSession) 'new_session': true,
         if (silent) 'silent': true,
       },
     });
@@ -5367,9 +5433,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final workdir = target?.workdir?.trim();
     if (workdir == null || workdir.isEmpty) return payload;
     final sessionId = target?.opencodeSessionId?.trim();
+    final model = target?.model?.trim();
     return {
       'workdir': workdir,
       if (sessionId != null && sessionId.isNotEmpty) 'session_id': sessionId,
+      if (model != null && model.isNotEmpty) 'model': model,
       ...payload,
     };
   }

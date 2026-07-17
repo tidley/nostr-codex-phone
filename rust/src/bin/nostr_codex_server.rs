@@ -19,7 +19,8 @@ use rand::{rngs::OsRng, RngCore};
 mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
 use rust_lib_nostr_codex_phone::codex::{
-    ensure_opencode_session, is_codex_usage_limit_error, list_opencode_sessions, run_codex,
+    ensure_opencode_session, is_codex_usage_limit_error, list_opencode_models,
+    list_opencode_sessions, new_opencode_session, run_codex,
     run_codex_session_with_cancel_and_events, AgentBackend, CodexCancelToken, CodexConfig,
     CodexRunResult, OpenCodeSessionInfo,
 };
@@ -58,6 +59,7 @@ enum RequestClass {
 struct SpawnWorkerRequest {
     workdir: String,
     create: bool,
+    new_session: bool,
     silent: bool,
 }
 
@@ -508,22 +510,24 @@ fn is_pairing_claim_message(message: &IncomingMessage) -> bool {
 }
 
 fn routed_codex_config(config: &CodexConfig, message: &IncomingMessage) -> Result<CodexConfig> {
-    let Some(workdir) = route_workdir_from_json(&message.raw_json)
-        .or_else(|| route_workdir_from_json(&message.text))
-    else {
-        return Ok(config.clone());
-    };
-
-    let workdir = PathBuf::from(workdir);
-    let canonical = workdir
-        .canonicalize()
-        .with_context(|| format!("route workdir `{}` is not accessible", workdir.display()))?;
-    if !canonical.is_dir() {
-        bail!("route workdir `{}` is not a directory", canonical.display());
-    }
-
     let mut routed = config.clone();
-    routed.working_dir = canonical;
+    if let Some(workdir) = route_workdir_from_json(&message.raw_json)
+        .or_else(|| route_workdir_from_json(&message.text))
+    {
+        let workdir = PathBuf::from(workdir);
+        let canonical = workdir
+            .canonicalize()
+            .with_context(|| format!("route workdir `{}` is not accessible", workdir.display()))?;
+        if !canonical.is_dir() {
+            bail!("route workdir `{}` is not a directory", canonical.display());
+        }
+        routed.working_dir = canonical;
+    }
+    if let Some(model) =
+        route_model_from_json(&message.raw_json).or_else(|| route_model_from_json(&message.text))
+    {
+        routed = routed.with_model_override(&model);
+    }
     Ok(routed)
 }
 
@@ -543,6 +547,16 @@ fn route_session_id_from_json(raw: &str) -> Option<String> {
     value
         .get("session_id")
         .or_else(|| value.get("sessionId"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn route_model_from_json(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("model")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -1097,9 +1111,23 @@ async fn process_message(
                 return;
             }
 
-            if let Some(tool_result) =
-                structured_tool_result(&message.text, &codex_config.working_dir)
-            {
+            if let Some(request_id) = opencode_model_list_request_id(&message.text) {
+                process_opencode_model_list_request(
+                    messenger,
+                    &message.sender_pubkey_hex,
+                    &codex_config,
+                    &request_id,
+                )
+                .await;
+                return;
+            }
+
+            if let Some(tool_result) = structured_tool_result(
+                memory,
+                &message.sender_pubkey_hex,
+                &message.text,
+                &codex_config.working_dir,
+            ) {
                 let delivery_error = ToolResult {
                     data: serde_json::json!({
                         "error": "The tool result could not be delivered. Please retry."
@@ -1719,6 +1747,48 @@ async fn process_opencode_session_list_request(
     }
 }
 
+async fn process_opencode_model_list_request(
+    messenger: &NostrMessenger,
+    owner_pubkey_hex: &str,
+    codex_config: &CodexConfig,
+    request_id: &str,
+) {
+    match list_opencode_models(codex_config).await {
+        Ok(models) => {
+            let result = ToolResult {
+                tool: "model_list".to_string(),
+                request_id: request_id.to_string(),
+                workdir: codex_config.working_dir.to_string_lossy().to_string(),
+                data: serde_json::json!({
+                    "models": models.into_iter().map(|model| serde_json::json!({
+                        "provider_id": model.provider_id,
+                        "provider_name": model.provider_name,
+                        "model_id": model.model_id,
+                        "model_name": model.model_name,
+                    })).collect::<Vec<_>>(),
+                }),
+            };
+            if let Err(err) = messenger
+                .send_wire_to_pubkey(owner_pubkey_hex, WireMessage::tool_result(result))
+                .await
+            {
+                error!("failed to send OpenCode model list DM: {err:#}");
+            }
+        }
+        Err(err) => {
+            let result = ToolResult {
+                tool: "model_list".to_string(),
+                request_id: request_id.to_string(),
+                workdir: codex_config.working_dir.to_string_lossy().to_string(),
+                data: serde_json::json!({ "error": format!("Could not list OpenCode models: {err:#}") }),
+            };
+            let _ = messenger
+                .send_wire_to_pubkey(owner_pubkey_hex, WireMessage::tool_result(result))
+                .await;
+        }
+    }
+}
+
 fn opencode_session_entry(session: OpenCodeSessionInfo) -> OpenCodeSessionListEntry {
     OpenCodeSessionListEntry {
         id: session.id,
@@ -1747,7 +1817,11 @@ async fn start_repo_worker(
     if codex_config.backend == AgentBackend::OpenCode {
         let mut target_config = codex_config.clone();
         target_config.working_dir = context.workdir.clone();
-        let session_id = ensure_opencode_session(&target_config).await?;
+        let session_id = if request.new_session {
+            new_opencode_session(&target_config).await?
+        } else {
+            ensure_opencode_session(&target_config).await?
+        };
         info!(
             "ensured OpenCode session {session_id} for {}",
             context.workdir.display()
@@ -1957,6 +2031,20 @@ fn is_opencode_session_list_request(request: &str) -> bool {
         .is_some_and(|object| object.contains_key("opencode_session_list_request"))
 }
 
+fn opencode_model_list_request_id(request: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(request.trim()).ok()?;
+    let object = value.as_object()?;
+    if object.get("opencode_model_list_request") != Some(&serde_json::Value::Bool(true)) {
+        return None;
+    }
+    object
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|request_id| !request_id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn build_repo_list() -> Result<RepoList> {
     let root = canonical_worker_root_dir()?;
     let roots = [root.clone(), root.join("pave")]
@@ -2148,6 +2236,7 @@ fn parse_spawn_worker_request(request: &str) -> Option<SpawnWorkerRequest> {
                 SpawnWorkerRequest {
                     workdir,
                     create,
+                    new_session: false,
                     silent: false,
                 }
             });
@@ -2174,6 +2263,7 @@ fn parse_spawn_worker_request(request: &str) -> Option<SpawnWorkerRequest> {
                 SpawnWorkerRequest {
                     workdir,
                     create,
+                    new_session: false,
                     silent: false,
                 }
             });
@@ -2201,6 +2291,11 @@ fn parse_spawn_worker_json_request(request: &str) -> Option<SpawnWorkerRequest> 
         .or_else(|| raw_object.get("create_folder"))
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
+    let new_session = raw_object
+        .get("new_session")
+        .or_else(|| raw_object.get("newSession"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
     let silent = raw_object
         .get("silent")
         .or_else(|| raw_object.get("quiet"))
@@ -2209,6 +2304,7 @@ fn parse_spawn_worker_json_request(request: &str) -> Option<SpawnWorkerRequest> 
     Some(SpawnWorkerRequest {
         workdir,
         create,
+        new_session,
         silent,
     })
 }
@@ -2949,13 +3045,15 @@ fn handle_tool_request(
     }
 }
 
-fn structured_tool_result(request: &str, workdir: &Path) -> Option<ToolResult> {
+fn structured_tool_result(
+    memory: &mut Option<MemoryStore>,
+    peer_pubkey: &str,
+    request: &str,
+    workdir: &Path,
+) -> Option<ToolResult> {
     let value = serde_json::from_str::<serde_json::Value>(request.trim()).ok()?;
     let object = value.as_object()?;
     let tool = object.get("tool_request")?.as_str()?.trim();
-    if !matches!(tool, "git_status" | "diff" | "read_file" | "file_browser") {
-        return None;
-    }
     let request_id = object.get("request_id")?.as_str()?.trim();
     if request_id.is_empty() {
         return None;
@@ -2970,7 +3068,10 @@ fn structured_tool_result(request: &str, workdir: &Path) -> Option<ToolResult> {
             .map(|path| read_file_data(workdir, path))
             .unwrap_or_else(|| serde_json::json!({ "error": "A file path is required." })),
         "file_browser" => file_browser_data(workdir),
-        _ => unreachable!(),
+        _ => serde_json::json!({
+            "text": handle_tool_request(memory, peer_pubkey, request, workdir)
+                .unwrap_or_else(|| format!("Unknown tool request `{tool}`.")),
+        }),
     };
 
     Some(ToolResult {
@@ -4521,7 +4622,8 @@ mod tests {
         })
         .to_string();
 
-        let result = structured_tool_result(&request, temp_dir.path()).unwrap();
+        let result =
+            structured_tool_result(&mut None, "peer-1", &request, temp_dir.path()).unwrap();
 
         assert_eq!(result.tool, "read_file");
         assert_eq!(result.request_id, "request-1");
@@ -4554,7 +4656,8 @@ mod tests {
         })
         .to_string();
 
-        let result = structured_tool_result(&request, temp_dir.path()).unwrap();
+        let result =
+            structured_tool_result(&mut None, "peer-1", &request, temp_dir.path()).unwrap();
         let paths = result.data["entries"]
             .as_array()
             .unwrap()
@@ -4621,6 +4724,7 @@ mod tests {
             Some(SpawnWorkerRequest {
                 workdir: "/home/tom/code/repo".to_string(),
                 create: false,
+                new_session: false,
                 silent: false,
             })
         );
@@ -4629,6 +4733,7 @@ mod tests {
             Some(SpawnWorkerRequest {
                 workdir: "/home/tom/code/repo with spaces".to_string(),
                 create: false,
+                new_session: false,
                 silent: false,
             })
         );
@@ -4637,6 +4742,7 @@ mod tests {
             Some(SpawnWorkerRequest {
                 workdir: "~/code/repo".to_string(),
                 create: false,
+                new_session: false,
                 silent: false,
             })
         );
@@ -4645,6 +4751,7 @@ mod tests {
             Some(SpawnWorkerRequest {
                 workdir: "/home/tom/code/repo".to_string(),
                 create: false,
+                new_session: false,
                 silent: false,
             })
         );
@@ -4653,6 +4760,7 @@ mod tests {
             Some(SpawnWorkerRequest {
                 workdir: "/home/tom/code/repo".to_string(),
                 create: false,
+                new_session: false,
                 silent: false,
             })
         );
@@ -4661,6 +4769,7 @@ mod tests {
             Some(SpawnWorkerRequest {
                 workdir: "/home/tom/code/repo".to_string(),
                 create: false,
+                new_session: false,
                 silent: false,
             })
         );
@@ -4669,6 +4778,7 @@ mod tests {
             Some(SpawnWorkerRequest {
                 workdir: "/home/tom/code/new".to_string(),
                 create: true,
+                new_session: false,
                 silent: false,
             })
         );
@@ -4679,7 +4789,19 @@ mod tests {
             Some(SpawnWorkerRequest {
                 workdir: "/home/tom/code/new".to_string(),
                 create: true,
+                new_session: false,
                 silent: true,
+            })
+        );
+        assert_eq!(
+            parse_spawn_worker_request(
+                r#"{"spawn_session":{"workdir":"/home/tom/code/repo","new_session":true}}"#
+            ),
+            Some(SpawnWorkerRequest {
+                workdir: "/home/tom/code/repo".to_string(),
+                create: false,
+                new_session: true,
+                silent: false,
             })
         );
         assert_eq!(
@@ -4687,6 +4809,7 @@ mod tests {
             Some(SpawnWorkerRequest {
                 workdir: "new-repo".to_string(),
                 create: true,
+                new_session: false,
                 silent: false,
             })
         );
@@ -4712,6 +4835,7 @@ mod tests {
             Some(NonblockingControlRequest::Spawn(SpawnWorkerRequest {
                 workdir: "/home/tom/code/repo".to_string(),
                 create: false,
+                new_session: false,
                 silent: false,
             }))
         );
@@ -5004,6 +5128,7 @@ mod tests {
         let request = SpawnWorkerRequest {
             workdir: "new-repo".to_string(),
             create: true,
+            new_session: false,
             silent: false,
         };
         let resolved = resolve_spawn_workdir(&request, &current_workdir).unwrap();
@@ -5039,6 +5164,7 @@ mod tests {
         let request = SpawnWorkerRequest {
             workdir: outside.to_string_lossy().to_string(),
             create: false,
+            new_session: false,
             silent: false,
         };
         let error = resolve_spawn_workdir(&request, &current_workdir)
@@ -5072,6 +5198,7 @@ mod tests {
         let request = SpawnWorkerRequest {
             workdir: "../tmp/new-repo".to_string(),
             create: true,
+            new_session: false,
             silent: false,
         };
         let error = resolve_spawn_workdir(&request, &current_workdir)
@@ -5108,6 +5235,7 @@ mod tests {
         let request = SpawnWorkerRequest {
             workdir: extra_root.join("new-repo").to_string_lossy().to_string(),
             create: true,
+            new_session: false,
             silent: false,
         };
         let resolved = resolve_spawn_workdir(&request, &current_workdir).unwrap();

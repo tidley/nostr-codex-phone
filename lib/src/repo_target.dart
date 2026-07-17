@@ -14,6 +14,7 @@ class RepoTarget {
     this.pairingSecret,
     this.opencodeSessionId,
     this.opencodeSessionTitle,
+    this.model,
     this.isMasterSession = false,
   });
 
@@ -29,6 +30,7 @@ class RepoTarget {
   final String? pairingSecret;
   final String? opencodeSessionId;
   final String? opencodeSessionTitle;
+  final String? model;
   final bool isMasterSession;
 
   String get displayName {
@@ -57,6 +59,7 @@ class RepoTarget {
       'opencode_session_id': opencodeSessionId,
     if (opencodeSessionTitle != null && opencodeSessionTitle!.trim().isNotEmpty)
       'opencode_session_title': opencodeSessionTitle,
+    if (model != null && model!.trim().isNotEmpty) 'model': model,
     if (isMasterSession) 'is_master_session': true,
   };
 
@@ -73,9 +76,11 @@ class RepoTarget {
     String? pairingSecret,
     String? opencodeSessionId,
     String? opencodeSessionTitle,
+    String? model,
     bool? isMasterSession,
     bool clearPairingSecret = false,
     bool clearOpenCodeSession = false,
+    bool clearModel = false,
   }) {
     return RepoTarget(
       id: id ?? this.id,
@@ -96,6 +101,7 @@ class RepoTarget {
       opencodeSessionTitle: clearOpenCodeSession
           ? null
           : opencodeSessionTitle ?? this.opencodeSessionTitle,
+      model: clearModel ? null : model ?? this.model,
       isMasterSession: isMasterSession ?? this.isMasterSession,
     );
   }
@@ -114,6 +120,7 @@ class RepoTarget {
     final opencodeSessionTitle = raw['opencode_session_title']
         ?.toString()
         .trim();
+    final model = raw['model']?.toString().trim();
     final isMasterSession = raw['is_master_session'] == true;
     final rawRelays = raw['relays'];
     final relays = rawRelays is Iterable
@@ -154,6 +161,7 @@ class RepoTarget {
           opencodeSessionTitle == null || opencodeSessionTitle.isEmpty
           ? null
           : opencodeSessionTitle,
+      model: model == null || model.isEmpty ? null : model,
       isMasterSession: isMasterSession,
     );
   }
