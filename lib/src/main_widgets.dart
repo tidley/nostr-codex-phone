@@ -439,6 +439,111 @@ class _ToolErrorPage extends StatelessWidget {
   }
 }
 
+class _ToolTextPage extends StatelessWidget {
+  const _ToolTextPage({required this.title, required this.text});
+
+  final String title;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(title)),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: SelectableText(text),
+        ),
+      ),
+    );
+  }
+}
+
+class _OpenCodeModelPickerPage extends StatefulWidget {
+  const _OpenCodeModelPickerPage({
+    required this.models,
+    required this.selectedModel,
+  });
+
+  final List<_OpenCodeModelChoice> models;
+  final String? selectedModel;
+
+  @override
+  State<_OpenCodeModelPickerPage> createState() =>
+      _OpenCodeModelPickerPageState();
+}
+
+class _OpenCodeModelPickerPageState extends State<_OpenCodeModelPickerPage> {
+  String _query = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final query = _query.trim().toLowerCase();
+    final models = widget.models.where((model) {
+      return query.isEmpty ||
+          model.providerName.toLowerCase().contains(query) ||
+          model.modelName.toLowerCase().contains(query) ||
+          model.value.toLowerCase().contains(query);
+    }).toList();
+    return Scaffold(
+      appBar: AppBar(title: const Text('Select OpenCode model')),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: SearchBar(
+              hintText: 'Search providers and models',
+              leading: const Icon(Icons.search),
+              onChanged: (value) => setState(() => _query = value),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.settings_backup_restore_outlined),
+            title: const Text('Server default'),
+            subtitle: const Text('Use OpenCode’s configured default model'),
+            trailing: widget.selectedModel == null
+                ? const Icon(Icons.check)
+                : null,
+            onTap: () => Navigator.of(context).pop(''),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: ListView.builder(
+              itemCount: models.length,
+              itemBuilder: (context, index) {
+                final model = models[index];
+                final previous = index == 0 ? null : models[index - 1];
+                final showProvider = previous?.providerId != model.providerId;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (showProvider)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 20, 16, 4),
+                        child: Text(
+                          model.providerName,
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
+                      ),
+                    ListTile(
+                      title: Text(model.modelName),
+                      subtitle: Text(model.value),
+                      trailing: widget.selectedModel == model.value
+                          ? const Icon(Icons.check)
+                          : null,
+                      onTap: () => Navigator.of(context).pop(model.value),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 enum _GitStatusFilter { all, staged, working, untracked }
 
 class _GitStatusPage extends StatefulWidget {

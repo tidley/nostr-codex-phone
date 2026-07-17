@@ -65,6 +65,14 @@ pub struct OpenCodeSessionInfo {
     pub updated_at: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenCodeModelInfo {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model_id: String,
+    pub model_name: String,
+}
+
 impl OpenCodeSessionInfo {
     fn sort_key(&self) -> &str {
         self.updated_at
@@ -306,6 +314,23 @@ pub async fn list_opencode_sessions(config: &CodexConfig) -> Result<Vec<OpenCode
     list_opencode_sessions_with_client(&client, config).await
 }
 
+pub async fn list_opencode_models(config: &CodexConfig) -> Result<Vec<OpenCodeModelInfo>> {
+    if config.backend != AgentBackend::OpenCode {
+        return Err(anyhow!("OpenCode models require AGENT_BACKEND=opencode"));
+    }
+
+    let client = reqwest::Client::new();
+    ensure_opencode_available(&client, config).await?;
+    let response = timeout(
+        OPENCODE_CONTROL_TIMEOUT,
+        opencode_request(&client, config, reqwest::Method::GET, "/config/providers").send(),
+    )
+    .await
+    .context("timed out listing OpenCode models")?
+    .context("failed to list OpenCode models")?;
+    parse_opencode_model_list(&opencode_json_response(response).await?)
+}
+
 pub async fn ensure_opencode_session(config: &CodexConfig) -> Result<String> {
     if config.backend != AgentBackend::OpenCode {
         return Err(anyhow!("OpenCode sessions require AGENT_BACKEND=opencode"));
@@ -317,6 +342,16 @@ pub async fn ensure_opencode_session(config: &CodexConfig) -> Result<String> {
         Some(session_id) => Ok(session_id),
         None => create_opencode_session(&client, config).await,
     }
+}
+
+pub async fn new_opencode_session(config: &CodexConfig) -> Result<String> {
+    if config.backend != AgentBackend::OpenCode {
+        return Err(anyhow!("OpenCode sessions require AGENT_BACKEND=opencode"));
+    }
+
+    let client = reqwest::Client::new();
+    ensure_opencode_available(&client, config).await?;
+    create_opencode_session(&client, config).await
 }
 
 async fn run_opencode_session(
@@ -520,6 +555,38 @@ fn parse_opencode_session_list(value: &Value) -> Result<Vec<OpenCodeSessionInfo>
         .collect::<Vec<_>>();
     sessions.sort_by(|left, right| right.sort_key().cmp(left.sort_key()));
     Ok(sessions)
+}
+
+fn parse_opencode_model_list(value: &Value) -> Result<Vec<OpenCodeModelInfo>> {
+    let providers = value
+        .get("providers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("OpenCode provider response did not contain providers: {value}"))?;
+    let mut models = Vec::new();
+    for provider in providers {
+        let Some(provider_id) = json_string_at(provider, &["id"]) else {
+            continue;
+        };
+        let provider_name =
+            json_string_at(provider, &["name"]).unwrap_or_else(|| provider_id.clone());
+        let Some(provider_models) = provider.get("models").and_then(Value::as_object) else {
+            continue;
+        };
+        for (model_key, model) in provider_models {
+            let model_id = json_string_at(model, &["id"]).unwrap_or_else(|| model_key.clone());
+            let model_name = json_string_at(model, &["name"]).unwrap_or_else(|| model_id.clone());
+            models.push(OpenCodeModelInfo {
+                provider_id: provider_id.clone(),
+                provider_name: provider_name.clone(),
+                model_id,
+                model_name,
+            });
+        }
+    }
+    models.sort_by(|left, right| {
+        (&left.provider_name, &left.model_name).cmp(&(&right.provider_name, &right.model_name))
+    });
+    Ok(models)
 }
 
 fn opencode_session_info_from_value(value: &Value) -> Option<OpenCodeSessionInfo> {
@@ -1148,6 +1215,28 @@ mod tests {
         assert_eq!(sessions[0].id, "newer");
         assert_eq!(sessions[0].directory.as_deref(), Some("/repo"));
         assert_eq!(sessions[1].updated_at.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn parses_opencode_models_from_configured_providers() {
+        let value = json!({
+            "providers": [{
+                "id": "openai",
+                "name": "OpenAI",
+                "models": {
+                    "gpt-5.5": { "name": "GPT-5.5" },
+                    "gpt-5-mini": { "id": "gpt-5-mini" }
+                }
+            }]
+        });
+
+        let models = parse_opencode_model_list(&value).unwrap();
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].provider_id, "openai");
+        assert_eq!(models[0].model_id, "gpt-5.5");
+        assert_eq!(models[0].model_name, "GPT-5.5");
+        assert_eq!(models[1].model_name, "gpt-5-mini");
     }
 
     #[test]
