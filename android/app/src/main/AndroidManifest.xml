@@ -19,7 +19,8 @@
         android:label="Code Call"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:roundIcon="@mipmap/ic_launcher_round">
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:allowBackup="false">
         <activity
             android:name=".MainActivity"
             android:exported="true"

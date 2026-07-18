@@ -7,10 +7,11 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use futures_util::StreamExt;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use ogg::PacketReader;
 use opus_decoder::OpusDecoder;
-use reqwest::Client;
+use reqwest::{redirect::Policy, Client};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
@@ -114,7 +115,19 @@ pub async fn download_blossom_attachment(
         ));
     }
 
-    let response = Client::new()
+    let response = Client::builder()
+        .https_only(true)
+        .redirect(Policy::custom(|attempt| {
+            if attempt.url().scheme() == "https" {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .context("failed to configure attachment download client")?
         .get(&attachment.url)
         .send()
         .await
@@ -127,16 +140,29 @@ pub async fn download_blossom_attachment(
         ));
     }
 
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("failed to read attachment blob `{}`", attachment.url))?;
-    if bytes.len() as u64 > config.max_bytes {
+    if response
+        .content_length()
+        .is_some_and(|size| size > config.max_bytes)
+    {
         return Err(anyhow!(
-            "downloaded attachment blob is too large: {} bytes > {} byte limit",
-            bytes.len(),
+            "attachment blob is too large: {} bytes > {} byte limit",
+            response.content_length().unwrap_or_default(),
             config.max_bytes
         ));
+    }
+
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .with_context(|| format!("failed to read attachment blob `{}`", attachment.url))?;
+        if bytes.len().saturating_add(chunk.len()) as u64 > config.max_bytes {
+            return Err(anyhow!(
+                "downloaded attachment blob exceeds the {} byte limit",
+                config.max_bytes
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
     }
 
     let actual_hash = sha256_hex(&bytes);
@@ -159,7 +185,7 @@ pub async fn download_blossom_attachment(
         }
         (plaintext, encryption.plaintext_sha256.to_lowercase())
     } else {
-        (bytes.to_vec(), actual_hash)
+        (bytes, actual_hash)
     };
 
     let temp_dir = tempfile::tempdir().context("failed to create attachment temp directory")?;

@@ -581,8 +581,8 @@ fn validate_reference_fields(
     media_type: &str,
     encryption: Option<&AttachmentEncryption>,
 ) -> Result<()> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(anyhow!("field `{label}.url` must be an HTTP(S) URL"));
+    if !url.starts_with("https://") {
+        return Err(anyhow!("field `{label}.url` must use HTTPS"));
     }
     if sha256.len() != 64 || !sha256.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return Err(anyhow!(

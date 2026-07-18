@@ -96,11 +96,15 @@ impl NostrMessenger {
                 }
 
                 match decode_gift_wrap(&listener_keys, &listener_receive_peers, &event) {
-                    Ok(Some(message)) => {
-                        if tx.send(message).await.is_err() {
-                            break;
+                    Ok(Some(message)) => match tx.try_send(message) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            tracing::warn!(
+                                "dropping GiftWrap DM because the inbound queue is full"
+                            );
                         }
-                    }
+                    },
                     Ok(None) => {}
                     Err(err) => tracing::warn!("failed to process GiftWrap DM: {err:#}"),
                 }
