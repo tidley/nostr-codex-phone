@@ -2876,6 +2876,124 @@ class _RepoTargetQrScannerPageState extends State<_RepoTargetQrScannerPage> {
   }
 }
 
+class _OpenCodeToolsPage extends StatelessWidget {
+  const _OpenCodeToolsPage();
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(title: const Text('OpenCode tools')),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 8, 16),
+              child: Text(
+                'Session controls and repository tools',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            _OpenCodeToolTile(
+              icon: Icons.info_outline,
+              title: 'Session status',
+              subtitle: 'Inspect the active agent session',
+              value: 'status',
+            ),
+            _OpenCodeToolTile(
+              icon: Icons.stop_circle_outlined,
+              title: 'Stop current task',
+              subtitle: 'Cancel the active agent task',
+              value: 'stop',
+              destructive: true,
+            ),
+            const Divider(height: 32),
+            _OpenCodeToolTile(
+              icon: Icons.account_tree_outlined,
+              title: 'Git status',
+              subtitle: 'Review changed files and repository state',
+              value: 'git_status',
+            ),
+            _OpenCodeToolTile(
+              icon: Icons.difference_outlined,
+              title: 'File diff',
+              subtitle: 'View pending source changes',
+              value: 'diff',
+            ),
+            _OpenCodeToolTile(
+              icon: Icons.description_outlined,
+              title: 'Read file',
+              subtitle: 'Browse and open repository files',
+              value: 'file_browser',
+            ),
+            const Divider(height: 32),
+            _OpenCodeToolTile(
+              icon: Icons.history,
+              title: 'Task history',
+              subtitle: 'Review recent agent activity',
+              value: 'history',
+            ),
+            _OpenCodeToolTile(
+              icon: Icons.memory,
+              title: 'Choose model',
+              subtitle: 'Select a configured OpenCode model',
+              value: 'model_config',
+            ),
+            _OpenCodeToolTile(
+              icon: Icons.commit,
+              title: 'Commit prep',
+              subtitle: 'Prepare a source-control commit',
+              value: 'commit_help',
+            ),
+            _OpenCodeToolTile(
+              icon: Icons.rocket_launch_outlined,
+              title: 'Release workflow',
+              subtitle: 'Review release steps and artifacts',
+              value: 'release_help',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _OpenCodeToolTile extends StatelessWidget {
+  const _OpenCodeToolTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.value,
+    this.destructive = false,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final String value;
+  final bool destructive;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final color = destructive ? colorScheme.error : colorScheme.primary;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        leading: Icon(icon, color: color),
+        title: Text(title),
+        subtitle: Text(subtitle),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => Navigator.of(context).pop(value),
+      ),
+    );
+  }
+}
+
 class _Composer extends StatefulWidget {
   const _Composer({
     required this.controller,
@@ -3273,7 +3391,13 @@ class _RecordingButtonState extends State<_RecordingButton>
     if (widget.sendWipe && !oldWidget.sendWipe) {
       _wipeController.forward(from: 0);
     } else if (widget.finishWipe && !oldWidget.finishWipe) {
-      _wipeController.forward().whenComplete(() => widget.onWipeComplete?.call());
+      _wipeController
+          .animateTo(
+            1,
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+          )
+          .whenComplete(() => widget.onWipeComplete?.call());
     } else if (!widget.sendWipe && oldWidget.sendWipe) {
       _wipeController.value = 0;
       _seedWaveSamples();

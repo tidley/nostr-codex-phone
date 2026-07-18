@@ -4105,62 +4105,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _openToolsSheet() async {
-    final tool = await showModalBottomSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            const ListTile(title: Text('OpenCode tools')),
-            ListTile(
-              leading: const Icon(Icons.info_outline),
-              title: const Text('Session status'),
-              onTap: () => Navigator.of(context).pop('status'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.stop_circle_outlined),
-              title: const Text('Stop current task'),
-              onTap: () => Navigator.of(context).pop('stop'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.account_tree_outlined),
-              title: const Text('Git status'),
-              onTap: () => Navigator.of(context).pop('git_status'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.difference_outlined),
-              title: const Text('File diff'),
-              onTap: () => Navigator.of(context).pop('diff'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.description_outlined),
-              title: const Text('Read file'),
-              onTap: () => Navigator.of(context).pop('file_browser'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.history),
-              title: const Text('Task history'),
-              onTap: () => Navigator.of(context).pop('history'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.memory),
-              title: const Text('Choose model'),
-              onTap: () => Navigator.of(context).pop('model_config'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.commit),
-              title: const Text('Commit prep'),
-              onTap: () => Navigator.of(context).pop('commit_help'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.rocket_launch_outlined),
-              title: const Text('Release workflow'),
-              onTap: () => Navigator.of(context).pop('release_help'),
-            ),
-          ],
-        ),
-      ),
+    final tool = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const _OpenCodeToolsPage()),
     );
     if (tool == null || !mounted) return;
     if (tool == 'stop') {
