@@ -454,7 +454,7 @@ fn opencode_sse_event_for_session(raw: &str, session_id: &str) -> Option<Value> 
         .map(str::trim)
         .collect::<String>();
     let event: Value = serde_json::from_str(&data).ok()?;
-    let payload = event.get("payload")?;
+    let payload = event.get("payload").unwrap_or(&event);
     let properties = payload.get("properties")?;
     let event_session_id = properties
         .get("sessionID")
@@ -1253,6 +1253,16 @@ mod tests {
     #[test]
     fn filters_opencode_sse_events_by_session() {
         let event = "data: {\"directory\":\"/tmp\",\"payload\":{\"type\":\"session.status\",\"properties\":{\"sessionID\":\"session-1\",\"status\":{\"type\":\"busy\"}}}}\n\n";
+
+        let payload = opencode_sse_event_for_session(event, "session-1").unwrap();
+
+        assert_eq!(payload["type"], "session.status");
+        assert!(opencode_sse_event_for_session(event, "session-2").is_none());
+    }
+
+    #[test]
+    fn filters_direct_opencode_sse_events_by_session() {
+        let event = "data: {\"id\":\"evt-1\",\"type\":\"session.status\",\"properties\":{\"sessionID\":\"session-1\",\"status\":{\"type\":\"busy\"}}}\n\n";
 
         let payload = opencode_sse_event_for_session(event, "session-1").unwrap();
 

@@ -299,6 +299,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _pendingReplyTargetIds = <String>{};
   final _pendingTargetInvites = <RepoTarget>[];
   final ScrollController _chatScrollController = ScrollController();
+  final _pendingConversationHistorySaves = <String>{};
+  Future<void> _conversationHistoryWriteTail = Future<void>.value();
+  Timer? _conversationHistorySaveTimer;
   late final AnimationController _menuNotificationPulseController;
 
   bool _loadingSettings = true;
@@ -387,6 +390,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   bool get _sendingAudioInActiveConversation =>
       _sendingAudio && _sendingAudioConversationKey == _activeConversationKey;
+
+  bool get _transcribingInActiveConversation => _pendingProcessingMessages.any(
+    (pending) =>
+        pending.conversationKey == _activeConversationKey &&
+        pending.completion == _PendingMessageCompletion.transcript,
+  );
 
   bool get _sendingMediaInActiveConversation =>
       _sendingMedia && _sendingMediaConversationKey == _activeConversationKey;
@@ -560,6 +569,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
     unawaited(_recordingAmplitudeSubscription?.cancel());
     _recordingTimer?.cancel();
+    _conversationHistorySaveTimer?.cancel();
     _tts.stop();
     _chatScrollController.dispose();
     _secretKeyController.dispose();
@@ -1859,7 +1869,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     return 'No target';
   }
 
-  Future<Map<String, dynamic>> _readConversationHistoryStore() async {
+  Future<Map<String, dynamic>> _readConversationHistoryStoreRaw() async {
     final raw = await _storage.read(key: _conversationHistoryStorageKey);
     if (raw == null || raw.trim().isEmpty) return {};
     try {
@@ -1869,6 +1879,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     } catch (_) {
       return {};
     }
+  }
+
+  Future<Map<String, dynamic>> _readConversationHistoryStore() async {
+    await _conversationHistoryWriteTail;
+    return _readConversationHistoryStoreRaw();
   }
 
   Future<List<ConversationMessage>> _readConversationHistory(
@@ -1891,18 +1906,26 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
     if (removedVolatile) {
       store[conversationKey] = messages.map((item) => item.toJson()).toList();
-      unawaited(_writeConversationHistoryStore(store));
+      unawaited(_updateConversationHistoryStore((latest) {
+        latest[conversationKey] = store[conversationKey];
+      }));
     }
     return sortConversationMessagesNewestFirst(messages);
   }
 
-  Future<void> _writeConversationHistoryStore(
-    Map<String, dynamic> store,
-  ) async {
-    await _storage.write(
-      key: _conversationHistoryStorageKey,
-      value: jsonEncode(store),
-    );
+  Future<void> _updateConversationHistoryStore(
+    void Function(Map<String, dynamic> store) update,
+  ) {
+    final operation = _conversationHistoryWriteTail.then((_) async {
+      final store = await _readConversationHistoryStoreRaw();
+      update(store);
+      await _storage.write(
+        key: _conversationHistoryStorageKey,
+        value: jsonEncode(store),
+      );
+    });
+    _conversationHistoryWriteTail = operation.catchError((_) {});
+    return operation;
   }
 
   Future<void> _saveConversationHistoryForKey(String conversationKey) async {
@@ -1911,15 +1934,27 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final trimmed = sortConversationMessagesNewestFirst(
       messages.where((message) => !_isVolatileConversationMessage(message)),
     ).take(_maxConversationMessages).toList();
-    final store = await _readConversationHistoryStore();
-    store[conversationKey] = trimmed.map((item) => item.toJson()).toList();
-    await _writeConversationHistoryStore(store);
+    await _updateConversationHistoryStore((store) {
+      store[conversationKey] = trimmed.map((item) => item.toJson()).toList();
+    });
   }
 
   Future<void> _deleteConversationHistoryForKey(String conversationKey) async {
-    final store = await _readConversationHistoryStore();
-    if (!store.remove(conversationKey)) return;
-    await _writeConversationHistoryStore(store);
+    await _updateConversationHistoryStore((store) {
+      store.remove(conversationKey);
+    });
+  }
+
+  void _scheduleConversationHistorySave(String conversationKey) {
+    _pendingConversationHistorySaves.add(conversationKey);
+    _conversationHistorySaveTimer?.cancel();
+    _conversationHistorySaveTimer = Timer(const Duration(milliseconds: 350), () {
+      final keys = _pendingConversationHistorySaves.toList();
+      _pendingConversationHistorySaves.clear();
+      for (final key in keys) {
+        unawaited(_saveConversationHistoryForKey(key));
+      }
+    });
   }
 
   void _appendMessageForConversation(
@@ -1928,7 +1963,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   ) {
     final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
     messages.insert(0, message);
-    unawaited(_saveConversationHistoryForKey(conversationKey));
+    _scheduleConversationHistorySave(conversationKey);
     if (conversationKey == _activeConversationKey) {
       _scrollToLatestMessage();
     }
@@ -1979,7 +2014,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     } else {
       messages.insert(0, replacement);
     }
-    unawaited(_saveConversationHistoryForKey(conversationKey));
+    _scheduleConversationHistorySave(conversationKey);
     if (conversationKey == _activeConversationKey) {
       _scrollToLatestMessage();
     }
@@ -2096,7 +2131,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       timestamp: pending.timestamp,
       audio: pending.audio,
     );
-    unawaited(_saveConversationHistoryForKey(conversationKey));
+    _scheduleConversationHistorySave(conversationKey);
     _appendIncomingProcessingPlaceholder(conversationKey, eventId);
     if (conversationKey == _activeConversationKey) {
       _scrollToLatestMessage();
@@ -2117,7 +2152,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (index >= 0) {
       final messages = _messagesByTarget[conversationKey];
       messages?.removeAt(index);
-      unawaited(_saveConversationHistoryForKey(conversationKey));
+      _scheduleConversationHistorySave(conversationKey);
       if (conversationKey == _activeConversationKey) {
         _scrollToLatestMessage();
       }
@@ -2214,7 +2249,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (oldestIndex >= 0) {
       messages[oldestIndex] = replacement;
       _syncPendingReplyTarget(conversationKey);
-      unawaited(_saveConversationHistoryForKey(conversationKey));
+      _scheduleConversationHistorySave(conversationKey);
       if (conversationKey == _activeConversationKey) {
         _scrollToLatestMessage();
       }
@@ -2262,7 +2297,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       timestamp: queued.timestamp,
       audio: queued.audio,
     );
-    unawaited(_saveConversationHistoryForKey(conversationKey));
+    _scheduleConversationHistorySave(conversationKey);
   }
 
   bool _dropIncomingProcessingPlaceholder(String conversationKey) {
@@ -2276,7 +2311,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (index < 0) return false;
     messages.removeAt(index);
     _syncPendingReplyTarget(conversationKey);
-    unawaited(_saveConversationHistoryForKey(conversationKey));
+    _scheduleConversationHistorySave(conversationKey);
     if (conversationKey == _activeConversationKey) {
       _scrollToLatestMessage();
     }
@@ -2300,7 +2335,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (trimmedEventId.isNotEmpty) {
       _completedVoiceEventIds.add(trimmedEventId);
     }
-    unawaited(_saveConversationHistoryForKey(conversationKey));
+    _scheduleConversationHistorySave(conversationKey);
     if (conversationKey == _activeConversationKey) {
       _scrollToLatestMessage();
     }
@@ -2332,7 +2367,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (index < 0) return false;
     messages[index] = replacement;
     _syncPendingReplyTarget(conversationKey);
-    unawaited(_saveConversationHistoryForKey(conversationKey));
+    _scheduleConversationHistorySave(conversationKey);
     if (conversationKey == _activeConversationKey) {
       _scrollToLatestMessage();
     }
@@ -5825,6 +5860,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               connecting: _connecting,
               sending: _sendingInActiveConversation,
               sendingAudio: _sendingAudioInActiveConversation,
+              transcribingAudio: _transcribingInActiveConversation,
               sendingMedia: _sendingMediaInActiveConversation,
               activeSendBlocked: _activeConversationSendBlocked,
               recording: _recording,

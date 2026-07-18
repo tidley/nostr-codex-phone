@@ -2884,6 +2884,7 @@ class _Composer extends StatefulWidget {
     required this.connecting,
     required this.sending,
     required this.sendingAudio,
+    required this.transcribingAudio,
     required this.sendingMedia,
     required this.activeSendBlocked,
     required this.recording,
@@ -2906,6 +2907,7 @@ class _Composer extends StatefulWidget {
   final bool connecting;
   final bool sending;
   final bool sendingAudio;
+  final bool transcribingAudio;
   final bool sendingMedia;
   final bool activeSendBlocked;
   final bool recording;
@@ -2926,6 +2928,31 @@ class _Composer extends StatefulWidget {
 }
 
 class _ComposerState extends State<_Composer> {
+  bool _voiceWipeVisible = false;
+  bool _finishVoiceWipe = false;
+
+  @override
+  void didUpdateWidget(covariant _Composer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final shouldShowWipe = widget.sendingAudio || widget.transcribingAudio;
+    if (shouldShowWipe && !_voiceWipeVisible) {
+      setState(() {
+        _voiceWipeVisible = true;
+        _finishVoiceWipe = false;
+      });
+    } else if (!shouldShowWipe && _voiceWipeVisible && !_finishVoiceWipe) {
+      setState(() => _finishVoiceWipe = true);
+    }
+  }
+
+  void _completeVoiceWipe() {
+    if (!mounted) return;
+    setState(() {
+      _voiceWipeVisible = false;
+      _finishVoiceWipe = false;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -2986,6 +3013,7 @@ class _ComposerState extends State<_Composer> {
                         ),
                         child: _RecordingButton(
                           sendWipe: false,
+                          finishWipe: false,
                           backgroundColor: Colors.transparent,
                           wipeColor: Colors.transparent,
                           waveformColor:
@@ -3058,7 +3086,7 @@ class _ComposerState extends State<_Composer> {
                       )
                     : IconButton.styleFrom(minimumSize: const Size(48, 48));
                 final sendingAudioShell =
-                    widget.sendingAudio && !widget.recording;
+                    _voiceWipeVisible && !widget.recording;
                 final sentButtonColor = theme.colorScheme.primary;
 
                 final icon = busy
@@ -3129,12 +3157,14 @@ class _ComposerState extends State<_Composer> {
                 final actionButton = (widget.recording || sendingAudioShell)
                     ? _RecordingButton(
                         sendWipe: sendingAudioShell,
+                        finishWipe: _finishVoiceWipe,
                         backgroundColor: _recordingButtonColor,
                         foregroundColor: _recordingButtonForegroundColor,
                         wipeColor: sentButtonColor,
                         wipeDuration: widget.voiceSendWipeDuration,
                         showWaveform: false,
                         waveformLevel: 0,
+                        onWipeComplete: _completeVoiceWipe,
                         child: mainButton,
                       )
                     : mainButton;
@@ -3168,6 +3198,7 @@ class _RecordingButton extends StatefulWidget {
   const _RecordingButton({
     required this.child,
     required this.sendWipe,
+    required this.finishWipe,
     required this.backgroundColor,
     required this.wipeColor,
     this.foregroundColor = Colors.white,
@@ -3175,10 +3206,12 @@ class _RecordingButton extends StatefulWidget {
     this.waveformColor = Colors.white,
     required this.waveformLevel,
     this.showWaveform = true,
+    this.onWipeComplete,
   });
 
   final Widget child;
   final bool sendWipe;
+  final bool finishWipe;
   final Color backgroundColor;
   final Color foregroundColor;
   final Color wipeColor;
@@ -3186,6 +3219,7 @@ class _RecordingButton extends StatefulWidget {
   final Color waveformColor;
   final double waveformLevel;
   final bool showWaveform;
+  final VoidCallback? onWipeComplete;
 
   @override
   State<_RecordingButton> createState() => _RecordingButtonState();
@@ -3224,7 +3258,7 @@ class _RecordingButtonState extends State<_RecordingButton>
           ..addListener(_advanceWaveform)
           ..repeat();
     if (widget.sendWipe) {
-      _wipeController.value = 1;
+      _wipeController.forward(from: 0);
     } else {
       _seedWaveSamples();
     }
@@ -3238,6 +3272,8 @@ class _RecordingButtonState extends State<_RecordingButton>
     }
     if (widget.sendWipe && !oldWidget.sendWipe) {
       _wipeController.forward(from: 0);
+    } else if (widget.finishWipe && !oldWidget.finishWipe) {
+      _wipeController.forward().whenComplete(() => widget.onWipeComplete?.call());
     } else if (!widget.sendWipe && oldWidget.sendWipe) {
       _wipeController.value = 0;
       _seedWaveSamples();
@@ -3563,32 +3599,6 @@ class _MessageTileState extends State<_MessageTile>
         ? outgoingBubbleColor
         : colorScheme.surfaceContainerHigh;
     final flashColor = Color.lerp(baseColor, colorScheme.primary, 0.16)!;
-    final transcribingLabel = widget.message.text.trim().isEmpty
-        ? 'Transcribing'
-        : widget.message.text.trim();
-
-    if (transcribing) {
-      return SizedBox(
-        height: 48,
-        width: double.infinity,
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: outgoingBubbleColor,
-            borderRadius: BorderRadius.circular(28),
-          ),
-          child: Center(
-            child: Text(
-              transcribingLabel,
-              style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: colorScheme.onPrimaryContainer,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-
     if (widget.message.kind == 'processing') {
       if (!widget.workingAnimationStyle.enabled) {
         return const SizedBox.shrink();
@@ -3755,7 +3765,20 @@ class _MessageTileState extends State<_MessageTile>
             ],
           ),
           const SizedBox(height: 8),
-          if (processing)
+          if (transcribing)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: widget.workingAnimationStyle.enabled
+                  ? DigitalThinkingIndicator(
+                      width: 42,
+                      height: 18,
+                      color: colorScheme.onPrimaryContainer,
+                      style: widget.workingAnimationStyle,
+                      speed: widget.workingAnimationSpeed,
+                    )
+                  : const SizedBox(height: 18),
+            )
+          else if (processing)
             Row(
               children: [
                 if (widget.workingAnimationStyle.enabled) ...[
