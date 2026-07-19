@@ -5300,7 +5300,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   void _startRecordingAmplitude() {
     unawaited(_recordingAmplitudeSubscription?.cancel());
     _recordingAmplitudeSubscription = _recorder
-        .onAmplitudeChanged(const Duration(milliseconds: 120))
+        .onAmplitudeChanged(const Duration(milliseconds: 60))
         .listen((amplitude) {
           if (!_recording || !mounted) return;
           final current = amplitude.current;

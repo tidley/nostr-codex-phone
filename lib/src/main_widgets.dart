@@ -3501,7 +3501,8 @@ class _RecordingButtonState extends State<_RecordingButton>
   void _pushWaveSample() {
     final level = widget.waveformLevel.clamp(0.0, 1.0);
     final responsiveLevel = math.pow(level, 0.55).toDouble();
-    _smoothedWaveLevel += (responsiveLevel - _smoothedWaveLevel) * 0.5;
+    final smoothing = responsiveLevel < _smoothedWaveLevel ? 0.85 : 0.5;
+    _smoothedWaveLevel += (responsiveLevel - _smoothedWaveLevel) * smoothing;
     final envelope = 0.05 + _smoothedWaveLevel * 0.95;
     final previous = _waveSamples.isEmpty ? 0.0 : _waveSamples.last;
     final noise = _waveRandom.nextDouble() * 2 - 1;
