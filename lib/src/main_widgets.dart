@@ -2891,7 +2891,7 @@ class _OpenCodeToolsPage extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.fromLTRB(8, 8, 8, 16),
               child: Text(
-                'Session controls and repository tools',
+                'Control the active OpenCode session and repository workflow',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: colorScheme.onSurfaceVariant,
                 ),
@@ -2910,7 +2910,20 @@ class _OpenCodeToolsPage extends StatelessWidget {
               value: 'stop',
               destructive: true,
             ),
+            _OpenCodeToolTile(
+              icon: Icons.history,
+              title: 'Task history',
+              subtitle: 'Review recent agent activity',
+              value: 'history',
+            ),
             const Divider(height: 32),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+              child: Text(
+                'Repository tools',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+            ),
             _OpenCodeToolTile(
               icon: Icons.account_tree_outlined,
               title: 'Git status',
@@ -2931,18 +2944,6 @@ class _OpenCodeToolsPage extends StatelessWidget {
             ),
             const Divider(height: 32),
             _OpenCodeToolTile(
-              icon: Icons.history,
-              title: 'Task history',
-              subtitle: 'Review recent agent activity',
-              value: 'history',
-            ),
-            _OpenCodeToolTile(
-              icon: Icons.memory,
-              title: 'Choose model',
-              subtitle: 'Select a configured OpenCode model',
-              value: 'model_config',
-            ),
-            _OpenCodeToolTile(
               icon: Icons.commit,
               title: 'Commit prep',
               subtitle: 'Prepare a source-control commit',
@@ -2953,6 +2954,20 @@ class _OpenCodeToolsPage extends StatelessWidget {
               title: 'Release workflow',
               subtitle: 'Review release steps and artifacts',
               value: 'release_help',
+            ),
+            const Divider(height: 32),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+              child: Text(
+                'OpenCode',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+            ),
+            _OpenCodeToolTile(
+              icon: Icons.memory,
+              title: 'Choose model',
+              subtitle: 'Select a configured OpenCode model',
+              value: 'model_config',
             ),
           ],
         ),
