@@ -1858,6 +1858,8 @@ class _SettingsPage extends StatelessWidget {
     required this.workingAnimationSpeed,
     required this.hapticFeedbackEnabled,
     required this.receiveVibrationEnabled,
+    required this.inactiveReplyPopupEnabled,
+    required this.inactiveReplyAudioEnabled,
     required this.language,
     required this.languages,
     required this.engine,
@@ -1885,6 +1887,8 @@ class _SettingsPage extends StatelessWidget {
     required this.onWorkingAnimationSpeedChanged,
     required this.onHapticFeedbackChanged,
     required this.onReceiveVibrationChanged,
+    required this.onInactiveReplyPopupChanged,
+    required this.onInactiveReplyAudioChanged,
     required this.onLanguageChanged,
     required this.onEngineChanged,
     required this.onRateChanged,
@@ -1916,6 +1920,8 @@ class _SettingsPage extends StatelessWidget {
   final double workingAnimationSpeed;
   final bool hapticFeedbackEnabled;
   final bool receiveVibrationEnabled;
+  final bool inactiveReplyPopupEnabled;
+  final bool inactiveReplyAudioEnabled;
   final String language;
   final List<String> languages;
   final String? engine;
@@ -1943,6 +1949,8 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<double> onWorkingAnimationSpeedChanged;
   final ValueChanged<bool> onHapticFeedbackChanged;
   final ValueChanged<bool> onReceiveVibrationChanged;
+  final ValueChanged<bool> onInactiveReplyPopupChanged;
+  final ValueChanged<bool> onInactiveReplyAudioChanged;
   final ValueChanged<String> onLanguageChanged;
   final ValueChanged<String?> onEngineChanged;
   final ValueChanged<double> onRateChanged;
@@ -2018,8 +2026,12 @@ class _SettingsPage extends StatelessWidget {
           _HapticFeedbackSettings(
             initialEnabled: hapticFeedbackEnabled,
             initialReceiveVibrationEnabled: receiveVibrationEnabled,
+            initialInactiveReplyPopupEnabled: inactiveReplyPopupEnabled,
+            initialInactiveReplyAudioEnabled: inactiveReplyAudioEnabled,
             onChanged: onHapticFeedbackChanged,
             onReceiveVibrationChanged: onReceiveVibrationChanged,
+            onInactiveReplyPopupChanged: onInactiveReplyPopupChanged,
+            onInactiveReplyAudioChanged: onInactiveReplyAudioChanged,
           ),
           const SizedBox(height: 16),
           Card(
@@ -2203,14 +2215,22 @@ class _HapticFeedbackSettings extends StatefulWidget {
   const _HapticFeedbackSettings({
     required this.initialEnabled,
     required this.initialReceiveVibrationEnabled,
+    required this.initialInactiveReplyPopupEnabled,
+    required this.initialInactiveReplyAudioEnabled,
     required this.onChanged,
     required this.onReceiveVibrationChanged,
+    required this.onInactiveReplyPopupChanged,
+    required this.onInactiveReplyAudioChanged,
   });
 
   final bool initialEnabled;
   final bool initialReceiveVibrationEnabled;
+  final bool initialInactiveReplyPopupEnabled;
+  final bool initialInactiveReplyAudioEnabled;
   final ValueChanged<bool> onChanged;
   final ValueChanged<bool> onReceiveVibrationChanged;
+  final ValueChanged<bool> onInactiveReplyPopupChanged;
+  final ValueChanged<bool> onInactiveReplyAudioChanged;
 
   @override
   State<_HapticFeedbackSettings> createState() =>
@@ -2220,12 +2240,16 @@ class _HapticFeedbackSettings extends StatefulWidget {
 class _HapticFeedbackSettingsState extends State<_HapticFeedbackSettings> {
   late bool _enabled;
   late bool _receiveVibrationEnabled;
+  late bool _inactiveReplyPopupEnabled;
+  late bool _inactiveReplyAudioEnabled;
 
   @override
   void initState() {
     super.initState();
     _enabled = widget.initialEnabled;
     _receiveVibrationEnabled = widget.initialReceiveVibrationEnabled;
+    _inactiveReplyPopupEnabled = widget.initialInactiveReplyPopupEnabled;
+    _inactiveReplyAudioEnabled = widget.initialInactiveReplyAudioEnabled;
   }
 
   @override
@@ -2237,6 +2261,14 @@ class _HapticFeedbackSettingsState extends State<_HapticFeedbackSettings> {
     if (oldWidget.initialReceiveVibrationEnabled !=
         widget.initialReceiveVibrationEnabled) {
       _receiveVibrationEnabled = widget.initialReceiveVibrationEnabled;
+    }
+    if (oldWidget.initialInactiveReplyPopupEnabled !=
+        widget.initialInactiveReplyPopupEnabled) {
+      _inactiveReplyPopupEnabled = widget.initialInactiveReplyPopupEnabled;
+    }
+    if (oldWidget.initialInactiveReplyAudioEnabled !=
+        widget.initialInactiveReplyAudioEnabled) {
+      _inactiveReplyAudioEnabled = widget.initialInactiveReplyAudioEnabled;
     }
   }
 
@@ -2264,6 +2296,28 @@ class _HapticFeedbackSettingsState extends State<_HapticFeedbackSettings> {
             onChanged: (enabled) {
               setState(() => _receiveVibrationEnabled = enabled);
               widget.onReceiveVibrationChanged(enabled);
+            },
+          ),
+          const Divider(height: 1),
+          SwitchListTile(
+            secondary: const Icon(Icons.mark_chat_unread_outlined),
+            title: const Text('Show inactive session replies'),
+            subtitle: const Text('Popup and orange menu highlight'),
+            value: _inactiveReplyPopupEnabled,
+            onChanged: (enabled) {
+              setState(() => _inactiveReplyPopupEnabled = enabled);
+              widget.onInactiveReplyPopupChanged(enabled);
+            },
+          ),
+          const Divider(height: 1),
+          SwitchListTile(
+            secondary: const Icon(Icons.volume_up_outlined),
+            title: const Text('Play inactive session alert'),
+            subtitle: const Text('System sound for live replies'),
+            value: _inactiveReplyAudioEnabled,
+            onChanged: (enabled) {
+              setState(() => _inactiveReplyAudioEnabled = enabled);
+              widget.onInactiveReplyAudioChanged(enabled);
             },
           ),
         ],

@@ -250,6 +250,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _workingAnimationSpeedStorageKey = 'working_animation_speed';
   static const _hapticFeedbackStorageKey = 'haptic_feedback_enabled';
   static const _receiveVibrationStorageKey = 'receive_vibration_enabled';
+  static const _inactiveReplyPopupStorageKey =
+      'inactive_reply_popup_enabled';
+  static const _inactiveReplyAudioStorageKey =
+      'inactive_reply_audio_enabled';
   static const _conversationHistoryStorageKey = 'conversation_history_v1';
   static const _seenIncomingEventIdsStorageKey = 'seen_incoming_event_ids_v1';
   static const _unreadCountsStorageKey = 'unread_counts_v1';
@@ -272,6 +276,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _workingAnimationSpeedStorageKey,
     _hapticFeedbackStorageKey,
     _receiveVibrationStorageKey,
+    _inactiveReplyPopupStorageKey,
+    _inactiveReplyAudioStorageKey,
     _conversationHistoryStorageKey,
     _seenIncomingEventIdsStorageKey,
     _unreadCountsStorageKey,
@@ -345,6 +351,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   double _workingAnimationSpeed = 1.0;
   bool _hapticFeedbackEnabled = true;
   bool _receiveVibrationEnabled = true;
+  bool _inactiveReplyPopupEnabled = true;
+  bool _inactiveReplyAudioEnabled = true;
   String _ttsLanguage = 'en-US';
   String? _ttsEngine;
   List<String> _ttsLanguages = const ['en-US'];
@@ -618,6 +626,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final receiveVibration = await _storage.read(
       key: _receiveVibrationStorageKey,
     );
+    final inactiveReplyPopup = await _storage.read(
+      key: _inactiveReplyPopupStorageKey,
+    );
+    final inactiveReplyAudio = await _storage.read(
+      key: _inactiveReplyAudioStorageKey,
+    );
     final seenEventIds = await _storage.read(
       key: _seenIncomingEventIdsStorageKey,
     );
@@ -670,6 +684,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       );
       _hapticFeedbackEnabled = _storedBool(hapticFeedback, true);
       _receiveVibrationEnabled = _storedBool(receiveVibration, true);
+      _inactiveReplyPopupEnabled = _storedBool(inactiveReplyPopup, true);
+      _inactiveReplyAudioEnabled = _storedBool(inactiveReplyAudio, true);
       _seenIncomingEventIds
         ..clear()
         ..addAll(_decodeSeenEventIds(seenEventIds));
@@ -753,6 +769,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _saveWorkingAnimationStyle();
     await _saveHapticFeedbackEnabled();
     await _saveReceiveVibrationEnabled();
+    await _saveInactiveReplyPopupEnabled();
+    await _saveInactiveReplyAudioEnabled();
   }
 
   Future<void> _exportProfile() async {
@@ -2422,6 +2440,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             workingAnimationSpeed: _workingAnimationSpeed,
             hapticFeedbackEnabled: _hapticFeedbackEnabled,
             receiveVibrationEnabled: _receiveVibrationEnabled,
+            inactiveReplyPopupEnabled: _inactiveReplyPopupEnabled,
+            inactiveReplyAudioEnabled: _inactiveReplyAudioEnabled,
             language: _ttsLanguage,
             languages: _ttsLanguages,
             engine: _ttsEngine,
@@ -2517,6 +2537,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onWorkingAnimationSpeedChanged: _setWorkingAnimationSpeed,
             onHapticFeedbackChanged: _setHapticFeedbackEnabled,
             onReceiveVibrationChanged: _setReceiveVibrationEnabled,
+            onInactiveReplyPopupChanged: _setInactiveReplyPopupEnabled,
+            onInactiveReplyAudioChanged: _setInactiveReplyAudioEnabled,
             onLanguageChanged: _setTtsLanguage,
             onEngineChanged: _setTtsEngine,
             onRateChanged: (value) {
@@ -2677,6 +2699,31 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (enabled) {
       unawaited(_replyVibrate());
     }
+  }
+
+  Future<void> _saveInactiveReplyPopupEnabled([bool? enabled]) async {
+    await _storage.write(
+      key: _inactiveReplyPopupStorageKey,
+      value: (enabled ?? _inactiveReplyPopupEnabled).toString(),
+    );
+  }
+
+  void _setInactiveReplyPopupEnabled(bool enabled) {
+    setState(() => _inactiveReplyPopupEnabled = enabled);
+    unawaited(_saveInactiveReplyPopupEnabled(enabled));
+  }
+
+  Future<void> _saveInactiveReplyAudioEnabled([bool? enabled]) async {
+    await _storage.write(
+      key: _inactiveReplyAudioStorageKey,
+      value: (enabled ?? _inactiveReplyAudioEnabled).toString(),
+    );
+  }
+
+  void _setInactiveReplyAudioEnabled(bool enabled) {
+    setState(() => _inactiveReplyAudioEnabled = enabled);
+    unawaited(_saveInactiveReplyAudioEnabled(enabled));
+    if (enabled) unawaited(SystemSound.play(SystemSoundType.alert));
   }
 
   Future<void> _loadTtsOptions() async {
@@ -3697,8 +3744,29 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         ),
       );
     }
+    if (!isActiveConversation && !fromCatchUp) {
+      _showInactiveSessionReplyPopup(conversationKey);
+      _playInactiveSessionReplyAlert();
+    }
     _vibrateForLiveIncomingMessage(message, fromCatchUp: fromCatchUp);
     return true;
+  }
+
+  void _showInactiveSessionReplyPopup(String conversationKey) {
+    if (!_inactiveReplyPopupEnabled || !mounted) return;
+    final target = _targetById(_repoTargets, conversationKey);
+    final sessionName = target?.displayName ?? 'another session';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('New reply in $sessionName'),
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  void _playInactiveSessionReplyAlert() {
+    if (!_inactiveReplyAudioEnabled) return;
+    unawaited(SystemSound.play(SystemSoundType.alert));
   }
 
   void _vibrateForLiveIncomingMessage(
