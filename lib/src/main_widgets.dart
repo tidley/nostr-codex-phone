@@ -2302,7 +2302,7 @@ class _HapticFeedbackSettingsState extends State<_HapticFeedbackSettings> {
           SwitchListTile(
             secondary: const Icon(Icons.mark_chat_unread_outlined),
             title: const Text('Show inactive session replies'),
-            subtitle: const Text('Popup and orange menu highlight'),
+            subtitle: const Text('Popup alert for live replies'),
             value: _inactiveReplyPopupEnabled,
             onChanged: (enabled) {
               setState(() => _inactiveReplyPopupEnabled = enabled);
