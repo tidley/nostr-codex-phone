@@ -1,8 +1,5 @@
 part of '../main.dart';
 
-const _recordingButtonColor = Color(0xffffc078);
-const _recordingButtonForegroundColor = Colors.black;
-
 class _SessionDrawer extends StatelessWidget {
   const _SessionDrawer({
     required this.targets,
@@ -3471,9 +3468,7 @@ class _ComposerState extends State<_Composer> {
                         dimension: 18,
                         child: CircularProgressIndicator(
                           strokeWidth: 2,
-                          color: sendingAudioShell
-                              ? _recordingButtonForegroundColor
-                              : theme.colorScheme.onPrimary,
+                          color: theme.colorScheme.onPrimary,
                         ),
                       )
                     : widget.recording
@@ -3521,8 +3516,8 @@ class _ComposerState extends State<_Composer> {
                             backgroundColor: const WidgetStatePropertyAll(
                               Colors.transparent,
                             ),
-                            foregroundColor: const WidgetStatePropertyAll(
-                              _recordingButtonForegroundColor,
+                            foregroundColor: WidgetStatePropertyAll(
+                              theme.colorScheme.onPrimary,
                             ),
                           )
                         : mainButtonStyle,
@@ -3531,12 +3526,12 @@ class _ComposerState extends State<_Composer> {
                     label: Text(label),
                   ),
                 );
-                final actionButton = (widget.recording || sendingAudioShell)
+                final actionButton = sendingAudioShell
                     ? _RecordingButton(
                         sendWipe: sendingAudioShell,
                         finishWipe: _finishVoiceWipe,
-                        backgroundColor: _recordingButtonColor,
-                        foregroundColor: _recordingButtonForegroundColor,
+                        backgroundColor: theme.colorScheme.primary,
+                        foregroundColor: theme.colorScheme.onPrimary,
                         wipeColor: sentButtonColor,
                         wipeDuration: widget.voiceSendWipeDuration,
                         showWaveform: false,
