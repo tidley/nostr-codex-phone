@@ -1416,15 +1416,15 @@ async fn process_media_bundle_turn(
     }
     let recorded_bundle_id = recorded_bundle.id;
 
-    let mut request_parts = Vec::new();
-    if !user_query.is_empty() {
-        request_parts.push(format!("User request: {user_query}"));
-    }
-
     let mut attachment_lines = Vec::new();
     let mut transcripts = Vec::new();
     let mut local_texts = Vec::new();
     let mut local_attachments: Vec<DownloadedAudio> = Vec::new();
+    let voice_only = !bundle.attachments.is_empty()
+        && bundle
+            .attachments
+            .iter()
+            .all(|attachment| attachment.media_type.starts_with("audio/"));
 
     for (index, attachment) in bundle.attachments.iter().enumerate() {
         if cancel_token.is_cancelled() {
@@ -1435,11 +1435,6 @@ async fn process_media_bundle_turn(
             .name
             .clone()
             .unwrap_or_else(|| format!("attachment-{}", index + 1));
-        attachment_lines.push(format!(
-            "- {label} ({}) => {}",
-            attachment.media_type, attachment.url
-        ));
-
         if attachment.media_type.starts_with("audio/") {
             let audio = media_reference_to_audio(attachment);
             let transcript = match transcribe_or_load_cached(
@@ -1461,7 +1456,7 @@ async fn process_media_bundle_turn(
                 return;
             }
 
-            transcripts.push(format!("{label}:\n{transcript}"));
+            transcripts.push(transcript.clone());
 
             if let Err(err) = messenger
                 .send_transcript_for_event_to(
@@ -1476,6 +1471,11 @@ async fn process_media_bundle_turn(
             }
             continue;
         }
+
+        attachment_lines.push(format!(
+            "- {label} ({}) => {}",
+            attachment.media_type, attachment.url
+        ));
 
         if is_text_media_type(&attachment.media_type) {
             let extracted_text = match extract_local_text_attachment(
@@ -1526,33 +1526,18 @@ async fn process_media_bundle_turn(
         }
     }
 
-    if !attachment_lines.is_empty() {
-        request_parts.push(format!("Attached files:\n{}", attachment_lines.join("\n")));
-    }
-
-    if !transcripts.is_empty() {
-        request_parts.push(format!(
-            "Attachment transcripts:\n{}",
-            transcripts.join("\n\n")
-        ));
-    }
-
-    if !local_texts.is_empty() {
-        request_parts.push(format!(
-            "Attachment text content:\n{}\n\nUse this content for the request.",
-            local_texts.join("\n\n")
-        ));
-    }
-
-    if request_parts.is_empty() {
-        request_parts.push("Process the attached media and answer the user's request.".to_string());
-    }
     if cancel_token.is_cancelled() {
         report_codex_cancelled(messenger, peer_pubkey).await.ok();
         return;
     }
 
-    let request_text = request_parts.join("\n\n");
+    let request_text = media_bundle_request_text(
+        user_query,
+        &attachment_lines,
+        &transcripts,
+        &local_texts,
+        voice_only,
+    );
 
     if let Some(response) = handle_local_request(
         memory,
@@ -2765,8 +2750,7 @@ async fn transcribe_or_load_cached(
 
 fn codex_phone_prompt(user_request: &str, memory_context: Option<&str>) -> String {
     let mut prompt = String::from(
-        "You are responding to a request sent from a phone over Nostr.\n\
-         Answer the user's request directly and concretely.\n\
+        "Answer the user's request directly and concretely.\n\
          If the request is ambiguous, say what you heard and ask one concise clarifying question.\n\
          Do not answer with a generic greeting such as \"I'm here\" unless the user only greeted you.\n"
     );
@@ -2780,6 +2764,46 @@ fn codex_phone_prompt(user_request: &str, memory_context: Option<&str>) -> Strin
     prompt.push_str("\nCurrent user request:\n");
     prompt.push_str(user_request);
     prompt
+}
+
+fn media_bundle_request_text(
+    user_query: &str,
+    attachment_lines: &[String],
+    transcripts: &[String],
+    local_texts: &[String],
+    voice_only: bool,
+) -> String {
+    let mut request_parts = Vec::new();
+    if !user_query.is_empty() {
+        request_parts.push(format!("User request: {user_query}"));
+    }
+
+    if voice_only {
+        request_parts.extend(transcripts.iter().cloned());
+    } else {
+        if !attachment_lines.is_empty() {
+            request_parts.push(format!("Attached files:\n{}", attachment_lines.join("\n")));
+        }
+        if !transcripts.is_empty() {
+            request_parts.push(format!(
+                "Attachment transcripts:\n{}",
+                transcripts.join("\n\n")
+            ));
+        }
+    }
+
+    if !local_texts.is_empty() {
+        request_parts.push(format!(
+            "Attachment text content:\n{}\n\nUse this content for the request.",
+            local_texts.join("\n\n")
+        ));
+    }
+
+    if request_parts.is_empty() {
+        "Process the attached media and answer the user's request.".to_string()
+    } else {
+        request_parts.join("\n\n")
+    }
 }
 
 fn transcript_preview(transcript: &str) -> String {
@@ -4714,6 +4738,28 @@ mod tests {
     fn allows_meaningful_transcripts() {
         assert!(low_information_transcript_response("status").is_none());
         assert!(low_information_transcript_response("turn the lights off").is_none());
+    }
+
+    #[test]
+    fn voice_only_media_prompt_is_just_the_transcript() {
+        assert_eq!(
+            media_bundle_request_text(
+                "",
+                &["- voice.ogg (audio/ogg) => https://example.test/voice.ogg".to_string()],
+                &["Update the iOS fast unlock flow.".to_string()],
+                &[],
+                true,
+            ),
+            "Update the iOS fast unlock flow."
+        );
+    }
+
+    #[test]
+    fn phone_prompt_omits_transport_framing() {
+        let prompt = codex_phone_prompt("status", None);
+
+        assert!(prompt.starts_with("Answer the user's request directly"));
+        assert!(!prompt.contains("phone over Nostr"));
     }
 
     #[test]

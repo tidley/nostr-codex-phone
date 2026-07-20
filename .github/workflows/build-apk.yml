@@ -37,15 +37,21 @@ jobs:
           printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=app/nostr-codex-phone-release.jks\n' '${{ secrets.ANDROID_KEYSTORE_PASSWORD }}' '${{ secrets.ANDROID_KEYSTORE_PASSWORD }}' '${{ secrets.ANDROID_KEY_ALIAS }}' > android/key.properties
 
       - run: flutter build apk --release
+      - run: cargo build --release --manifest-path rust/Cargo.toml --bin nostr-codex-server
+      - run: cp rust/target/release/nostr-codex-server build/nostr-codex-worker-linux-x64
 
       - uses: actions/upload-artifact@v4
         with:
-          name: nostr-codex-phone-release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: nostr-codex-phone-release-assets
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/nostr-codex-worker-linux-x64
 
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
-          files: build/app/outputs/flutter-apk/app-release.apk
+          files: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/nostr-codex-worker-linux-x64
