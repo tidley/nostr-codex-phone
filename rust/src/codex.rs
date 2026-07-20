@@ -476,11 +476,22 @@ async fn latest_opencode_session_id(
     client: &reqwest::Client,
     config: &CodexConfig,
 ) -> Result<Option<String>> {
-    Ok(list_opencode_sessions_with_client(client, config)
-        .await?
+    let directory = config.working_dir.to_string_lossy();
+    Ok(latest_opencode_session_id_for_directory(
+        list_opencode_sessions_with_client(client, config).await?,
+        directory.as_ref(),
+    ))
+}
+
+fn latest_opencode_session_id_for_directory(
+    sessions: Vec<OpenCodeSessionInfo>,
+    directory: &str,
+) -> Option<String> {
+    sessions
         .into_iter()
-        .next()
-        .map(|session| session.id))
+        // Do not rely solely on OpenCode honoring the directory query parameter.
+        .find(|session| session.directory.as_deref() == Some(directory))
+        .map(|session| session.id)
 }
 
 async fn ensure_opencode_available(client: &reqwest::Client, config: &CodexConfig) -> Result<()> {
@@ -1311,6 +1322,35 @@ mod tests {
         assert_eq!(sessions[0].id, "newer");
         assert_eq!(sessions[0].directory.as_deref(), Some("/repo"));
         assert_eq!(sessions[1].updated_at.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn selects_newest_opencode_session_in_matching_directory() {
+        let sessions = parse_opencode_session_list(&json!([
+            {
+                "id": "other-repo",
+                "title": "Other repo",
+                "directory": "/other",
+                "updatedAt": "2026-07-20T12:00:00Z"
+            },
+            {
+                "id": "older",
+                "title": "Older",
+                "directory": "/repo",
+                "updatedAt": "2026-07-20T10:00:00Z"
+            },
+            {
+                "id": "newer",
+                "title": "Newer",
+                "directory": "/repo",
+                "updatedAt": "2026-07-20T11:00:00Z"
+            }
+        ]))
+        .unwrap();
+
+        let session = latest_opencode_session_id_for_directory(sessions, "/repo");
+
+        assert_eq!(session.as_deref(), Some("newer"));
     }
 
     #[test]
