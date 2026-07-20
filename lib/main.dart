@@ -43,23 +43,6 @@ enum _PendingMessageCompletion { transcript, response }
 
 enum _RelayProbeStrength { strong, fair, weak, offline }
 
-enum RecordingWaveformMode {
-  staticEqualizer('static', 'Static equalizer'),
-  rolling('rolling', 'Rolling bars');
-
-  const RecordingWaveformMode(this.storageValue, this.label);
-
-  final String storageValue;
-  final String label;
-
-  static RecordingWaveformMode fromStorage(String? value) {
-    return RecordingWaveformMode.values.firstWhere(
-      (mode) => mode.storageValue == value,
-      orElse: () => RecordingWaveformMode.staticEqualizer,
-    );
-  }
-}
-
 class _RelayProbeResult {
   const _RelayProbeResult({
     required this.relay,
@@ -268,7 +251,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _recordingWaveformSensitivityStorageKey =
       'recording_waveform_sensitivity';
   static const _recordingWaveformBarsStorageKey = 'recording_waveform_bars';
-  static const _recordingWaveformModeStorageKey = 'recording_waveform_mode';
   static const _recordingWaveformDecayStorageKey =
       'recording_waveform_decay';
   static const _hapticFeedbackStorageKey = 'haptic_feedback_enabled';
@@ -299,7 +281,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _workingAnimationSpeedStorageKey,
     _recordingWaveformSensitivityStorageKey,
     _recordingWaveformBarsStorageKey,
-    _recordingWaveformModeStorageKey,
     _recordingWaveformDecayStorageKey,
     _hapticFeedbackStorageKey,
     _receiveVibrationStorageKey,
@@ -378,8 +359,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   double _workingAnimationSpeed = 1.0;
   double _recordingWaveformSensitivity = 1.0;
   int _recordingWaveformBars = 32;
-  RecordingWaveformMode _recordingWaveformMode =
-      RecordingWaveformMode.staticEqualizer;
   double _recordingWaveformDecay = 0.6;
   bool _hapticFeedbackEnabled = true;
   bool _receiveVibrationEnabled = true;
@@ -660,9 +639,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final recordingWaveformBars = await _storage.read(
       key: _recordingWaveformBarsStorageKey,
     );
-    final recordingWaveformMode = await _storage.read(
-      key: _recordingWaveformModeStorageKey,
-    );
     final recordingWaveformDecay = await _storage.read(
       key: _recordingWaveformDecayStorageKey,
     );
@@ -738,9 +714,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         12,
         48,
       ).round();
-      _recordingWaveformMode = RecordingWaveformMode.fromStorage(
-        recordingWaveformMode,
-      );
       _recordingWaveformDecay = _storedDouble(
         recordingWaveformDecay,
         _recordingWaveformDecay,
@@ -2506,7 +2479,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             workingAnimationSpeed: _workingAnimationSpeed,
             recordingWaveformSensitivity: _recordingWaveformSensitivity,
             recordingWaveformBars: _recordingWaveformBars,
-            recordingWaveformMode: _recordingWaveformMode,
             recordingWaveformDecay: _recordingWaveformDecay,
             hapticFeedbackEnabled: _hapticFeedbackEnabled,
             receiveVibrationEnabled: _receiveVibrationEnabled,
@@ -2608,7 +2580,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onRecordingWaveformSensitivityChanged:
                 _setRecordingWaveformSensitivity,
             onRecordingWaveformBarsChanged: _setRecordingWaveformBars,
-            onRecordingWaveformModeChanged: _setRecordingWaveformMode,
             onRecordingWaveformDecayChanged: _setRecordingWaveformDecay,
             onHapticFeedbackChanged: _setHapticFeedbackEnabled,
             onReceiveVibrationChanged: _setReceiveVibrationEnabled,
@@ -2756,10 +2727,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       value: _recordingWaveformBars.toString(),
     );
     await _storage.write(
-      key: _recordingWaveformModeStorageKey,
-      value: _recordingWaveformMode.storageValue,
-    );
-    await _storage.write(
       key: _recordingWaveformDecayStorageKey,
       value: _recordingWaveformDecay.toString(),
     );
@@ -2774,11 +2741,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   void _setRecordingWaveformBars(double bars) {
     setState(() => _recordingWaveformBars = bars.round().clamp(12, 48));
-    unawaited(_saveRecordingWaveformSettings());
-  }
-
-  void _setRecordingWaveformMode(RecordingWaveformMode mode) {
-    setState(() => _recordingWaveformMode = mode);
     unawaited(_saveRecordingWaveformSettings());
   }
 
@@ -6000,7 +5962,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               recording: _recording,
               recordingWaveformLevel: _recordingWaveformLevel,
               recordingWaveformBars: _recordingWaveformBars,
-              recordingWaveformMode: _recordingWaveformMode,
               recordingWaveformDecay: _recordingWaveformDecay,
               recordingDurationLabel: _recordingDurationLabel,
               voiceSendWipeDuration: _voiceSendWipeDuration,
