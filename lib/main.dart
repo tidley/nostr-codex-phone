@@ -2035,7 +2035,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (messages == null) return;
     messages.removeWhere(
       (message) =>
-          message.kind == 'recording' && message.eventId == targetEventId,
+          (message.kind == 'recording' || message.kind == 'transcribing') &&
+          message.eventId == targetEventId,
     );
   }
 
@@ -5141,6 +5142,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final recordingFormat = _activeRecordingFormat ?? opusVoiceFormat;
     final recordingStartedAt = _recordingStartedAt;
     String? path;
+    if (recordingMessageId != null) {
+      setState(() {
+        _appendMessageForConversation(
+          conversationKey,
+          ConversationMessage(
+            direction: MessageDirection.outgoing,
+            kind: 'recording',
+            text: 'Transcribing',
+            eventId: recordingMessageId,
+            timestamp: DateTime.now(),
+          ),
+        );
+      });
+    }
     try {
       path = await _recorder.stop();
       path = _usableAudioPath(path, fallbackPath);
