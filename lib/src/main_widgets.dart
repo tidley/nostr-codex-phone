@@ -3610,10 +3610,8 @@ class _RecordingButtonState extends State<_RecordingButton>
     with TickerProviderStateMixin {
   late final AnimationController _wipeController;
   late final Animation<double> _wipeAnimation;
-  late final AnimationController _waveController;
   late List<double> _equalizerBars;
   double _smoothedWaveLevel = 0;
-  DateTime? _lastRollingUpdateAt;
 
   @override
   void initState() {
@@ -3627,13 +3625,6 @@ class _RecordingButtonState extends State<_RecordingButton>
       parent: _wipeController,
       curve: Curves.easeOutCubic,
     );
-    _waveController =
-        AnimationController(
-            vsync: this,
-            duration: const Duration(milliseconds: 1450),
-          )
-          ..addListener(_advanceWaveform)
-          ..repeat();
     if (widget.sendWipe) {
       _wipeController.forward(from: 0);
     } else {
@@ -3664,17 +3655,13 @@ class _RecordingButtonState extends State<_RecordingButton>
     if (widget.waveformBarCount != oldWidget.waveformBarCount) {
       _equalizerBars = List<double>.filled(_barCount, 0);
     }
+    if (!widget.sendWipe) _updateEqualizer();
   }
 
   @override
   void dispose() {
-    _waveController.dispose();
     _wipeController.dispose();
     super.dispose();
-  }
-
-  void _advanceWaveform() {
-    if (!widget.sendWipe) _updateEqualizer();
   }
 
   void _updateEqualizer() {
@@ -3684,13 +3671,6 @@ class _RecordingButtonState extends State<_RecordingButton>
         ? widget.waveformDecay
         : 0.9;
     _smoothedWaveLevel += (responsiveLevel - _smoothedWaveLevel) * smoothing;
-    final now = DateTime.now();
-    if (_lastRollingUpdateAt != null &&
-        now.difference(_lastRollingUpdateAt!) <
-            const Duration(milliseconds: 32)) {
-      return;
-    }
-    _lastRollingUpdateAt = now;
     final value = _smoothedWaveLevel < 0.015 ? 0.0 : _smoothedWaveLevel;
     _equalizerBars
       ..removeAt(0)
@@ -3700,7 +3680,6 @@ class _RecordingButtonState extends State<_RecordingButton>
   void _resetEqualizer() {
     _equalizerBars.fillRange(0, _equalizerBars.length, 0);
     _smoothedWaveLevel = 0;
-    _lastRollingUpdateAt = null;
   }
 
   int get _barCount => widget.waveformBarCount.clamp(12, 48).toInt();
@@ -3716,16 +3695,11 @@ class _RecordingButtonState extends State<_RecordingButton>
           Positioned.fill(child: ColoredBox(color: widget.backgroundColor)),
           if (showWaveform)
             Positioned.fill(
-              child: AnimatedBuilder(
-                animation: _waveController,
-                builder: (context, _) {
-                  return CustomPaint(
-                    painter: _RecordingWaveformPainter(
-                      samples: List<double>.of(_equalizerBars),
-                      color: widget.waveformColor,
-                    ),
-                  );
-                },
+              child: CustomPaint(
+                painter: _RecordingWaveformPainter(
+                  samples: List<double>.of(_equalizerBars),
+                  color: widget.waveformColor,
+                ),
               ),
             ),
           Positioned.fill(
