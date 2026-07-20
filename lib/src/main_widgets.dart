@@ -3774,8 +3774,6 @@ class _MessageTile extends StatefulWidget {
     required this.speaking,
     required this.workingAnimationStyle,
     required this.workingAnimationSpeed,
-    required this.recordingWaveformLevel,
-    required this.recording,
     required this.stopSpeakingOnTap,
     required this.onSpeak,
     required this.onStopSpeaking,
@@ -3788,8 +3786,6 @@ class _MessageTile extends StatefulWidget {
   final bool speaking;
   final WorkingAnimationStyle workingAnimationStyle;
   final double workingAnimationSpeed;
-  final double recordingWaveformLevel;
-  final bool recording;
   final bool stopSpeakingOnTap;
   final VoidCallback? onSpeak;
   final VoidCallback? onStopSpeaking;

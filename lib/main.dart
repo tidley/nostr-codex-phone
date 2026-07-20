@@ -337,7 +337,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   DateTime? _recordingStartedAt;
   Timer? _recordingTimer;
   StreamSubscription<Amplitude>? _recordingAmplitudeSubscription;
-  double _recordingWaveformLevel = 0;
+  final _recordingWaveformLevel = ValueNotifier<double>(0);
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   final _pendingToolViews = <String, _PendingToolView>{};
   final _completedVoiceEventIds = <String>{};
@@ -587,6 +587,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       unawaited(_deleteTempAudio(recordingPath));
     }
     unawaited(_recordingAmplitudeSubscription?.cancel());
+    _recordingWaveformLevel.dispose();
     _recordingTimer?.cancel();
     _conversationHistorySaveTimer?.cancel();
     _tts.stop();
@@ -5372,7 +5373,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _recordingTimer = null;
     unawaited(_recordingAmplitudeSubscription?.cancel());
     _recordingAmplitudeSubscription = null;
-    _recordingWaveformLevel = 0;
+    _recordingWaveformLevel.value = 0;
   }
 
   void _startRecordingAmplitude() {
@@ -5390,7 +5391,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                   .clamp(0.0, 1.0)
                   .toDouble();
           final level = math.pow(gated, 0.7).toDouble();
-          setState(() => _recordingWaveformLevel = level);
+          _recordingWaveformLevel.value = level;
         }, onError: (_) {});
   }
 
@@ -5918,8 +5919,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                                   message.eventId == _speakingMessageEventId,
                               workingAnimationStyle: _workingAnimationStyle,
                               workingAnimationSpeed: _workingAnimationSpeed,
-                              recordingWaveformLevel: _recordingWaveformLevel,
-                              recording: _recording,
                               stopSpeakingOnTap:
                                   _speaking &&
                                   message.direction ==
@@ -5950,30 +5949,33 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                       ),
                     ),
             ),
-            _Composer(
-              controller: _queryController,
-              focusNode: _queryFocusNode,
-              connected: _connected,
-              connecting: _connecting,
-              sending: _sendingInActiveConversation,
-              sendingAudio: _sendingAudioInActiveConversation,
-              transcribingAudio: _transcribingInActiveConversation,
-              sendingMedia: _sendingMediaInActiveConversation,
-              activeSendBlocked: _activeConversationSendBlocked,
-              recording: _recording,
-              recordingWaveformLevel: _recordingWaveformLevel,
-              recordingWaveformBars: _recordingWaveformBars,
-              recordingWaveformDecay: _recordingWaveformDecay,
-              recordingDurationLabel: _recordingDurationLabel,
-              voiceSendWipeDuration: _voiceSendWipeDuration,
-              wavRetryRequested: _wavRetryRequested,
-              hasPendingMedia: _hasPendingMediaAttachment,
-              pendingMediaName: _pendingMediaFileName,
-              onMicPressed: _toggleRecording,
-              onAttachMedia: _attachAndSendMedia,
-              onCancelRecording: () => unawaited(_cancelCurrentAction()),
-              onClearPendingMedia: _clearPendingMediaAttachment,
-              onSendPressed: () => _sendMediaOrText(),
+            ValueListenableBuilder<double>(
+              valueListenable: _recordingWaveformLevel,
+              builder: (context, recordingWaveformLevel, _) => _Composer(
+                controller: _queryController,
+                focusNode: _queryFocusNode,
+                connected: _connected,
+                connecting: _connecting,
+                sending: _sendingInActiveConversation,
+                sendingAudio: _sendingAudioInActiveConversation,
+                transcribingAudio: _transcribingInActiveConversation,
+                sendingMedia: _sendingMediaInActiveConversation,
+                activeSendBlocked: _activeConversationSendBlocked,
+                recording: _recording,
+                recordingWaveformLevel: recordingWaveformLevel,
+                recordingWaveformBars: _recordingWaveformBars,
+                recordingWaveformDecay: _recordingWaveformDecay,
+                recordingDurationLabel: _recordingDurationLabel,
+                voiceSendWipeDuration: _voiceSendWipeDuration,
+                wavRetryRequested: _wavRetryRequested,
+                hasPendingMedia: _hasPendingMediaAttachment,
+                pendingMediaName: _pendingMediaFileName,
+                onMicPressed: _toggleRecording,
+                onAttachMedia: _attachAndSendMedia,
+                onCancelRecording: () => unawaited(_cancelCurrentAction()),
+                onClearPendingMedia: _clearPendingMediaAttachment,
+                onSendPressed: () => _sendMediaOrText(),
+              ),
             ),
             const SizedBox(height: 12),
           ],
