@@ -3603,10 +3603,12 @@ class _RecordingButton extends StatefulWidget {
 
 class _RecordingButtonState extends State<_RecordingButton>
     with TickerProviderStateMixin {
+  static const _waveformHistory = Duration(milliseconds: 3500);
   late final AnimationController _wipeController;
   late final Animation<double> _wipeAnimation;
   late List<double> _equalizerBars;
   double _smoothedWaveLevel = 0;
+  DateTime? _lastWaveformSampleAt;
 
   @override
   void initState() {
@@ -3660,6 +3662,15 @@ class _RecordingButtonState extends State<_RecordingButton>
   }
 
   void _updateEqualizer() {
+    final now = DateTime.now();
+    final sampleInterval = Duration(
+      microseconds: _waveformHistory.inMicroseconds ~/ _barCount,
+    );
+    if (_lastWaveformSampleAt != null &&
+        now.difference(_lastWaveformSampleAt!) < sampleInterval) {
+      return;
+    }
+    _lastWaveformSampleAt = now;
     final level = widget.waveformLevel.clamp(0.0, 1.0);
     final responsiveLevel = math.pow(level, 0.7).toDouble();
     final smoothing = responsiveLevel < _smoothedWaveLevel
@@ -3675,6 +3686,7 @@ class _RecordingButtonState extends State<_RecordingButton>
   void _resetEqualizer() {
     _equalizerBars.fillRange(0, _equalizerBars.length, 0);
     _smoothedWaveLevel = 0;
+    _lastWaveformSampleAt = null;
   }
 
   int get _barCount => widget.waveformBarCount.clamp(12, 48).toInt();
