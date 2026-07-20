@@ -338,6 +338,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Timer? _recordingTimer;
   StreamSubscription<Amplitude>? _recordingAmplitudeSubscription;
   final _recordingWaveformLevel = ValueNotifier<double>(0);
+  final _recordingDurationLabel = ValueNotifier<String>('00:00');
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   final _pendingToolViews = <String, _PendingToolView>{};
   final _completedVoiceEventIds = <String>{};
@@ -384,7 +385,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
 
-  String get _recordingDurationLabel {
+  String _formatRecordingDuration() {
     if (_recordingStartedAt == null) return '00:00';
     final elapsed = DateTime.now().difference(_recordingStartedAt!);
     final totalSeconds = elapsed.inSeconds;
@@ -588,6 +589,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
     unawaited(_recordingAmplitudeSubscription?.cancel());
     _recordingWaveformLevel.dispose();
+    _recordingDurationLabel.dispose();
     _recordingTimer?.cancel();
     _conversationHistorySaveTimer?.cancel();
     _tts.stop();
@@ -5374,12 +5376,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   void _startRecordingTimer() {
     _recordingTimer?.cancel();
+    _recordingDurationLabel.value = _formatRecordingDuration();
     _recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!_recording || !mounted) {
         _stopRecordingTimer();
         return;
       }
-      setState(() {});
+      _recordingDurationLabel.value = _formatRecordingDuration();
     });
   }
 
@@ -5389,6 +5392,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     unawaited(_recordingAmplitudeSubscription?.cancel());
     _recordingAmplitudeSubscription = null;
     _recordingWaveformLevel.value = 0;
+    _recordingDurationLabel.value = '00:00';
   }
 
   void _startRecordingAmplitude() {
@@ -5966,32 +5970,37 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             ),
             ValueListenableBuilder<double>(
               valueListenable: _recordingWaveformLevel,
-              builder: (context, recordingWaveformLevel, _) => _Composer(
-                controller: _queryController,
-                focusNode: _queryFocusNode,
-                connected: _connected,
-                connecting: _connecting,
-                sending: _sendingInActiveConversation,
-                sendingAudio: _sendingAudioInActiveConversation,
-                transcribingAudio: _transcribingInActiveConversation,
-                sendingMedia: _sendingMediaInActiveConversation,
-                activeSendBlocked: _activeConversationSendBlocked,
-                recording: _recording,
-                recordingWaveformLevel: recordingWaveformLevel,
-                recordingWaveformBars: _recordingWaveformBars,
-                recordingWaveformDecay: _recordingWaveformDecay,
-                recordingDurationLabel: _recordingDurationLabel,
-                voiceSendWipeDuration: _voiceSendWipeDuration,
-                wavRetryRequested: _wavRetryRequested,
-                hasPendingMedia: _hasPendingMediaAttachment,
-                pendingMediaName: _pendingMediaFileName,
-                onMicPressed: _toggleRecording,
-                onAttachMedia: _attachAndSendMedia,
-                onCancelRecording: () => unawaited(_cancelCurrentAction()),
-                onClearPendingMedia: _clearPendingMediaAttachment,
-                onSendPressed: () => _sendMediaOrText(),
+              builder: (context, recordingWaveformLevel, _) =>
+                  ValueListenableBuilder<String>(
+                    valueListenable: _recordingDurationLabel,
+                    builder: (context, recordingDurationLabel, _) => _Composer(
+                      controller: _queryController,
+                      focusNode: _queryFocusNode,
+                      connected: _connected,
+                      connecting: _connecting,
+                      sending: _sendingInActiveConversation,
+                      sendingAudio: _sendingAudioInActiveConversation,
+                      transcribingAudio: _transcribingInActiveConversation,
+                      sendingMedia: _sendingMediaInActiveConversation,
+                      activeSendBlocked: _activeConversationSendBlocked,
+                      recording: _recording,
+                      recordingWaveformLevel: recordingWaveformLevel,
+                      recordingWaveformBars: _recordingWaveformBars,
+                      recordingWaveformDecay: _recordingWaveformDecay,
+                      recordingDurationLabel: recordingDurationLabel,
+                      voiceSendWipeDuration: _voiceSendWipeDuration,
+                      wavRetryRequested: _wavRetryRequested,
+                      hasPendingMedia: _hasPendingMediaAttachment,
+                      pendingMediaName: _pendingMediaFileName,
+                      onMicPressed: _toggleRecording,
+                      onAttachMedia: _attachAndSendMedia,
+                      onCancelRecording: () =>
+                          unawaited(_cancelCurrentAction()),
+                      onClearPendingMedia: _clearPendingMediaAttachment,
+                      onSendPressed: () => _sendMediaOrText(),
+                    ),
+                  ),
               ),
-            ),
             const SizedBox(height: 12),
           ],
         ),
