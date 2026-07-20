@@ -1871,8 +1871,9 @@ class _SettingsPage extends StatelessWidget {
     required this.autoSpeak,
     required this.workingAnimationStyle,
     required this.workingAnimationSpeed,
-    required this.recordingWaveformHistorySeconds,
     required this.recordingWaveformSensitivity,
+    required this.recordingWaveformBars,
+    required this.recordingWaveformMode,
     required this.recordingWaveformDecay,
     required this.hapticFeedbackEnabled,
     required this.receiveVibrationEnabled,
@@ -1903,8 +1904,9 @@ class _SettingsPage extends StatelessWidget {
     required this.onAutoSpeakChanged,
     required this.onWorkingAnimationChanged,
     required this.onWorkingAnimationSpeedChanged,
-    required this.onRecordingWaveformHistoryChanged,
     required this.onRecordingWaveformSensitivityChanged,
+    required this.onRecordingWaveformBarsChanged,
+    required this.onRecordingWaveformModeChanged,
     required this.onRecordingWaveformDecayChanged,
     required this.onHapticFeedbackChanged,
     required this.onReceiveVibrationChanged,
@@ -1939,8 +1941,9 @@ class _SettingsPage extends StatelessWidget {
   final bool autoSpeak;
   final WorkingAnimationStyle workingAnimationStyle;
   final double workingAnimationSpeed;
-  final double recordingWaveformHistorySeconds;
   final double recordingWaveformSensitivity;
+  final int recordingWaveformBars;
+  final RecordingWaveformMode recordingWaveformMode;
   final double recordingWaveformDecay;
   final bool hapticFeedbackEnabled;
   final bool receiveVibrationEnabled;
@@ -1971,8 +1974,9 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<bool> onAutoSpeakChanged;
   final ValueChanged<WorkingAnimationStyle> onWorkingAnimationChanged;
   final ValueChanged<double> onWorkingAnimationSpeedChanged;
-  final ValueChanged<double> onRecordingWaveformHistoryChanged;
   final ValueChanged<double> onRecordingWaveformSensitivityChanged;
+  final ValueChanged<double> onRecordingWaveformBarsChanged;
+  final ValueChanged<RecordingWaveformMode> onRecordingWaveformModeChanged;
   final ValueChanged<double> onRecordingWaveformDecayChanged;
   final ValueChanged<bool> onHapticFeedbackChanged;
   final ValueChanged<bool> onReceiveVibrationChanged;
@@ -2051,11 +2055,13 @@ class _SettingsPage extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           _RecordingWaveformSettings(
-            initialHistorySeconds: recordingWaveformHistorySeconds,
             initialSensitivity: recordingWaveformSensitivity,
+            initialBars: recordingWaveformBars,
+            initialMode: recordingWaveformMode,
             initialDecay: recordingWaveformDecay,
-            onHistoryChanged: onRecordingWaveformHistoryChanged,
             onSensitivityChanged: onRecordingWaveformSensitivityChanged,
+            onBarsChanged: onRecordingWaveformBarsChanged,
+            onModeChanged: onRecordingWaveformModeChanged,
             onDecayChanged: onRecordingWaveformDecayChanged,
           ),
           const SizedBox(height: 16),
@@ -2249,19 +2255,23 @@ class _WorkingAnimationSettingsState extends State<_WorkingAnimationSettings> {
 
 class _RecordingWaveformSettings extends StatefulWidget {
   const _RecordingWaveformSettings({
-    required this.initialHistorySeconds,
     required this.initialSensitivity,
+    required this.initialBars,
+    required this.initialMode,
     required this.initialDecay,
-    required this.onHistoryChanged,
     required this.onSensitivityChanged,
+    required this.onBarsChanged,
+    required this.onModeChanged,
     required this.onDecayChanged,
   });
 
-  final double initialHistorySeconds;
   final double initialSensitivity;
+  final int initialBars;
+  final RecordingWaveformMode initialMode;
   final double initialDecay;
-  final ValueChanged<double> onHistoryChanged;
   final ValueChanged<double> onSensitivityChanged;
+  final ValueChanged<double> onBarsChanged;
+  final ValueChanged<RecordingWaveformMode> onModeChanged;
   final ValueChanged<double> onDecayChanged;
 
   @override
@@ -2271,15 +2281,17 @@ class _RecordingWaveformSettings extends StatefulWidget {
 
 class _RecordingWaveformSettingsState
     extends State<_RecordingWaveformSettings> {
-  late double _historySeconds;
   late double _sensitivity;
+  late double _bars;
+  late RecordingWaveformMode _mode;
   late double _decay;
 
   @override
   void initState() {
     super.initState();
-    _historySeconds = widget.initialHistorySeconds;
     _sensitivity = widget.initialSensitivity;
+    _bars = widget.initialBars.toDouble();
+    _mode = widget.initialMode;
     _decay = widget.initialDecay;
   }
 
@@ -2299,16 +2311,33 @@ class _RecordingWaveformSettingsState
               style: theme.textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
+            DropdownButtonFormField<RecordingWaveformMode>(
+              initialValue: _mode,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Animation',
+              ),
+              items: [
+                for (final mode in RecordingWaveformMode.values)
+                  DropdownMenuItem(value: mode, child: Text(mode.label)),
+              ],
+              onChanged: (mode) {
+                if (mode == null) return;
+                setState(() => _mode = mode);
+                widget.onModeChanged(mode);
+              },
+            ),
+            const SizedBox(height: 12),
             _WaveformSlider(
-              label: 'History',
-              valueLabel: '${_historySeconds.toStringAsFixed(2)} s',
-              value: _historySeconds,
-              min: 0.25,
-              max: 2.0,
-              divisions: 7,
+              label: 'Bar density',
+              valueLabel: '${_bars.round()} bars',
+              value: _bars,
+              min: 12,
+              max: 48,
+              divisions: 18,
               onChanged: (value) {
-                setState(() => _historySeconds = value);
-                widget.onHistoryChanged(value);
+                setState(() => _bars = value);
+                widget.onBarsChanged(value);
               },
             ),
             _WaveformSlider(
@@ -3250,7 +3279,8 @@ class _Composer extends StatefulWidget {
     required this.activeSendBlocked,
     required this.recording,
     required this.recordingWaveformLevel,
-    required this.recordingWaveformHistorySeconds,
+    required this.recordingWaveformBars,
+    required this.recordingWaveformMode,
     required this.recordingWaveformDecay,
     required this.recordingDurationLabel,
     required this.voiceSendWipeDuration,
@@ -3275,7 +3305,8 @@ class _Composer extends StatefulWidget {
   final bool activeSendBlocked;
   final bool recording;
   final double recordingWaveformLevel;
-  final double recordingWaveformHistorySeconds;
+  final int recordingWaveformBars;
+  final RecordingWaveformMode recordingWaveformMode;
   final double recordingWaveformDecay;
   final String recordingDurationLabel;
   final Duration voiceSendWipeDuration;
@@ -3316,6 +3347,16 @@ class _ComposerState extends State<_Composer> {
       _voiceWipeVisible = false;
       _finishVoiceWipe = false;
     });
+  }
+
+  void _cancelActiveComposerAction() {
+    if (_voiceWipeVisible) {
+      setState(() {
+        _voiceWipeVisible = false;
+        _finishVoiceWipe = false;
+      });
+    }
+    widget.onCancelRecording();
   }
 
   @override
@@ -3385,8 +3426,8 @@ class _ComposerState extends State<_Composer> {
                               theme.textTheme.bodyLarge?.color ??
                               theme.colorScheme.onSurface,
                           waveformLevel: widget.recordingWaveformLevel,
-                          waveformHistorySeconds:
-                              widget.recordingWaveformHistorySeconds,
+                          waveformBarCount: widget.recordingWaveformBars,
+                          waveformMode: widget.recordingWaveformMode,
                           waveformDecay: widget.recordingWaveformDecay,
                           child: const SizedBox.expand(),
                         ),
@@ -3433,9 +3474,9 @@ class _ComposerState extends State<_Composer> {
                     ? const Icon(Icons.close)
                     : const Icon(Icons.attach_file);
                 final attachAction = widget.recording
-                    ? widget.onCancelRecording
+                    ? _cancelActiveComposerAction
                     : widget.sendingMedia
-                    ? widget.onCancelRecording
+                    ? _cancelActiveComposerAction
                     : widget.onAttachMedia;
                 final attachTooltip = widget.recording
                     ? 'Cancel recording'
@@ -3573,7 +3614,8 @@ class _RecordingButton extends StatefulWidget {
     this.wipeDuration = const Duration(milliseconds: 1040),
     this.waveformColor = Colors.white,
     required this.waveformLevel,
-    this.waveformHistorySeconds = 1.0,
+    this.waveformBarCount = 32,
+    this.waveformMode = RecordingWaveformMode.staticEqualizer,
     this.waveformDecay = 0.6,
     this.showWaveform = true,
     this.onWipeComplete,
@@ -3588,7 +3630,8 @@ class _RecordingButton extends StatefulWidget {
   final Duration wipeDuration;
   final Color waveformColor;
   final double waveformLevel;
-  final double waveformHistorySeconds;
+  final int waveformBarCount;
+  final RecordingWaveformMode waveformMode;
   final double waveformDecay;
   final bool showWaveform;
   final VoidCallback? onWipeComplete;
@@ -3599,20 +3642,18 @@ class _RecordingButton extends StatefulWidget {
 
 class _RecordingButtonState extends State<_RecordingButton>
     with TickerProviderStateMixin {
-  static const _waveSampleRate = 30.0;
-
   late final AnimationController _wipeController;
   late final Animation<double> _wipeAnimation;
   late final AnimationController _waveController;
   final _waveRandom = math.Random();
-  final _waveSamples = <double>[];
-  double _lastWaveProgress = 0;
-  double _waveSampleCarry = 0;
+  late List<double> _equalizerBars;
   double _smoothedWaveLevel = 0;
+  DateTime? _lastRollingUpdateAt;
 
   @override
   void initState() {
     super.initState();
+    _equalizerBars = List<double>.filled(_barCount, 0);
     _wipeController = AnimationController(
       vsync: this,
       duration: widget.wipeDuration,
@@ -3631,7 +3672,7 @@ class _RecordingButtonState extends State<_RecordingButton>
     if (widget.sendWipe) {
       _wipeController.forward(from: 0);
     } else {
-      _seedWaveSamples();
+      _resetEqualizer();
     }
   }
 
@@ -3653,10 +3694,13 @@ class _RecordingButtonState extends State<_RecordingButton>
           .whenComplete(() => widget.onWipeComplete?.call());
     } else if (!widget.sendWipe && oldWidget.sendWipe) {
       _wipeController.value = 0;
-      _seedWaveSamples();
+      _resetEqualizer();
     }
-    if (widget.waveformHistorySeconds != oldWidget.waveformHistorySeconds) {
-      _seedWaveSamples();
+    if (widget.waveformBarCount != oldWidget.waveformBarCount) {
+      _equalizerBars = List<double>.filled(_barCount, 0);
+    }
+    if (widget.waveformMode != oldWidget.waveformMode) {
+      _resetEqualizer();
     }
   }
 
@@ -3668,52 +3712,47 @@ class _RecordingButtonState extends State<_RecordingButton>
   }
 
   void _advanceWaveform() {
-    if (widget.sendWipe) {
-      _lastWaveProgress = _waveController.value;
-      return;
-    }
-
-    final progress = _waveController.value;
-    var delta = progress - _lastWaveProgress;
-    if (delta < 0) delta += 1;
-    _lastWaveProgress = progress;
-
-    _waveSampleCarry += delta * _waveSampleRate;
-    while (_waveSampleCarry >= 1) {
-      _waveSampleCarry -= 1;
-      _pushWaveSample();
-    }
+    if (!widget.sendWipe) _updateEqualizer();
   }
 
-  void _pushWaveSample() {
+  void _updateEqualizer() {
     final level = widget.waveformLevel.clamp(0.0, 1.0);
     final responsiveLevel = math.pow(level, 0.7).toDouble();
     final smoothing = responsiveLevel < _smoothedWaveLevel
         ? widget.waveformDecay
         : 0.9;
     _smoothedWaveLevel += (responsiveLevel - _smoothedWaveLevel) * smoothing;
-    if (_smoothedWaveLevel < 0.015) {
-      _smoothedWaveLevel = 0;
-      _waveSamples.add(0);
-    } else {
-      final previous = _waveSamples.isEmpty ? 0.0 : _waveSamples.last;
-      final noise = _waveRandom.nextDouble() * 2 - 1;
-      _waveSamples.add((previous * 0.15 + noise * 0.85) * _smoothedWaveLevel);
+    if (widget.waveformMode == RecordingWaveformMode.rolling) {
+      final now = DateTime.now();
+      if (_lastRollingUpdateAt != null &&
+          now.difference(_lastRollingUpdateAt!) <
+              const Duration(milliseconds: 32)) {
+        return;
+      }
+      _lastRollingUpdateAt = now;
+      final value = _smoothedWaveLevel < 0.015
+          ? 0.0
+          : _smoothedWaveLevel * (0.35 + _waveRandom.nextDouble() * 0.65);
+      _equalizerBars
+        ..removeAt(0)
+        ..add(value);
+      return;
     }
-    if (_waveSamples.length > _waveSampleCount) {
-      _waveSamples.removeRange(0, _waveSamples.length - _waveSampleCount);
+    for (var i = 0; i < _equalizerBars.length; i++) {
+      final target = _smoothedWaveLevel < 0.015
+          ? 0.0
+          : _smoothedWaveLevel * (0.35 + _waveRandom.nextDouble() * 0.65);
+      final speed = target > _equalizerBars[i] ? 0.72 : widget.waveformDecay;
+      _equalizerBars[i] += (target - _equalizerBars[i]) * speed;
     }
   }
 
-  void _seedWaveSamples() {
-    _waveSamples
-      ..clear()
-      ..addAll(List<double>.filled(_waveSampleCount, 0));
+  void _resetEqualizer() {
+    _equalizerBars.fillRange(0, _equalizerBars.length, 0);
+    _lastRollingUpdateAt = null;
   }
 
-  int get _waveSampleCount =>
-      (widget.waveformHistorySeconds.clamp(0.25, 2.0) * _waveSampleRate)
-          .round();
+  int get _barCount => widget.waveformBarCount.clamp(12, 48).toInt();
 
   @override
   Widget build(BuildContext context) {
@@ -3731,7 +3770,7 @@ class _RecordingButtonState extends State<_RecordingButton>
                 builder: (context, _) {
                   return CustomPaint(
                     painter: _RecordingWaveformPainter(
-                      samples: List<double>.of(_waveSamples),
+                      samples: List<double>.of(_equalizerBars),
                       color: widget.waveformColor,
                     ),
                   );
