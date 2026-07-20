@@ -248,6 +248,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _ttsVolumeStorageKey = 'tts_volume';
   static const _workingAnimationStorageKey = 'working_animation_style';
   static const _workingAnimationSpeedStorageKey = 'working_animation_speed';
+  static const _recordingWaveformHistoryStorageKey =
+      'recording_waveform_history_seconds';
+  static const _recordingWaveformSensitivityStorageKey =
+      'recording_waveform_sensitivity';
+  static const _recordingWaveformDecayStorageKey =
+      'recording_waveform_decay';
   static const _hapticFeedbackStorageKey = 'haptic_feedback_enabled';
   static const _receiveVibrationStorageKey = 'receive_vibration_enabled';
   static const _inactiveReplyPopupStorageKey =
@@ -274,6 +280,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _ttsVolumeStorageKey,
     _workingAnimationStorageKey,
     _workingAnimationSpeedStorageKey,
+    _recordingWaveformHistoryStorageKey,
+    _recordingWaveformSensitivityStorageKey,
+    _recordingWaveformDecayStorageKey,
     _hapticFeedbackStorageKey,
     _receiveVibrationStorageKey,
     _inactiveReplyPopupStorageKey,
@@ -349,6 +358,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   WorkingAnimationStyle _workingAnimationStyle =
       WorkingAnimationStyle.digitalFlow;
   double _workingAnimationSpeed = 1.0;
+  double _recordingWaveformHistorySeconds = 1.0;
+  double _recordingWaveformSensitivity = 1.0;
+  double _recordingWaveformDecay = 0.6;
   bool _hapticFeedbackEnabled = true;
   bool _receiveVibrationEnabled = true;
   bool _inactiveReplyPopupEnabled = true;
@@ -622,6 +634,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final workingAnimationSpeed = await _storage.read(
       key: _workingAnimationSpeedStorageKey,
     );
+    final recordingWaveformHistory = await _storage.read(
+      key: _recordingWaveformHistoryStorageKey,
+    );
+    final recordingWaveformSensitivity = await _storage.read(
+      key: _recordingWaveformSensitivityStorageKey,
+    );
+    final recordingWaveformDecay = await _storage.read(
+      key: _recordingWaveformDecayStorageKey,
+    );
     final hapticFeedback = await _storage.read(key: _hapticFeedbackStorageKey);
     final receiveVibration = await _storage.read(
       key: _receiveVibrationStorageKey,
@@ -681,6 +702,24 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _workingAnimationSpeed,
         0.1,
         5.0,
+      );
+      _recordingWaveformHistorySeconds = _storedDouble(
+        recordingWaveformHistory,
+        _recordingWaveformHistorySeconds,
+        0.25,
+        2.0,
+      );
+      _recordingWaveformSensitivity = _storedDouble(
+        recordingWaveformSensitivity,
+        _recordingWaveformSensitivity,
+        0.5,
+        2.0,
+      );
+      _recordingWaveformDecay = _storedDouble(
+        recordingWaveformDecay,
+        _recordingWaveformDecay,
+        0.1,
+        1.0,
       );
       _hapticFeedbackEnabled = _storedBool(hapticFeedback, true);
       _receiveVibrationEnabled = _storedBool(receiveVibration, true);
@@ -767,6 +806,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
     await _saveTtsSettings();
     await _saveWorkingAnimationStyle();
+    await _saveRecordingWaveformSettings();
     await _saveHapticFeedbackEnabled();
     await _saveReceiveVibrationEnabled();
     await _saveInactiveReplyPopupEnabled();
@@ -2438,6 +2478,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             autoSpeak: _autoSpeak,
             workingAnimationStyle: _workingAnimationStyle,
             workingAnimationSpeed: _workingAnimationSpeed,
+            recordingWaveformHistorySeconds: _recordingWaveformHistorySeconds,
+            recordingWaveformSensitivity: _recordingWaveformSensitivity,
+            recordingWaveformDecay: _recordingWaveformDecay,
             hapticFeedbackEnabled: _hapticFeedbackEnabled,
             receiveVibrationEnabled: _receiveVibrationEnabled,
             inactiveReplyPopupEnabled: _inactiveReplyPopupEnabled,
@@ -2535,6 +2578,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             },
             onWorkingAnimationChanged: _setWorkingAnimationStyle,
             onWorkingAnimationSpeedChanged: _setWorkingAnimationSpeed,
+            onRecordingWaveformHistoryChanged: _setRecordingWaveformHistory,
+            onRecordingWaveformSensitivityChanged:
+                _setRecordingWaveformSensitivity,
+            onRecordingWaveformDecayChanged: _setRecordingWaveformDecay,
             onHapticFeedbackChanged: _setHapticFeedbackEnabled,
             onReceiveVibrationChanged: _setReceiveVibrationEnabled,
             onInactiveReplyPopupChanged: _setInactiveReplyPopupEnabled,
@@ -2669,6 +2716,40 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   void _setWorkingAnimationSpeed(double speed) {
     setState(() => _workingAnimationSpeed = speed.clamp(0.1, 5.0));
     unawaited(_saveWorkingAnimationStyle());
+  }
+
+  Future<void> _saveRecordingWaveformSettings() async {
+    await _storage.write(
+      key: _recordingWaveformHistoryStorageKey,
+      value: _recordingWaveformHistorySeconds.toString(),
+    );
+    await _storage.write(
+      key: _recordingWaveformSensitivityStorageKey,
+      value: _recordingWaveformSensitivity.toString(),
+    );
+    await _storage.write(
+      key: _recordingWaveformDecayStorageKey,
+      value: _recordingWaveformDecay.toString(),
+    );
+  }
+
+  void _setRecordingWaveformHistory(double seconds) {
+    setState(
+      () => _recordingWaveformHistorySeconds = seconds.clamp(0.25, 2.0),
+    );
+    unawaited(_saveRecordingWaveformSettings());
+  }
+
+  void _setRecordingWaveformSensitivity(double sensitivity) {
+    setState(
+      () => _recordingWaveformSensitivity = sensitivity.clamp(0.5, 2.0),
+    );
+    unawaited(_saveRecordingWaveformSettings());
+  }
+
+  void _setRecordingWaveformDecay(double decay) {
+    setState(() => _recordingWaveformDecay = decay.clamp(0.1, 1.0));
+    unawaited(_saveRecordingWaveformSettings());
   }
 
   Future<void> _saveHapticFeedbackEnabled([bool? enabled]) async {
@@ -5300,13 +5381,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   void _startRecordingAmplitude() {
     unawaited(_recordingAmplitudeSubscription?.cancel());
     _recordingAmplitudeSubscription = _recorder
-        .onAmplitudeChanged(const Duration(milliseconds: 60))
+        .onAmplitudeChanged(const Duration(milliseconds: 32))
         .listen((amplitude) {
           if (!_recording || !mounted) return;
           final current = amplitude.current;
           if (!current.isFinite) return;
           final normalized = ((current + 45) / 45).clamp(0.0, 1.0).toDouble();
-          final level = 1 - math.pow(1 - normalized, 2).toDouble();
+          final gated =
+              ((normalized * _recordingWaveformSensitivity - 0.08) / 0.92)
+                  .clamp(0.0, 1.0)
+                  .toDouble();
+          final level = math.pow(gated, 0.7).toDouble();
           setState(() => _recordingWaveformLevel = level);
         }, onError: (_) {});
   }
@@ -5879,6 +5964,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               activeSendBlocked: _activeConversationSendBlocked,
               recording: _recording,
               recordingWaveformLevel: _recordingWaveformLevel,
+              recordingWaveformHistorySeconds: _recordingWaveformHistorySeconds,
+              recordingWaveformDecay: _recordingWaveformDecay,
               recordingDurationLabel: _recordingDurationLabel,
               voiceSendWipeDuration: _voiceSendWipeDuration,
               wavRetryRequested: _wavRetryRequested,

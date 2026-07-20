@@ -314,20 +314,35 @@ class _SessionDrawer extends StatelessWidget {
                                         ),
                                       ),
                                     ),
-                                    title: Text(
-                                      target.isMasterSession
-                                          ? 'Pinned ${target.displayName}'
-                                          : target.displayName,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: statusColor == null
-                                          ? null
-                                          : TextStyle(
-                                              color: statusColor,
-                                              fontWeight: selected || connected
-                                                  ? FontWeight.w700
-                                                  : FontWeight.w600,
+                                    title: Row(
+                                      children: [
+                                        if (target.isMasterSession) ...[
+                                          const Tooltip(
+                                            message: 'Pinned session',
+                                            child: Icon(
+                                              Icons.push_pin,
+                                              size: 16,
                                             ),
+                                          ),
+                                          const SizedBox(width: 6),
+                                        ],
+                                        Expanded(
+                                          child: Text(
+                                            target.displayName,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: statusColor == null
+                                                ? null
+                                                : TextStyle(
+                                                    color: statusColor,
+                                                    fontWeight:
+                                                        selected || connected
+                                                        ? FontWeight.w700
+                                                        : FontWeight.w600,
+                                                  ),
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                     subtitle: Text(
                                       target.workdir?.trim().isNotEmpty == true
@@ -1856,6 +1871,9 @@ class _SettingsPage extends StatelessWidget {
     required this.autoSpeak,
     required this.workingAnimationStyle,
     required this.workingAnimationSpeed,
+    required this.recordingWaveformHistorySeconds,
+    required this.recordingWaveformSensitivity,
+    required this.recordingWaveformDecay,
     required this.hapticFeedbackEnabled,
     required this.receiveVibrationEnabled,
     required this.inactiveReplyPopupEnabled,
@@ -1885,6 +1903,9 @@ class _SettingsPage extends StatelessWidget {
     required this.onAutoSpeakChanged,
     required this.onWorkingAnimationChanged,
     required this.onWorkingAnimationSpeedChanged,
+    required this.onRecordingWaveformHistoryChanged,
+    required this.onRecordingWaveformSensitivityChanged,
+    required this.onRecordingWaveformDecayChanged,
     required this.onHapticFeedbackChanged,
     required this.onReceiveVibrationChanged,
     required this.onInactiveReplyPopupChanged,
@@ -1918,6 +1939,9 @@ class _SettingsPage extends StatelessWidget {
   final bool autoSpeak;
   final WorkingAnimationStyle workingAnimationStyle;
   final double workingAnimationSpeed;
+  final double recordingWaveformHistorySeconds;
+  final double recordingWaveformSensitivity;
+  final double recordingWaveformDecay;
   final bool hapticFeedbackEnabled;
   final bool receiveVibrationEnabled;
   final bool inactiveReplyPopupEnabled;
@@ -1947,6 +1971,9 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<bool> onAutoSpeakChanged;
   final ValueChanged<WorkingAnimationStyle> onWorkingAnimationChanged;
   final ValueChanged<double> onWorkingAnimationSpeedChanged;
+  final ValueChanged<double> onRecordingWaveformHistoryChanged;
+  final ValueChanged<double> onRecordingWaveformSensitivityChanged;
+  final ValueChanged<double> onRecordingWaveformDecayChanged;
   final ValueChanged<bool> onHapticFeedbackChanged;
   final ValueChanged<bool> onReceiveVibrationChanged;
   final ValueChanged<bool> onInactiveReplyPopupChanged;
@@ -2021,6 +2048,15 @@ class _SettingsPage extends StatelessWidget {
             initialSpeed: workingAnimationSpeed,
             onChanged: onWorkingAnimationChanged,
             onSpeedChanged: onWorkingAnimationSpeedChanged,
+          ),
+          const SizedBox(height: 16),
+          _RecordingWaveformSettings(
+            initialHistorySeconds: recordingWaveformHistorySeconds,
+            initialSensitivity: recordingWaveformSensitivity,
+            initialDecay: recordingWaveformDecay,
+            onHistoryChanged: onRecordingWaveformHistoryChanged,
+            onSensitivityChanged: onRecordingWaveformSensitivityChanged,
+            onDecayChanged: onRecordingWaveformDecayChanged,
           ),
           const SizedBox(height: 16),
           _HapticFeedbackSettings(
@@ -2207,6 +2243,144 @@ class _WorkingAnimationSettingsState extends State<_WorkingAnimationSettings> {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _RecordingWaveformSettings extends StatefulWidget {
+  const _RecordingWaveformSettings({
+    required this.initialHistorySeconds,
+    required this.initialSensitivity,
+    required this.initialDecay,
+    required this.onHistoryChanged,
+    required this.onSensitivityChanged,
+    required this.onDecayChanged,
+  });
+
+  final double initialHistorySeconds;
+  final double initialSensitivity;
+  final double initialDecay;
+  final ValueChanged<double> onHistoryChanged;
+  final ValueChanged<double> onSensitivityChanged;
+  final ValueChanged<double> onDecayChanged;
+
+  @override
+  State<_RecordingWaveformSettings> createState() =>
+      _RecordingWaveformSettingsState();
+}
+
+class _RecordingWaveformSettingsState
+    extends State<_RecordingWaveformSettings> {
+  late double _historySeconds;
+  late double _sensitivity;
+  late double _decay;
+
+  @override
+  void initState() {
+    super.initState();
+    _historySeconds = widget.initialHistorySeconds;
+    _sensitivity = widget.initialSensitivity;
+    _decay = widget.initialDecay;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Recording waveform', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(
+              'Tune the live equalizer while recording.',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            _WaveformSlider(
+              label: 'History',
+              valueLabel: '${_historySeconds.toStringAsFixed(2)} s',
+              value: _historySeconds,
+              min: 0.25,
+              max: 2.0,
+              divisions: 7,
+              onChanged: (value) {
+                setState(() => _historySeconds = value);
+                widget.onHistoryChanged(value);
+              },
+            ),
+            _WaveformSlider(
+              label: 'Sensitivity',
+              valueLabel: '${_sensitivity.toStringAsFixed(1)}x',
+              value: _sensitivity,
+              min: 0.5,
+              max: 2.0,
+              divisions: 15,
+              onChanged: (value) {
+                setState(() => _sensitivity = value);
+                widget.onSensitivityChanged(value);
+              },
+            ),
+            _WaveformSlider(
+              label: 'Silence fade',
+              valueLabel: '${_decay.toStringAsFixed(1)}x',
+              value: _decay,
+              min: 0.1,
+              max: 1.0,
+              divisions: 9,
+              onChanged: (value) {
+                setState(() => _decay = value);
+                widget.onDecayChanged(value);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _WaveformSlider extends StatelessWidget {
+  const _WaveformSlider({
+    required this.label,
+    required this.valueLabel,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.divisions,
+    required this.onChanged,
+  });
+
+  final String label;
+  final String valueLabel;
+  final double value;
+  final double min;
+  final double max;
+  final int divisions;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Row(
+          children: [
+            Text(label, style: Theme.of(context).textTheme.titleSmall),
+            const Spacer(),
+            Text(valueLabel),
+          ],
+        ),
+        Slider(
+          value: value,
+          min: min,
+          max: max,
+          divisions: divisions,
+          label: valueLabel,
+          onChanged: onChanged,
+        ),
+      ],
     );
   }
 }
@@ -3076,6 +3250,8 @@ class _Composer extends StatefulWidget {
     required this.activeSendBlocked,
     required this.recording,
     required this.recordingWaveformLevel,
+    required this.recordingWaveformHistorySeconds,
+    required this.recordingWaveformDecay,
     required this.recordingDurationLabel,
     required this.voiceSendWipeDuration,
     required this.wavRetryRequested,
@@ -3099,6 +3275,8 @@ class _Composer extends StatefulWidget {
   final bool activeSendBlocked;
   final bool recording;
   final double recordingWaveformLevel;
+  final double recordingWaveformHistorySeconds;
+  final double recordingWaveformDecay;
   final String recordingDurationLabel;
   final Duration voiceSendWipeDuration;
   final bool wavRetryRequested;
@@ -3207,6 +3385,9 @@ class _ComposerState extends State<_Composer> {
                               theme.textTheme.bodyLarge?.color ??
                               theme.colorScheme.onSurface,
                           waveformLevel: widget.recordingWaveformLevel,
+                          waveformHistorySeconds:
+                              widget.recordingWaveformHistorySeconds,
+                          waveformDecay: widget.recordingWaveformDecay,
                           child: const SizedBox.expand(),
                         ),
                       ),
@@ -3392,6 +3573,8 @@ class _RecordingButton extends StatefulWidget {
     this.wipeDuration = const Duration(milliseconds: 1040),
     this.waveformColor = Colors.white,
     required this.waveformLevel,
+    this.waveformHistorySeconds = 1.0,
+    this.waveformDecay = 0.6,
     this.showWaveform = true,
     this.onWipeComplete,
   });
@@ -3405,6 +3588,8 @@ class _RecordingButton extends StatefulWidget {
   final Duration wipeDuration;
   final Color waveformColor;
   final double waveformLevel;
+  final double waveformHistorySeconds;
+  final double waveformDecay;
   final bool showWaveform;
   final VoidCallback? onWipeComplete;
 
@@ -3414,14 +3599,13 @@ class _RecordingButton extends StatefulWidget {
 
 class _RecordingButtonState extends State<_RecordingButton>
     with TickerProviderStateMixin {
-  static const _waveSampleRate = 96.0;
-  static const _waveSampleCount = 360;
+  static const _waveSampleRate = 30.0;
 
   late final AnimationController _wipeController;
   late final Animation<double> _wipeAnimation;
   late final AnimationController _waveController;
   final _waveRandom = math.Random();
-  final _waveSamples = List<double>.filled(_waveSampleCount, 0, growable: true);
+  final _waveSamples = <double>[];
   double _lastWaveProgress = 0;
   double _waveSampleCarry = 0;
   double _smoothedWaveLevel = 0;
@@ -3471,6 +3655,9 @@ class _RecordingButtonState extends State<_RecordingButton>
       _wipeController.value = 0;
       _seedWaveSamples();
     }
+    if (widget.waveformHistorySeconds != oldWidget.waveformHistorySeconds) {
+      _seedWaveSamples();
+    }
   }
 
   @override
@@ -3500,13 +3687,19 @@ class _RecordingButtonState extends State<_RecordingButton>
 
   void _pushWaveSample() {
     final level = widget.waveformLevel.clamp(0.0, 1.0);
-    final responsiveLevel = math.pow(level, 0.55).toDouble();
-    final smoothing = responsiveLevel < _smoothedWaveLevel ? 0.85 : 0.5;
+    final responsiveLevel = math.pow(level, 0.7).toDouble();
+    final smoothing = responsiveLevel < _smoothedWaveLevel
+        ? widget.waveformDecay
+        : 0.9;
     _smoothedWaveLevel += (responsiveLevel - _smoothedWaveLevel) * smoothing;
-    final envelope = 0.05 + _smoothedWaveLevel * 0.95;
-    final previous = _waveSamples.isEmpty ? 0.0 : _waveSamples.last;
-    final noise = _waveRandom.nextDouble() * 2 - 1;
-    _waveSamples.add((previous * 0.28 + noise * 0.72) * envelope);
+    if (_smoothedWaveLevel < 0.015) {
+      _smoothedWaveLevel = 0;
+      _waveSamples.add(0);
+    } else {
+      final previous = _waveSamples.isEmpty ? 0.0 : _waveSamples.last;
+      final noise = _waveRandom.nextDouble() * 2 - 1;
+      _waveSamples.add((previous * 0.15 + noise * 0.85) * _smoothedWaveLevel);
+    }
     if (_waveSamples.length > _waveSampleCount) {
       _waveSamples.removeRange(0, _waveSamples.length - _waveSampleCount);
     }
@@ -3515,12 +3708,12 @@ class _RecordingButtonState extends State<_RecordingButton>
   void _seedWaveSamples() {
     _waveSamples
       ..clear()
-      ..addAll(
-        List<double>.generate(_waveSampleCount, (_) {
-          return (_waveRandom.nextDouble() * 2 - 1) * 0.04;
-        }),
-      );
+      ..addAll(List<double>.filled(_waveSampleCount, 0));
   }
+
+  int get _waveSampleCount =>
+      (widget.waveformHistorySeconds.clamp(0.25, 2.0) * _waveSampleRate)
+          .round();
 
   @override
   Widget build(BuildContext context) {
@@ -3539,7 +3732,6 @@ class _RecordingButtonState extends State<_RecordingButton>
                   return CustomPaint(
                     painter: _RecordingWaveformPainter(
                       samples: List<double>.of(_waveSamples),
-                      progress: _waveController.value,
                       color: widget.waveformColor,
                     ),
                   );
@@ -3578,72 +3770,42 @@ class _RecordingButtonState extends State<_RecordingButton>
 }
 
 class _RecordingWaveformPainter extends CustomPainter {
-  const _RecordingWaveformPainter({
-    required this.samples,
-    required this.progress,
-    required this.color,
-  });
+  const _RecordingWaveformPainter({required this.samples, required this.color});
 
   final List<double> samples;
-  final double progress;
   final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = color.withValues(alpha: 0.62)
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..strokeWidth = 1.8;
-    canvas.drawPath(_recordingWaveformPath(size, samples, progress), paint);
+      ..style = PaintingStyle.fill;
+    final values = samples.isEmpty ? const [0.0] : samples;
+    final gap = 2.0;
+    final barWidth = math.max(
+      1.0,
+      (size.width - gap * (values.length - 1)) / values.length,
+    );
+    final centerY = size.height / 2;
+
+    for (var i = 0; i < values.length; i++) {
+      final level = values[i].abs().clamp(0.0, 1.0);
+      final barHeight = math.max(1.0, level * size.height * 0.78);
+      final left = i * (barWidth + gap);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(left, centerY - barHeight / 2, barWidth, barHeight),
+          Radius.circular(barWidth / 2),
+        ),
+        paint,
+      );
+    }
   }
 
   @override
   bool shouldRepaint(covariant _RecordingWaveformPainter oldDelegate) {
-    return oldDelegate.samples != samples ||
-        oldDelegate.progress != progress ||
-        oldDelegate.color != color;
+    return oldDelegate.samples != samples || oldDelegate.color != color;
   }
-}
-
-Path _recordingWaveformPath(Size size, List<double> samples, double progress) {
-  final path = Path();
-  final points = _recordingWaveformPoints(size, samples, progress);
-
-  for (var i = 0; i < points.length; i++) {
-    final point = points[i];
-    if (i == 0) {
-      path.moveTo(point.dx, point.dy);
-    } else {
-      path.lineTo(point.dx, point.dy);
-    }
-  }
-
-  return path;
-}
-
-List<Offset> _recordingWaveformPoints(
-  Size size,
-  List<double> samples,
-  double progress,
-) {
-  final centerY = size.height / 2;
-  final width = size.width;
-  final values = samples.isEmpty ? const [0.0] : samples;
-  final sampleCount = values.length;
-  final step = sampleCount <= 1 ? width : width / (sampleCount - 1);
-  final amplitude = size.height * 0.36;
-  final scroll = progress * step;
-  final points = <Offset>[];
-
-  for (var i = 0; i < sampleCount; i++) {
-    final x = width - (sampleCount - 1 - i) * step - scroll;
-    final y = centerY - values[i].clamp(-1.0, 1.0) * amplitude;
-    points.add(Offset(x, y));
-  }
-
-  return points;
 }
 
 class _MessageTile extends StatefulWidget {
