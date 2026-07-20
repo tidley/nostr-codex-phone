@@ -5383,9 +5383,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           if (!_recording || !mounted) return;
           final current = amplitude.current;
           if (!current.isFinite) return;
-          final normalized = ((current + 45) / 45).clamp(0.0, 1.0).toDouble();
+          // Android microphone levels commonly stay below -45 dB even for speech.
+          final normalized = ((current + 60) / 60).clamp(0.0, 1.0).toDouble();
           final gated =
-              ((normalized * _recordingWaveformSensitivity - 0.08) / 0.92)
+              ((normalized * _recordingWaveformSensitivity - 0.02) / 0.98)
                   .clamp(0.0, 1.0)
                   .toDouble();
           final level = math.pow(gated, 0.7).toDouble();
