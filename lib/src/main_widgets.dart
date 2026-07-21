@@ -2297,8 +2297,8 @@ class _RecordingWaveformSettingsState
             ),
             const SizedBox(height: 12),
             _WaveformSlider(
-              label: 'Bar density',
-              valueLabel: '${_bars.round()} bars',
+              label: 'Waveform speed',
+              valueLabel: '${(_bars / 32).toStringAsFixed(1)}x',
               value: _bars,
               min: 12,
               max: 48,
@@ -2321,7 +2321,7 @@ class _RecordingWaveformSettingsState
               },
             ),
             _WaveformSlider(
-              label: 'Silence fade',
+              label: 'Fade to silence',
               valueLabel: '${_decay.toStringAsFixed(1)}x',
               value: _decay,
               min: 0.1,
@@ -3385,6 +3385,7 @@ class _ComposerState extends State<_Composer> {
                         ),
                         child: _LiveRecordingWaveform(
                           level: widget.recordingWaveformLevel,
+                          speed: widget.recordingWaveformBars / 32,
                           decay: widget.recordingWaveformDecay,
                           color:
                               theme.textTheme.bodyLarge?.color ??
