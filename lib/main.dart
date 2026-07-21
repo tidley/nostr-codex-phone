@@ -32,13 +32,14 @@ import 'package:record/record.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 part 'src/main_widgets.dart';
+part 'src/live_recording_waveform.dart';
 
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.30+230';
+const _appVersion = '0.2.31+231';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -252,14 +253,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _recordingWaveformSensitivityStorageKey =
       'recording_waveform_sensitivity';
   static const _recordingWaveformBarsStorageKey = 'recording_waveform_bars';
-  static const _recordingWaveformDecayStorageKey =
-      'recording_waveform_decay';
+  static const _recordingWaveformDecayStorageKey = 'recording_waveform_decay';
   static const _hapticFeedbackStorageKey = 'haptic_feedback_enabled';
   static const _receiveVibrationStorageKey = 'receive_vibration_enabled';
-  static const _inactiveReplyPopupStorageKey =
-      'inactive_reply_popup_enabled';
-  static const _inactiveReplyAudioStorageKey =
-      'inactive_reply_audio_enabled';
+  static const _inactiveReplyPopupStorageKey = 'inactive_reply_popup_enabled';
+  static const _inactiveReplyAudioStorageKey = 'inactive_reply_audio_enabled';
   static const _conversationHistoryStorageKey = 'conversation_history_v1';
   static const _seenIncomingEventIdsStorageKey = 'seen_incoming_event_ids_v1';
   static const _unreadCountsStorageKey = 'unread_counts_v1';
@@ -1967,9 +1965,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
     if (removedVolatile) {
       store[conversationKey] = messages.map((item) => item.toJson()).toList();
-      unawaited(_updateConversationHistoryStore((latest) {
-        latest[conversationKey] = store[conversationKey];
-      }));
+      unawaited(
+        _updateConversationHistoryStore((latest) {
+          latest[conversationKey] = store[conversationKey];
+        }),
+      );
     }
     return sortConversationMessagesNewestFirst(messages);
   }
@@ -2009,13 +2009,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   void _scheduleConversationHistorySave(String conversationKey) {
     _pendingConversationHistorySaves.add(conversationKey);
     _conversationHistorySaveTimer?.cancel();
-    _conversationHistorySaveTimer = Timer(const Duration(milliseconds: 350), () {
-      final keys = _pendingConversationHistorySaves.toList();
-      _pendingConversationHistorySaves.clear();
-      for (final key in keys) {
-        unawaited(_saveConversationHistoryForKey(key));
-      }
-    });
+    _conversationHistorySaveTimer = Timer(
+      const Duration(milliseconds: 350),
+      () {
+        final keys = _pendingConversationHistorySaves.toList();
+        _pendingConversationHistorySaves.clear();
+        for (final key in keys) {
+          unawaited(_saveConversationHistoryForKey(key));
+        }
+      },
+    );
   }
 
   void _appendMessageForConversation(
@@ -2738,9 +2741,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   void _setRecordingWaveformSensitivity(double sensitivity) {
-    setState(
-      () => _recordingWaveformSensitivity = sensitivity.clamp(0.5, 2.0),
-    );
+    setState(() => _recordingWaveformSensitivity = sensitivity.clamp(0.5, 2.0));
     unawaited(_saveRecordingWaveformSettings());
   }
 

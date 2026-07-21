@@ -3383,22 +3383,13 @@ class _ComposerState extends State<_Composer> {
                           horizontal: 12,
                           vertical: 8,
                         ),
-                        child: ValueListenableBuilder<double>(
-                          valueListenable: widget.recordingWaveformLevel,
-                          builder: (context, waveformLevel, _) =>
-                              _RecordingButton(
-                                sendWipe: false,
-                                finishWipe: false,
-                                backgroundColor: Colors.transparent,
-                                wipeColor: Colors.transparent,
-                                waveformColor:
-                                    theme.textTheme.bodyLarge?.color ??
-                                    theme.colorScheme.onSurface,
-                                waveformLevel: waveformLevel,
-                                waveformBarCount: widget.recordingWaveformBars,
-                                waveformDecay: widget.recordingWaveformDecay,
-                                child: const SizedBox.expand(),
-                              ),
+                        child: _LiveRecordingWaveform(
+                          level: widget.recordingWaveformLevel,
+                          barCount: widget.recordingWaveformBars,
+                          decay: widget.recordingWaveformDecay,
+                          color:
+                              theme.textTheme.bodyLarge?.color ??
+                              theme.colorScheme.onSurface,
                         ),
                       ),
                     ),
@@ -3544,8 +3535,6 @@ class _ComposerState extends State<_Composer> {
                         foregroundColor: theme.colorScheme.onPrimary,
                         wipeColor: sentButtonColor,
                         wipeDuration: widget.voiceSendWipeDuration,
-                        showWaveform: false,
-                        waveformLevel: 0,
                         onWipeComplete: _completeVoiceWipe,
                         child: mainButton,
                       )
@@ -3585,11 +3574,6 @@ class _RecordingButton extends StatefulWidget {
     required this.wipeColor,
     this.foregroundColor = Colors.white,
     this.wipeDuration = const Duration(milliseconds: 1040),
-    this.waveformColor = Colors.white,
-    required this.waveformLevel,
-    this.waveformBarCount = 32,
-    this.waveformDecay = 0.6,
-    this.showWaveform = true,
     this.onWipeComplete,
   });
 
@@ -3600,11 +3584,6 @@ class _RecordingButton extends StatefulWidget {
   final Color foregroundColor;
   final Color wipeColor;
   final Duration wipeDuration;
-  final Color waveformColor;
-  final double waveformLevel;
-  final int waveformBarCount;
-  final double waveformDecay;
-  final bool showWaveform;
   final VoidCallback? onWipeComplete;
 
   @override
@@ -3613,17 +3592,12 @@ class _RecordingButton extends StatefulWidget {
 
 class _RecordingButtonState extends State<_RecordingButton>
     with TickerProviderStateMixin {
-  static const _waveformHistory = Duration(milliseconds: 3500);
   late final AnimationController _wipeController;
   late final Animation<double> _wipeAnimation;
-  late List<double> _equalizerBars;
-  double _smoothedWaveLevel = 0;
-  DateTime? _lastWaveformSampleAt;
 
   @override
   void initState() {
     super.initState();
-    _equalizerBars = List<double>.filled(_barCount, 0);
     _wipeController = AnimationController(
       vsync: this,
       duration: widget.wipeDuration,
@@ -3634,8 +3608,6 @@ class _RecordingButtonState extends State<_RecordingButton>
     );
     if (widget.sendWipe) {
       _wipeController.forward(from: 0);
-    } else {
-      _resetEqualizer();
     }
   }
 
@@ -3657,12 +3629,7 @@ class _RecordingButtonState extends State<_RecordingButton>
           .whenComplete(() => widget.onWipeComplete?.call());
     } else if (!widget.sendWipe && oldWidget.sendWipe) {
       _wipeController.value = 0;
-      _resetEqualizer();
     }
-    if (widget.waveformBarCount != oldWidget.waveformBarCount) {
-      _equalizerBars = List<double>.filled(_barCount, 0);
-    }
-    if (!widget.sendWipe) _updateEqualizer();
   }
 
   @override
@@ -3671,54 +3638,14 @@ class _RecordingButtonState extends State<_RecordingButton>
     super.dispose();
   }
 
-  void _updateEqualizer() {
-    final now = DateTime.now();
-    final sampleInterval = Duration(
-      microseconds: _waveformHistory.inMicroseconds ~/ _barCount,
-    );
-    if (_lastWaveformSampleAt != null &&
-        now.difference(_lastWaveformSampleAt!) < sampleInterval) {
-      return;
-    }
-    _lastWaveformSampleAt = now;
-    final level = widget.waveformLevel.clamp(0.0, 1.0);
-    final responsiveLevel = math.pow(level, 0.7).toDouble();
-    final smoothing = responsiveLevel < _smoothedWaveLevel
-        ? widget.waveformDecay
-        : 0.9;
-    _smoothedWaveLevel += (responsiveLevel - _smoothedWaveLevel) * smoothing;
-    final value = _smoothedWaveLevel < 0.015 ? 0.0 : _smoothedWaveLevel;
-    _equalizerBars
-      ..removeAt(0)
-      ..add(value);
-  }
-
-  void _resetEqualizer() {
-    _equalizerBars.fillRange(0, _equalizerBars.length, 0);
-    _smoothedWaveLevel = 0;
-    _lastWaveformSampleAt = null;
-  }
-
-  int get _barCount => widget.waveformBarCount.clamp(12, 48).toInt();
-
   @override
   Widget build(BuildContext context) {
-    final showWaveform = widget.showWaveform && !widget.sendWipe;
     return ClipRRect(
       borderRadius: BorderRadius.circular(28),
       child: Stack(
         fit: StackFit.passthrough,
         children: [
           Positioned.fill(child: ColoredBox(color: widget.backgroundColor)),
-          if (showWaveform)
-            Positioned.fill(
-              child: CustomPaint(
-                painter: _RecordingWaveformPainter(
-                  samples: List<double>.of(_equalizerBars),
-                  color: widget.waveformColor,
-                ),
-              ),
-            ),
           Positioned.fill(
             child: AnimatedBuilder(
               animation: _wipeAnimation,
