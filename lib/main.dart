@@ -33,13 +33,14 @@ import 'package:url_launcher/url_launcher.dart';
 
 part 'src/main_widgets.dart';
 part 'src/live_recording_waveform.dart';
+part 'src/inactive_reply_notice.dart';
 
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.36+236';
+const _appVersion = '0.2.37+237';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -234,7 +235,7 @@ class NostrCodexHome extends StatefulWidget {
 }
 
 class _NostrCodexHomeState extends State<NostrCodexHome>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   static const _storage = FlutterSecureStorage();
   static const _secretKeyStorageKey = 'nostr_secret_key';
   static const _peerPubkeyStorageKey = 'nostr_peer_pubkey';
@@ -316,6 +317,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Future<void> _conversationHistoryWriteTail = Future<void>.value();
   Timer? _conversationHistorySaveTimer;
   late final AnimationController _menuNotificationPulseController;
+  OverlayEntry? _inactiveReplyNotice;
+  AnimationController? _inactiveReplyNoticeController;
+  Timer? _inactiveReplyNoticeTimer;
 
   bool _loadingSettings = true;
   bool _connecting = false;
@@ -591,6 +595,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _recordingDurationLabel.dispose();
     _recordingTimer?.cancel();
     _conversationHistorySaveTimer?.cancel();
+    _inactiveReplyNoticeTimer?.cancel();
+    _inactiveReplyNotice?.remove();
+    _inactiveReplyNoticeController?.dispose();
     _tts.stop();
     _chatScrollController.dispose();
     _secretKeyController.dispose();
@@ -3841,12 +3848,52 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (!_inactiveReplyPopupEnabled || !mounted) return;
     final target = _targetById(_repoTargets, conversationKey);
     final sessionName = target?.displayName ?? 'another session';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('New reply in $sessionName'),
-        duration: const Duration(seconds: 3),
+    _dismissInactiveReplyNotice(immediately: true);
+
+    final overlay = Overlay.of(context, rootOverlay: true);
+    late final OverlayEntry notice;
+    final controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 360),
+      reverseDuration: const Duration(milliseconds: 180),
+    );
+    notice = OverlayEntry(
+      builder: (context) => _InactiveReplyNotice(
+        animation: controller,
+        sessionName: sessionName,
+        onTap: () {
+          _dismissInactiveReplyNotice();
+          unawaited(_selectRepoTarget(conversationKey));
+        },
       ),
     );
+    _inactiveReplyNotice = notice;
+    _inactiveReplyNoticeController = controller;
+    overlay.insert(notice);
+    controller.forward();
+    _inactiveReplyNoticeTimer = Timer(
+      const Duration(seconds: 4),
+      _dismissInactiveReplyNotice,
+    );
+  }
+
+  void _dismissInactiveReplyNotice({bool immediately = false}) {
+    _inactiveReplyNoticeTimer?.cancel();
+    _inactiveReplyNoticeTimer = null;
+    final notice = _inactiveReplyNotice;
+    final controller = _inactiveReplyNoticeController;
+    _inactiveReplyNotice = null;
+    _inactiveReplyNoticeController = null;
+    if (notice == null || controller == null) return;
+    if (immediately) {
+      notice.remove();
+      controller.dispose();
+      return;
+    }
+    controller.reverse().whenComplete(() {
+      notice.remove();
+      controller.dispose();
+    });
   }
 
   void _playInactiveSessionReplyAlert() {
