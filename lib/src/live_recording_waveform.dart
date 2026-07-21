@@ -6,6 +6,7 @@ class _LiveRecordingWaveform extends StatefulWidget {
     required this.speed,
     required this.decay,
     required this.compression,
+    required this.sampleRate,
     required this.color,
   });
 
@@ -13,6 +14,7 @@ class _LiveRecordingWaveform extends StatefulWidget {
   final double speed;
   final double decay;
   final double compression;
+  final double sampleRate;
   final Color color;
 
   @override
@@ -21,7 +23,6 @@ class _LiveRecordingWaveform extends StatefulWidget {
 
 class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
     with SingleTickerProviderStateMixin {
-  static const _sampleRate = 96.0;
   static const _sampleCount = 360;
 
   late final AnimationController _animation;
@@ -62,7 +63,7 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
     if (delta < 0) delta += 1;
     _lastProgress = progress;
 
-    _sampleCarry += delta * _sampleRate * _safeSpeed;
+    _sampleCarry += delta * _safeSampleRate * _safeSpeed;
     while (_sampleCarry >= 1) {
       _sampleCarry -= 1;
       _pushSample();
@@ -97,6 +98,8 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
   }
 
   double get _safeSpeed => widget.speed.clamp(0.375, 10.0).toDouble();
+
+  double get _safeSampleRate => widget.sampleRate.clamp(24.0, 240.0).toDouble();
 
   Duration _durationForSpeed(double speed) => Duration(
     milliseconds: (1450 / speed.clamp(0.375, 10.0).toDouble()).round(),

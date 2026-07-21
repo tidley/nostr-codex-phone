@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.38+238';
+const _appVersion = '0.2.39+239';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -257,6 +257,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _recordingWaveformDecayStorageKey = 'recording_waveform_decay';
   static const _recordingWaveformCompressionStorageKey =
       'recording_waveform_compression';
+  static const _recordingWaveformSampleRateStorageKey =
+      'recording_waveform_sample_rate';
   static const _hapticFeedbackStorageKey = 'haptic_feedback_enabled';
   static const _receiveVibrationStorageKey = 'receive_vibration_enabled';
   static const _inactiveReplyPopupStorageKey = 'inactive_reply_popup_enabled';
@@ -285,6 +287,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _recordingWaveformBarsStorageKey,
     _recordingWaveformDecayStorageKey,
     _recordingWaveformCompressionStorageKey,
+    _recordingWaveformSampleRateStorageKey,
     _hapticFeedbackStorageKey,
     _receiveVibrationStorageKey,
     _inactiveReplyPopupStorageKey,
@@ -368,6 +371,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   int _recordingWaveformBars = 32;
   double _recordingWaveformDecay = 0.6;
   double _recordingWaveformCompression = 0.5;
+  double _recordingWaveformSampleRate = 96;
   bool _hapticFeedbackEnabled = true;
   bool _receiveVibrationEnabled = true;
   bool _inactiveReplyPopupEnabled = true;
@@ -658,6 +662,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final recordingWaveformCompression = await _storage.read(
       key: _recordingWaveformCompressionStorageKey,
     );
+    final recordingWaveformSampleRate = await _storage.read(
+      key: _recordingWaveformSampleRateStorageKey,
+    );
     final hapticFeedback = await _storage.read(key: _hapticFeedbackStorageKey);
     final receiveVibration = await _storage.read(
       key: _receiveVibrationStorageKey,
@@ -741,6 +748,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _recordingWaveformCompression,
         0.0,
         1.0,
+      );
+      _recordingWaveformSampleRate = _storedDouble(
+        recordingWaveformSampleRate,
+        _recordingWaveformSampleRate,
+        24,
+        240,
       );
       _hapticFeedbackEnabled = _storedBool(hapticFeedback, true);
       _receiveVibrationEnabled = _storedBool(receiveVibration, true);
@@ -2509,6 +2522,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             recordingWaveformBars: _recordingWaveformBars,
             recordingWaveformDecay: _recordingWaveformDecay,
             recordingWaveformCompression: _recordingWaveformCompression,
+            recordingWaveformSampleRate: _recordingWaveformSampleRate,
             hapticFeedbackEnabled: _hapticFeedbackEnabled,
             receiveVibrationEnabled: _receiveVibrationEnabled,
             inactiveReplyPopupEnabled: _inactiveReplyPopupEnabled,
@@ -2612,6 +2626,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onRecordingWaveformDecayChanged: _setRecordingWaveformDecay,
             onRecordingWaveformCompressionChanged:
                 _setRecordingWaveformCompression,
+            onRecordingWaveformSampleRateChanged:
+                _setRecordingWaveformSampleRate,
             onHapticFeedbackChanged: _setHapticFeedbackEnabled,
             onReceiveVibrationChanged: _setReceiveVibrationEnabled,
             onInactiveReplyPopupChanged: _setInactiveReplyPopupEnabled,
@@ -2765,6 +2781,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       key: _recordingWaveformCompressionStorageKey,
       value: _recordingWaveformCompression.toString(),
     );
+    await _storage.write(
+      key: _recordingWaveformSampleRateStorageKey,
+      value: _recordingWaveformSampleRate.toString(),
+    );
   }
 
   void _setRecordingWaveformSensitivity(double sensitivity) {
@@ -2784,6 +2804,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   void _setRecordingWaveformCompression(double compression) {
     setState(() => _recordingWaveformCompression = compression.clamp(0.0, 1.0));
+    unawaited(_saveRecordingWaveformSettings());
+  }
+
+  void _setRecordingWaveformSampleRate(double sampleRate) {
+    setState(
+      () => _recordingWaveformSampleRate = sampleRate.clamp(24.0, 240.0),
+    );
     unawaited(_saveRecordingWaveformSettings());
   }
 
@@ -6058,6 +6085,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               recordingWaveformBars: _recordingWaveformBars,
               recordingWaveformDecay: _recordingWaveformDecay,
               recordingWaveformCompression: _recordingWaveformCompression,
+              recordingWaveformSampleRate: _recordingWaveformSampleRate,
               recordingDurationLabel: _recordingDurationLabel,
               voiceSendWipeDuration: _voiceSendWipeDuration,
               wavRetryRequested: _wavRetryRequested,
