@@ -99,7 +99,7 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
 
   double get _safeSpeed => widget.speed.clamp(0.375, 10.0).toDouble();
 
-  double get _safeSampleRate => widget.sampleRate.clamp(24.0, 240.0).toDouble();
+  double get _safeSampleRate => widget.sampleRate.clamp(1.0, 240.0).toDouble();
 
   Duration _durationForSpeed(double speed) => Duration(
     milliseconds: (1450 / speed.clamp(0.375, 10.0).toDouble()).round(),

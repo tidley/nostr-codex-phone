@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.39+239';
+const _appVersion = '0.2.40+240';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -752,7 +752,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _recordingWaveformSampleRate = _storedDouble(
         recordingWaveformSampleRate,
         _recordingWaveformSampleRate,
-        24,
+        1,
         240,
       );
       _hapticFeedbackEnabled = _storedBool(hapticFeedback, true);
@@ -2808,9 +2808,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   void _setRecordingWaveformSampleRate(double sampleRate) {
-    setState(
-      () => _recordingWaveformSampleRate = sampleRate.clamp(24.0, 240.0),
-    );
+    setState(() => _recordingWaveformSampleRate = sampleRate.clamp(1.0, 240.0));
     unawaited(_saveRecordingWaveformSettings());
   }
 
