@@ -1872,6 +1872,7 @@ class _SettingsPage extends StatelessWidget {
     required this.recordingWaveformBars,
     required this.recordingWaveformDecay,
     required this.recordingWaveformCompression,
+    required this.recordingWaveformSampleRate,
     required this.hapticFeedbackEnabled,
     required this.receiveVibrationEnabled,
     required this.inactiveReplyPopupEnabled,
@@ -1905,6 +1906,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onRecordingWaveformBarsChanged,
     required this.onRecordingWaveformDecayChanged,
     required this.onRecordingWaveformCompressionChanged,
+    required this.onRecordingWaveformSampleRateChanged,
     required this.onHapticFeedbackChanged,
     required this.onReceiveVibrationChanged,
     required this.onInactiveReplyPopupChanged,
@@ -1942,6 +1944,7 @@ class _SettingsPage extends StatelessWidget {
   final int recordingWaveformBars;
   final double recordingWaveformDecay;
   final double recordingWaveformCompression;
+  final double recordingWaveformSampleRate;
   final bool hapticFeedbackEnabled;
   final bool receiveVibrationEnabled;
   final bool inactiveReplyPopupEnabled;
@@ -1975,6 +1978,7 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<double> onRecordingWaveformBarsChanged;
   final ValueChanged<double> onRecordingWaveformDecayChanged;
   final ValueChanged<double> onRecordingWaveformCompressionChanged;
+  final ValueChanged<double> onRecordingWaveformSampleRateChanged;
   final ValueChanged<bool> onHapticFeedbackChanged;
   final ValueChanged<bool> onReceiveVibrationChanged;
   final ValueChanged<bool> onInactiveReplyPopupChanged;
@@ -2056,10 +2060,12 @@ class _SettingsPage extends StatelessWidget {
             initialBars: recordingWaveformBars,
             initialDecay: recordingWaveformDecay,
             initialCompression: recordingWaveformCompression,
+            initialSampleRate: recordingWaveformSampleRate,
             onSensitivityChanged: onRecordingWaveformSensitivityChanged,
             onBarsChanged: onRecordingWaveformBarsChanged,
             onDecayChanged: onRecordingWaveformDecayChanged,
             onCompressionChanged: onRecordingWaveformCompressionChanged,
+            onSampleRateChanged: onRecordingWaveformSampleRateChanged,
           ),
           const SizedBox(height: 16),
           _HapticFeedbackSettings(
@@ -2256,20 +2262,24 @@ class _RecordingWaveformSettings extends StatefulWidget {
     required this.initialBars,
     required this.initialDecay,
     required this.initialCompression,
+    required this.initialSampleRate,
     required this.onSensitivityChanged,
     required this.onBarsChanged,
     required this.onDecayChanged,
     required this.onCompressionChanged,
+    required this.onSampleRateChanged,
   });
 
   final double initialSensitivity;
   final int initialBars;
   final double initialDecay;
   final double initialCompression;
+  final double initialSampleRate;
   final ValueChanged<double> onSensitivityChanged;
   final ValueChanged<double> onBarsChanged;
   final ValueChanged<double> onDecayChanged;
   final ValueChanged<double> onCompressionChanged;
+  final ValueChanged<double> onSampleRateChanged;
 
   @override
   State<_RecordingWaveformSettings> createState() =>
@@ -2282,6 +2292,7 @@ class _RecordingWaveformSettingsState
   late double _bars;
   late double _decay;
   late double _compression;
+  late double _sampleRate;
 
   @override
   void initState() {
@@ -2290,6 +2301,7 @@ class _RecordingWaveformSettingsState
     _bars = widget.initialBars.toDouble();
     _decay = widget.initialDecay;
     _compression = widget.initialCompression;
+    _sampleRate = widget.initialSampleRate;
   }
 
   @override
@@ -2342,6 +2354,18 @@ class _RecordingWaveformSettingsState
               onChanged: (value) {
                 setState(() => _decay = value);
                 widget.onDecayChanged(value);
+              },
+            ),
+            _WaveformSlider(
+              label: 'Waveform sample rate',
+              valueLabel: '${_sampleRate.round()} samples/s',
+              value: _sampleRate,
+              min: 24,
+              max: 240,
+              divisions: 18,
+              onChanged: (value) {
+                setState(() => _sampleRate = value);
+                widget.onSampleRateChanged(value);
               },
             ),
             _WaveformSlider(
@@ -3284,6 +3308,7 @@ class _Composer extends StatefulWidget {
     required this.recordingWaveformBars,
     required this.recordingWaveformDecay,
     required this.recordingWaveformCompression,
+    required this.recordingWaveformSampleRate,
     required this.recordingDurationLabel,
     required this.voiceSendWipeDuration,
     required this.wavRetryRequested,
@@ -3310,6 +3335,7 @@ class _Composer extends StatefulWidget {
   final int recordingWaveformBars;
   final double recordingWaveformDecay;
   final double recordingWaveformCompression;
+  final double recordingWaveformSampleRate;
   final ValueListenable<String> recordingDurationLabel;
   final Duration voiceSendWipeDuration;
   final bool wavRetryRequested;
@@ -3424,6 +3450,7 @@ class _ComposerState extends State<_Composer> {
                           speed: widget.recordingWaveformBars / 32,
                           decay: widget.recordingWaveformDecay,
                           compression: widget.recordingWaveformCompression,
+                          sampleRate: widget.recordingWaveformSampleRate,
                           color:
                               theme.textTheme.bodyLarge?.color ??
                               theme.colorScheme.onSurface,
