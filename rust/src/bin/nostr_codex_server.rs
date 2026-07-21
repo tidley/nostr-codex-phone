@@ -4475,19 +4475,7 @@ fn codex_status_from_event(event: &serde_json::Value) -> Option<(String, bool)> 
             let todos = event
                 .pointer("/properties/todos")
                 .and_then(serde_json::Value::as_array)?;
-            let completed = todos
-                .iter()
-                .filter(|todo| {
-                    todo.get("status").and_then(serde_json::Value::as_str) == Some("completed")
-                })
-                .count();
-            Some((
-                format!(
-                    "OpenCode todo progress: {completed}/{} complete.",
-                    todos.len()
-                ),
-                false,
-            ))
+            Some((format_todo_status(todos), true))
         }
         Some("permission.updated") => Some((
             format!(
@@ -4520,6 +4508,44 @@ fn status_detail(value: Option<&str>) -> String {
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(96).collect())
         .unwrap_or_else(|| "working".to_string())
+}
+
+fn format_todo_status(todos: &[serde_json::Value]) -> String {
+    const MAX_VISIBLE_TODOS: usize = 8;
+
+    let completed = todos
+        .iter()
+        .filter(|todo| todo.get("status").and_then(serde_json::Value::as_str) == Some("completed"))
+        .count();
+    let mut lines = vec![format!(
+        "OpenCode todos: {completed}/{} complete",
+        todos.len()
+    )];
+
+    for todo in todos.iter().take(MAX_VISIBLE_TODOS) {
+        let status = todo
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("pending");
+        let marker = match status {
+            "completed" => "[x]",
+            "in_progress" => "[~]",
+            _ => "[ ]",
+        };
+        let content = todo
+            .get("content")
+            .or_else(|| todo.get("title"))
+            .or_else(|| todo.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .map(|value| status_detail(Some(value)))
+            .unwrap_or_else(|| "Unnamed task".to_string());
+        lines.push(format!("{marker} {content}"));
+    }
+    if todos.len() > MAX_VISIBLE_TODOS {
+        lines.push(format!("... and {} more", todos.len() - MAX_VISIBLE_TODOS));
+    }
+
+    lines.join("\n")
 }
 
 fn codex_item_status(event: &serde_json::Value) -> Option<&'static str> {
@@ -4901,6 +4927,20 @@ mod tests {
         assert_eq!(
             codex_status_from_event(&tool).map(|(message, _)| message),
             Some("OpenCode: running tool.".to_string())
+        );
+    }
+
+    #[test]
+    fn formats_opencode_todos_as_a_checklist() {
+        let todos = serde_json::json!([
+            {"content": "Inspect status routing", "status": "completed"},
+            {"content": "Show updates on the phone", "status": "in_progress"},
+            {"content": "Run checks", "status": "pending"}
+        ]);
+
+        assert_eq!(
+            format_todo_status(todos.as_array().unwrap()),
+            "OpenCode todos: 1/3 complete\n[x] Inspect status routing\n[~] Show updates on the phone\n[ ] Run checks"
         );
     }
 
