@@ -3271,10 +3271,10 @@ class _Composer extends StatefulWidget {
   final bool sendingMedia;
   final bool activeSendBlocked;
   final bool recording;
-  final double recordingWaveformLevel;
+  final ValueListenable<double> recordingWaveformLevel;
   final int recordingWaveformBars;
   final double recordingWaveformDecay;
-  final String recordingDurationLabel;
+  final ValueListenable<String> recordingDurationLabel;
   final Duration voiceSendWipeDuration;
   final bool wavRetryRequested;
   final bool hasPendingMedia;
@@ -3383,18 +3383,22 @@ class _ComposerState extends State<_Composer> {
                           horizontal: 12,
                           vertical: 8,
                         ),
-                        child: _RecordingButton(
-                          sendWipe: false,
-                          finishWipe: false,
-                          backgroundColor: Colors.transparent,
-                          wipeColor: Colors.transparent,
-                          waveformColor:
-                              theme.textTheme.bodyLarge?.color ??
-                              theme.colorScheme.onSurface,
-                          waveformLevel: widget.recordingWaveformLevel,
-                          waveformBarCount: widget.recordingWaveformBars,
-                          waveformDecay: widget.recordingWaveformDecay,
-                          child: const SizedBox.expand(),
+                        child: ValueListenableBuilder<double>(
+                          valueListenable: widget.recordingWaveformLevel,
+                          builder: (context, waveformLevel, _) =>
+                              _RecordingButton(
+                                sendWipe: false,
+                                finishWipe: false,
+                                backgroundColor: Colors.transparent,
+                                wipeColor: Colors.transparent,
+                                waveformColor:
+                                    theme.textTheme.bodyLarge?.color ??
+                                    theme.colorScheme.onSurface,
+                                waveformLevel: waveformLevel,
+                                waveformBarCount: widget.recordingWaveformBars,
+                                waveformDecay: widget.recordingWaveformDecay,
+                                child: const SizedBox.expand(),
+                              ),
                         ),
                       ),
                     ),
@@ -3485,7 +3489,7 @@ class _ComposerState extends State<_Composer> {
                     : !widget.connected && canSendFromInput
                     ? 'Send'
                     : widget.recording
-                    ? 'Recording... ${widget.recordingDurationLabel}'
+                    ? 'Recording...'
                     : canSendFromInput
                     ? 'Send'
                     : widget.wavRetryRequested
@@ -3523,7 +3527,13 @@ class _ComposerState extends State<_Composer> {
                         : mainButtonStyle,
                     onPressed: onMainPressed,
                     icon: icon,
-                    label: Text(label),
+                    label: widget.recording
+                        ? ValueListenableBuilder<String>(
+                            valueListenable: widget.recordingDurationLabel,
+                            builder: (context, duration, _) =>
+                                Text('Recording... $duration'),
+                          )
+                        : Text(label),
                   ),
                 );
                 final actionButton = sendingAudioShell
