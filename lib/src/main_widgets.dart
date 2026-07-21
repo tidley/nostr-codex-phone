@@ -2360,9 +2360,9 @@ class _RecordingWaveformSettingsState
               label: 'Waveform sample rate',
               valueLabel: '${_sampleRate.round()} samples/s',
               value: _sampleRate,
-              min: 24,
+              min: 1,
               max: 240,
-              divisions: 18,
+              divisions: 239,
               onChanged: (value) {
                 setState(() => _sampleRate = value);
                 widget.onSampleRateChanged(value);
