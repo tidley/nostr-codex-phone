@@ -17,9 +17,11 @@ class _LiveRecordingWaveform extends StatefulWidget {
   State<_LiveRecordingWaveform> createState() => _LiveRecordingWaveformState();
 }
 
-class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform> {
+class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
+    with SingleTickerProviderStateMixin {
   static const _history = Duration(milliseconds: 3500);
   late List<double> _bars;
+  late final AnimationController _animation;
   double _smoothedLevel = 0;
   DateTime? _lastSampleAt;
 
@@ -29,16 +31,16 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform> {
   void initState() {
     super.initState();
     _bars = List<double>.filled(_barCount, 0);
-    widget.level.addListener(_updateLevel);
+    _animation = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..addListener(_sampleLevel);
+    _animation.repeat();
   }
 
   @override
   void didUpdateWidget(covariant _LiveRecordingWaveform oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.level != widget.level) {
-      oldWidget.level.removeListener(_updateLevel);
-      widget.level.addListener(_updateLevel);
-    }
     if (oldWidget.barCount != widget.barCount) {
       _bars = List<double>.filled(_barCount, 0);
       _smoothedLevel = 0;
@@ -48,11 +50,11 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform> {
 
   @override
   void dispose() {
-    widget.level.removeListener(_updateLevel);
+    _animation.dispose();
     super.dispose();
   }
 
-  void _updateLevel() {
+  void _sampleLevel() {
     final now = DateTime.now();
     final sampleInterval = Duration(
       microseconds: _history.inMicroseconds ~/ _barCount,
@@ -66,7 +68,9 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform> {
     final responsiveLevel = math.pow(level, 0.7).toDouble();
     final smoothing = responsiveLevel < _smoothedLevel ? widget.decay : 0.9;
     _smoothedLevel += (responsiveLevel - _smoothedLevel) * smoothing;
-    final value = _smoothedLevel < 0.015 ? 0.0 : _smoothedLevel;
+    final idleLevel =
+        0.055 + math.sin(_animation.value * math.pi * 2).abs() * 0.035;
+    final value = math.max(_smoothedLevel, idleLevel).toDouble();
     if (!mounted) return;
     setState(() {
       _bars
