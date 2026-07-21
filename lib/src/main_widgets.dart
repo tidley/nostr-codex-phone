@@ -3385,7 +3385,6 @@ class _ComposerState extends State<_Composer> {
                         ),
                         child: _LiveRecordingWaveform(
                           level: widget.recordingWaveformLevel,
-                          barCount: widget.recordingWaveformBars,
                           decay: widget.recordingWaveformDecay,
                           color:
                               theme.textTheme.bodyLarge?.color ??
@@ -3678,42 +3677,67 @@ class _RecordingButtonState extends State<_RecordingButton>
 }
 
 class _RecordingWaveformPainter extends CustomPainter {
-  const _RecordingWaveformPainter({required this.samples, required this.color});
+  const _RecordingWaveformPainter({
+    required this.samples,
+    required this.progress,
+    required this.color,
+  });
 
   final List<double> samples;
+  final double progress;
   final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
       ..color = color.withValues(alpha: 0.62)
-      ..style = PaintingStyle.fill;
-    final values = samples.isEmpty ? const [0.0] : samples;
-    final gap = 2.0;
-    final barWidth = math.max(
-      1.0,
-      (size.width - gap * (values.length - 1)) / values.length,
-    );
-    final centerY = size.height / 2;
-
-    for (var i = 0; i < values.length; i++) {
-      final level = values[i].abs().clamp(0.0, 1.0);
-      final barHeight = math.max(1.0, level * size.height * 0.78);
-      final left = i * (barWidth + gap);
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(left, centerY - barHeight / 2, barWidth, barHeight),
-          Radius.circular(barWidth / 2),
-        ),
-        paint,
-      );
-    }
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..strokeWidth = 1.8;
+    canvas.drawPath(_recordingWaveformPath(size, samples, progress), paint);
   }
 
   @override
   bool shouldRepaint(covariant _RecordingWaveformPainter oldDelegate) {
-    return oldDelegate.samples != samples || oldDelegate.color != color;
+    return oldDelegate.samples != samples ||
+        oldDelegate.progress != progress ||
+        oldDelegate.color != color;
   }
+}
+
+Path _recordingWaveformPath(Size size, List<double> samples, double progress) {
+  final path = Path();
+  final points = _recordingWaveformPoints(size, samples, progress);
+
+  for (var i = 0; i < points.length; i++) {
+    if (i == 0) {
+      path.moveTo(points[i].dx, points[i].dy);
+    } else {
+      path.lineTo(points[i].dx, points[i].dy);
+    }
+  }
+
+  return path;
+}
+
+List<Offset> _recordingWaveformPoints(
+  Size size,
+  List<double> samples,
+  double progress,
+) {
+  final centerY = size.height / 2;
+  final values = samples.isEmpty ? const [0.0] : samples;
+  final step = values.length <= 1
+      ? size.width
+      : size.width / (values.length - 1);
+  final scroll = progress * step;
+
+  return List<Offset>.generate(values.length, (index) {
+    final x = size.width - (values.length - 1 - index) * step - scroll;
+    final y = centerY - values[index].clamp(-1.0, 1.0) * size.height * 0.36;
+    return Offset(x, y);
+  });
 }
 
 class _MessageTile extends StatefulWidget {

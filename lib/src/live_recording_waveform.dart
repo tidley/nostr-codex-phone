@@ -3,13 +3,11 @@ part of '../main.dart';
 class _LiveRecordingWaveform extends StatefulWidget {
   const _LiveRecordingWaveform({
     required this.level,
-    required this.barCount,
     required this.decay,
     required this.color,
   });
 
   final ValueListenable<double> level;
-  final int barCount;
   final double decay;
   final Color color;
 
@@ -19,33 +17,25 @@ class _LiveRecordingWaveform extends StatefulWidget {
 
 class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
     with SingleTickerProviderStateMixin {
-  static const _history = Duration(milliseconds: 3500);
-  late List<double> _bars;
-  late final AnimationController _animation;
-  double _smoothedLevel = 0;
-  DateTime? _lastSampleAt;
+  static const _sampleRate = 96.0;
+  static const _sampleCount = 360;
 
-  int get _barCount => widget.barCount.clamp(12, 48).toInt();
+  late final AnimationController _animation;
+  final _random = math.Random();
+  final _samples = List<double>.filled(_sampleCount, 0, growable: true);
+  double _lastProgress = 0;
+  double _sampleCarry = 0;
+  double _smoothedLevel = 0;
 
   @override
   void initState() {
     super.initState();
-    _bars = List<double>.filled(_barCount, 0);
+    _seedSamples();
     _animation = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1400),
-    )..addListener(_sampleLevel);
+      duration: const Duration(milliseconds: 1450),
+    )..addListener(_advanceWaveform);
     _animation.repeat();
-  }
-
-  @override
-  void didUpdateWidget(covariant _LiveRecordingWaveform oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.barCount != widget.barCount) {
-      _bars = List<double>.filled(_barCount, 0);
-      _smoothedLevel = 0;
-      _lastSampleAt = null;
-    }
   }
 
   @override
@@ -54,39 +44,56 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
     super.dispose();
   }
 
-  void _sampleLevel() {
-    final now = DateTime.now();
-    final sampleInterval = Duration(
-      microseconds: _history.inMicroseconds ~/ _barCount,
-    );
-    if (_lastSampleAt != null &&
-        now.difference(_lastSampleAt!) < sampleInterval) {
-      return;
+  void _advanceWaveform() {
+    final progress = _animation.value;
+    var delta = progress - _lastProgress;
+    if (delta < 0) delta += 1;
+    _lastProgress = progress;
+
+    _sampleCarry += delta * _sampleRate;
+    while (_sampleCarry >= 1) {
+      _sampleCarry -= 1;
+      _pushSample();
     }
-    _lastSampleAt = now;
+  }
+
+  void _pushSample() {
     final level = widget.level.value.clamp(0.0, 1.0);
-    final responsiveLevel = math.pow(level, 0.7).toDouble();
-    final smoothing = responsiveLevel < _smoothedLevel ? widget.decay : 0.9;
+    final responsiveLevel = math.pow(level, 0.55).toDouble();
+    final smoothing = responsiveLevel < _smoothedLevel ? widget.decay : 0.5;
     _smoothedLevel += (responsiveLevel - _smoothedLevel) * smoothing;
-    final idleLevel =
-        0.055 + math.sin(_animation.value * math.pi * 2).abs() * 0.035;
-    final value = math.max(_smoothedLevel, idleLevel).toDouble();
-    if (!mounted) return;
-    setState(() {
-      _bars
-        ..removeAt(0)
-        ..add(value);
-    });
+    final envelope = 0.05 + _smoothedLevel * 0.95;
+    final previous = _samples.isEmpty ? 0.0 : _samples.last;
+    final noise = _random.nextDouble() * 2 - 1;
+    _samples.add((previous * 0.28 + noise * 0.72) * envelope);
+    if (_samples.length > _sampleCount) {
+      _samples.removeRange(0, _samples.length - _sampleCount);
+    }
+  }
+
+  void _seedSamples() {
+    _samples
+      ..clear()
+      ..addAll(
+        List<double>.generate(
+          _sampleCount,
+          (_) => (_random.nextDouble() * 2 - 1) * 0.04,
+        ),
+      );
   }
 
   @override
   Widget build(BuildContext context) {
-    return CustomPaint(
-      painter: _RecordingWaveformPainter(
-        samples: List<double>.of(_bars),
-        color: widget.color,
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, _) => CustomPaint(
+        painter: _RecordingWaveformPainter(
+          samples: List<double>.of(_samples),
+          progress: _animation.value,
+          color: widget.color,
+        ),
+        child: const SizedBox.expand(),
       ),
-      child: const SizedBox.expand(),
     );
   }
 }
