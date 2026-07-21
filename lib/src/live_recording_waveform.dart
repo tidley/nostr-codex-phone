@@ -5,12 +5,14 @@ class _LiveRecordingWaveform extends StatefulWidget {
     required this.level,
     required this.speed,
     required this.decay,
+    required this.compression,
     required this.color,
   });
 
   final ValueListenable<double> level;
   final double speed;
   final double decay;
+  final double compression;
   final Color color;
 
   @override
@@ -69,7 +71,7 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
 
   void _pushSample() {
     final level = widget.level.value.clamp(0.0, 1.0);
-    final responsiveLevel = math.pow(level, 0.55).toDouble();
+    final responsiveLevel = math.pow(level, _compressionExponent).toDouble();
     final smoothing = responsiveLevel < _smoothedLevel
         ? _fadeSmoothing(widget.decay)
         : 0.5;
@@ -103,6 +105,12 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
   double _fadeSmoothing(double fade) {
     if (fade <= 1) return fade.clamp(0.0, 1.0).toDouble();
     return 1 - math.pow(0.4, fade).toDouble();
+  }
+
+  double get _compressionExponent {
+    final compression = widget.compression.clamp(0.0, 1.0).toDouble();
+    if (compression <= 0.5) return 1 + (0.5 - compression) * 3;
+    return 1 - (compression - 0.5) * 1.4;
   }
 
   @override

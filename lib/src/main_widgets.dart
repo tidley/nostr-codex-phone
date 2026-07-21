@@ -1871,6 +1871,7 @@ class _SettingsPage extends StatelessWidget {
     required this.recordingWaveformSensitivity,
     required this.recordingWaveformBars,
     required this.recordingWaveformDecay,
+    required this.recordingWaveformCompression,
     required this.hapticFeedbackEnabled,
     required this.receiveVibrationEnabled,
     required this.inactiveReplyPopupEnabled,
@@ -1903,6 +1904,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onRecordingWaveformSensitivityChanged,
     required this.onRecordingWaveformBarsChanged,
     required this.onRecordingWaveformDecayChanged,
+    required this.onRecordingWaveformCompressionChanged,
     required this.onHapticFeedbackChanged,
     required this.onReceiveVibrationChanged,
     required this.onInactiveReplyPopupChanged,
@@ -1939,6 +1941,7 @@ class _SettingsPage extends StatelessWidget {
   final double recordingWaveformSensitivity;
   final int recordingWaveformBars;
   final double recordingWaveformDecay;
+  final double recordingWaveformCompression;
   final bool hapticFeedbackEnabled;
   final bool receiveVibrationEnabled;
   final bool inactiveReplyPopupEnabled;
@@ -1971,6 +1974,7 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<double> onRecordingWaveformSensitivityChanged;
   final ValueChanged<double> onRecordingWaveformBarsChanged;
   final ValueChanged<double> onRecordingWaveformDecayChanged;
+  final ValueChanged<double> onRecordingWaveformCompressionChanged;
   final ValueChanged<bool> onHapticFeedbackChanged;
   final ValueChanged<bool> onReceiveVibrationChanged;
   final ValueChanged<bool> onInactiveReplyPopupChanged;
@@ -2051,9 +2055,11 @@ class _SettingsPage extends StatelessWidget {
             initialSensitivity: recordingWaveformSensitivity,
             initialBars: recordingWaveformBars,
             initialDecay: recordingWaveformDecay,
+            initialCompression: recordingWaveformCompression,
             onSensitivityChanged: onRecordingWaveformSensitivityChanged,
             onBarsChanged: onRecordingWaveformBarsChanged,
             onDecayChanged: onRecordingWaveformDecayChanged,
+            onCompressionChanged: onRecordingWaveformCompressionChanged,
           ),
           const SizedBox(height: 16),
           _HapticFeedbackSettings(
@@ -2249,17 +2255,21 @@ class _RecordingWaveformSettings extends StatefulWidget {
     required this.initialSensitivity,
     required this.initialBars,
     required this.initialDecay,
+    required this.initialCompression,
     required this.onSensitivityChanged,
     required this.onBarsChanged,
     required this.onDecayChanged,
+    required this.onCompressionChanged,
   });
 
   final double initialSensitivity;
   final int initialBars;
   final double initialDecay;
+  final double initialCompression;
   final ValueChanged<double> onSensitivityChanged;
   final ValueChanged<double> onBarsChanged;
   final ValueChanged<double> onDecayChanged;
+  final ValueChanged<double> onCompressionChanged;
 
   @override
   State<_RecordingWaveformSettings> createState() =>
@@ -2271,6 +2281,7 @@ class _RecordingWaveformSettingsState
   late double _sensitivity;
   late double _bars;
   late double _decay;
+  late double _compression;
 
   @override
   void initState() {
@@ -2278,6 +2289,7 @@ class _RecordingWaveformSettingsState
     _sensitivity = widget.initialSensitivity;
     _bars = widget.initialBars.toDouble();
     _decay = widget.initialDecay;
+    _compression = widget.initialCompression;
   }
 
   @override
@@ -2332,10 +2344,32 @@ class _RecordingWaveformSettingsState
                 widget.onDecayChanged(value);
               },
             ),
+            _WaveformSlider(
+              label: 'Compression',
+              valueLabel: _compressionLabel,
+              value: _compression,
+              min: 0,
+              max: 1,
+              divisions: 20,
+              onChanged: (value) {
+                setState(() => _compression = value);
+                widget.onCompressionChanged(value);
+              },
+            ),
           ],
         ),
       ),
     );
+  }
+
+  String get _compressionLabel {
+    if (_compression < 0.45) {
+      return 'Expand ${((0.5 - _compression) * 200).round()}%';
+    }
+    if (_compression > 0.55) {
+      return 'Compress ${((_compression - 0.5) * 200).round()}%';
+    }
+    return 'Neutral';
   }
 }
 
@@ -3249,6 +3283,7 @@ class _Composer extends StatefulWidget {
     required this.recordingWaveformLevel,
     required this.recordingWaveformBars,
     required this.recordingWaveformDecay,
+    required this.recordingWaveformCompression,
     required this.recordingDurationLabel,
     required this.voiceSendWipeDuration,
     required this.wavRetryRequested,
@@ -3274,6 +3309,7 @@ class _Composer extends StatefulWidget {
   final ValueListenable<double> recordingWaveformLevel;
   final int recordingWaveformBars;
   final double recordingWaveformDecay;
+  final double recordingWaveformCompression;
   final ValueListenable<String> recordingDurationLabel;
   final Duration voiceSendWipeDuration;
   final bool wavRetryRequested;
@@ -3387,6 +3423,7 @@ class _ComposerState extends State<_Composer> {
                           level: widget.recordingWaveformLevel,
                           speed: widget.recordingWaveformBars / 32,
                           decay: widget.recordingWaveformDecay,
+                          compression: widget.recordingWaveformCompression,
                           color:
                               theme.textTheme.bodyLarge?.color ??
                               theme.colorScheme.onSurface,
