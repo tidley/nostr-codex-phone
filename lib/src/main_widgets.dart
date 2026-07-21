@@ -1873,6 +1873,7 @@ class _SettingsPage extends StatelessWidget {
     required this.recordingWaveformDecay,
     required this.recordingWaveformCompression,
     required this.recordingWaveformSampleRate,
+    required this.recordingWaveformDuration,
     required this.hapticFeedbackEnabled,
     required this.receiveVibrationEnabled,
     required this.inactiveReplyPopupEnabled,
@@ -1907,6 +1908,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onRecordingWaveformDecayChanged,
     required this.onRecordingWaveformCompressionChanged,
     required this.onRecordingWaveformSampleRateChanged,
+    required this.onRecordingWaveformDurationChanged,
     required this.onHapticFeedbackChanged,
     required this.onReceiveVibrationChanged,
     required this.onInactiveReplyPopupChanged,
@@ -1945,6 +1947,7 @@ class _SettingsPage extends StatelessWidget {
   final double recordingWaveformDecay;
   final double recordingWaveformCompression;
   final double recordingWaveformSampleRate;
+  final double recordingWaveformDuration;
   final bool hapticFeedbackEnabled;
   final bool receiveVibrationEnabled;
   final bool inactiveReplyPopupEnabled;
@@ -1979,6 +1982,7 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<double> onRecordingWaveformDecayChanged;
   final ValueChanged<double> onRecordingWaveformCompressionChanged;
   final ValueChanged<double> onRecordingWaveformSampleRateChanged;
+  final ValueChanged<double> onRecordingWaveformDurationChanged;
   final ValueChanged<bool> onHapticFeedbackChanged;
   final ValueChanged<bool> onReceiveVibrationChanged;
   final ValueChanged<bool> onInactiveReplyPopupChanged;
@@ -2061,11 +2065,13 @@ class _SettingsPage extends StatelessWidget {
             initialDecay: recordingWaveformDecay,
             initialCompression: recordingWaveformCompression,
             initialSampleRate: recordingWaveformSampleRate,
+            initialDuration: recordingWaveformDuration,
             onSensitivityChanged: onRecordingWaveformSensitivityChanged,
             onBarsChanged: onRecordingWaveformBarsChanged,
             onDecayChanged: onRecordingWaveformDecayChanged,
             onCompressionChanged: onRecordingWaveformCompressionChanged,
             onSampleRateChanged: onRecordingWaveformSampleRateChanged,
+            onDurationChanged: onRecordingWaveformDurationChanged,
           ),
           const SizedBox(height: 16),
           _HapticFeedbackSettings(
@@ -2263,11 +2269,13 @@ class _RecordingWaveformSettings extends StatefulWidget {
     required this.initialDecay,
     required this.initialCompression,
     required this.initialSampleRate,
+    required this.initialDuration,
     required this.onSensitivityChanged,
     required this.onBarsChanged,
     required this.onDecayChanged,
     required this.onCompressionChanged,
     required this.onSampleRateChanged,
+    required this.onDurationChanged,
   });
 
   final double initialSensitivity;
@@ -2275,11 +2283,13 @@ class _RecordingWaveformSettings extends StatefulWidget {
   final double initialDecay;
   final double initialCompression;
   final double initialSampleRate;
+  final double initialDuration;
   final ValueChanged<double> onSensitivityChanged;
   final ValueChanged<double> onBarsChanged;
   final ValueChanged<double> onDecayChanged;
   final ValueChanged<double> onCompressionChanged;
   final ValueChanged<double> onSampleRateChanged;
+  final ValueChanged<double> onDurationChanged;
 
   @override
   State<_RecordingWaveformSettings> createState() =>
@@ -2289,19 +2299,19 @@ class _RecordingWaveformSettings extends StatefulWidget {
 class _RecordingWaveformSettingsState
     extends State<_RecordingWaveformSettings> {
   late double _sensitivity;
-  late double _bars;
   late double _decay;
   late double _compression;
   late double _sampleRate;
+  late double _duration;
 
   @override
   void initState() {
     super.initState();
     _sensitivity = widget.initialSensitivity;
-    _bars = widget.initialBars.toDouble();
     _decay = widget.initialDecay;
     _compression = widget.initialCompression;
     _sampleRate = widget.initialSampleRate;
+    _duration = widget.initialDuration;
   }
 
   @override
@@ -2321,15 +2331,15 @@ class _RecordingWaveformSettingsState
             ),
             const SizedBox(height: 12),
             _WaveformSlider(
-              label: 'Waveform speed',
-              valueLabel: '${(_bars / 32).toStringAsFixed(1)}x',
-              value: _bars,
-              min: 12,
-              max: 320,
-              divisions: 77,
+              label: 'Waveform travel time',
+              valueLabel: '${_duration.toStringAsFixed(1)} s',
+              value: _duration,
+              min: 0.1,
+              max: 20,
+              divisions: 199,
               onChanged: (value) {
-                setState(() => _bars = value);
-                widget.onBarsChanged(value);
+                setState(() => _duration = value);
+                widget.onDurationChanged(value);
               },
             ),
             _WaveformSlider(
@@ -3309,6 +3319,7 @@ class _Composer extends StatefulWidget {
     required this.recordingWaveformDecay,
     required this.recordingWaveformCompression,
     required this.recordingWaveformSampleRate,
+    required this.recordingWaveformDuration,
     required this.recordingDurationLabel,
     required this.voiceSendWipeDuration,
     required this.wavRetryRequested,
@@ -3336,6 +3347,7 @@ class _Composer extends StatefulWidget {
   final double recordingWaveformDecay;
   final double recordingWaveformCompression;
   final double recordingWaveformSampleRate;
+  final double recordingWaveformDuration;
   final ValueListenable<String> recordingDurationLabel;
   final Duration voiceSendWipeDuration;
   final bool wavRetryRequested;
@@ -3447,7 +3459,7 @@ class _ComposerState extends State<_Composer> {
                         ),
                         child: _LiveRecordingWaveform(
                           level: widget.recordingWaveformLevel,
-                          speed: widget.recordingWaveformBars / 32,
+                          duration: widget.recordingWaveformDuration,
                           decay: widget.recordingWaveformDecay,
                           compression: widget.recordingWaveformCompression,
                           sampleRate: widget.recordingWaveformSampleRate,
@@ -3744,65 +3756,56 @@ class _RecordingButtonState extends State<_RecordingButton>
 class _RecordingWaveformPainter extends CustomPainter {
   const _RecordingWaveformPainter({
     required this.samples,
-    required this.progress,
+    required this.now,
+    required this.visibleDuration,
     required this.color,
   });
 
-  final List<double> samples;
-  final double progress;
+  final List<_WaveformSample> samples;
+  final DateTime now;
+  final Duration visibleDuration;
   final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
+    if (samples.isEmpty || visibleDuration <= Duration.zero) return;
     final paint = Paint()
       ..color = color.withValues(alpha: 0.62)
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
       ..strokeWidth = 1.8;
-    canvas.drawPath(_recordingWaveformPath(size, samples, progress), paint);
+    final points = <Offset>[];
+    final durationMicros = visibleDuration.inMicroseconds;
+    for (final sample in samples) {
+      final age = now.difference(sample.timestamp).inMicroseconds;
+      if (age < 0 || age > durationMicros) continue;
+      final x = size.width * (1 - age / durationMicros);
+      final y =
+          size.height / 2 - sample.value.clamp(-1.0, 1.0) * size.height * 0.36;
+      points.add(Offset(x, y));
+    }
+    if (points.isEmpty) return;
+    final path = Path()..moveTo(points.first.dx, points.first.dy);
+    for (final point in points.skip(1)) {
+      path.lineTo(point.dx, point.dy);
+    }
+    canvas.drawPath(path, paint);
+    if (points.length <= 64) {
+      final markerPaint = Paint()..color = color.withValues(alpha: 0.84);
+      for (final point in points) {
+        canvas.drawCircle(point, 1.6, markerPaint);
+      }
+    }
   }
 
   @override
   bool shouldRepaint(covariant _RecordingWaveformPainter oldDelegate) {
     return oldDelegate.samples != samples ||
-        oldDelegate.progress != progress ||
+        oldDelegate.now != now ||
+        oldDelegate.visibleDuration != visibleDuration ||
         oldDelegate.color != color;
   }
-}
-
-Path _recordingWaveformPath(Size size, List<double> samples, double progress) {
-  final path = Path();
-  final points = _recordingWaveformPoints(size, samples, progress);
-
-  for (var i = 0; i < points.length; i++) {
-    if (i == 0) {
-      path.moveTo(points[i].dx, points[i].dy);
-    } else {
-      path.lineTo(points[i].dx, points[i].dy);
-    }
-  }
-
-  return path;
-}
-
-List<Offset> _recordingWaveformPoints(
-  Size size,
-  List<double> samples,
-  double progress,
-) {
-  final centerY = size.height / 2;
-  final values = samples.isEmpty ? const [0.0] : samples;
-  final step = values.length <= 1
-      ? size.width
-      : size.width / (values.length - 1);
-  final scroll = progress * step;
-
-  return List<Offset>.generate(values.length, (index) {
-    final x = size.width - (values.length - 1 - index) * step - scroll;
-    final y = centerY - values[index].clamp(-1.0, 1.0) * size.height * 0.36;
-    return Offset(x, y);
-  });
 }
 
 class _MessageTile extends StatefulWidget {
