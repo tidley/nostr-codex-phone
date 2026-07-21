@@ -39,7 +39,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.35+235';
+const _appVersion = '0.2.36+236';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -714,7 +714,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         recordingWaveformBars,
         _recordingWaveformBars.toDouble(),
         12,
-        48,
+        320,
       ).round();
       _recordingWaveformDecay = _storedDouble(
         recordingWaveformDecay,
@@ -2746,12 +2746,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   void _setRecordingWaveformBars(double bars) {
-    setState(() => _recordingWaveformBars = bars.round().clamp(12, 48));
+    setState(() => _recordingWaveformBars = bars.round().clamp(12, 320));
     unawaited(_saveRecordingWaveformSettings());
   }
 
   void _setRecordingWaveformDecay(double decay) {
-    setState(() => _recordingWaveformDecay = decay.clamp(0.1, 1.0));
+    setState(() => _recordingWaveformDecay = decay.clamp(0.1, 10.0));
     unawaited(_saveRecordingWaveformSettings());
   }
 

@@ -70,7 +70,9 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
   void _pushSample() {
     final level = widget.level.value.clamp(0.0, 1.0);
     final responsiveLevel = math.pow(level, 0.55).toDouble();
-    final smoothing = responsiveLevel < _smoothedLevel ? widget.decay : 0.5;
+    final smoothing = responsiveLevel < _smoothedLevel
+        ? _fadeSmoothing(widget.decay)
+        : 0.5;
     _smoothedLevel += (responsiveLevel - _smoothedLevel) * smoothing;
     final envelope = 0.05 + _smoothedLevel * 0.95;
     final previous = _samples.isEmpty ? 0.0 : _samples.last;
@@ -92,11 +94,16 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
       );
   }
 
-  double get _safeSpeed => widget.speed.clamp(0.375, 1.5).toDouble();
+  double get _safeSpeed => widget.speed.clamp(0.375, 10.0).toDouble();
 
   Duration _durationForSpeed(double speed) => Duration(
-    milliseconds: (1450 / speed.clamp(0.375, 1.5).toDouble()).round(),
+    milliseconds: (1450 / speed.clamp(0.375, 10.0).toDouble()).round(),
   );
+
+  double _fadeSmoothing(double fade) {
+    if (fade <= 1) return fade.clamp(0.0, 1.0).toDouble();
+    return 1 - math.pow(0.4, fade).toDouble();
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -2301,8 +2301,8 @@ class _RecordingWaveformSettingsState
               valueLabel: '${(_bars / 32).toStringAsFixed(1)}x',
               value: _bars,
               min: 12,
-              max: 48,
-              divisions: 18,
+              max: 320,
+              divisions: 77,
               onChanged: (value) {
                 setState(() => _bars = value);
                 widget.onBarsChanged(value);
@@ -2325,8 +2325,8 @@ class _RecordingWaveformSettingsState
               valueLabel: '${_decay.toStringAsFixed(1)}x',
               value: _decay,
               min: 0.1,
-              max: 1.0,
-              divisions: 9,
+              max: 10.0,
+              divisions: 99,
               onChanged: (value) {
                 setState(() => _decay = value);
                 widget.onDecayChanged(value);
