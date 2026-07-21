@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter/services.dart';
@@ -37,7 +38,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.10+210';
+const _appVersion = '0.2.30+230';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -5968,39 +5969,31 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                       ),
                     ),
             ),
-            ValueListenableBuilder<double>(
-              valueListenable: _recordingWaveformLevel,
-              builder: (context, recordingWaveformLevel, _) =>
-                  ValueListenableBuilder<String>(
-                    valueListenable: _recordingDurationLabel,
-                    builder: (context, recordingDurationLabel, _) => _Composer(
-                      controller: _queryController,
-                      focusNode: _queryFocusNode,
-                      connected: _connected,
-                      connecting: _connecting,
-                      sending: _sendingInActiveConversation,
-                      sendingAudio: _sendingAudioInActiveConversation,
-                      transcribingAudio: _transcribingInActiveConversation,
-                      sendingMedia: _sendingMediaInActiveConversation,
-                      activeSendBlocked: _activeConversationSendBlocked,
-                      recording: _recording,
-                      recordingWaveformLevel: recordingWaveformLevel,
-                      recordingWaveformBars: _recordingWaveformBars,
-                      recordingWaveformDecay: _recordingWaveformDecay,
-                      recordingDurationLabel: recordingDurationLabel,
-                      voiceSendWipeDuration: _voiceSendWipeDuration,
-                      wavRetryRequested: _wavRetryRequested,
-                      hasPendingMedia: _hasPendingMediaAttachment,
-                      pendingMediaName: _pendingMediaFileName,
-                      onMicPressed: _toggleRecording,
-                      onAttachMedia: _attachAndSendMedia,
-                      onCancelRecording: () =>
-                          unawaited(_cancelCurrentAction()),
-                      onClearPendingMedia: _clearPendingMediaAttachment,
-                      onSendPressed: () => _sendMediaOrText(),
-                    ),
-                  ),
-              ),
+            _Composer(
+              controller: _queryController,
+              focusNode: _queryFocusNode,
+              connected: _connected,
+              connecting: _connecting,
+              sending: _sendingInActiveConversation,
+              sendingAudio: _sendingAudioInActiveConversation,
+              transcribingAudio: _transcribingInActiveConversation,
+              sendingMedia: _sendingMediaInActiveConversation,
+              activeSendBlocked: _activeConversationSendBlocked,
+              recording: _recording,
+              recordingWaveformLevel: _recordingWaveformLevel,
+              recordingWaveformBars: _recordingWaveformBars,
+              recordingWaveformDecay: _recordingWaveformDecay,
+              recordingDurationLabel: _recordingDurationLabel,
+              voiceSendWipeDuration: _voiceSendWipeDuration,
+              wavRetryRequested: _wavRetryRequested,
+              hasPendingMedia: _hasPendingMediaAttachment,
+              pendingMediaName: _pendingMediaFileName,
+              onMicPressed: _toggleRecording,
+              onAttachMedia: _attachAndSendMedia,
+              onCancelRecording: () => unawaited(_cancelCurrentAction()),
+              onClearPendingMedia: _clearPendingMediaAttachment,
+              onSendPressed: () => _sendMediaOrText(),
+            ),
             const SizedBox(height: 12),
           ],
         ),
