@@ -42,33 +42,46 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
       vsync: this,
       duration: const Duration(seconds: 1),
     )..addListener(_advanceWaveform);
+    widget.level.addListener(_recordAmplitudeSample);
+    _recordAmplitudeSample();
     _animation.repeat();
   }
 
   @override
+  void didUpdateWidget(covariant _LiveRecordingWaveform oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.level != widget.level) {
+      oldWidget.level.removeListener(_recordAmplitudeSample);
+      widget.level.addListener(_recordAmplitudeSample);
+      _lastSampleAt = null;
+    }
+  }
+
+  @override
   void dispose() {
+    widget.level.removeListener(_recordAmplitudeSample);
     _animation.dispose();
     super.dispose();
   }
 
   void _advanceWaveform() {
     final now = DateTime.now();
-    final interval = Duration(
-      microseconds: (Duration.microsecondsPerSecond / _safeSampleRate).round(),
-    );
-    var nextSampleAt = _lastSampleAt;
-    if (nextSampleAt == null) {
-      _pushSample(now);
-      nextSampleAt = now;
-    }
-    while (!nextSampleAt!.add(interval).isAfter(now)) {
-      nextSampleAt = nextSampleAt.add(interval);
-      _pushSample(nextSampleAt);
-    }
-    _lastSampleAt = nextSampleAt;
     _samples.removeWhere(
       (sample) => now.difference(sample.timestamp) > _visibleDuration,
     );
+  }
+
+  void _recordAmplitudeSample() {
+    final now = DateTime.now();
+    final interval = Duration(
+      microseconds: (Duration.microsecondsPerSecond / _safeSampleRate).round(),
+    );
+    if (_lastSampleAt != null && now.difference(_lastSampleAt!) < interval) {
+      return;
+    }
+    _lastSampleAt = now;
+    _pushSample(now);
+    if (mounted) setState(() {});
   }
 
   void _pushSample(DateTime timestamp) {
