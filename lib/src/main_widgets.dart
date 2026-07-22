@@ -18,6 +18,7 @@ class _SessionDrawer extends StatelessWidget {
     required this.onRestartTarget,
     required this.onRenameTarget,
     required this.onTogglePinTarget,
+    required this.onOpenWorkers,
     required this.onOpenSettings,
     required this.onDeleteTarget,
   });
@@ -38,6 +39,7 @@ class _SessionDrawer extends StatelessWidget {
   final ValueChanged<RepoTarget> onRestartTarget;
   final ValueChanged<RepoTarget> onRenameTarget;
   final ValueChanged<RepoTarget> onTogglePinTarget;
+  final VoidCallback onOpenWorkers;
   final VoidCallback onOpenSettings;
   final ValueChanged<String> onDeleteTarget;
 
@@ -374,13 +376,26 @@ class _SessionDrawer extends StatelessWidget {
             const Divider(height: 1),
             Align(
               alignment: Alignment.centerLeft,
-              child: ListTile(
-                leading: const Icon(Icons.settings),
-                title: const Text('Settings'),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  onOpenSettings();
-                },
+              child: Column(
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.computer_outlined),
+                    title: const Text('Workers'),
+                    subtitle: const Text('Add and manage computers'),
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      onOpenWorkers();
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.settings),
+                    title: const Text('Settings'),
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      onOpenSettings();
+                    },
+                  ),
+                ],
               ),
             ),
           ],
@@ -412,6 +427,116 @@ class _SessionDrawer extends StatelessWidget {
 }
 
 enum _SessionDrawerAction { pin, restart, rename, delete }
+
+class _WorkersPage extends StatelessWidget {
+  const _WorkersPage({
+    required this.workers,
+    required this.selectedWorkerId,
+    required this.onAddWorker,
+    required this.onSelectWorker,
+    required this.onTestWorker,
+    required this.onDeleteWorker,
+  });
+
+  final List<RepoTarget> workers;
+  final String? selectedWorkerId;
+  final Future<void> Function() onAddWorker;
+  final ValueChanged<RepoTarget> onSelectWorker;
+  final ValueChanged<RepoTarget> onTestWorker;
+  final ValueChanged<RepoTarget> onDeleteWorker;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Workers')),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => unawaited(onAddWorker()),
+        icon: const Icon(Icons.qr_code_scanner),
+        label: const Text('Scan worker'),
+      ),
+      body: workers.isEmpty
+          ? const Center(
+              child: Padding(
+                padding: EdgeInsets.all(32),
+                child: Text(
+                  'Scan the QR shown by each Linux or Mac worker. Each worker keeps its own sessions and identity.',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            )
+          : ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
+              itemCount: workers.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 8),
+              itemBuilder: (context, index) {
+                final worker = workers[index];
+                final selected = worker.id == selectedWorkerId;
+                return Card(
+                  color: selected
+                      ? Theme.of(context).colorScheme.primaryContainer
+                      : null,
+                  child: ListTile(
+                    leading: Icon(
+                      selected
+                          ? Icons.computer
+                          : Icons.computer_outlined,
+                    ),
+                    title: Text(worker.displayName),
+                    subtitle: Text(
+                      '${compactIdentifier(worker.pubkey)}\n${worker.relays.length} relay${worker.relays.length == 1 ? '' : 's'}',
+                    ),
+                    isThreeLine: true,
+                    onTap: () => onSelectWorker(worker),
+                    trailing: PopupMenuButton<_WorkerAction>(
+                      onSelected: (action) async {
+                        if (action == _WorkerAction.test) {
+                          onTestWorker(worker);
+                        } else if (action == _WorkerAction.remove &&
+                            await _confirmDelete(context, worker)) {
+                          onDeleteWorker(worker);
+                        }
+                      },
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(
+                          value: _WorkerAction.test,
+                          child: Text('Test connection'),
+                        ),
+                        PopupMenuItem(
+                          value: _WorkerAction.remove,
+                          child: Text('Remove worker'),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+    );
+  }
+
+  Future<bool> _confirmDelete(BuildContext context, RepoTarget worker) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Remove worker?'),
+            content: Text('Remove ${worker.displayName}? Its sessions stay saved.'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Remove'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+}
+
+enum _WorkerAction { test, remove }
 
 class _SpawnSessionRequest {
   const _SpawnSessionRequest({required this.path, required this.create});
