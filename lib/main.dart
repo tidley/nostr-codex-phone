@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.50+250';
+const _appVersion = '0.2.51+251';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -4315,9 +4315,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       if (!await _ensureConnectedForSend()) {
         throw StateError('Not connected');
       }
-      final payload = jsonEncode({
-        'cancel_request': {'event_id': eventId},
-      });
+      final payload = jsonEncode(
+        _withActiveRoute({
+          'cancel_request': {'event_id': eventId},
+        }),
+      );
       await _sendWithAutoRecovery(
         label: 'cancel request',
         sender: () => nostrSendQuery(query: payload),
