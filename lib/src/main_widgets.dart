@@ -1998,6 +1998,7 @@ class _SettingsPage extends StatelessWidget {
     required this.recordingWaveformDecay,
     required this.recordingWaveformCompression,
     required this.recordingWaveformDuration,
+    required this.recordingWaveformRmsSmoothing,
     required this.hapticFeedbackEnabled,
     required this.receiveVibrationEnabled,
     required this.inactiveReplyPopupEnabled,
@@ -2032,6 +2033,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onRecordingWaveformDecayChanged,
     required this.onRecordingWaveformCompressionChanged,
     required this.onRecordingWaveformDurationChanged,
+    required this.onRecordingWaveformRmsSmoothingChanged,
     required this.onHapticFeedbackChanged,
     required this.onReceiveVibrationChanged,
     required this.onInactiveReplyPopupChanged,
@@ -2070,6 +2072,7 @@ class _SettingsPage extends StatelessWidget {
   final double recordingWaveformDecay;
   final double recordingWaveformCompression;
   final double recordingWaveformDuration;
+  final double recordingWaveformRmsSmoothing;
   final bool hapticFeedbackEnabled;
   final bool receiveVibrationEnabled;
   final bool inactiveReplyPopupEnabled;
@@ -2104,6 +2107,7 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<double> onRecordingWaveformDecayChanged;
   final ValueChanged<double> onRecordingWaveformCompressionChanged;
   final ValueChanged<double> onRecordingWaveformDurationChanged;
+  final ValueChanged<double> onRecordingWaveformRmsSmoothingChanged;
   final ValueChanged<bool> onHapticFeedbackChanged;
   final ValueChanged<bool> onReceiveVibrationChanged;
   final ValueChanged<bool> onInactiveReplyPopupChanged;
@@ -2186,11 +2190,13 @@ class _SettingsPage extends StatelessWidget {
             initialDecay: recordingWaveformDecay,
             initialCompression: recordingWaveformCompression,
             initialDuration: recordingWaveformDuration,
+            initialRmsSmoothing: recordingWaveformRmsSmoothing,
             onSensitivityChanged: onRecordingWaveformSensitivityChanged,
             onBarsChanged: onRecordingWaveformBarsChanged,
             onDecayChanged: onRecordingWaveformDecayChanged,
             onCompressionChanged: onRecordingWaveformCompressionChanged,
             onDurationChanged: onRecordingWaveformDurationChanged,
+            onRmsSmoothingChanged: onRecordingWaveformRmsSmoothingChanged,
           ),
           const SizedBox(height: 16),
           _HapticFeedbackSettings(
@@ -2388,11 +2394,13 @@ class _RecordingWaveformSettings extends StatefulWidget {
     required this.initialDecay,
     required this.initialCompression,
     required this.initialDuration,
+    required this.initialRmsSmoothing,
     required this.onSensitivityChanged,
     required this.onBarsChanged,
     required this.onDecayChanged,
     required this.onCompressionChanged,
     required this.onDurationChanged,
+    required this.onRmsSmoothingChanged,
   });
 
   final double initialSensitivity;
@@ -2400,11 +2408,13 @@ class _RecordingWaveformSettings extends StatefulWidget {
   final double initialDecay;
   final double initialCompression;
   final double initialDuration;
+  final double initialRmsSmoothing;
   final ValueChanged<double> onSensitivityChanged;
   final ValueChanged<double> onBarsChanged;
   final ValueChanged<double> onDecayChanged;
   final ValueChanged<double> onCompressionChanged;
   final ValueChanged<double> onDurationChanged;
+  final ValueChanged<double> onRmsSmoothingChanged;
 
   @override
   State<_RecordingWaveformSettings> createState() =>
@@ -2417,6 +2427,7 @@ class _RecordingWaveformSettingsState
   late double _decay;
   late double _compression;
   late double _duration;
+  late double _rmsSmoothing;
 
   @override
   void initState() {
@@ -2425,6 +2436,7 @@ class _RecordingWaveformSettingsState
     _decay = widget.initialDecay;
     _compression = widget.initialCompression;
     _duration = widget.initialDuration;
+    _rmsSmoothing = widget.initialRmsSmoothing;
   }
 
   @override
@@ -2444,7 +2456,7 @@ class _RecordingWaveformSettingsState
             ),
             const SizedBox(height: 12),
             _WaveformSlider(
-              label: 'Waveform travel time',
+              label: 'History and travel time',
               valueLabel: '${_duration.toStringAsFixed(1)} s',
               value: _duration,
               min: 0.1,
@@ -2453,6 +2465,20 @@ class _RecordingWaveformSettingsState
               onChanged: (value) {
                 setState(() => _duration = value);
                 widget.onDurationChanged(value);
+              },
+            ),
+            _WaveformSlider(
+              label: 'RMS averaging',
+              valueLabel: _rmsSmoothing == 0
+                  ? 'Off'
+                  : '${(_rmsSmoothing * 1000).round()} ms',
+              value: _rmsSmoothing,
+              min: 0,
+              max: 1,
+              divisions: 20,
+              onChanged: (value) {
+                setState(() => _rmsSmoothing = value);
+                widget.onRmsSmoothingChanged(value);
               },
             ),
             _WaveformSlider(
@@ -3420,6 +3446,7 @@ class _Composer extends StatefulWidget {
     required this.recordingWaveformDecay,
     required this.recordingWaveformCompression,
     required this.recordingWaveformDuration,
+    required this.recordingWaveformRmsSmoothing,
     required this.recordingDurationLabel,
     required this.voiceSendWipeDuration,
     required this.wavRetryRequested,
@@ -3447,6 +3474,7 @@ class _Composer extends StatefulWidget {
   final double recordingWaveformDecay;
   final double recordingWaveformCompression;
   final double recordingWaveformDuration;
+  final double recordingWaveformRmsSmoothing;
   final ValueListenable<String> recordingDurationLabel;
   final Duration voiceSendWipeDuration;
   final bool wavRetryRequested;
@@ -3562,6 +3590,7 @@ class _ComposerState extends State<_Composer> {
                           speed: 3.75 / widget.recordingWaveformDuration,
                           decay: widget.recordingWaveformDecay,
                           compression: widget.recordingWaveformCompression,
+                          rmsSmoothing: widget.recordingWaveformRmsSmoothing,
                           color:
                               theme.textTheme.bodyLarge?.color ??
                               theme.colorScheme.onSurface,

@@ -6,6 +6,7 @@ class _LiveRecordingWaveform extends StatefulWidget {
     required this.speed,
     required this.decay,
     required this.compression,
+    required this.rmsSmoothing,
     required this.color,
   });
 
@@ -13,6 +14,7 @@ class _LiveRecordingWaveform extends StatefulWidget {
   final double speed;
   final double decay;
   final double compression;
+  final double rmsSmoothing;
   final Color color;
 
   @override
@@ -27,6 +29,7 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
   late final AnimationController _animation;
   final _random = math.Random();
   final _samples = List<double>.filled(_sampleCount, 0, growable: true);
+  final _rmsLevels = <double>[];
   double _lastProgress = 0;
   double _sampleCarry = 0;
   double _smoothedLevel = 0;
@@ -70,7 +73,16 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
   }
 
   void _pushSample() {
-    final level = widget.level.value.clamp(0.0, 1.0);
+    final rawLevel = widget.level.value.clamp(0.0, 1.0).toDouble();
+    final rmsWindow = math.max(
+      1,
+      (widget.rmsSmoothing.clamp(0.0, 1.0) * _sampleRate * _safeSpeed).round(),
+    );
+    _rmsLevels.add(rawLevel * rawLevel);
+    if (_rmsLevels.length > rmsWindow) _rmsLevels.removeAt(0);
+    final level = math.sqrt(
+      _rmsLevels.reduce((total, value) => total + value) / _rmsLevels.length,
+    );
     final responsiveLevel = math.pow(level, _compressionExponent).toDouble();
     final smoothing = responsiveLevel < _smoothedLevel
         ? _fadeSmoothing(widget.decay)
