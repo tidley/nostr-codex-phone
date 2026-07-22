@@ -3660,7 +3660,9 @@ class _ComposerState extends State<_Composer> {
                     : IconButton.styleFrom(minimumSize: const Size(48, 48));
                 final sendingAudioShell =
                     _voiceWipeVisible && !widget.recording;
-                final sentButtonColor = theme.colorScheme.primaryContainer;
+                const recordingButtonColor = Color(0xffffb74d);
+                const recordingButtonForeground = Color(0xff1c1408);
+                final sentButtonColor = theme.colorScheme.primary;
 
                 final icon = busy
                     ? SizedBox.square(
@@ -3706,6 +3708,12 @@ class _ComposerState extends State<_Composer> {
                 final mainButtonStyle = FilledButton.styleFrom(
                   minimumSize: const Size(112, 48),
                   padding: const EdgeInsets.symmetric(horizontal: 12),
+                  backgroundColor: widget.recording
+                      ? recordingButtonColor
+                      : null,
+                  foregroundColor: widget.recording
+                      ? recordingButtonForeground
+                      : null,
                 );
                 final mainButton = Tooltip(
                   message: tooltip,
@@ -3735,8 +3743,8 @@ class _ComposerState extends State<_Composer> {
                     ? _RecordingButton(
                         sendWipe: sendingAudioShell,
                         finishWipe: _finishVoiceWipe,
-                        backgroundColor: theme.colorScheme.primary,
-                        foregroundColor: theme.colorScheme.onPrimary,
+                        backgroundColor: recordingButtonColor,
+                        foregroundColor: recordingButtonForeground,
                         wipeColor: sentButtonColor,
                         wipeDuration: widget.voiceSendWipeDuration,
                         onWipeComplete: _completeVoiceWipe,
