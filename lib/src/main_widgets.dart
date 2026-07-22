@@ -3660,7 +3660,7 @@ class _ComposerState extends State<_Composer> {
                     : IconButton.styleFrom(minimumSize: const Size(48, 48));
                 final sendingAudioShell =
                     _voiceWipeVisible && !widget.recording;
-                final sentButtonColor = theme.colorScheme.primary;
+                final sentButtonColor = theme.colorScheme.primaryContainer;
 
                 final icon = busy
                     ? SizedBox.square(
