@@ -3832,13 +3832,8 @@ class _RecordingButtonState extends State<_RecordingButton>
     if (widget.sendWipe && !oldWidget.sendWipe) {
       _wipeController.forward(from: 0);
     } else if (widget.finishWipe && !oldWidget.finishWipe) {
-      _wipeController
-          .animateTo(
-            1,
-            duration: const Duration(milliseconds: 180),
-            curve: Curves.easeOutCubic,
-          )
-          .whenComplete(() => widget.onWipeComplete?.call());
+      _wipeController.value = 1;
+      widget.onWipeComplete?.call();
     } else if (!widget.sendWipe && oldWidget.sendWipe) {
       _wipeController.value = 0;
     }
