@@ -1,25 +1,16 @@
 part of '../main.dart';
 
-class _WaveformSample {
-  const _WaveformSample({required this.timestamp, required this.value});
-
-  final DateTime timestamp;
-  final double value;
-}
-
 class _LiveRecordingWaveform extends StatefulWidget {
   const _LiveRecordingWaveform({
     required this.level,
-    required this.bars,
-    required this.duration,
+    required this.speed,
     required this.decay,
     required this.compression,
     required this.color,
   });
 
   final ValueListenable<double> level;
-  final int bars;
-  final double duration;
+  final double speed;
   final double decay;
   final double compression;
   final Color color;
@@ -30,77 +21,86 @@ class _LiveRecordingWaveform extends StatefulWidget {
 
 class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
     with SingleTickerProviderStateMixin {
+  static const _sampleRate = 96.0;
+  static const _sampleCount = 360;
+
   late final AnimationController _animation;
-  final _samples = <_WaveformSample>[];
-  DateTime? _lastSampleAt;
+  final _random = math.Random();
+  final _samples = List<double>.filled(_sampleCount, 0, growable: true);
+  double _lastProgress = 0;
+  double _sampleCarry = 0;
   double _smoothedLevel = 0;
 
   @override
   void initState() {
     super.initState();
+    _seedSamples();
     _animation = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 1),
+      duration: _durationForSpeed(widget.speed),
     )..addListener(_advanceWaveform);
-    widget.level.addListener(_recordAmplitudeSample);
-    _recordAmplitudeSample();
     _animation.repeat();
   }
 
   @override
   void didUpdateWidget(covariant _LiveRecordingWaveform oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.level != widget.level) {
-      oldWidget.level.removeListener(_recordAmplitudeSample);
-      widget.level.addListener(_recordAmplitudeSample);
-      _lastSampleAt = null;
+    if (oldWidget.speed != widget.speed) {
+      _animation.duration = _durationForSpeed(widget.speed);
     }
   }
 
   @override
   void dispose() {
-    widget.level.removeListener(_recordAmplitudeSample);
     _animation.dispose();
     super.dispose();
   }
 
   void _advanceWaveform() {
-    final now = DateTime.now();
-    _samples.removeWhere(
-      (sample) => now.difference(sample.timestamp) > _visibleDuration,
-    );
-  }
+    final progress = _animation.value;
+    var delta = progress - _lastProgress;
+    if (delta < 0) delta += 1;
+    _lastProgress = progress;
 
-  void _recordAmplitudeSample() {
-    final now = DateTime.now();
-    final interval = Duration(
-      microseconds: (Duration.microsecondsPerSecond / _sampleRate).round(),
-    );
-    if (_lastSampleAt != null && now.difference(_lastSampleAt!) < interval) {
-      return;
+    _sampleCarry += delta * _sampleRate * _safeSpeed;
+    while (_sampleCarry >= 1) {
+      _sampleCarry -= 1;
+      _pushSample();
     }
-    _lastSampleAt = now;
-    _pushSample(now);
-    if (mounted) setState(() {});
   }
 
-  void _pushSample(DateTime timestamp) {
+  void _pushSample() {
     final level = widget.level.value.clamp(0.0, 1.0);
     final responsiveLevel = math.pow(level, _compressionExponent).toDouble();
     final smoothing = responsiveLevel < _smoothedLevel
         ? _fadeSmoothing(widget.decay)
         : 0.5;
     _smoothedLevel += (responsiveLevel - _smoothedLevel) * smoothing;
-    _samples.add(_WaveformSample(timestamp: timestamp, value: _smoothedLevel));
+    final envelope = 0.05 + _smoothedLevel * 0.95;
+    final previous = _samples.isEmpty ? 0.0 : _samples.last;
+    final noise = _random.nextDouble() * 2 - 1;
+    _samples.add((previous * 0.28 + noise * 0.72) * envelope);
+    if (_samples.length > _sampleCount) {
+      _samples.removeRange(0, _samples.length - _sampleCount);
+    }
   }
 
-  static const _sampleRate = 60.0;
+  void _seedSamples() {
+    _samples
+      ..clear()
+      ..addAll(
+        List<double>.generate(
+          _sampleCount,
+          (_) => (_random.nextDouble() * 2 - 1) * 0.04,
+        ),
+      );
+  }
 
-  Duration get _visibleDuration => Duration(
-    microseconds: (_safeDuration * Duration.microsecondsPerSecond).round(),
+  double get _safeSpeed => widget.speed.clamp(0.375, 10.0).toDouble();
+
+  Duration _durationForSpeed(double speed) => Duration(
+    milliseconds: (1450 / speed.clamp(0.375, 10.0).toDouble()).round(),
   );
-
-  double get _safeDuration => widget.duration.clamp(0.1, 20.0).toDouble();
 
   double _fadeSmoothing(double fade) {
     if (fade <= 1) return fade.clamp(0.0, 1.0).toDouble();
@@ -119,10 +119,8 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
       animation: _animation,
       builder: (context, _) => CustomPaint(
         painter: _RecordingWaveformPainter(
-          samples: List<_WaveformSample>.of(_samples),
-          now: DateTime.now(),
-          visibleDuration: _visibleDuration,
-          bars: widget.bars,
+          samples: List<double>.of(_samples),
+          progress: _animation.value,
           color: widget.color,
         ),
         child: const SizedBox.expand(),
