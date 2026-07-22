@@ -32,4 +32,6 @@ jobs:
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ inputs.tag }}" rust/target/release/nostr-codex-server#nostr-codex-worker-macos-arm64 --clobber
+        run: |
+          cp rust/target/release/nostr-codex-server nostr-codex-worker-macos-arm64
+          gh release upload "${{ inputs.tag }}" nostr-codex-worker-macos-arm64 --clobber
