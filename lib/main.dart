@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.43+243';
+const _appVersion = '0.2.44+244';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -243,6 +243,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _repoTargetsStorageKey = 'repo_targets_v1';
   static const _selectedRepoTargetStorageKey = 'selected_repo_target_id';
   static const _computerServiceTargetStorageKey = 'computer_service_target_v1';
+  static const _computerServiceTargetsStorageKey = 'computer_service_targets_v1';
+  static const _selectedComputerServiceTargetStorageKey =
+      'selected_computer_service_target_id';
   static const _blossomServerStorageKey = 'blossom_server';
   static const _ttsLanguageStorageKey = 'tts_language';
   static const _ttsEngineStorageKey = 'tts_engine';
@@ -275,6 +278,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _repoTargetsStorageKey,
     _selectedRepoTargetStorageKey,
     _computerServiceTargetStorageKey,
+    _computerServiceTargetsStorageKey,
+    _selectedComputerServiceTargetStorageKey,
     _blossomServerStorageKey,
     _ttsLanguageStorageKey,
     _ttsEngineStorageKey,
@@ -359,6 +364,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   bool _speaking = false;
   bool _wavRetryRequested = false;
   List<RepoTarget> _repoTargets = const [];
+  List<RepoTarget> _computerServiceTargets = const [];
   RepoTarget? _computerServiceTarget;
   String? _selectedRepoTargetId;
   double _ttsRate = 0.48;
@@ -638,6 +644,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final computerServiceTarget = await _storage.read(
       key: _computerServiceTargetStorageKey,
     );
+    final computerServiceTargets = await _storage.read(
+      key: _computerServiceTargetsStorageKey,
+    );
+    final selectedComputerServiceTarget = await _storage.read(
+      key: _selectedComputerServiceTargetStorageKey,
+    );
     final blossomServer = await _storage.read(key: _blossomServerStorageKey);
     final ttsLanguage = await _storage.read(key: _ttsLanguageStorageKey);
     final ttsEngine = await _storage.read(key: _ttsEngineStorageKey);
@@ -686,13 +698,20 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     final migratedRelays = relays?.replaceAll(',', '\n') ?? defaultRelays;
     final targets = _decodeRepoTargets(repoTargets);
-    final serviceTarget =
+    final legacyServiceTarget =
         _decodeRepoTarget(computerServiceTarget) ??
         _deriveComputerServiceTarget(
           targets,
           legacyPeerPubkey: peerPubkey,
           legacyRelays: _splitRelayText(migratedRelays),
         );
+    final serviceTargets = _decodeRepoTargets(computerServiceTargets);
+    if (serviceTargets.isEmpty && legacyServiceTarget != null) {
+      serviceTargets.add(_normalizeComputerServiceTarget(legacyServiceTarget));
+    }
+    final serviceTarget =
+        _targetById(serviceTargets, selectedComputerServiceTarget) ??
+        (serviceTargets.isNotEmpty ? serviceTargets.first : null);
     final selectedTarget =
         _targetById(targets, selectedRepoTarget) ??
         (targets.isNotEmpty ? targets.first : null);
@@ -701,6 +720,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     setState(() {
       _secretKeyController.text = secretKey ?? '';
       _repoTargets = targets;
+      _computerServiceTargets = serviceTargets;
       _computerServiceTarget = serviceTarget;
       _selectedRepoTargetId = selectedTarget?.id;
       _targetNameController.text = selectedTarget?.name ?? '';
@@ -1103,7 +1123,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         ? target.name.trim()
         : 'Computer service';
     return RepoTarget(
-      id: 'computer-service',
+      id: target.id == 'computer-service'
+          ? 'computer-${target.pubkey}'
+          : target.id,
       name: name,
       pubkey: target.pubkey,
       relays: target.relays,
@@ -1113,22 +1135,63 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _saveComputerServiceTarget() async {
-    final target = _computerServiceTarget;
-    if (target == null) {
-      await _storage.delete(key: _computerServiceTargetStorageKey);
+    final targets = _computerServiceTargets;
+    if (targets.isEmpty) {
+      await _storage.delete(key: _computerServiceTargetsStorageKey);
+      await _storage.delete(key: _selectedComputerServiceTargetStorageKey);
       return;
     }
     await _storage.write(
-      key: _computerServiceTargetStorageKey,
-      value: jsonEncode(target.toJson()),
+      key: _computerServiceTargetsStorageKey,
+      value: jsonEncode([for (final target in targets) target.toJson()]),
+    );
+    await _storage.write(
+      key: _selectedComputerServiceTargetStorageKey,
+      value: _computerServiceTarget?.id ?? targets.first.id,
     );
   }
 
   Future<void> _storeComputerServiceTarget(RepoTarget target) async {
-    final serviceTarget = _normalizeComputerServiceTarget(target);
+    final incomingTarget = _normalizeComputerServiceTarget(target);
     setState(() {
+      final targets = [..._computerServiceTargets];
+      final index = targets.indexWhere(
+        (item) => item.pubkey == incomingTarget.pubkey,
+      );
+      final serviceTarget = index == -1
+          ? incomingTarget
+          : incomingTarget.copyWith(id: targets[index].id);
+      if (index == -1) {
+        targets.add(serviceTarget);
+      } else {
+        targets[index] = serviceTarget;
+      }
+      _computerServiceTargets = targets;
       _computerServiceTarget = serviceTarget;
-      _status = 'Computer service saved: ${serviceTarget.displayName}';
+      _status = 'Worker saved: ${serviceTarget.displayName}';
+    });
+    await _saveComputerServiceTarget();
+  }
+
+  Future<void> _selectComputerServiceTarget(RepoTarget target) async {
+    setState(() {
+      _computerServiceTarget = target;
+      _status = 'Worker selected: ${target.displayName}';
+    });
+    await _saveComputerServiceTarget();
+  }
+
+  Future<void> _deleteComputerServiceTarget(RepoTarget target) async {
+    setState(() {
+      _computerServiceTargets = _computerServiceTargets
+          .where((item) => item.id != target.id)
+          .toList();
+      if (_computerServiceTarget?.id == target.id) {
+        _computerServiceTarget = _computerServiceTargets.isEmpty
+            ? null
+            : _computerServiceTargets.first;
+      }
+      _status = 'Worker removed: ${target.displayName}';
     });
     await _saveComputerServiceTarget();
   }
@@ -2658,6 +2721,33 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (mounted) await _saveSettings();
   }
 
+  Future<void> _openWorkers() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => StatefulBuilder(
+          builder: (workersContext, refreshWorkers) => _WorkersPage(
+            workers: _computerServiceTargets,
+            selectedWorkerId: _computerServiceTarget?.id,
+            onAddWorker: () async {
+              await _scanRepoTargetQr();
+              if (workersContext.mounted) refreshWorkers(() {});
+            },
+            onSelectWorker: (worker) async {
+              await _selectComputerServiceTarget(worker);
+              if (workersContext.mounted) refreshWorkers(() {});
+            },
+            onTestWorker: (worker) =>
+                unawaited(_connectToRepoTargetForSend(worker)),
+            onDeleteWorker: (worker) async {
+              await _deleteComputerServiceTarget(worker);
+              if (workersContext.mounted) refreshWorkers(() {});
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _renameRepoTarget(RepoTarget target) async {
     final controller = TextEditingController(text: target.name);
     final newName = await showDialog<String>(
@@ -3431,6 +3521,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final serviceTarget = _computerServiceTarget;
     if (serviceTarget != null && serviceTarget.id == targetId) {
       _computerServiceTarget = serviceTarget.copyWith(clearPairingSecret: true);
+      _computerServiceTargets = [
+        for (final worker in _computerServiceTargets)
+          worker.id == targetId
+              ? worker.copyWith(clearPairingSecret: true)
+              : worker,
+      ];
       return;
     }
 
@@ -3487,9 +3583,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final pubkeys = <String>{};
     final cleanedSelected = selectedPeer.trim();
     if (cleanedSelected.isNotEmpty) pubkeys.add(cleanedSelected);
-    final servicePubkey = _computerServiceTarget?.pubkey.trim();
-    if (servicePubkey != null && servicePubkey.isNotEmpty) {
-      pubkeys.add(servicePubkey);
+    for (final worker in _computerServiceTargets) {
+      final servicePubkey = worker.pubkey.trim();
+      if (servicePubkey.isNotEmpty) pubkeys.add(servicePubkey);
     }
     for (final target in _repoTargets) {
       final pubkey = target.pubkey.trim();
@@ -5986,6 +6082,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         onRestartTarget: (target) => unawaited(_restartRepoTarget(target)),
         onRenameTarget: (target) => unawaited(_renameRepoTarget(target)),
         onTogglePinTarget: (target) => unawaited(_togglePinRepoTarget(target)),
+        onOpenWorkers: () => unawaited(_openWorkers()),
         onOpenSettings: () => unawaited(_openSettings()),
         onDeleteTarget: (targetId) {
           unawaited(() async {
