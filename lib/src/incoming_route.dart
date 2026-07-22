@@ -31,13 +31,18 @@ String? conversationKeyForIncomingRoute({
   final routeWorkdir = incomingRouteWorkdir(rawJson);
   if (routeWorkdir != null) {
     for (final target in targets) {
-      if (target.workdir?.trim() == routeWorkdir) return target.id;
+      if (_targetMatchesSender(target, senderPubkey, senderPubkeyHex) &&
+          target.workdir?.trim() == routeWorkdir) {
+        return target.id;
+      }
     }
   }
 
-  final matches = targets.where((target) {
-    return target.pubkey == senderPubkey || target.pubkey == senderPubkeyHex;
-  }).toList();
+  final matches = targets
+      .where(
+        (target) => _targetMatchesSender(target, senderPubkey, senderPubkeyHex),
+      )
+      .toList();
   if (matches.length == 1) return matches.single.id;
   if (matches.isEmpty) return fallbackKey;
 
@@ -52,10 +57,7 @@ String? conversationKeyForPendingResponse({
 }) {
   final matches = <String>[];
   for (final target in targets) {
-    final targetPubkey = target.pubkey.trim();
-    if (targetPubkey != senderPubkey && targetPubkey != senderPubkeyHex) {
-      continue;
-    }
+    if (!_targetMatchesSender(target, senderPubkey, senderPubkeyHex)) continue;
     final messages = messagesByTarget[target.id] ?? const [];
     final hasPendingResponse = messages.any(
       (message) =>
@@ -66,6 +68,16 @@ String? conversationKeyForPendingResponse({
   }
 
   return matches.length == 1 ? matches.single : null;
+}
+
+bool _targetMatchesSender(
+  RepoTarget target,
+  String senderPubkey,
+  String senderPubkeyHex,
+) {
+  final senderKeys = {senderPubkey.trim(), senderPubkeyHex.trim()}..remove('');
+  return senderKeys.contains(target.pubkey.trim()) ||
+      senderKeys.contains(target.parentPubkey?.trim());
 }
 
 String? conversationKeyForPendingTranscript({

@@ -99,6 +99,26 @@ void main() {
     },
   );
 
+  test('does not trust a routed workdir from another worker', () {
+    const target = RepoTarget(
+      id: 'phone',
+      name: 'phone',
+      pubkey: 'npub1phone',
+      relays: ['wss://relay.example'],
+      workdir: '/home/tom/code/phone',
+    );
+
+    expect(
+      conversationKeyForIncomingRoute(
+        targets: [target],
+        senderPubkey: 'npub1otherworker',
+        senderPubkeyHex: '',
+        rawJson: '{"workdir":"/home/tom/code/phone","response":"done"}',
+      ),
+      isNull,
+    );
+  });
+
   test(
     'routes incoming transcripts by embedded workdir before shared pubkey',
     () {
