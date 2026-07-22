@@ -96,10 +96,10 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
       );
   }
 
-  double get _safeSpeed => widget.speed.clamp(0.375, 10.0).toDouble();
+  double get _safeSpeed => widget.speed.clamp(0.1875, 37.5).toDouble();
 
   Duration _durationForSpeed(double speed) => Duration(
-    milliseconds: (1450 / speed.clamp(0.375, 10.0).toDouble()).round(),
+    milliseconds: (1450 / speed.clamp(0.1875, 37.5).toDouble()).round(),
   );
 
   double _fadeSmoothing(double fade) {
