@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.49+249';
+const _appVersion = '0.2.50+250';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -4241,9 +4241,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (query.isEmpty) return;
     if (_sending) return;
     final conversationKey = _activeConversationKey;
-    if (!await _ensureConnectedForSend()) {
-      return;
-    }
+    final target = _targetById(_repoTargets, _selectedRepoTargetId);
     _clearAutoSpeakSuppression();
 
     setState(() {
@@ -4253,9 +4251,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     });
 
     try {
+      if (!await _ensureConnectedForSend()) return;
       final eventId = await _sendWithAutoRecovery(
         label: 'query send',
-        sender: () => nostrSendQuery(query: _buildQueryPayload(query)),
+        sender: () =>
+            nostrSendQuery(query: _buildQueryPayload(query, target: target)),
       );
       if (!mounted) return;
       setState(() {
@@ -4877,9 +4877,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (selected == null) return;
     if (_sendingMedia || _sending || _sendingAudio || _recording) return;
     final conversationKey = _activeConversationKey;
-    if (!await _ensureConnectedForSend()) {
-      return;
-    }
+    final target = _targetById(_repoTargets, _selectedRepoTargetId);
 
     final caption = _queryController.text.trim();
     _mediaUploadCancelled = false;
@@ -4893,6 +4891,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     });
 
     try {
+      if (!await _ensureConnectedForSend()) return;
       final attachment = await _uploadAudioToBlossom(
         selected.path,
         selected.fileName,
@@ -4912,6 +4911,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       final analysisQuery = _buildMediaBundlePayload(
         attachment: attachment,
         caption: caption,
+        target: target,
       );
       final eventId = await _sendWithAutoRecovery(
         label: 'attachment send',
@@ -5179,6 +5179,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }) async {
     if (_sending) return;
     final conversationKey = _activeConversationKey;
+    final target = _targetById(_repoTargets, _selectedRepoTargetId);
     setState(() {
       _sending = true;
       _sendingConversationKey = conversationKey;
@@ -5193,7 +5194,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       }
       final eventId = await _sendWithAutoRecovery(
         label: 'resend query',
-        sender: () => nostrSendQuery(query: _buildQueryPayload(query)),
+        sender: () =>
+            nostrSendQuery(query: _buildQueryPayload(query, target: target)),
       );
       if (!mounted) return;
       setState(() {
@@ -5225,6 +5227,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Future<void> _resendAudioMessage(BridgeAudioReference audio) async {
     if (_sendingAudio) return;
     final conversationKey = _activeConversationKey;
+    final target = _targetById(_repoTargets, _selectedRepoTargetId);
     setState(() {
       _sendingAudio = true;
       _sendingAudioConversationKey = conversationKey;
@@ -5238,7 +5241,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       final eventId = await _sendWithAutoRecovery(
         label: 'resend voice note',
         sender: () => nostrSendQuery(
-          query: _buildMediaBundlePayload(attachment: audio, caption: ''),
+          query: _buildMediaBundlePayload(
+            attachment: audio,
+            caption: '',
+            target: target,
+          ),
         ),
       );
       if (!mounted) return;
@@ -5494,7 +5501,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       final eventId = await _sendWithAutoRecovery(
         label: 'voice note send',
         sender: () => nostrSendQuery(
-          query: _buildMediaBundlePayload(attachment: audio, caption: ''),
+          query: _buildMediaBundlePayload(
+            attachment: audio,
+            caption: '',
+            target: sendTarget,
+          ),
         ),
       );
       if (!mounted) return;
@@ -5771,6 +5782,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   String _buildMediaBundlePayload({
     required BridgeAudioReference attachment,
     required String caption,
+    RepoTarget? target,
   }) {
     final encryption = attachment.encryption;
     final attachmentPayload = {
@@ -5796,13 +5808,22 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (trimmedCaption.isNotEmpty) {
       mediaBundle['query'] = trimmedCaption;
     }
-    final payload = _withActiveRoute({'media_bundle': mediaBundle});
+    final payload = _withRoute({'media_bundle': mediaBundle}, target);
     const encoder = JsonEncoder.withIndent('  ');
     return encoder.convert(payload);
   }
 
   Map<String, dynamic> _withActiveRoute(Map<String, dynamic> payload) {
-    final target = _targetById(_repoTargets, _selectedRepoTargetId);
+    return _withRoute(
+      payload,
+      _targetById(_repoTargets, _selectedRepoTargetId),
+    );
+  }
+
+  Map<String, dynamic> _withRoute(
+    Map<String, dynamic> payload,
+    RepoTarget? target,
+  ) {
     final workdir = target?.workdir?.trim();
     if (workdir == null || workdir.isEmpty) return payload;
     final sessionId = target?.opencodeSessionId?.trim();
@@ -5815,8 +5836,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     };
   }
 
-  String _buildQueryPayload(String query) {
-    return jsonEncode(_withActiveRoute({'message': query}));
+  String _buildQueryPayload(String query, {RepoTarget? target}) {
+    return jsonEncode(_withRoute({'message': query}, target));
   }
 
   List<String> _selectedBlossomServers() {
