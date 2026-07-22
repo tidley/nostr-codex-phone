@@ -686,7 +686,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
-    let mut peer_workers = HashMap::<String, mpsc::Sender<IncomingMessage>>::new();
+    let mut session_workers = HashMap::<String, mpsc::Sender<IncomingMessage>>::new();
 
     loop {
         let message = tokio::select! {
@@ -710,8 +710,8 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             continue;
         }
 
-        let worker_key = message.sender_pubkey_hex.clone();
-        let sender = peer_workers
+        let worker_key = session_worker_key(&message);
+        let sender = session_workers
             .entry(worker_key.clone())
             .or_insert_with(|| {
                 spawn_peer_worker(
@@ -729,8 +729,8 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             .clone();
 
         if let Err(send_err) = sender.send(message).await {
-            warn!("peer worker for {worker_key} stopped; restarting and retrying message");
-            peer_workers.remove(&worker_key);
+            warn!("session worker for {worker_key} stopped; restarting and retrying message");
+            session_workers.remove(&worker_key);
             let message = send_err.0;
             let sender = spawn_peer_worker(
                 worker_key.clone(),
@@ -744,12 +744,27 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                 config.control.clone(),
             );
             if sender.send(message).await.is_err() {
-                error!("restarted peer worker for {worker_key} stopped; dropping incoming message");
+                error!(
+                    "restarted session worker for {worker_key} stopped; dropping incoming message"
+                );
             } else {
-                peer_workers.insert(worker_key, sender);
+                session_workers.insert(worker_key, sender);
             }
         }
     }
+}
+
+fn session_worker_key(message: &IncomingMessage) -> String {
+    let workdir = route_workdir_from_json(&message.raw_json)
+        .or_else(|| route_workdir_from_json(&message.text))
+        .unwrap_or_default();
+    let session_id = route_session_id_from_json(&message.raw_json)
+        .or_else(|| route_session_id_from_json(&message.text))
+        .unwrap_or_default();
+    format!(
+        "{}\u{1f}{workdir}\u{1f}{session_id}",
+        message.sender_pubkey_hex
+    )
 }
 
 fn spawn_peer_worker(
