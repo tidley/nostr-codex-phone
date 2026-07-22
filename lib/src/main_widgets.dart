@@ -477,9 +477,7 @@ class _WorkersPage extends StatelessWidget {
                       : null,
                   child: ListTile(
                     leading: Icon(
-                      selected
-                          ? Icons.computer
-                          : Icons.computer_outlined,
+                      selected ? Icons.computer : Icons.computer_outlined,
                     ),
                     title: Text(worker.displayName),
                     subtitle: Text(
@@ -519,7 +517,9 @@ class _WorkersPage extends StatelessWidget {
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('Remove worker?'),
-            content: Text('Remove ${worker.displayName}? Its sessions stay saved.'),
+            content: Text(
+              'Remove ${worker.displayName}? Its sessions stay saved.',
+            ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(context).pop(false),
@@ -3558,6 +3558,7 @@ class _ComposerState extends State<_Composer> {
                         ),
                         child: _LiveRecordingWaveform(
                           level: widget.recordingWaveformLevel,
+                          bars: widget.recordingWaveformBars,
                           duration: widget.recordingWaveformDuration,
                           decay: widget.recordingWaveformDecay,
                           compression: widget.recordingWaveformCompression,
@@ -3856,44 +3857,61 @@ class _RecordingWaveformPainter extends CustomPainter {
     required this.samples,
     required this.now,
     required this.visibleDuration,
+    required this.bars,
     required this.color,
   });
 
   final List<_WaveformSample> samples;
   final DateTime now;
   final Duration visibleDuration;
+  final int bars;
   final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (samples.isEmpty || visibleDuration <= Duration.zero) return;
-    final paint = Paint()
-      ..color = color.withValues(alpha: 0.62)
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..strokeWidth = 1.8;
-    final points = <Offset>[];
+    if (visibleDuration <= Duration.zero || size.isEmpty) return;
+    final barCount = bars
+        .clamp(12, math.max(12, (size.width / 4).floor()))
+        .toInt();
+    final levels = List<double>.filled(barCount, 0);
     final durationMicros = visibleDuration.inMicroseconds;
     for (final sample in samples) {
       final age = now.difference(sample.timestamp).inMicroseconds;
       if (age < 0 || age > durationMicros) continue;
-      final x = size.width * (1 - age / durationMicros);
-      final y =
-          size.height / 2 - sample.value.clamp(-1.0, 1.0) * size.height * 0.36;
-      points.add(Offset(x, y));
+      final index = ((1 - age / durationMicros) * barCount)
+          .floor()
+          .clamp(0, barCount - 1)
+          .toInt();
+      levels[index] = math.max(
+        levels[index],
+        sample.value.clamp(0.0, 1.0).toDouble(),
+      );
     }
-    if (points.isEmpty) return;
-    final path = Path()..moveTo(points.first.dx, points.first.dy);
-    for (final point in points.skip(1)) {
-      path.lineTo(point.dx, point.dy);
-    }
-    canvas.drawPath(path, paint);
-    if (points.length <= 64) {
-      final markerPaint = Paint()..color = color.withValues(alpha: 0.84);
-      for (final point in points) {
-        canvas.drawCircle(point, 1.6, markerPaint);
-      }
+    final center = size.height / 2;
+    canvas.drawLine(
+      Offset(0, center),
+      Offset(size.width, center),
+      Paint()
+        ..color = color.withValues(alpha: 0.22)
+        ..strokeWidth = 1,
+    );
+    final slotWidth = size.width / barCount;
+    final barWidth = math.min(3.5, slotWidth * 0.68);
+    for (var index = 0; index < barCount; index++) {
+      final level = levels[index];
+      final height = 3 + level * (size.height - 6);
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromCenter(
+          center: Offset((index + 0.5) * slotWidth, center),
+          width: barWidth,
+          height: height,
+        ),
+        Radius.circular(barWidth),
+      );
+      canvas.drawRRect(
+        rect,
+        Paint()..color = color.withValues(alpha: 0.42 + level * 0.58),
+      );
     }
   }
 
@@ -3902,6 +3920,7 @@ class _RecordingWaveformPainter extends CustomPainter {
     return oldDelegate.samples != samples ||
         oldDelegate.now != now ||
         oldDelegate.visibleDuration != visibleDuration ||
+        oldDelegate.bars != bars ||
         oldDelegate.color != color;
   }
 }

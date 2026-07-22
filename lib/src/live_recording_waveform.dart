@@ -10,6 +10,7 @@ class _WaveformSample {
 class _LiveRecordingWaveform extends StatefulWidget {
   const _LiveRecordingWaveform({
     required this.level,
+    required this.bars,
     required this.duration,
     required this.decay,
     required this.compression,
@@ -17,6 +18,7 @@ class _LiveRecordingWaveform extends StatefulWidget {
   });
 
   final ValueListenable<double> level;
+  final int bars;
   final double duration;
   final double decay;
   final double compression;
@@ -120,6 +122,7 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
           samples: List<_WaveformSample>.of(_samples),
           now: DateTime.now(),
           visibleDuration: _visibleDuration,
+          bars: widget.bars,
           color: widget.color,
         ),
         child: const SizedBox.expand(),
