@@ -1,0 +1,35 @@
+name: Build macOS Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to receive the Apple Silicon worker
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Apple Silicon worker
+        run: cargo build --release --manifest-path rust/Cargo.toml --bin nostr-codex-server
+
+      - name: Verify Apple Silicon binary
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(file rust/target/release/nostr-codex-server | grep -c 'arm64')" -gt 0
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.tag }}" rust/target/release/nostr-codex-server#nostr-codex-worker-macos-arm64 --clobber
