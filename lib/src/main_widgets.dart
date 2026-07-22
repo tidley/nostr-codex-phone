@@ -3558,7 +3558,8 @@ class _ComposerState extends State<_Composer> {
                         ),
                         child: _LiveRecordingWaveform(
                           level: widget.recordingWaveformLevel,
-                          speed: widget.recordingWaveformBars / 32,
+                          // 360 samples at 96 samples/sec cross in 3.75 seconds.
+                          speed: 3.75 / widget.recordingWaveformDuration,
                           decay: widget.recordingWaveformDecay,
                           compression: widget.recordingWaveformCompression,
                           color:
