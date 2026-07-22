@@ -2748,22 +2748,8 @@ async fn transcribe_or_load_cached(
     Some(transcript)
 }
 
-fn codex_phone_prompt(user_request: &str, memory_context: Option<&str>) -> String {
-    let mut prompt = String::from(
-        "Answer the user's request directly and concretely.\n\
-         If the request is ambiguous, say what you heard and ask one concise clarifying question.\n\
-         Do not answer with a generic greeting such as \"I'm here\" unless the user only greeted you.\n"
-    );
-
-    if let Some(memory_context) = memory_context.filter(|context| !context.trim().is_empty()) {
-        prompt.push('\n');
-        prompt.push_str(memory_context.trim());
-        prompt.push('\n');
-    }
-
-    prompt.push_str("\nCurrent user request:\n");
-    prompt.push_str(user_request);
-    prompt
+fn codex_phone_prompt(user_request: &str, _memory_context: Option<&str>) -> String {
+    user_request.to_string()
 }
 
 fn media_bundle_request_text(
@@ -2775,7 +2761,7 @@ fn media_bundle_request_text(
 ) -> String {
     let mut request_parts = Vec::new();
     if !user_query.is_empty() {
-        request_parts.push(format!("User request: {user_query}"));
+        request_parts.push(user_query.to_string());
     }
 
     if voice_only {
@@ -4781,11 +4767,10 @@ mod tests {
     }
 
     #[test]
-    fn phone_prompt_omits_transport_framing() {
+    fn phone_prompt_is_just_the_user_request() {
         let prompt = codex_phone_prompt("status", None);
 
-        assert!(prompt.starts_with("Answer the user's request directly"));
-        assert!(!prompt.contains("phone over Nostr"));
+        assert_eq!(prompt, "status");
     }
 
     #[test]
