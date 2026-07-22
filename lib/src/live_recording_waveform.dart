@@ -13,7 +13,6 @@ class _LiveRecordingWaveform extends StatefulWidget {
     required this.duration,
     required this.decay,
     required this.compression,
-    required this.sampleRate,
     required this.color,
   });
 
@@ -21,7 +20,6 @@ class _LiveRecordingWaveform extends StatefulWidget {
   final double duration;
   final double decay;
   final double compression;
-  final double sampleRate;
   final Color color;
 
   @override
@@ -74,7 +72,7 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
   void _recordAmplitudeSample() {
     final now = DateTime.now();
     final interval = Duration(
-      microseconds: (Duration.microsecondsPerSecond / _safeSampleRate).round(),
+      microseconds: (Duration.microsecondsPerSecond / _sampleRate).round(),
     );
     if (_lastSampleAt != null && now.difference(_lastSampleAt!) < interval) {
       return;
@@ -94,7 +92,7 @@ class _LiveRecordingWaveformState extends State<_LiveRecordingWaveform>
     _samples.add(_WaveformSample(timestamp: timestamp, value: _smoothedLevel));
   }
 
-  double get _safeSampleRate => widget.sampleRate.clamp(1.0, 240.0).toDouble();
+  static const _sampleRate = 60.0;
 
   Duration get _visibleDuration => Duration(
     microseconds: (_safeDuration * Duration.microsecondsPerSecond).round(),
