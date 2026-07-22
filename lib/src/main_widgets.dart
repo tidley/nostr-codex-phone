@@ -3558,8 +3558,7 @@ class _ComposerState extends State<_Composer> {
                         ),
                         child: _LiveRecordingWaveform(
                           level: widget.recordingWaveformLevel,
-                          bars: widget.recordingWaveformBars,
-                          duration: widget.recordingWaveformDuration,
+                          speed: widget.recordingWaveformBars / 32,
                           decay: widget.recordingWaveformDecay,
                           compression: widget.recordingWaveformCompression,
                           color:
@@ -3855,74 +3854,65 @@ class _RecordingButtonState extends State<_RecordingButton>
 class _RecordingWaveformPainter extends CustomPainter {
   const _RecordingWaveformPainter({
     required this.samples,
-    required this.now,
-    required this.visibleDuration,
-    required this.bars,
+    required this.progress,
     required this.color,
   });
 
-  final List<_WaveformSample> samples;
-  final DateTime now;
-  final Duration visibleDuration;
-  final int bars;
+  final List<double> samples;
+  final double progress;
   final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (visibleDuration <= Duration.zero || size.isEmpty) return;
-    final barCount = bars
-        .clamp(12, math.max(12, (size.width / 4).floor()))
-        .toInt();
-    final levels = List<double>.filled(barCount, 0);
-    final durationMicros = visibleDuration.inMicroseconds;
-    for (final sample in samples) {
-      final age = now.difference(sample.timestamp).inMicroseconds;
-      if (age < 0 || age > durationMicros) continue;
-      final index = ((1 - age / durationMicros) * barCount)
-          .floor()
-          .clamp(0, barCount - 1)
-          .toInt();
-      levels[index] = math.max(
-        levels[index],
-        sample.value.clamp(0.0, 1.0).toDouble(),
-      );
-    }
-    final center = size.height / 2;
-    canvas.drawLine(
-      Offset(0, center),
-      Offset(size.width, center),
-      Paint()
-        ..color = color.withValues(alpha: 0.22)
-        ..strokeWidth = 1,
-    );
-    final slotWidth = size.width / barCount;
-    final barWidth = math.min(3.5, slotWidth * 0.68);
-    for (var index = 0; index < barCount; index++) {
-      final level = levels[index];
-      final height = 3 + level * (size.height - 6);
-      final rect = RRect.fromRectAndRadius(
-        Rect.fromCenter(
-          center: Offset((index + 0.5) * slotWidth, center),
-          width: barWidth,
-          height: height,
-        ),
-        Radius.circular(barWidth),
-      );
-      canvas.drawRRect(
-        rect,
-        Paint()..color = color.withValues(alpha: 0.42 + level * 0.58),
-      );
-    }
+    final paint = Paint()
+      ..color = color.withValues(alpha: 0.62)
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..strokeWidth = 1.8;
+    canvas.drawPath(_recordingWaveformPath(size, samples, progress), paint);
   }
 
   @override
   bool shouldRepaint(covariant _RecordingWaveformPainter oldDelegate) {
     return oldDelegate.samples != samples ||
-        oldDelegate.now != now ||
-        oldDelegate.visibleDuration != visibleDuration ||
-        oldDelegate.bars != bars ||
+        oldDelegate.progress != progress ||
         oldDelegate.color != color;
   }
+}
+
+Path _recordingWaveformPath(Size size, List<double> samples, double progress) {
+  final path = Path();
+  final points = _recordingWaveformPoints(size, samples, progress);
+
+  for (var i = 0; i < points.length; i++) {
+    if (i == 0) {
+      path.moveTo(points[i].dx, points[i].dy);
+    } else {
+      path.lineTo(points[i].dx, points[i].dy);
+    }
+  }
+
+  return path;
+}
+
+List<Offset> _recordingWaveformPoints(
+  Size size,
+  List<double> samples,
+  double progress,
+) {
+  final centerY = size.height / 2;
+  final values = samples.isEmpty ? const [0.0] : samples;
+  final step = values.length <= 1
+      ? size.width
+      : size.width / (values.length - 1);
+  final scroll = progress * step;
+
+  return List<Offset>.generate(values.length, (index) {
+    final x = size.width - (values.length - 1 - index) * step - scroll;
+    final y = centerY - values[index].clamp(-1.0, 1.0) * size.height * 0.36;
+    return Offset(x, y);
+  });
 }
 
 class _MessageTile extends StatefulWidget {
