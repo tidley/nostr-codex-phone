@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.58+258';
+const _appVersion = '0.2.59+259';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -1342,7 +1342,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   RepoTarget? _activeRepoTargetFromControllers() {
     final pubkey = _peerPubkeyController.text.trim();
-    final relays = _relayLines();
+    final relays = _inboxRelays(_relayLines());
     if (pubkey.isEmpty || relays.isEmpty) return null;
 
     final name = _targetNameController.text.trim();
@@ -3003,6 +3003,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         if (mounted) _showError('Could not update background delivery: $error');
       }),
     );
+    if (enabled && _connected) unawaited(_refreshInboxConnection());
+  }
+
+  Future<void> _refreshInboxConnection() async {
+    await _disconnect(expand: false);
+    if (mounted) await _connect();
   }
 
   Future<void> _loadTtsOptions() async {
@@ -3244,10 +3250,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     final secret = _secretKeyController.text.trim();
     final peer = target.pubkey.trim();
-    final relays = target.relays
-        .map((relay) => relay.trim())
-        .where((relay) => relay.isNotEmpty)
-        .toList();
+    final relays = _inboxRelays(target.relays);
 
     if (secret.isEmpty || peer.isEmpty || relays.isEmpty) {
       _showError('Secret key, target pubkey, and relays are required');
@@ -3645,6 +3648,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       }
     }
     return pubkeys.toList()..sort();
+  }
+
+  List<String> _inboxRelays(Iterable<String> selectedRelays) {
+    final relays = <String>{
+      for (final relay in selectedRelays) relay.trim(),
+      for (final target in _repoTargets)
+        ...target.relays.map((relay) => relay.trim()),
+      for (final worker in _computerServiceTargets)
+        ...worker.relays.map((relay) => relay.trim()),
+    }..remove('');
+    return relays.toList()..sort();
   }
 
   bool _isRecoverableNostrSendError(Object error) {
