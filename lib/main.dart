@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.55+255';
+const _appVersion = '0.2.56+256';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -2517,15 +2517,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     return true;
   }
 
-  bool _hasIncomingProcessingPlaceholder(String conversationKey) {
-    final messages = _messagesByTarget[conversationKey] ?? const [];
-    return messages.any(
-      (message) =>
-          message.kind == 'processing' &&
-          message.direction == MessageDirection.incoming,
-    );
-  }
-
   bool _replaceIncomingProcessingPlaceholder(
     String conversationKey,
     String eventId,
@@ -3875,7 +3866,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final transcriptSourceEventId = message.kind == 'transcript'
         ? _transcriptSourceEventId(message) ?? message.eventId
         : null;
-    if (transcriptSourceEventId != null) {
+    if (targetKey == null && transcriptSourceEventId != null) {
       targetKey =
           conversationKeyForPendingTranscript(
             messagesByTarget: _messagesByTarget,
@@ -3883,8 +3874,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           ) ??
           targetKey;
     }
-    if (completesPendingRequest &&
-        (targetKey == null || !_hasIncomingProcessingPlaceholder(targetKey))) {
+    if (completesPendingRequest && targetKey == null) {
       targetKey =
           conversationKeyForPendingResponse(
             targets: _repoTargets,
@@ -3894,10 +3884,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           ) ??
           targetKey;
     }
-    if (targetKey == null) return false;
+    if (targetKey == null) {
+      _forgetIncomingEventId(eventId);
+      return false;
+    }
     final conversationKey = targetKey;
     final isActiveConversation = conversationKey == _activeConversationKey;
-    if (!isActiveConversation && message.kind == 'status') return false;
 
     if (message.kind == 'transcript') {
       if (_tryCompleteTranscription(
@@ -3920,11 +3912,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       eventId: message.eventId,
       timestamp: DateTime.now(),
     );
-    if (fromCatchUp &&
-        completesPendingRequest &&
-        !_hasIncomingProcessingPlaceholder(conversationKey)) {
-      return false;
-    }
     setState(() {
       if (message.kind == 'response') {
         _dropPendingProcessingMessage(
@@ -4099,6 +4086,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
     unawaited(_saveSeenIncomingEventIds());
     return true;
+  }
+
+  void _forgetIncomingEventId(String eventId) {
+    if (eventId.isEmpty || !_seenIncomingEventIds.remove(eventId)) return;
+    unawaited(_saveSeenIncomingEventIds());
   }
 
   String? _transcriptSourceEventId(BridgeIncomingMessage message) {
