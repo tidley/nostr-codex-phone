@@ -2274,7 +2274,7 @@ class _SettingsPage extends StatelessWidget {
   }
 }
 
-class _BackgroundDeliverySettings extends StatelessWidget {
+class _BackgroundDeliverySettings extends StatefulWidget {
   const _BackgroundDeliverySettings({
     required this.enabled,
     required this.onChanged,
@@ -2282,6 +2282,27 @@ class _BackgroundDeliverySettings extends StatelessWidget {
 
   final bool enabled;
   final ValueChanged<bool> onChanged;
+
+  @override
+  State<_BackgroundDeliverySettings> createState() =>
+      _BackgroundDeliverySettingsState();
+}
+
+class _BackgroundDeliverySettingsState
+    extends State<_BackgroundDeliverySettings> {
+  late bool _enabled;
+
+  @override
+  void initState() {
+    super.initState();
+    _enabled = widget.enabled;
+  }
+
+  @override
+  void didUpdateWidget(covariant _BackgroundDeliverySettings oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.enabled != widget.enabled) _enabled = widget.enabled;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2292,8 +2313,11 @@ class _BackgroundDeliverySettings extends StatelessWidget {
         subtitle: const Text(
           'Keep receiving replies while Code Call is in the background. Android shows a persistent notification.',
         ),
-        value: enabled,
-        onChanged: onChanged,
+        value: _enabled,
+        onChanged: (enabled) {
+          setState(() => _enabled = enabled);
+          widget.onChanged(enabled);
+        },
       ),
     );
   }

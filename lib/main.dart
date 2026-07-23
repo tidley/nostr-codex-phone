@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.57+257';
+const _appVersion = '0.2.58+258';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -2985,11 +2985,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<void> _syncBackgroundDelivery() async {
     if (!Platform.isAndroid) return;
-    try {
-      await _ttsControlChannel.invokeMethod<void>('backgroundDelivery', {
-        'enabled': _backgroundDeliveryEnabled,
-      });
-    } catch (_) {}
+    await _ttsControlChannel.invokeMethod<void>('backgroundDelivery', {
+      'enabled': _backgroundDeliveryEnabled,
+    });
   }
 
   void _setBackgroundDeliveryEnabled(bool enabled) {
@@ -3000,7 +2998,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         value: enabled.toString(),
       ),
     );
-    unawaited(_syncBackgroundDelivery());
+    unawaited(
+      _syncBackgroundDelivery().catchError((Object error) {
+        if (mounted) _showError('Could not update background delivery: $error');
+      }),
+    );
   }
 
   Future<void> _loadTtsOptions() async {
