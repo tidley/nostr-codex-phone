@@ -1,5 +1,5 @@
 String cleanTextForSpeech(String text) {
-  var cleaned = text.replaceAll('\r\n', '\n');
+  var cleaned = _speakMarkdownTables(text.replaceAll('\r\n', '\n'));
 
   cleaned = cleaned.replaceAllMapped(
     RegExp(r'```[^\n]*\n?([\s\S]*?)```'),
@@ -64,6 +64,56 @@ String cleanTextForSpeech(String text) {
   return _speakTechnicalText(cleaned).trim();
 }
 
+String _speakMarkdownTables(String text) {
+  final lines = text.split('\n');
+  final spoken = <String>[];
+  for (var index = 0; index < lines.length; index++) {
+    final header = _tableCells(lines[index]);
+    final separator = index + 1 < lines.length
+        ? _tableCells(lines[index + 1])
+        : null;
+    if (header == null || separator == null || !_isTableSeparator(separator)) {
+      spoken.add(lines[index]);
+      continue;
+    }
+
+    spoken.add('Table. Columns: ${header.join(', ')}.');
+    index += 2;
+    var rowNumber = 1;
+    while (index < lines.length) {
+      final row = _tableCells(lines[index]);
+      if (row == null) {
+        index--;
+        break;
+      }
+      final entries = <String>[];
+      for (var column = 0; column < row.length; column++) {
+        final label = column < header.length ? header[column] : 'value';
+        entries.add('$label: ${row[column]}');
+      }
+      spoken.add('Row $rowNumber. ${entries.join(', ')}.');
+      rowNumber++;
+      index++;
+    }
+  }
+  return spoken.join('\n');
+}
+
+List<String>? _tableCells(String line) {
+  final trimmed = line.trim();
+  if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return null;
+  return trimmed
+      .substring(1, trimmed.length - 1)
+      .split('|')
+      .map((cell) => cell.trim())
+      .toList();
+}
+
+bool _isTableSeparator(List<String> cells) {
+  return cells.isNotEmpty &&
+      cells.every((cell) => RegExp(r'^:?-{3,}:?$').hasMatch(cell));
+}
+
 List<String> splitTextForSpeech(String text, {int maxCharacters = 1200}) {
   if (text.length <= maxCharacters) return text.isEmpty ? const [] : [text];
 
@@ -101,8 +151,30 @@ String _speakTechnicalText(String text) {
     (match) => 'Number of ${match.group(1) ?? ''}',
   );
   spoken = spoken.replaceAllMapped(
+    RegExp(r'\b([A-Za-z][A-Za-z0-9_]*)\^(\d+)\b'),
+    (match) =>
+        '${match.group(1)} to the power of ${_numberWords(match.group(2)!)}',
+  );
+  spoken = spoken.replaceAll('->', ' maps to ');
+  spoken = spoken.replaceAll('=>', ' results in ');
+  spoken = spoken.replaceAll('±', ' plus or minus ');
+  spoken = spoken.replaceAllMapped(
     RegExp(r'\barr\[(\d+)\]'),
     (match) => 'array index ${_numberWords(match.group(1)!)}',
+  );
+  spoken = spoken.replaceAllMapped(
+    RegExp(r'\b(\d+(?:\.\d+)?)\s*(kHz|MHz|GHz|Hz)\b', caseSensitive: false),
+    (match) =>
+        '${_speakDecimal(match.group(1)!)} ${match.group(2)!.toLowerCase()}',
+  );
+  spoken = spoken.replaceAllMapped(
+    RegExp(r'\b(\d+(?:\.\d+)?)\s*°\s*([CF])\b', caseSensitive: false),
+    (match) =>
+        '${_speakDecimal(match.group(1)!)} degrees ${match.group(2)!.toUpperCase()}',
+  );
+  spoken = spoken.replaceAllMapped(
+    RegExp(r'\b\d+\.\d+\b'),
+    (match) => _speakDecimal(match.group(0)!),
   );
   spoken = spoken.replaceAllMapped(
     RegExp(r'\b([A-Za-z][A-Za-z0-9_]*)\[(\d+)\]'),
@@ -156,6 +228,12 @@ String _speakTechnicalText(String text) {
       .replaceAll(RegExp(r' *\n *'), '.\n')
       .replaceAll(RegExp(r'\.{2,}'), '.')
       .trim();
+}
+
+String _speakDecimal(String value) {
+  final parts = value.split('.');
+  if (parts.length != 2) return _numberWords(value);
+  return '${_numberWords(parts.first)} point ${parts.last.split('').map(_numberWords).join(' ')}';
 }
 
 String _speakIdentifier(String word) {

@@ -71,6 +71,30 @@ repo API JSON RS232 I2C UART CAN BLE
     expect(spoken, contains('you-art CAN bus B L E'));
   });
 
+  test('reads Markdown tables as labeled rows', () {
+    final spoken = cleanTextForSpeech('''
+| Sensor | Value | Status |
+| --- | ---: | --- |
+| GNSS | 3.14 | OK |
+| CAN | 115200 baud | Ready |
+''');
+
+    expect(spoken, contains('Table. Columns: Sensor, Value, Status.'));
+    expect(
+      spoken,
+      contains(
+        'Row one. Sensor: G N S S, Value: three point one four, Status: OK.',
+      ),
+    );
+    expect(
+      spoken,
+      contains(
+        'Row two. Sensor: CAN bus, Value: one fifteen two hundred baud, Status: Ready.',
+      ),
+    );
+    expect(spoken, isNot(contains('vertical line')));
+  });
+
   test('converts bridge unsigned integers before json encoding', () {
     final converted = bridgeUIntToJsonInt(BigInt.from(90281152));
 
