@@ -1,6 +1,7 @@
 package com.tidley.nostrcodexphone
 
 import android.content.Context
+import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.os.Build
@@ -33,6 +34,20 @@ class MainActivity : FlutterActivity() {
                 }
                 "replyVibrate" -> {
                     replyVibrate()
+                    result.success(null)
+                }
+                "backgroundDelivery" -> {
+                    val enabled = call.argument<Boolean>("enabled") == true
+                    if (enabled) {
+                        val intent = Intent(this, BackgroundDeliveryService::class.java)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(intent)
+                        } else {
+                            startService(intent)
+                        }
+                    } else {
+                        stopService(Intent(this, BackgroundDeliveryService::class.java))
+                    }
                     result.success(null)
                 }
 
