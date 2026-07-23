@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.56+256';
+const _appVersion = '0.2.57+257';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -269,6 +269,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _receiveVibrationStorageKey = 'receive_vibration_enabled';
   static const _inactiveReplyPopupStorageKey = 'inactive_reply_popup_enabled';
   static const _inactiveReplyAudioStorageKey = 'inactive_reply_audio_enabled';
+  static const _backgroundDeliveryStorageKey = 'background_delivery_enabled';
   static const _conversationHistoryStorageKey = 'conversation_history_v1';
   static const _seenIncomingEventIdsStorageKey = 'seen_incoming_event_ids_v1';
   static const _unreadCountsStorageKey = 'unread_counts_v1';
@@ -301,6 +302,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _receiveVibrationStorageKey,
     _inactiveReplyPopupStorageKey,
     _inactiveReplyAudioStorageKey,
+    _backgroundDeliveryStorageKey,
     _conversationHistoryStorageKey,
     _seenIncomingEventIdsStorageKey,
     _unreadCountsStorageKey,
@@ -387,6 +389,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   bool _receiveVibrationEnabled = true;
   bool _inactiveReplyPopupEnabled = true;
   bool _inactiveReplyAudioEnabled = true;
+  bool _backgroundDeliveryEnabled = false;
   String _ttsLanguage = 'en-US';
   String? _ttsEngine;
   List<String> _ttsLanguages = const ['en-US'];
@@ -695,6 +698,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final inactiveReplyAudio = await _storage.read(
       key: _inactiveReplyAudioStorageKey,
     );
+    final backgroundDelivery = await _storage.read(
+      key: _backgroundDeliveryStorageKey,
+    );
     final seenEventIds = await _storage.read(
       key: _seenIncomingEventIdsStorageKey,
     );
@@ -793,6 +799,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _receiveVibrationEnabled = _storedBool(receiveVibration, true);
       _inactiveReplyPopupEnabled = _storedBool(inactiveReplyPopup, true);
       _inactiveReplyAudioEnabled = _storedBool(inactiveReplyAudio, true);
+      _backgroundDeliveryEnabled = _storedBool(backgroundDelivery, false);
       _seenIncomingEventIds
         ..clear()
         ..addAll(_decodeSeenEventIds(seenEventIds));
@@ -807,6 +814,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _dismissQueryKeyboard();
     _refreshOwnPubkey();
     await _applyTtsSettings();
+    unawaited(_syncBackgroundDelivery());
     unawaited(_loadTtsOptions());
   }
 
@@ -2596,6 +2604,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             receiveVibrationEnabled: _receiveVibrationEnabled,
             inactiveReplyPopupEnabled: _inactiveReplyPopupEnabled,
             inactiveReplyAudioEnabled: _inactiveReplyAudioEnabled,
+            backgroundDeliveryEnabled: _backgroundDeliveryEnabled,
             language: _ttsLanguage,
             languages: _ttsLanguages,
             engine: _ttsEngine,
@@ -2702,6 +2711,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onReceiveVibrationChanged: _setReceiveVibrationEnabled,
             onInactiveReplyPopupChanged: _setInactiveReplyPopupEnabled,
             onInactiveReplyAudioChanged: _setInactiveReplyAudioEnabled,
+            onBackgroundDeliveryChanged: _setBackgroundDeliveryEnabled,
             onLanguageChanged: _setTtsLanguage,
             onEngineChanged: _setTtsEngine,
             onRateChanged: (value) {
@@ -2971,6 +2981,26 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     setState(() => _inactiveReplyAudioEnabled = enabled);
     unawaited(_saveInactiveReplyAudioEnabled(enabled));
     if (enabled) unawaited(SystemSound.play(SystemSoundType.alert));
+  }
+
+  Future<void> _syncBackgroundDelivery() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _ttsControlChannel.invokeMethod<void>('backgroundDelivery', {
+        'enabled': _backgroundDeliveryEnabled,
+      });
+    } catch (_) {}
+  }
+
+  void _setBackgroundDeliveryEnabled(bool enabled) {
+    setState(() => _backgroundDeliveryEnabled = enabled);
+    unawaited(
+      _storage.write(
+        key: _backgroundDeliveryStorageKey,
+        value: enabled.toString(),
+      ),
+    );
+    unawaited(_syncBackgroundDelivery());
   }
 
   Future<void> _loadTtsOptions() async {

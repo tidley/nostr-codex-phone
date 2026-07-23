@@ -2003,6 +2003,7 @@ class _SettingsPage extends StatelessWidget {
     required this.receiveVibrationEnabled,
     required this.inactiveReplyPopupEnabled,
     required this.inactiveReplyAudioEnabled,
+    required this.backgroundDeliveryEnabled,
     required this.language,
     required this.languages,
     required this.engine,
@@ -2038,6 +2039,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onReceiveVibrationChanged,
     required this.onInactiveReplyPopupChanged,
     required this.onInactiveReplyAudioChanged,
+    required this.onBackgroundDeliveryChanged,
     required this.onLanguageChanged,
     required this.onEngineChanged,
     required this.onRateChanged,
@@ -2077,6 +2079,7 @@ class _SettingsPage extends StatelessWidget {
   final bool receiveVibrationEnabled;
   final bool inactiveReplyPopupEnabled;
   final bool inactiveReplyAudioEnabled;
+  final bool backgroundDeliveryEnabled;
   final String language;
   final List<String> languages;
   final String? engine;
@@ -2112,6 +2115,7 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<bool> onReceiveVibrationChanged;
   final ValueChanged<bool> onInactiveReplyPopupChanged;
   final ValueChanged<bool> onInactiveReplyAudioChanged;
+  final ValueChanged<bool> onBackgroundDeliveryChanged;
   final ValueChanged<String> onLanguageChanged;
   final ValueChanged<String?> onEngineChanged;
   final ValueChanged<double> onRateChanged;
@@ -2210,6 +2214,11 @@ class _SettingsPage extends StatelessWidget {
             onInactiveReplyAudioChanged: onInactiveReplyAudioChanged,
           ),
           const SizedBox(height: 16),
+          _BackgroundDeliverySettings(
+            enabled: backgroundDeliveryEnabled,
+            onChanged: onBackgroundDeliveryChanged,
+          ),
+          const SizedBox(height: 16),
           Card(
             child: Padding(
               padding: const EdgeInsets.all(12),
@@ -2260,6 +2269,31 @@ class _SettingsPage extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _BackgroundDeliverySettings extends StatelessWidget {
+  const _BackgroundDeliverySettings({
+    required this.enabled,
+    required this.onChanged,
+  });
+
+  final bool enabled;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: SwitchListTile(
+        secondary: const Icon(Icons.cloud_sync_outlined),
+        title: const Text('Background delivery'),
+        subtitle: const Text(
+          'Keep receiving replies while Code Call is in the background. Android shows a persistent notification.',
+        ),
+        value: enabled,
+        onChanged: onChanged,
       ),
     );
   }
