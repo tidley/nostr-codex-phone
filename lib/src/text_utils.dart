@@ -1,5 +1,7 @@
 String cleanTextForSpeech(String text) {
-  var cleaned = _speakMarkdownTables(text.replaceAll('\r\n', '\n'));
+  var cleaned = _speakMarkdownTables(
+    _stripUrlSchemes(text.replaceAll('\r\n', '\n')),
+  );
 
   cleaned = cleaned.replaceAllMapped(
     RegExp(r'```[^\n]*\n?([\s\S]*?)```'),
@@ -62,6 +64,12 @@ String cleanTextForSpeech(String text) {
       .replaceAll(RegExp(r'\n{3,}'), '\n\n');
 
   return _speakTechnicalText(cleaned).trim();
+}
+
+String _stripUrlSchemes(String text) {
+  return text.replaceAllMapped(RegExp(r'https?://[^\s<>()\[\]]+'), (match) {
+    return match.group(0)!.replaceFirst(RegExp(r'^https?://'), '');
+  });
 }
 
 String _speakMarkdownTables(String text) {

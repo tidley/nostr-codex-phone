@@ -37,6 +37,15 @@ Use [the docs](https://example.com).
     expect(spoken, contains('the docs'));
   });
 
+  test('removes URL schemes before text to speech', () {
+    final spoken = cleanTextForSpeech(
+      'Install from https://github.com/tidley/nostr-codex-phone/releases.',
+    );
+
+    expect(spoken, contains('github.com/tidley/nostr-codex-phone/releases.'));
+    expect(spoken, isNot(contains('https')));
+  });
+
   test('preprocesses technical text before text to speech', () {
     final spoken = cleanTextForSpeech('''
 Zero-quality GGA means no GNSS fix.
