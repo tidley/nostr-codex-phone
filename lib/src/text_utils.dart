@@ -64,6 +64,35 @@ String cleanTextForSpeech(String text) {
   return _speakTechnicalText(cleaned).trim();
 }
 
+List<String> splitTextForSpeech(String text, {int maxCharacters = 1200}) {
+  if (text.length <= maxCharacters) return text.isEmpty ? const [] : [text];
+
+  final chunks = <String>[];
+  var current = '';
+  for (final paragraph in text.split(RegExp(r'\n\s*\n'))) {
+    final sentences = paragraph.split(RegExp(r'(?<=[.!?])\s+'));
+    for (final sentence in sentences) {
+      final trimmed = sentence.trim();
+      if (trimmed.isEmpty) continue;
+      if (current.isNotEmpty &&
+          current.length + trimmed.length + 1 > maxCharacters) {
+        chunks.add(current);
+        current = '';
+      }
+      if (trimmed.length > maxCharacters) {
+        for (var start = 0; start < trimmed.length; start += maxCharacters) {
+          final end = (start + maxCharacters).clamp(0, trimmed.length).toInt();
+          chunks.add(trimmed.substring(start, end));
+        }
+      } else {
+        current = current.isEmpty ? trimmed : '$current $trimmed';
+      }
+    }
+  }
+  if (current.isNotEmpty) chunks.add(current);
+  return chunks;
+}
+
 String _speakTechnicalText(String text) {
   var spoken = text;
 
