@@ -68,7 +68,10 @@ String cleanTextForSpeech(String text) {
 
 String _stripUrlSchemes(String text) {
   return text.replaceAllMapped(RegExp(r'https?://[^\s<>()\[\]]+'), (match) {
-    return match.group(0)!.replaceFirst(RegExp(r'^https?://'), '');
+    return match
+        .group(0)!
+        .replaceFirst(RegExp(r'^https?://'), '')
+        .replaceAll('/', ' slash ');
   });
 }
 
@@ -154,6 +157,9 @@ List<String> splitTextForSpeech(String text, {int maxCharacters = 1200}) {
 String _speakTechnicalText(String text) {
   var spoken = text;
 
+  spoken = spoken.replaceAllMapped(RegExp(r'\b(?:[A-Z]\.){2,}'), (match) {
+    return match.group(0)!.replaceAll('.', ' ');
+  });
   spoken = spoken.replaceAllMapped(
     RegExp(r'\bNumber\(([^)]*)\)'),
     (match) => 'Number of ${match.group(1) ?? ''}',
@@ -166,6 +172,10 @@ String _speakTechnicalText(String text) {
   spoken = spoken.replaceAll('->', ' maps to ');
   spoken = spoken.replaceAll('=>', ' results in ');
   spoken = spoken.replaceAll('±', ' plus or minus ');
+  spoken = spoken.replaceAll('≠', ' not equal to ');
+  spoken = spoken.replaceAll('≈', ' approximately ');
+  spoken = spoken.replaceAll('×', ' times ');
+  spoken = spoken.replaceAll('÷', ' divided by ');
   spoken = spoken.replaceAllMapped(
     RegExp(r'\barr\[(\d+)\]'),
     (match) => 'array index ${_numberWords(match.group(1)!)}',
@@ -188,6 +198,7 @@ String _speakTechnicalText(String text) {
     RegExp(r'\b([A-Za-z][A-Za-z0-9_]*)\[(\d+)\]'),
     (match) => '${match.group(1)} index ${_numberWords(match.group(2)!)}',
   );
+  spoken = spoken.replaceAllMapped(RegExp(r'!=\s*'), (_) => ' not equal to ');
   spoken = spoken.replaceAllMapped(
     RegExp(r'!([A-Za-z][A-Za-z0-9_]*)'),
     (match) => 'not ${match.group(1)}',
@@ -210,6 +221,7 @@ String _speakTechnicalText(String text) {
     final needsSpeech =
         word.contains('_') ||
         RegExp(r'[a-z0-9][A-Z]').hasMatch(word) ||
+        RegExp(r'^[A-Z]{2,}$').hasMatch(word) ||
         _spokenReplacement(word) != null;
     return needsSpeech ? _speakIdentifier(word) : word;
   });
@@ -264,6 +276,9 @@ String _speakIdentifier(String word) {
       .map((part) {
         final replacement = _spokenReplacement(part);
         if (replacement != null) return replacement;
+        if (RegExp(r'^[A-Z]{2,}$').hasMatch(part)) {
+          return part.split('').join(' ');
+        }
         return part.toLowerCase();
       })
       .join(' ');

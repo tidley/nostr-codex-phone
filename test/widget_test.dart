@@ -42,8 +42,35 @@ Use [the docs](https://example.com).
       'Install from https://github.com/tidley/nostr-codex-phone/releases.',
     );
 
-    expect(spoken, contains('github.com/tidley/nostr-codex-phone/releases.'));
+    expect(
+      spoken,
+      contains(
+        'github.com slash tidley slash nostr-codex-phone slash releases.',
+      ),
+    );
     expect(spoken, isNot(contains('https')));
+  });
+
+  test('spells arbitrary uppercase initialisms', () {
+    final spoken = cleanTextForSpeech(
+      'Enable SSO for the CRM, SDK, and A.P.I.',
+    );
+
+    expect(spoken, contains('S S O'));
+    expect(spoken, contains('C R M'));
+    expect(spoken, contains('S D K'));
+    expect(spoken, contains('A P I'));
+  });
+
+  test('names portable mathematical and comparison symbols', () {
+    final spoken = cleanTextForSpeech('enabled != OK; x ≠ y; 3 × 2 ≈ 6 ÷ 1');
+
+    expect(spoken, contains('enabled not equal to O K'));
+    expect(spoken, contains('x not equal to y'));
+    expect(
+      spoken,
+      contains('three times two approximately six divided by one'),
+    );
   });
 
   test('preprocesses technical text before text to speech', () {
@@ -92,7 +119,7 @@ repo API JSON RS232 I2C UART CAN BLE
     expect(
       spoken,
       contains(
-        'Row one. Sensor: G N S S, Value: three point one four, Status: OK.',
+        'Row one. Sensor: G N S S, Value: three point one four, Status: O K.',
       ),
     );
     expect(
