@@ -63,7 +63,9 @@ Use [the docs](https://example.com).
   });
 
   test('names portable mathematical and comparison symbols', () {
-    final spoken = cleanTextForSpeech('enabled != OK; x ≠ y; 3 × 2 ≈ 6 ÷ 1');
+    final spoken = cleanTextForSpeech(
+      'enabled != OK; x ≠ y; 3 × 2 ≈ 6 ÷ 1; threshold > 5%',
+    );
 
     expect(spoken, contains('enabled not equal to O K'));
     expect(spoken, contains('x not equal to y'));
@@ -71,6 +73,7 @@ Use [the docs](https://example.com).
       spoken,
       contains('three times two approximately six divided by one'),
     );
+    expect(spoken, contains('threshold greater than five percent'));
   });
 
   test('preprocesses technical text before text to speech', () {

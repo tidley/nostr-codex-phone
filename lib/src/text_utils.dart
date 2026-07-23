@@ -176,6 +176,7 @@ String _speakTechnicalText(String text) {
   spoken = spoken.replaceAll('≈', ' approximately ');
   spoken = spoken.replaceAll('×', ' times ');
   spoken = spoken.replaceAll('÷', ' divided by ');
+  spoken = spoken.replaceAll('%', ' percent ');
   spoken = spoken.replaceAllMapped(
     RegExp(r'\barr\[(\d+)\]'),
     (match) => 'array index ${_numberWords(match.group(1)!)}',
@@ -206,6 +207,8 @@ String _speakTechnicalText(String text) {
   const operators = {
     r'>=': ' greater than or equal to ',
     r'<=': ' less than or equal to ',
+    r'>': ' greater than ',
+    r'<': ' less than ',
     r'||': ' or ',
     r'&&': ' and ',
     r'=': ' equals ',
