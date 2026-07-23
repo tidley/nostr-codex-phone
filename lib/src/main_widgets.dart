@@ -15,6 +15,7 @@ class _SessionDrawer extends StatelessWidget {
     required this.onSelectTarget,
     required this.onSpawnSession,
     required this.onOpenCodeSessions,
+    required this.onRefreshTarget,
     required this.onRestartTarget,
     required this.onRenameTarget,
     required this.onTogglePinTarget,
@@ -36,6 +37,7 @@ class _SessionDrawer extends StatelessWidget {
   final ValueChanged<String> onSelectTarget;
   final VoidCallback onSpawnSession;
   final VoidCallback onOpenCodeSessions;
+  final ValueChanged<RepoTarget> onRefreshTarget;
   final ValueChanged<RepoTarget> onRestartTarget;
   final ValueChanged<RepoTarget> onRenameTarget;
   final ValueChanged<RepoTarget> onTogglePinTarget;
@@ -190,6 +192,9 @@ class _SessionDrawer extends StatelessWidget {
                                       PopupMenuButton<_SessionDrawerAction>(
                                         onSelected: (action) async {
                                           if (action ==
+                                              _SessionDrawerAction.refresh) {
+                                            onRefreshTarget(target);
+                                          } else if (action ==
                                               _SessionDrawerAction.restart) {
                                             onRestartTarget(target);
                                           } else if (action ==
@@ -227,6 +232,15 @@ class _SessionDrawer extends StatelessWidget {
                                                     ? 'Unpin'
                                                     : 'Pin',
                                               ),
+                                            ),
+                                          ),
+                                          PopupMenuItem(
+                                            value: _SessionDrawerAction.refresh,
+                                            child: const ListTile(
+                                              dense: true,
+                                              contentPadding: EdgeInsets.zero,
+                                              leading: Icon(Icons.refresh),
+                                              title: Text('Refresh messages'),
                                             ),
                                           ),
                                           PopupMenuItem(
@@ -426,7 +440,7 @@ class _SessionDrawer extends StatelessWidget {
   }
 }
 
-enum _SessionDrawerAction { pin, restart, rename, delete }
+enum _SessionDrawerAction { pin, refresh, restart, rename, delete }
 
 class _WorkersPage extends StatelessWidget {
   const _WorkersPage({
