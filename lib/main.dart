@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.59+259';
+const _appVersion = '0.2.60+260';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -4227,7 +4227,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           if (remember) _lastSpokenText = text;
         });
       }
-      await _tts.speak(spoken);
+      await _tts.awaitSpeakCompletion(true);
+      for (final chunk in splitTextForSpeech(spoken)) {
+        if (generation != _speechGeneration) return;
+        await _tts.speak(chunk);
+      }
     } catch (error) {
       if (!mounted) return;
       setState(() {
