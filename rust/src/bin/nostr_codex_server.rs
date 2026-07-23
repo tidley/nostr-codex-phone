@@ -1538,7 +1538,30 @@ async fn process_media_bundle_turn(
                 "{label}:\nLocal decrypted image file: {local_path}\nUse this local file when inspecting the image."
             ));
             local_attachments.push(downloaded);
+            continue;
         }
+
+        let downloaded = match download_local_attachment(
+            attachment,
+            audio_config,
+            messenger,
+            peer_pubkey,
+            "file",
+        )
+        .await
+        {
+            Some(downloaded) => downloaded,
+            None => continue,
+        };
+        if cancel_token.is_cancelled() {
+            report_codex_cancelled(messenger, peer_pubkey).await.ok();
+            return;
+        }
+        let local_path = downloaded.path.display().to_string();
+        local_texts.push(format!(
+            "{label}:\nLocal decrypted file: {local_path}\nUse this file when handling the request."
+        ));
+        local_attachments.push(downloaded);
     }
 
     if cancel_token.is_cancelled() {
