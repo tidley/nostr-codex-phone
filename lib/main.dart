@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.63+263';
+const _appVersion = '0.2.64+264';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -3195,7 +3195,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     final secret = _secretKeyController.text.trim();
     final peer = _peerPubkeyController.text.trim();
-    final relays = _relayLines();
+    final relays = _inboxRelays(_relayLines());
 
     if (secret.isEmpty || peer.isEmpty || relays.isEmpty) {
       _showError('Secret key, peer pubkey, and relays are required');
@@ -3781,7 +3781,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
   }
 
-  Future<int> _fetchRecentInboxMessages({
+  Future<int?> _fetchRecentInboxMessages({
     bool allowCatchUpSpeech = false,
   }) async {
     try {
@@ -3806,7 +3806,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     } catch (error) {
       if (mounted) setState(() => _status = 'Recent message fetch failed');
       debugPrint('recent message fetch failed: $error');
-      return 0;
+      return null;
     }
   }
 
@@ -4624,6 +4624,27 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       waitingStatus: 'Waiting for new session...',
       timeoutMessage: 'Session restart timed out',
     );
+  }
+
+  Future<void> _refreshRepoTarget(RepoTarget target) async {
+    if (_connecting) {
+      _showError('Wait for the relay connection before refreshing');
+      return;
+    }
+    if (!_connected) {
+      await _connect();
+    }
+    if (!mounted || !_connected) return;
+
+    setState(() => _status = 'Refreshing ${target.displayName} messages...');
+    final accepted = await _fetchRecentInboxMessages();
+    if (!mounted || accepted == null) return;
+    setState(() {
+      _status = accepted == 0
+          ? 'No new messages for ${target.displayName}'
+          : 'Refreshed Nostr messages';
+    });
+    if (target.id == _selectedRepoTargetId) _scrollToLatestMessage();
   }
 
   Future<bool> _spawnAndOpenSession({
@@ -6170,6 +6191,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         onSelectTarget: (targetId) => unawaited(_selectRepoTarget(targetId)),
         onSpawnSession: () => unawaited(_requestSpawnSession()),
         onOpenCodeSessions: () => unawaited(_openOpenCodeSessions()),
+        onRefreshTarget: (target) => unawaited(_refreshRepoTarget(target)),
         onRestartTarget: (target) => unawaited(_restartRepoTarget(target)),
         onRenameTarget: (target) => unawaited(_renameRepoTarget(target)),
         onTogglePinTarget: (target) => unawaited(_togglePinRepoTarget(target)),
