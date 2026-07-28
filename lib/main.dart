@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.67+267';
+const _appVersion = '0.2.68+268';
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -4587,7 +4587,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       MaterialPageRoute(
         builder: (_) => _SpawnSessionPage(
           initialRepoChoices: _cachedRepoChoices,
-          onLoadRepos: _requestRepoChoices,
+          onLoadRepos: (path) => _requestRepoChoices(path: path),
         ),
       ),
     );
@@ -4792,7 +4792,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
   }
 
-  Future<List<RepoChoice>> _requestRepoChoices() async {
+  Future<List<RepoChoice>> _requestRepoChoices({String? path}) async {
     if (!await _ensureConnectedToParentService()) {
       throw StateError('Connect to the computer service first');
     }
@@ -4805,7 +4805,7 @@ Return a concise catch-up summary of what happened after that point: completed w
 
     final payload = jsonEncode({
       'repo_list_request': {
-        'roots': ['.', './pave'],
+        if (path != null && path.trim().isNotEmpty) 'path': path.trim(),
       },
     });
 
