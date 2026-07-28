@@ -1752,7 +1752,7 @@ class _SpawnSessionPage extends StatefulWidget {
 class _SpawnSessionPageState extends State<_SpawnSessionPage> {
   final _pathController = TextEditingController();
   final _searchController = TextEditingController();
-  bool _create = true;
+  bool _create = false;
   bool _loadingRepos = false;
   String _searchQuery = '';
   List<RepoChoice> _repoChoices = const [];
@@ -1761,6 +1761,7 @@ class _SpawnSessionPageState extends State<_SpawnSessionPage> {
   void initState() {
     super.initState();
     _repoChoices = widget.initialRepoChoices;
+    if (_repoChoices.isEmpty) unawaited(_loadRepos());
   }
 
   @override
@@ -1863,9 +1864,9 @@ class _SpawnSessionPageState extends State<_SpawnSessionPage> {
                 border: const OutlineInputBorder(),
                 helperText: _create
                     ? 'Created inside an allowed worker root'
-                    : 'Select below or enter an allowed path',
+                    : 'Select below or enter a nested allowed folder, e.g. buzz/buzz',
                 labelText: _create ? 'New folder' : 'Selected folder',
-                hintText: _create ? 'my-new-project' : 'phone',
+                hintText: _create ? 'my-new-project' : 'buzz/buzz',
               ),
             ),
           ),
