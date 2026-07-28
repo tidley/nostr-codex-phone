@@ -71,7 +71,7 @@ struct CancelRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NonblockingControlRequest {
     Spawn(SpawnWorkerRequest),
-    RepoList,
+    RepoList(Option<String>),
     OpenCodeSessions,
 }
 
@@ -941,12 +941,17 @@ async fn process_nonblocking_control_message(
             .await;
             true
         }
-        Some(NonblockingControlRequest::RepoList) => {
+        Some(NonblockingControlRequest::RepoList(path)) => {
             info!(
                 "processing repo list request event {} while codex task is active",
                 message.event_id
             );
-            process_repo_list_request(messenger.as_ref(), &message.sender_pubkey_hex).await;
+            process_repo_list_request(
+                messenger.as_ref(),
+                &message.sender_pubkey_hex,
+                path.as_deref(),
+            )
+            .await;
             true
         }
         Some(NonblockingControlRequest::OpenCodeSessions) => {
@@ -990,7 +995,9 @@ fn nonblocking_control_request(kind: &str, text: &str) -> Option<NonblockingCont
         return Some(NonblockingControlRequest::Spawn(spawn_request));
     }
     if is_repo_list_request(text) {
-        return Some(NonblockingControlRequest::RepoList);
+        return Some(NonblockingControlRequest::RepoList(repo_list_request_path(
+            text,
+        )));
     }
     if is_opencode_session_list_request(text) {
         return Some(NonblockingControlRequest::OpenCodeSessions);
@@ -1112,7 +1119,9 @@ async fn process_message(
             }
 
             if is_repo_list_request(&message.text) {
-                process_repo_list_request(messenger, &message.sender_pubkey_hex).await;
+                let path = repo_list_request_path(&message.text);
+                process_repo_list_request(messenger, &message.sender_pubkey_hex, path.as_deref())
+                    .await;
                 return;
             }
 
@@ -1710,8 +1719,12 @@ async fn process_spawn_worker_request(
     }
 }
 
-async fn process_repo_list_request(messenger: &NostrMessenger, owner_pubkey_hex: &str) {
-    match build_repo_list() {
+async fn process_repo_list_request(
+    messenger: &NostrMessenger,
+    owner_pubkey_hex: &str,
+    path: Option<&str>,
+) {
+    match build_repo_list(path) {
         Ok(repo_list) => {
             if let Err(err) = messenger
                 .send_wire_to_pubkey(owner_pubkey_hex, WireMessage::repo_list(repo_list))
@@ -2038,6 +2051,19 @@ fn is_repo_list_request(request: &str) -> bool {
         .is_some_and(|object| object.contains_key("repo_list_request"))
 }
 
+fn repo_list_request_path(request: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(request.trim()).ok()?;
+    value
+        .as_object()?
+        .get("repo_list_request")?
+        .as_object()?
+        .get("path")?
+        .as_str()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn is_opencode_session_list_request(request: &str) -> bool {
     let trimmed = request.trim();
     if matches!(
@@ -2068,14 +2094,26 @@ fn opencode_model_list_request_id(request: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn build_repo_list() -> Result<RepoList> {
-    let root = canonical_worker_root_dir()?;
-    let roots = [root.clone(), root.join("pave")]
-        .into_iter()
-        .filter(|root| root.is_dir())
-        .map(|repo_root| list_repo_root(&root, &repo_root))
-        .collect::<Result<Vec<_>>>()?;
-    Ok(RepoList { roots })
+fn build_repo_list(requested_path: Option<&str>) -> Result<RepoList> {
+    let worker_root = canonical_worker_root_dir()?;
+    let requested = requested_path.unwrap_or("").trim();
+    if requested.split('/').any(|part| part == "..") {
+        bail!("folder path cannot contain ..");
+    }
+    let directory = if requested.is_empty() {
+        worker_root.clone()
+    } else {
+        worker_root
+            .join(requested)
+            .canonicalize()
+            .with_context(|| format!("failed to resolve folder `{requested}`"))?
+    };
+    if !directory.starts_with(&worker_root) || !directory.is_dir() {
+        bail!("folder is outside the worker root");
+    }
+    Ok(RepoList {
+        roots: vec![list_repo_root(&worker_root, &directory)?],
+    })
 }
 
 fn list_repo_root(worker_root: &Path, root: &Path) -> Result<RepoListRoot> {
@@ -5071,7 +5109,13 @@ mod tests {
     fn detects_nonblocking_control_requests() {
         assert_eq!(
             nonblocking_control_request("query", r#"{"repo_list_request":{}}"#),
-            Some(NonblockingControlRequest::RepoList)
+            Some(NonblockingControlRequest::RepoList(None))
+        );
+        assert_eq!(
+            nonblocking_control_request("query", r#"{"repo_list_request":{"path":"buzz/buzz"}}"#,),
+            Some(NonblockingControlRequest::RepoList(Some(
+                "buzz/buzz".to_string(),
+            )))
         );
         assert_eq!(
             nonblocking_control_request("query", r#"{"opencode_session_list_request":{}}"#),

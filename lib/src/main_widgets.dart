@@ -1743,7 +1743,7 @@ class _SpawnSessionPage extends StatefulWidget {
   });
 
   final List<RepoChoice> initialRepoChoices;
-  final Future<List<RepoChoice>> Function() onLoadRepos;
+  final Future<List<RepoChoice>> Function(String? path) onLoadRepos;
 
   @override
   State<_SpawnSessionPage> createState() => _SpawnSessionPageState();
@@ -1755,13 +1755,15 @@ class _SpawnSessionPageState extends State<_SpawnSessionPage> {
   bool _create = false;
   bool _loadingRepos = false;
   String _searchQuery = '';
+  String _currentPath = '';
+  String? _selectedPath;
   List<RepoChoice> _repoChoices = const [];
 
   @override
   void initState() {
     super.initState();
     _repoChoices = widget.initialRepoChoices;
-    if (_repoChoices.isEmpty) unawaited(_loadRepos());
+    unawaited(_loadRepos());
   }
 
   @override
@@ -1781,12 +1783,15 @@ class _SpawnSessionPageState extends State<_SpawnSessionPage> {
     return null;
   }
 
-  Future<void> _loadRepos() async {
+  Future<void> _loadRepos([String? path]) async {
     setState(() => _loadingRepos = true);
     try {
-      final choices = await widget.onLoadRepos();
+      final choices = await widget.onLoadRepos(path);
       if (!mounted) return;
-      setState(() => _repoChoices = choices);
+      setState(() {
+        _repoChoices = choices;
+        _currentPath = path ?? '';
+      });
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -1859,6 +1864,7 @@ class _SpawnSessionPageState extends State<_SpawnSessionPage> {
               controller: _pathController,
               autofocus: _create,
               textInputAction: TextInputAction.done,
+              onChanged: (_) => setState(() => _selectedPath = null),
               onSubmitted: (_) => _submit(),
               decoration: InputDecoration(
                 border: const OutlineInputBorder(),
@@ -1917,7 +1923,11 @@ class _SpawnSessionPageState extends State<_SpawnSessionPage> {
                   ),
                   IconButton(
                     tooltip: 'Refresh folders',
-                    onPressed: _loadingRepos ? null : _loadRepos,
+                    onPressed: _loadingRepos
+                        ? null
+                        : () => _loadRepos(
+                            _currentPath.isEmpty ? null : _currentPath,
+                          ),
                     icon: _loadingRepos
                         ? const SizedBox.square(
                             dimension: 20,
@@ -1928,47 +1938,77 @@ class _SpawnSessionPageState extends State<_SpawnSessionPage> {
                 ],
               ),
             ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+              child: Row(
+                children: [
+                  IconButton(
+                    tooltip: 'Up one folder',
+                    onPressed: _currentPath.isEmpty || _loadingRepos
+                        ? null
+                        : () {
+                            final parts = _currentPath.split('/');
+                            parts.removeLast();
+                            _loadRepos(parts.isEmpty ? null : parts.join('/'));
+                          },
+                    icon: const Icon(Icons.arrow_upward),
+                  ),
+                  Expanded(
+                    child: Text(
+                      _currentPath.isEmpty ? 'Worker root' : _currentPath,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
             Expanded(
               child: _loadingRepos && _repoChoices.isEmpty
                   ? const Center(child: CircularProgressIndicator())
                   : visibleChoices.isEmpty
                   ? const Center(child: Text('No matching folders'))
-                  : ListView.separated(
-                      itemCount: visibleChoices.length,
-                      separatorBuilder: (_, _) =>
-                          const Divider(height: 1, indent: 64),
-                      itemBuilder: (context, index) {
-                        final choice = visibleChoices[index];
-                        final selected =
-                            _pathController.text == choice.relativePath;
-                        return ListTile(
-                          selected: selected,
-                          leading: Icon(
-                            choice.isGitRepo
-                                ? Icons.account_tree_outlined
-                                : Icons.folder_outlined,
-                          ),
-                          title: Text(
-                            choice.displayName,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            choice.relativePath,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontFamily: 'monospace'),
-                          ),
-                          trailing: selected
-                              ? const Icon(Icons.check_circle)
-                              : const Icon(Icons.chevron_right),
-                          onTap: () {
-                            setState(
-                              () => _pathController.text = choice.relativePath,
-                            );
-                          },
-                        );
+                  : RadioGroup<String>(
+                      groupValue: _selectedPath,
+                      onChanged: (value) {
+                        if (value == null) return;
+                        setState(() {
+                          _selectedPath = value;
+                          _pathController.text = value;
+                        });
                       },
+                      child: ListView.separated(
+                        itemCount: visibleChoices.length,
+                        separatorBuilder: (_, _) =>
+                            const Divider(height: 1, indent: 64),
+                        itemBuilder: (context, index) {
+                          final choice = visibleChoices[index];
+                          final selected = _selectedPath == choice.relativePath;
+                          return ListTile(
+                            selected: selected,
+                            leading: Icon(
+                              choice.isGitRepo
+                                  ? Icons.account_tree_outlined
+                                  : Icons.folder_outlined,
+                            ),
+                            title: Text(
+                              choice.displayName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text(
+                              choice.relativePath,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontFamily: 'monospace'),
+                            ),
+                            trailing: Radio<String>(value: choice.relativePath),
+                            onTap: () {
+                              _loadRepos(choice.relativePath);
+                            },
+                          );
+                        },
+                      ),
                     ),
             ),
           ],
