@@ -10,6 +10,7 @@ version="${version#v}"
 
 apk="build/app/outputs/flutter-apk/app-release.apk"
 worker="rust/target/release/nostr-codex-server"
+linux_bundle="build/linux/x64/release/bundle"
 out="build/release-assets/v$version"
 
 if [[ ! -f "$apk" ]]; then
@@ -22,6 +23,11 @@ if [[ ! -x "$worker" ]]; then
   echo "Run: cargo build --release --manifest-path rust/Cargo.toml --bin nostr-codex-server" >&2
   exit 1
 fi
+if [[ ! -x "$linux_bundle/nostr_codex_phone" ]]; then
+  echo "Missing Linux desktop bundle: $linux_bundle" >&2
+  echo "Run: flutter build linux --release" >&2
+  exit 1
+fi
 
 rm -rf "$out"
 mkdir -p "$out"
@@ -29,6 +35,7 @@ mkdir -p "$out"
 cp "$apk" "$out/code-call-v$version.apk"
 cp "$worker" "$out/nostr-codex-worker-linux-x64"
 chmod 755 "$out/nostr-codex-worker-linux-x64"
+tar -C "$linux_bundle" -czf "$out/code-call-v$version-linux-x64.tar.gz" .
 
 "${STRIP:-strip}" --strip-unneeded "$out/nostr-codex-worker-linux-x64"
 

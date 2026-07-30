@@ -12,6 +12,7 @@ class RepoTarget {
     this.parentWorkdir,
     this.parentName,
     this.pairingSecret,
+    this.pairingConfirmation,
     this.opencodeSessionId,
     this.opencodeSessionTitle,
     this.model,
@@ -28,6 +29,7 @@ class RepoTarget {
   final String? parentWorkdir;
   final String? parentName;
   final String? pairingSecret;
+  final String? pairingConfirmation;
   final String? opencodeSessionId;
   final String? opencodeSessionTitle;
   final String? model;
@@ -55,6 +57,8 @@ class RepoTarget {
       'parent_name': parentName,
     if (pairingSecret != null && pairingSecret!.trim().isNotEmpty)
       'pairing_secret': pairingSecret,
+    if (pairingConfirmation != null && pairingConfirmation!.trim().isNotEmpty)
+      'pairing_confirmation': pairingConfirmation,
     if (opencodeSessionId != null && opencodeSessionId!.trim().isNotEmpty)
       'opencode_session_id': opencodeSessionId,
     if (opencodeSessionTitle != null && opencodeSessionTitle!.trim().isNotEmpty)
@@ -74,6 +78,7 @@ class RepoTarget {
     String? parentWorkdir,
     String? parentName,
     String? pairingSecret,
+    String? pairingConfirmation,
     String? opencodeSessionId,
     String? opencodeSessionTitle,
     String? model,
@@ -95,6 +100,9 @@ class RepoTarget {
       pairingSecret: clearPairingSecret
           ? null
           : pairingSecret ?? this.pairingSecret,
+      pairingConfirmation: clearPairingSecret
+          ? null
+          : pairingConfirmation ?? this.pairingConfirmation,
       opencodeSessionId: clearOpenCodeSession
           ? null
           : opencodeSessionId ?? this.opencodeSessionId,
@@ -116,6 +124,7 @@ class RepoTarget {
     final parentWorkdir = raw['parent_workdir']?.toString().trim();
     final parentName = raw['parent_name']?.toString().trim();
     final pairingSecret = raw['pairing_secret']?.toString().trim();
+    final pairingConfirmation = raw['pairing_confirmation']?.toString().trim();
     final opencodeSessionId = raw['opencode_session_id']?.toString().trim();
     final opencodeSessionTitle = raw['opencode_session_title']
         ?.toString()
@@ -154,6 +163,10 @@ class RepoTarget {
       pairingSecret: pairingSecret == null || pairingSecret.isEmpty
           ? null
           : pairingSecret,
+      pairingConfirmation:
+          pairingConfirmation == null || pairingConfirmation.isEmpty
+          ? null
+          : pairingConfirmation,
       opencodeSessionId: opencodeSessionId == null || opencodeSessionId.isEmpty
           ? null
           : opencodeSessionId,

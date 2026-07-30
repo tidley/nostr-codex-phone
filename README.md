@@ -87,7 +87,7 @@ The browser layout and file contents are returned as structured NIP-17/NIP-59 Gi
 
 - Text, transcripts, responses, attachment URLs, and decryption keys are inside NIP-17/NIP-59 encrypted GiftWrapped DMs.
 - Blossom uploads are public blobs, but the uploaded payload is encrypted locally before upload.
-- The worker only accepts the configured phone pubkey, or claims the first phone during pairing when no owner is configured.
+- The worker only accepts the configured phone pubkey, or claims the first phone during pairing when no owner is configured. First-owner pairing requires both the QR secret and its six-digit confirmation code.
 - SQLite memory, if enabled, is local to the worker and contains decrypted request/response history.
 
 ## Install APK
@@ -111,6 +111,8 @@ curl -fsSL https://raw.githubusercontent.com/tidley/nostr-codex-phone/main/scrip
 The worker writes state under `.nostr-codex/`, including `.env.server`, `target.svg`, `target.txt`, `workers.json`, `worker.lock`, and optional `memory.sqlite3`.
 
 On startup it prints/saves a QR target card. Scan it from the phone to add the computer service or repo session.
+
+The confirmation code is `SHA-256("nostr-codex/first-owner-confirmation/v1" || 0x00 || UTF-8(pairing_secret))`: interpret the first four digest bytes as an unsigned big-endian integer and take modulo `1,000,000`, zero-padded to six digits. The QR SVG and target payload contain the pairing secret and are saved with Unix mode `0600`.
 
 ## Worker Configuration
 
