@@ -41,6 +41,51 @@ void main() {
     expect(state.messages['channel-1']![1].parentId, 'message-1');
   });
 
+  test('workspace snapshot rehydrates messages and replaces stale state', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'channels': [
+            {'id': 'old-channel', 'name': 'old'},
+          ],
+          'members': ['old-member'],
+          'messages': [
+            {
+              'id': 'old-message',
+              'channel_id': 'old-channel',
+              'sender_pubkey': 'old-member',
+              'body': 'old',
+              'created_at': 1,
+            },
+          ],
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'channels': [
+            {'id': 'channel-1', 'name': 'engineering'},
+          ],
+          'members': ['owner', 'member'],
+          'messages': [
+            {
+              'id': 'message-1',
+              'channel_id': 'channel-1',
+              'sender_pubkey': 'owner',
+              'body': 'restored',
+              'created_at': 2,
+            },
+          ],
+        },
+      });
+
+    expect(state.channels.single.id, 'channel-1');
+    expect(state.members, ['owner', 'member']);
+    expect(state.messages.keys, ['channel-1']);
+    expect(state.messages['channel-1']!.single.body, 'restored');
+  });
+
   test('workspace state applies a broadcast channel creation', () {
     final state = WorkspaceState();
 

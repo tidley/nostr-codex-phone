@@ -1044,7 +1044,11 @@ async fn process_workspace_request(
                 .into_iter()
                 .map(member_payload)
                 .collect(),
-            messages: vec![],
+            messages: workspace
+                .snapshot_messages(sender)?
+                .into_iter()
+                .map(message_payload)
+                .collect(),
         },
         "create_channel" => {
             let channel = workspace

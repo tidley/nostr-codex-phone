@@ -68,6 +68,13 @@ class WorkspaceState {
     final update = raw['workspace_update'];
     if (update is! Map) return;
     final data = Map<String, dynamic>.from(update);
+    final isSnapshot = data['action'] == 'snapshot';
+    if (isSnapshot) {
+      channels = [];
+      members = [];
+      memberNames.clear();
+      messages.clear();
+    }
     final incomingChannels = _channels(data['channels']);
     if (incomingChannels.isNotEmpty) {
       final byId = {for (final channel in channels) channel.id: channel};
@@ -78,9 +85,8 @@ class WorkspaceState {
     }
     final incomingMembers = _members(data['members']);
     if (incomingMembers.isNotEmpty) {
-      if (data['action'] == 'snapshot') {
+      if (isSnapshot) {
         members = incomingMembers.keys.toList();
-        memberNames.clear();
       } else {
         final knownMembers = members.toSet()..addAll(incomingMembers.keys);
         members = knownMembers.toList();
