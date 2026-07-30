@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.69+269';
+const _appVersion = '0.2.70+270';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -599,7 +599,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       duration: const Duration(milliseconds: 620),
     );
     _configureTtsHandlers();
-    unawaited(_loadSettings());
+    unawaited(_loadSettingsWithFallback());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _dismissQueryKeyboard();
     });
@@ -818,6 +818,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _applyTtsSettings();
     unawaited(_syncBackgroundDelivery());
     unawaited(_loadTtsOptions());
+  }
+
+  Future<void> _loadSettingsWithFallback() async {
+    try {
+      await _loadSettings().timeout(const Duration(seconds: 12));
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loadingSettings = false;
+        _status = 'Saved settings could not be loaded. Open Settings to reconnect.';
+      });
+    }
   }
 
   void _configureTtsHandlers() {
