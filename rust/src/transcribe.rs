@@ -2,6 +2,7 @@ use std::any::Any;
 use std::env;
 use std::fs::File;
 use std::io::ErrorKind;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -11,7 +12,9 @@ use futures_util::StreamExt;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use ogg::PacketReader;
 use opus_decoder::OpusDecoder;
-use reqwest::{redirect::Policy, Client};
+use reqwest::header::LOCATION;
+use reqwest::{redirect::Policy, Client, Response, Url};
+use sha2::{Digest, Sha256};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
@@ -24,10 +27,10 @@ use tempfile::TempDir;
 use tokio::process::Command;
 
 use crate::audio_crypto::{decrypt_audio_payload, unwrap_encrypted_payload};
-use crate::blossom::sha256_hex;
 use crate::protocol::AudioReference;
 
 const MIN_TRANSCRIBE_AUDIO_DURATION: Duration = Duration::from_secs(1);
+const MAX_ATTACHMENT_REDIRECTS: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
@@ -115,23 +118,9 @@ pub async fn download_blossom_attachment(
         ));
     }
 
-    let response = Client::builder()
-        .https_only(true)
-        .redirect(Policy::custom(|attempt| {
-            if attempt.url().scheme() == "https" {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }))
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(60))
-        .build()
-        .context("failed to configure attachment download client")?
-        .get(&attachment.url)
-        .send()
-        .await
-        .with_context(|| format!("failed to download attachment `{}`", attachment.url))?;
+    let initial_url = Url::parse(&attachment.url)
+        .with_context(|| format!("attachment URL is invalid `{}`", attachment.url))?;
+    let response = download_public_https_attachment(initial_url).await?;
     let status = response.status();
     if !status.is_success() {
         return Err(anyhow!(
@@ -152,6 +141,7 @@ pub async fn download_blossom_attachment(
     }
 
     let mut bytes = Vec::new();
+    let mut hasher = Sha256::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk
@@ -162,16 +152,12 @@ pub async fn download_blossom_attachment(
                 config.max_bytes
             ));
         }
+        hasher.update(&chunk);
         bytes.extend_from_slice(&chunk);
     }
 
-    let actual_hash = sha256_hex(&bytes);
-    if actual_hash != attachment.sha256.to_lowercase() {
-        return Err(anyhow!(
-            "attachment blob sha256 mismatch: expected {}, got {actual_hash}",
-            attachment.sha256
-        ));
-    }
+    let actual_hash = format!("{:x}", hasher.finalize());
+    verify_expected_sha256(&actual_hash, Some(&attachment.sha256))?;
 
     let (attachment_bytes, attachment_hash) = if let Some(encryption) = &attachment.encryption {
         let ciphertext = unwrap_encrypted_payload(&bytes)?;
@@ -210,6 +196,138 @@ pub async fn download_blossom_attachment(
         _temp_dir: temp_dir,
         path,
     })
+}
+
+async fn download_public_https_attachment(initial_url: Url) -> Result<Response> {
+    let mut url = initial_url;
+
+    for redirects in 0..=MAX_ATTACHMENT_REDIRECTS {
+        let (host, addresses) = resolve_public_https_host(&url).await?;
+        let response = public_https_client(&host, &addresses)?
+            .get(url.clone())
+            .send()
+            .await
+            .with_context(|| format!("failed to download attachment `{url}`"))?;
+
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        if redirects == MAX_ATTACHMENT_REDIRECTS {
+            return Err(anyhow!(
+                "attachment redirect limit of {MAX_ATTACHMENT_REDIRECTS} exceeded"
+            ));
+        }
+
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .ok_or_else(|| anyhow!("attachment redirect from `{url}` has no Location header"))?
+            .to_str()
+            .context("attachment redirect Location header is not valid text")?;
+        url = url
+            .join(location)
+            .with_context(|| format!("invalid attachment redirect `{location}` from `{url}`"))?;
+    }
+
+    unreachable!("redirect loop has a fixed upper bound")
+}
+
+fn public_https_client(host: &str, addresses: &[SocketAddr]) -> Result<Client> {
+    let mut builder = Client::builder()
+        .https_only(true)
+        .no_proxy()
+        // Redirects are followed manually so every target is validated and pinned.
+        .redirect(Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60));
+    for address in addresses {
+        builder = builder.resolve(host, *address);
+    }
+    builder
+        .build()
+        .context("failed to configure attachment download client")
+}
+
+async fn resolve_public_https_host(url: &Url) -> Result<(String, Vec<SocketAddr>)> {
+    let host = validate_public_https_url(url)?;
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addresses = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .with_context(|| format!("failed to resolve attachment host `{host}`"))?
+        .collect::<Vec<_>>();
+    validate_public_resolved_addresses(&host, &addresses)?;
+    Ok((host, addresses))
+}
+
+fn validate_public_https_url(url: &Url) -> Result<String> {
+    if url.scheme() != "https" {
+        return Err(anyhow!("attachment URL must use HTTPS"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(anyhow!("attachment URL must not include credentials"));
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("attachment URL has no hostname"))?;
+    Ok(host.to_string())
+}
+
+fn validate_public_resolved_addresses(host: &str, addresses: &[SocketAddr]) -> Result<()> {
+    if addresses.is_empty() {
+        return Err(anyhow!("attachment host `{host}` resolved to no addresses"));
+    }
+    if let Some(address) = addresses
+        .iter()
+        .find(|address| !is_public_ip_address(address.ip()))
+    {
+        return Err(anyhow!(
+            "attachment host `{host}` resolved to unsafe address {}",
+            address.ip()
+        ));
+    }
+    Ok(())
+}
+
+fn is_public_ip_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let [a, b, ..] = address.octets();
+            !(a == 0
+                || a == 10
+                || a == 100 && (64..=127).contains(&b)
+                || a == 127
+                || a == 169 && b == 254
+                || a == 172 && (16..=31).contains(&b)
+                || a == 192
+                || a == 198 && (18..=19).contains(&b)
+                || a == 203
+                || a >= 224)
+        }
+        IpAddr::V6(address) => {
+            if let Some(address) = address.to_ipv4_mapped() {
+                return is_public_ip_address(IpAddr::V4(address));
+            }
+            let segments = address.segments();
+            // Global unicast only; this excludes loopback, link-local, unique-local, and multicast.
+            (segments[0] & 0xe000) == 0x2000 && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
+    }
+}
+
+fn verify_expected_sha256(actual: &str, expected: Option<&str>) -> Result<()> {
+    let Some(expected) = expected.filter(|expected| !expected.trim().is_empty()) else {
+        return Ok(());
+    };
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(anyhow!("attachment blob has an invalid expected sha256"));
+    }
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(anyhow!(
+            "attachment blob sha256 mismatch: expected {expected}, got {actual}"
+        ));
+    }
+    Ok(())
 }
 
 pub async fn transcribe_audio(audio_path: &Path, config: &TranscribeConfig) -> Result<String> {
@@ -733,6 +851,50 @@ async fn read_transcript_file(output_dir: &Path) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_https_urls_without_credentials() {
+        assert!(
+            validate_public_https_url(&Url::parse("https://media.example/audio").unwrap()).is_ok()
+        );
+        assert!(
+            validate_public_https_url(&Url::parse("http://media.example/audio").unwrap()).is_err()
+        );
+        assert!(validate_public_https_url(&Url::parse("https://8.8.8.8/audio").unwrap()).is_ok());
+        assert!(
+            validate_public_https_url(&Url::parse("https://user@example.com/audio").unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_resolved_addresses() {
+        let public = ["8.8.8.8:443".parse().unwrap()];
+        let private = [
+            "8.8.8.8:443".parse().unwrap(),
+            "127.0.0.1:443".parse().unwrap(),
+        ];
+        let documentation = ["[2001:db8::1]:443".parse().unwrap()];
+
+        assert!(validate_public_resolved_addresses("media.example", &public).is_ok());
+        assert!(validate_public_resolved_addresses("media.example", &private).is_err());
+        assert!(validate_public_resolved_addresses("media.example", &documentation).is_err());
+        assert!(validate_public_resolved_addresses("media.example", &[]).is_err());
+    }
+
+    #[test]
+    fn verifies_optional_expected_sha256() {
+        let hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+        assert!(verify_expected_sha256(hash, None).is_ok());
+        assert!(verify_expected_sha256(hash, Some(hash)).is_ok());
+        assert!(verify_expected_sha256(hash, Some("not-a-hash")).is_err());
+        assert!(verify_expected_sha256(
+            hash,
+            Some("00f24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        )
+        .is_err());
+    }
 
     #[test]
     fn detects_wav_paths_case_insensitively() {

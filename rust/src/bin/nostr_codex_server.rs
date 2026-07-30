@@ -15,6 +15,7 @@ use futures_util::FutureExt;
 use nostr_sdk::prelude::{Keys, PublicKey, ToBech32};
 use qrcode::{Color, QrCode};
 use rand::{rngs::OsRng, RngCore};
+use sha2::{Digest, Sha256};
 #[path = "nostr_codex_server/memory.rs"]
 mod memory;
 use memory::{MemoryConfig, MemoryStore, RecordedMessage};
@@ -45,6 +46,8 @@ const WORKER_REGISTRY_FILE: &str = "workers.json";
 const WORKER_LOCK_FILE: &str = "worker.lock";
 const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(45);
 const CODEX_STATUS_MIN_INTERVAL: Duration = Duration::from_secs(8);
+// SHA-256 input is the UTF-8 bytes of this domain, a zero byte, then the pairing secret.
+const PAIRING_CONFIRMATION_DOMAIN: &str = "nostr-codex/first-owner-confirmation/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestClass {
@@ -304,13 +307,6 @@ fn env_nonempty(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn allow_first_owner_claim() -> bool {
-    env::var("NOSTR_ALLOW_FIRST_OWNER_CLAIM")
-        .ok()
-        .map(|value| !is_falsey_env(&value))
-        .unwrap_or(false)
-}
-
 fn generate_pairing_secret() -> String {
     let mut bytes = [0_u8; 16];
     OsRng.fill_bytes(&mut bytes);
@@ -448,9 +444,9 @@ fn accept_or_claim_owner(
         }
         Some(_) => true,
         None => {
-            if !allow_first_owner_claim() && !pairing_secret_matches(pairing_secret, message) {
+            if !pairing_credentials_match(pairing_secret, message) {
                 warn!(
-                    "ignored first-owner claim from {} without matching pairing secret",
+                    "ignored first-owner claim from {} without matching pairing credentials",
                     message.sender_pubkey_hex
                 );
                 return false;
@@ -478,7 +474,7 @@ fn accept_or_claim_owner(
     }
 }
 
-fn pairing_secret_matches(pairing_secret: &Option<String>, message: &IncomingMessage) -> bool {
+fn pairing_credentials_match(pairing_secret: &Option<String>, message: &IncomingMessage) -> bool {
     let Some(expected) = pairing_secret
         .as_deref()
         .map(str::trim)
@@ -487,6 +483,18 @@ fn pairing_secret_matches(pairing_secret: &Option<String>, message: &IncomingMes
         return false;
     };
     message_pairing_secret(message).as_deref() == Some(expected)
+        && message_pairing_confirmation(message).as_deref()
+            == Some(pairing_confirmation_code(expected).as_str())
+}
+
+fn pairing_confirmation_code(pairing_secret: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(PAIRING_CONFIRMATION_DOMAIN.as_bytes());
+    hasher.update([0]);
+    hasher.update(pairing_secret.trim().as_bytes());
+    let digest = hasher.finalize();
+    let number = u32::from_be_bytes(digest[..4].try_into().expect("SHA-256 is 32 bytes"));
+    format!("{:06}", number % 1_000_000)
 }
 
 fn message_pairing_secret(message: &IncomingMessage) -> Option<String> {
@@ -505,6 +513,23 @@ fn pairing_secret_from_json(raw: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn message_pairing_confirmation(message: &IncomingMessage) -> Option<String> {
+    pairing_confirmation_from_json(&message.text)
+        .or_else(|| pairing_confirmation_from_json(&message.raw_json))
+}
+
+fn pairing_confirmation_from_json(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let object = value.as_object()?;
+    object
+        .get("pairing_confirmation")
+        .or_else(|| object.get("pairingConfirmation"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .map(ToOwned::to_owned)
+}
+
 fn is_pairing_claim_message(message: &IncomingMessage) -> bool {
     message_pairing_secret(message).is_some()
 }
@@ -514,13 +539,17 @@ fn routed_codex_config(config: &CodexConfig, message: &IncomingMessage) -> Resul
     if let Some(workdir) = route_workdir_from_json(&message.raw_json)
         .or_else(|| route_workdir_from_json(&message.text))
     {
-        let workdir = PathBuf::from(workdir);
-        let canonical = workdir
-            .canonicalize()
-            .with_context(|| format!("route workdir `{}` is not accessible", workdir.display()))?;
+        let requested = PathBuf::from(workdir);
+        let canonical = requested.canonicalize().with_context(|| {
+            format!("route workdir `{}` is not accessible", requested.display())
+        })?;
         if !canonical.is_dir() {
             bail!("route workdir `{}` is not a directory", canonical.display());
         }
+        ensure_spawn_existing_allowed(
+            &canonical,
+            &canonical_allowed_workdir_roots(&config.working_dir)?,
+        )?;
         routed.working_dir = canonical;
     }
     if let Some(model) =
@@ -2157,7 +2186,7 @@ fn list_repo_root(worker_root: &Path, root: &Path) -> Result<RepoListRoot> {
 }
 
 fn resolve_spawn_workdir(request: &SpawnWorkerRequest, current_workdir: &Path) -> Result<PathBuf> {
-    let allowed_roots = canonical_spawn_root_dirs(current_workdir)?;
+    let allowed_roots = canonical_allowed_workdir_roots(current_workdir)?;
     let worker_root = allowed_roots
         .first()
         .cloned()
@@ -2232,10 +2261,10 @@ fn canonical_spawn_root_dir(current_workdir: &Path) -> Result<PathBuf> {
         .with_context(|| format!("failed to resolve worker root `{}`", root.display()))
 }
 
-fn canonical_spawn_root_dirs(current_workdir: &Path) -> Result<Vec<PathBuf>> {
+fn canonical_allowed_workdir_roots(current_workdir: &Path) -> Result<Vec<PathBuf>> {
     let mut roots = vec![canonical_spawn_root_dir(current_workdir)?];
-    for root in env_csv("NOSTR_SPAWN_ROOTS")
-        .or_else(|| env_csv("NOSTR_ALLOWED_WORKDIR_ROOTS"))
+    for root in env_csv("NOSTR_ALLOWED_WORKDIR_ROOTS")
+        .or_else(|| env_csv("NOSTR_SPAWN_ROOTS"))
         .unwrap_or_default()
     {
         let canonical = PathBuf::from(&root)
@@ -3753,6 +3782,9 @@ fn write_worker_target_qr(
     relays: &[String],
     pairing_secret: Option<&str>,
 ) {
+    let pairing_confirmation = pairing_secret
+        .filter(|secret| !secret.trim().is_empty())
+        .map(pairing_confirmation_code);
     let mut payload = serde_json::json!({
         "type": "nostr_codex_target",
         "version": 1,
@@ -3764,13 +3796,17 @@ fn write_worker_target_qr(
     });
     if let Some(secret) = pairing_secret.filter(|secret| !secret.trim().is_empty()) {
         payload["pairing_secret"] = serde_json::Value::String(secret.to_string());
+        payload["pairing_confirmation"] = serde_json::Value::String(
+            pairing_confirmation
+                .as_deref()
+                .expect("pairing confirmation exists with pairing secret")
+                .to_string(),
+        );
     }
     let Ok(payload) = serde_json::to_string(&payload) else {
         warn!("failed to serialize worker QR payload");
         return;
     };
-
-    info!("worker target QR payload: {payload}");
 
     let code = match QrCode::new(payload.as_bytes()) {
         Ok(code) => code,
@@ -3781,6 +3817,9 @@ fn write_worker_target_qr(
     };
 
     if env_bool("NOSTR_CODEX_QR_PRINT", true) {
+        if let Some(confirmation) = &pairing_confirmation {
+            println!("First-owner pairing confirmation: {confirmation}");
+        }
         println!(
             "\nNostr Codex target for {}\n{}\n",
             workdir.display(),
@@ -3807,6 +3846,9 @@ fn write_worker_target_qr(
         );
         return;
     }
+    if pairing_confirmation.is_some() {
+        set_private_file_permissions(&qr_path);
+    }
     info!("worker target QR saved: {}", qr_path.display());
 
     let payload_path = env::var("NOSTR_CODEX_TARGET_PAYLOAD_PATH")
@@ -3827,6 +3869,9 @@ fn write_worker_target_qr(
             payload_path.display()
         );
         return;
+    }
+    if pairing_confirmation.is_some() {
+        set_private_file_permissions(&payload_path);
     }
     info!("worker target payload saved: {}", payload_path.display());
 
@@ -4815,6 +4860,27 @@ mod tests {
         }
     }
 
+    fn test_codex_config(working_dir: PathBuf) -> CodexConfig {
+        CodexConfig {
+            backend: AgentBackend::Codex,
+            bin: "codex".to_string(),
+            args: vec!["exec".to_string()],
+            working_dir,
+            timeout: Duration::from_secs(300),
+            persist_sessions: true,
+            usage_limit_fallback_model: None,
+            opencode: OpenCodeConfig {
+                base_url: "http://127.0.0.1:4096".to_string(),
+                bin: "opencode".to_string(),
+                auto_start: true,
+                username: None,
+                password: None,
+                agent: "build".to_string(),
+                model: None,
+            },
+        }
+    }
+
     #[test]
     fn rejects_low_information_transcripts() {
         let response = low_information_transcript_response("You").unwrap();
@@ -5381,6 +5447,205 @@ mod tests {
             &None,
             &message,
         ));
+    }
+
+    #[test]
+    fn first_owner_requires_matching_secret_and_confirmation_even_with_legacy_bypass() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_bypass = env::var_os("NOSTR_ALLOW_FIRST_OWNER_CLAIM");
+        env::set_var("NOSTR_ALLOW_FIRST_OWNER_CLAIM", "true");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let env_file = WorkerEnvFile {
+            path: temp_dir.path().join(".env.server"),
+        };
+        let secret = "0123456789abcdef".to_string();
+        let confirmation = pairing_confirmation_code(&secret);
+        let mut owner = None;
+        let message = IncomingMessage {
+            sender_pubkey: "npub-first".to_string(),
+            sender_pubkey_hex: "first-hex".to_string(),
+            kind: "query".to_string(),
+            text: serde_json::json!({"pairing_secret": secret.clone()}).to_string(),
+            raw_json: "{}".to_string(),
+            event_id: "event-1".to_string(),
+        };
+
+        assert!(!accept_or_claim_owner(
+            &env_file,
+            &mut owner,
+            &[],
+            &Some(secret.clone()),
+            &message,
+        ));
+        assert_eq!(owner, None);
+
+        let message = IncomingMessage {
+            text: serde_json::json!({
+                "pairing_secret": secret.clone(),
+                "pairing_confirmation": "000000",
+            })
+            .to_string(),
+            ..message
+        };
+        assert!(!accept_or_claim_owner(
+            &env_file,
+            &mut owner,
+            &[],
+            &Some(secret.clone()),
+            &message,
+        ));
+        assert_eq!(owner, None);
+
+        let message = IncomingMessage {
+            text: serde_json::json!({
+                "pairing_secret": secret,
+                "pairing_confirmation": confirmation,
+            })
+            .to_string(),
+            ..message
+        };
+        assert!(accept_or_claim_owner(
+            &env_file,
+            &mut owner,
+            &[],
+            &Some("0123456789abcdef".to_string()),
+            &message,
+        ));
+        assert_eq!(owner.as_deref(), Some("first-hex"));
+        restore_env_var("NOSTR_ALLOW_FIRST_OWNER_CLAIM", previous_bypass);
+    }
+
+    #[test]
+    fn pairing_confirmation_uses_the_documented_domain_separated_sha256_input() {
+        let secret = "test-secret";
+        let mut hasher = Sha256::new();
+        hasher.update(b"nostr-codex/first-owner-confirmation/v1\0test-secret");
+        let digest = hasher.finalize();
+        let expected = format!(
+            "{:06}",
+            u32::from_be_bytes(digest[..4].try_into().unwrap()) % 1_000_000
+        );
+
+        assert_eq!(pairing_confirmation_code(secret), expected);
+        assert_eq!(pairing_confirmation_code(secret).len(), 6);
+    }
+
+    #[test]
+    fn routed_workdir_must_be_inside_a_canonical_allowed_root() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_allowed_roots = env::var_os("NOSTR_ALLOWED_WORKDIR_ROOTS");
+        let previous_spawn_roots = env::var_os("NOSTR_SPAWN_ROOTS");
+        let previous_workdir = env::var_os("CODEX_WORKDIR");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let worker_root = temp_dir.path().join("worker");
+        let allowed_root = temp_dir.path().join("allowed");
+        let routed_dir = allowed_root.join("repo");
+        let outside_dir = temp_dir.path().join("outside");
+        fs::create_dir_all(&worker_root).unwrap();
+        fs::create_dir_all(&routed_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        env::set_var("CODEX_WORKDIR", &worker_root);
+        env::set_var("NOSTR_ALLOWED_WORKDIR_ROOTS", &allowed_root);
+        env::remove_var("NOSTR_SPAWN_ROOTS");
+
+        let config = test_codex_config(worker_root);
+        let allowed_message = IncomingMessage {
+            sender_pubkey: "npub".to_string(),
+            sender_pubkey_hex: "hex".to_string(),
+            kind: "query".to_string(),
+            text: serde_json::json!({"workdir": routed_dir}).to_string(),
+            raw_json: "{}".to_string(),
+            event_id: "event".to_string(),
+        };
+        assert_eq!(
+            routed_codex_config(&config, &allowed_message)
+                .unwrap()
+                .working_dir,
+            routed_dir.canonicalize().unwrap()
+        );
+
+        let outside_message = IncomingMessage {
+            text: serde_json::json!({"workdir": outside_dir}).to_string(),
+            ..allowed_message
+        };
+        assert!(routed_codex_config(&config, &outside_message).is_err());
+        restore_env_var("CODEX_WORKDIR", previous_workdir);
+        restore_env_var("NOSTR_ALLOWED_WORKDIR_ROOTS", previous_allowed_roots);
+        restore_env_var("NOSTR_SPAWN_ROOTS", previous_spawn_roots);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn routed_workdir_rejects_a_symlink_that_escapes_an_allowed_root() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_allowed_roots = env::var_os("NOSTR_ALLOWED_WORKDIR_ROOTS");
+        let previous_workdir = env::var_os("CODEX_WORKDIR");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let worker_root = temp_dir.path().join("worker");
+        let allowed_root = temp_dir.path().join("allowed");
+        let outside_dir = temp_dir.path().join("outside");
+        fs::create_dir_all(&worker_root).unwrap();
+        fs::create_dir_all(&allowed_root).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, allowed_root.join("escape")).unwrap();
+        env::set_var("CODEX_WORKDIR", &worker_root);
+        env::set_var("NOSTR_ALLOWED_WORKDIR_ROOTS", &allowed_root);
+
+        let message = IncomingMessage {
+            sender_pubkey: "npub".to_string(),
+            sender_pubkey_hex: "hex".to_string(),
+            kind: "query".to_string(),
+            text: serde_json::json!({"workdir": allowed_root.join("escape")}).to_string(),
+            raw_json: "{}".to_string(),
+            event_id: "event".to_string(),
+        };
+        assert!(routed_codex_config(&test_codex_config(worker_root), &message).is_err());
+        restore_env_var("CODEX_WORKDIR", previous_workdir);
+        restore_env_var("NOSTR_ALLOWED_WORKDIR_ROOTS", previous_allowed_roots);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_bearing_qr_artifacts_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let previous_print = env::var_os("NOSTR_CODEX_QR_PRINT");
+        let previous_qr_path = env::var_os("NOSTR_CODEX_QR_PATH");
+        let previous_payload_path = env::var_os("NOSTR_CODEX_TARGET_PAYLOAD_PATH");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let qr_path = temp_dir.path().join("target.svg");
+        let payload_path = temp_dir.path().join("target.txt");
+        env::set_var("NOSTR_CODEX_QR_PRINT", "false");
+        env::set_var("NOSTR_CODEX_QR_PATH", &qr_path);
+        env::set_var("NOSTR_CODEX_TARGET_PAYLOAD_PATH", &payload_path);
+
+        write_worker_target_qr(
+            "npub-test",
+            "hex-test",
+            temp_dir.path(),
+            &["wss://relay.example".to_string()],
+            Some("secret"),
+        );
+
+        assert_eq!(
+            fs::metadata(qr_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&payload_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let payload = fs::read_to_string(payload_path).unwrap();
+        assert!(payload.contains("\"pairing_secret\":\"secret\""));
+        assert!(payload.contains(&format!(
+            "\"pairing_confirmation\":\"{}\"",
+            pairing_confirmation_code("secret")
+        )));
+        restore_env_var("NOSTR_CODEX_QR_PRINT", previous_print);
+        restore_env_var("NOSTR_CODEX_QR_PATH", previous_qr_path);
+        restore_env_var("NOSTR_CODEX_TARGET_PAYLOAD_PATH", previous_payload_path);
     }
 
     #[test]

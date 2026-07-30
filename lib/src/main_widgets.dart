@@ -463,17 +463,21 @@ class _WorkersPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Workers')),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => unawaited(onAddWorker()),
-        icon: const Icon(Icons.qr_code_scanner),
-        label: const Text('Scan worker'),
-      ),
+      floatingActionButton: _supportsCameraQrScan
+          ? FloatingActionButton.extended(
+              onPressed: () => unawaited(onAddWorker()),
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('Scan worker'),
+            )
+          : null,
       body: workers.isEmpty
-          ? const Center(
+          ? Center(
               child: Padding(
-                padding: EdgeInsets.all(32),
+                padding: const EdgeInsets.all(32),
                 child: Text(
-                  'Scan the QR shown by each Linux or Mac worker. Each worker keeps its own sessions and identity.',
+                  _supportsCameraQrScan
+                      ? 'Scan the QR shown by each Linux or Mac worker. Each worker keeps its own sessions and identity.'
+                      : 'Add a worker by pasting its target details in Settings. Each worker keeps its own sessions and identity.',
                   textAlign: TextAlign.center,
                 ),
               ),
@@ -2073,6 +2077,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onSaveTarget,
     required this.onNewTarget,
     required this.onScanTarget,
+    required this.onPasteTarget,
     required this.onDeleteTarget,
     required this.onGenerateKey,
     required this.onSecretChanged,
@@ -2149,6 +2154,7 @@ class _SettingsPage extends StatelessWidget {
   final VoidCallback onSaveTarget;
   final VoidCallback onNewTarget;
   final VoidCallback onScanTarget;
+  final VoidCallback onPasteTarget;
   final VoidCallback? onDeleteTarget;
   final VoidCallback onGenerateKey;
   final ValueChanged<String> onSecretChanged;
@@ -2218,6 +2224,7 @@ class _SettingsPage extends StatelessWidget {
             onSaveTarget: onSaveTarget,
             onNewTarget: onNewTarget,
             onScanTarget: onScanTarget,
+            onPasteTarget: onPasteTarget,
             onDeleteTarget: onDeleteTarget,
             onGenerateKey: onGenerateKey,
             onSecretChanged: onSecretChanged,
@@ -2880,6 +2887,7 @@ class _ConnectionPanel extends StatelessWidget {
     required this.onSaveTarget,
     required this.onNewTarget,
     required this.onScanTarget,
+    required this.onPasteTarget,
     required this.onDeleteTarget,
     required this.onGenerateKey,
     required this.onSecretChanged,
@@ -2926,6 +2934,7 @@ class _ConnectionPanel extends StatelessWidget {
   final VoidCallback onSaveTarget;
   final VoidCallback onNewTarget;
   final VoidCallback onScanTarget;
+  final VoidCallback onPasteTarget;
   final VoidCallback? onDeleteTarget;
   final VoidCallback onGenerateKey;
   final ValueChanged<String> onSecretChanged;
@@ -3010,10 +3019,16 @@ class _ConnectionPanel extends StatelessWidget {
                   icon: const Icon(Icons.save),
                   label: const Text('Save'),
                 ),
+                if (_supportsCameraQrScan)
+                  TextButton.icon(
+                    onPressed: connecting ? null : onScanTarget,
+                    icon: const Icon(Icons.qr_code_scanner),
+                    label: const Text('Scan'),
+                  ),
                 TextButton.icon(
-                  onPressed: connecting ? null : onScanTarget,
-                  icon: const Icon(Icons.qr_code_scanner),
-                  label: const Text('Scan'),
+                  onPressed: connecting ? null : onPasteTarget,
+                  icon: const Icon(Icons.content_paste_go_outlined),
+                  label: const Text('Paste target'),
                 ),
                 IconButton(
                   tooltip: 'Delete target',

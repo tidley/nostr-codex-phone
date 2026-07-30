@@ -19,6 +19,8 @@ use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 
 const OPENCODE_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+// OpenCode session IDs are `ses_` plus 1-124 ASCII alphanumeric characters.
+const OPENCODE_SESSION_ID_MAX_LEN: usize = 128;
 
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
@@ -364,20 +366,21 @@ async fn run_opencode_session(
 ) -> Result<CodexRunResult> {
     let client = reqwest::Client::new();
     ensure_opencode_available(&client, config).await?;
-    let session_id = match session_id.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(session_id) => session_id.to_string(),
+    let session_id = match session_id.filter(|session_id| !session_id.is_empty()) {
+        Some(session_id) => validate_opencode_session_id(session_id)?.to_string(),
         None => match latest_opencode_session_id(&client, config).await? {
             Some(session_id) => session_id,
             None => create_opencode_session(&client, config).await?,
         },
     };
     let body = opencode_prompt_body(prompt, &config.opencode);
-    let request = opencode_request(
+    let request = opencode_session_request(
         &client,
         config,
         reqwest::Method::POST,
-        &format!("/session/{session_id}/message"),
-    )
+        &session_id,
+        "message",
+    )?
     .json(&body);
 
     let event_task = event_sender.map(|sender| {
@@ -584,6 +587,8 @@ async fn create_opencode_session(client: &reqwest::Client, config: &CodexConfig)
     value
         .get("id")
         .and_then(Value::as_str)
+        .map(validate_opencode_session_id)
+        .transpose()?
         .map(ToOwned::to_owned)
         .ok_or_else(|| anyhow!("OpenCode session create response did not include `id`: {value}"))
 }
@@ -593,15 +598,11 @@ async fn abort_opencode_session(
     config: &CodexConfig,
     session_id: &str,
 ) -> Result<()> {
-    let response = opencode_request(
-        client,
-        config,
-        reqwest::Method::POST,
-        &format!("/session/{session_id}/abort"),
-    )
-    .send()
-    .await
-    .context("failed to abort OpenCode session")?;
+    let response =
+        opencode_session_request(client, config, reqwest::Method::POST, session_id, "abort")?
+            .send()
+            .await
+            .context("failed to abort OpenCode session")?;
     let status = response.status();
     if !status.is_success() && status != StatusCode::NOT_FOUND {
         let body = response.text().await.unwrap_or_default();
@@ -627,6 +628,35 @@ fn opencode_request(
         );
     }
     request
+}
+
+fn opencode_session_request(
+    client: &reqwest::Client,
+    config: &CodexConfig,
+    method: reqwest::Method,
+    session_id: &str,
+    action: &str,
+) -> Result<reqwest::RequestBuilder> {
+    validate_opencode_session_id(session_id)?;
+    let mut url = reqwest::Url::parse(&config.opencode.base_url)
+        .with_context(|| format!("invalid OPENCODE_URL `{}`", config.opencode.base_url))?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow!("OPENCODE_URL cannot be a base URL"))?
+        .pop_if_empty()
+        .push("session")
+        .push(session_id)
+        .push(action);
+
+    let mut request = client
+        .request(method, url)
+        .query(&[("directory", config.working_dir.to_string_lossy().as_ref())]);
+    if let Some(password) = config.opencode.password.as_deref() {
+        request = request.basic_auth(
+            config.opencode.username.as_deref().unwrap_or("opencode"),
+            Some(password),
+        );
+    }
+    Ok(request)
 }
 
 fn parse_opencode_session_list(value: &Value) -> Result<Vec<OpenCodeSessionInfo>> {
@@ -677,9 +707,12 @@ fn parse_opencode_model_list(value: &Value) -> Result<Vec<OpenCodeModelInfo>> {
 }
 
 fn opencode_session_info_from_value(value: &Value) -> Option<OpenCodeSessionInfo> {
-    let id = json_string_at(value, &["id"])
-        .or_else(|| json_string_at(value, &["sessionID"]))
-        .or_else(|| json_string_at(value, &["sessionId"]))?;
+    let id = value
+        .get("id")
+        .or_else(|| value.get("sessionID"))
+        .or_else(|| value.get("sessionId"))
+        .and_then(Value::as_str)?;
+    let id = validate_opencode_session_id(id).ok()?.to_string();
     let title = json_string_at(value, &["title"])
         .or_else(|| json_string_at(value, &["name"]))
         .unwrap_or_else(|| id.clone());
@@ -704,6 +737,22 @@ fn opencode_session_info_from_value(value: &Value) -> Option<OpenCodeSessionInfo
         created_at,
         updated_at,
     })
+}
+
+fn validate_opencode_session_id(session_id: &str) -> Result<&str> {
+    let suffix = session_id
+        .strip_prefix("ses_")
+        .filter(|suffix| !suffix.is_empty());
+    if session_id.len() <= OPENCODE_SESSION_ID_MAX_LEN
+        && suffix.is_some_and(|suffix| suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    {
+        Ok(session_id)
+    } else {
+        Err(anyhow!(
+            "invalid OpenCode session ID; expected `ses_` followed by 1-{} ASCII alphanumeric characters",
+            OPENCODE_SESSION_ID_MAX_LEN - "ses_".len()
+        ))
+    }
 }
 
 fn json_string_at(value: &Value, path: &[&str]) -> Option<String> {
@@ -1303,13 +1352,13 @@ mod tests {
         let value = json!({
             "sessions": [
                 {
-                    "id": "older",
+                    "id": "ses_Older1",
                     "title": "Older",
                     "directory": "/repo",
                     "time": { "updated": 1, "created": 1 }
                 },
                 {
-                    "id": "newer",
+                    "id": "ses_Newer1",
                     "title": "Newer",
                     "path": { "cwd": "/repo" },
                     "updatedAt": "2026-07-09T12:00:00Z"
@@ -1319,7 +1368,7 @@ mod tests {
 
         let sessions = parse_opencode_session_list(&value).unwrap();
 
-        assert_eq!(sessions[0].id, "newer");
+        assert_eq!(sessions[0].id, "ses_Newer1");
         assert_eq!(sessions[0].directory.as_deref(), Some("/repo"));
         assert_eq!(sessions[1].updated_at.as_deref(), Some("1"));
     }
@@ -1328,19 +1377,19 @@ mod tests {
     fn selects_newest_opencode_session_in_matching_directory() {
         let sessions = parse_opencode_session_list(&json!([
             {
-                "id": "other-repo",
+                "id": "ses_Other1",
                 "title": "Other repo",
                 "directory": "/other",
                 "updatedAt": "2026-07-20T12:00:00Z"
             },
             {
-                "id": "older",
+                "id": "ses_Older1",
                 "title": "Older",
                 "directory": "/repo",
                 "updatedAt": "2026-07-20T10:00:00Z"
             },
             {
-                "id": "newer",
+                "id": "ses_Newer1",
                 "title": "Newer",
                 "directory": "/repo",
                 "updatedAt": "2026-07-20T11:00:00Z"
@@ -1350,7 +1399,74 @@ mod tests {
 
         let session = latest_opencode_session_id_for_directory(sessions, "/repo");
 
-        assert_eq!(session.as_deref(), Some("newer"));
+        assert_eq!(session.as_deref(), Some("ses_Newer1"));
+    }
+
+    #[test]
+    fn accepts_only_bounded_standard_opencode_session_ids() {
+        assert_eq!(
+            validate_opencode_session_id("ses_Abc123").unwrap(),
+            "ses_Abc123"
+        );
+        assert!(validate_opencode_session_id("ses_").is_err());
+        assert!(validate_opencode_session_id("session-1").is_err());
+        assert!(validate_opencode_session_id("ses_bad-id").is_err());
+        assert!(validate_opencode_session_id(" ses_Abc123 ").is_err());
+        assert!(validate_opencode_session_id(&format!(
+            "ses_{}",
+            "a".repeat(OPENCODE_SESSION_ID_MAX_LEN)
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn ignores_invalid_opencode_session_ids_from_list_responses() {
+        let sessions = parse_opencode_session_list(&json!([
+            { "id": "ses_Valid1", "title": "Valid" },
+            { "id": "../../etc/passwd", "title": "Invalid" }
+        ]))
+        .unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "ses_Valid1");
+    }
+
+    #[test]
+    fn builds_opencode_session_urls_from_path_segments() {
+        let config = CodexConfig {
+            backend: AgentBackend::OpenCode,
+            bin: "codex".to_string(),
+            args: Vec::new(),
+            working_dir: PathBuf::from("/repo"),
+            timeout: Duration::from_secs(1),
+            persist_sessions: true,
+            usage_limit_fallback_model: None,
+            opencode: OpenCodeConfig {
+                base_url: "http://127.0.0.1:4096/api/".to_string(),
+                bin: "opencode".to_string(),
+                auto_start: false,
+                username: None,
+                password: None,
+                agent: "build".to_string(),
+                model: None,
+            },
+        };
+
+        let request = opencode_session_request(
+            &reqwest::Client::new(),
+            &config,
+            reqwest::Method::POST,
+            "ses_Abc123",
+            "message",
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            request.url().as_str(),
+            "http://127.0.0.1:4096/api/session/ses_Abc123/message?directory=%2Frepo"
+        );
     }
 
     #[test]

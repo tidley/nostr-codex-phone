@@ -40,7 +40,9 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.68+268';
+const _appVersion = '0.2.69+269';
+
+bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -1153,6 +1155,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       relays: target.relays,
       workdir: target.workdir,
       pairingSecret: target.pairingSecret,
+      pairingConfirmation: target.pairingConfirmation,
     );
   }
 
@@ -1358,6 +1361,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       parentWorkdir: existing?.parentWorkdir,
       parentName: existing?.parentName,
       pairingSecret: existing?.pairingSecret,
+      pairingConfirmation: existing?.pairingConfirmation,
       opencodeSessionId: existing?.opencodeSessionId,
       opencodeSessionTitle: existing?.opencodeSessionTitle,
       model: existing?.model,
@@ -1415,14 +1419,64 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _scanRepoTargetQr() async {
+    if (!_supportsCameraQrScan) {
+      _showError(
+        'Camera scanning is unavailable on desktop. Paste the target details in Settings.',
+      );
+      return;
+    }
     final payload = await Navigator.of(context).push<String>(
       MaterialPageRoute(builder: (_) => const _RepoTargetQrScannerPage()),
     );
     if (!mounted || payload == null || payload.trim().isEmpty) return;
+    await _importRepoTargetPayload(payload, source: 'Scanned');
+  }
 
-    final target = _repoTargetFromQrPayload(payload);
+  Future<void> _pasteRepoTarget() async {
+    final controller = TextEditingController();
+    final payload = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Paste worker target'),
+        content: TextField(
+          controller: controller,
+          minLines: 4,
+          maxLines: 8,
+          autofocus: true,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            hintText: 'nostr-codex-target:... or target JSON',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Continue'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (!mounted || payload == null || payload.trim().isEmpty) return;
+    await _importRepoTargetPayload(payload, source: 'Pasted');
+  }
+
+  Future<void> _importRepoTargetPayload(
+    String payload, {
+    required String source,
+  }) async {
+    final scannedTarget = _repoTargetFromQrPayload(payload);
+    final target = scannedTarget == null
+        ? null
+        : await _confirmPairingTarget(scannedTarget);
     if (target == null) {
-      _showError('QR did not contain a Nostr Codex target');
+      if (scannedTarget == null) {
+        _showError('Target details did not contain a Nostr Codex target');
+      }
       return;
     }
 
@@ -1476,10 +1530,43 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _applyRepoTargetFields(savedTarget);
       _messagesByTarget.putIfAbsent(savedTarget.id, () => []);
       _wavRetryRequested = false;
-      _status = 'Scanned target ${savedTarget.displayName}';
+      _status = '$source target ${savedTarget.displayName}';
     });
     await _saveSettings();
     await _loadConversationHistoryForActiveSession();
+  }
+
+  Future<RepoTarget?> _confirmPairingTarget(RepoTarget target) async {
+    final secret = target.pairingSecret?.trim();
+    if (secret == null || secret.isEmpty) return target;
+    final confirmation = target.pairingConfirmation?.trim();
+    if (confirmation == null || !RegExp(r'^\d{6}$').hasMatch(confirmation)) {
+      _showError('This worker target has no valid pairing confirmation code');
+      return null;
+    }
+    final formattedCode =
+        '${confirmation.substring(0, 3)} ${confirmation.substring(3)}';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirm worker pairing'),
+        content: Text(
+          'Check that the worker shows this same code before continuing:\n\n$formattedCode',
+          textAlign: TextAlign.center,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Confirm pair'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true ? target : null;
   }
 
   RepoTarget? _repoTargetFromQrPayload(String raw) {
@@ -1535,6 +1622,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           ? parent['name']?.toString().trim()
           : decoded['parent_name']?.toString().trim();
       final pairingSecret = decoded['pairing_secret']?.toString().trim();
+      final pairingConfirmation = decoded['pairing_confirmation']
+          ?.toString()
+          .trim();
       final rawName = decoded['name']?.toString().trim() ?? '';
       final name = rawName.isNotEmpty
           ? rawName
@@ -1558,6 +1648,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         pairingSecret: pairingSecret == null || pairingSecret.isEmpty
             ? null
             : pairingSecret,
+        pairingConfirmation:
+            pairingConfirmation == null || pairingConfirmation.isEmpty
+            ? null
+            : pairingConfirmation,
       );
     } catch (_) {
       return null;
@@ -1605,6 +1699,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           ? parent['name']?.toString().trim()
           : invite['parent_name']?.toString().trim();
       final pairingSecret = invite['pairing_secret']?.toString().trim();
+      final pairingConfirmation = invite['pairing_confirmation']
+          ?.toString()
+          .trim();
       final rawName = invite['name']?.toString().trim() ?? '';
       final name = rawName.isNotEmpty
           ? rawName
@@ -1628,6 +1725,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         pairingSecret: pairingSecret == null || pairingSecret.isEmpty
             ? null
             : pairingSecret,
+        pairingConfirmation:
+            pairingConfirmation == null || pairingConfirmation.isEmpty
+            ? null
+            : pairingConfirmation,
       );
     } catch (_) {
       return null;
@@ -1672,6 +1773,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       parentWorkdir: selectedParent?.workdir,
       parentName: parentName,
       pairingSecret: target.pairingSecret,
+      pairingConfirmation: target.pairingConfirmation,
       opencodeSessionId: target.opencodeSessionId,
       opencodeSessionTitle: target.opencodeSessionTitle,
     );
@@ -2620,6 +2722,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onSaveTarget: () => unawaited(_saveCurrentRepoTarget()),
             onNewTarget: () => unawaited(_createRepoTarget()),
             onScanTarget: () => unawaited(_scanRepoTargetQr()),
+            onPasteTarget: () => unawaited(_pasteRepoTarget()),
             onDeleteTarget: _selectedRepoTargetId == null
                 ? null
                 : () => unawaited(_deleteSelectedRepoTarget()),
@@ -3405,6 +3508,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<RepoTarget?> _scanComputerServiceForSpawn() async {
     if (!mounted) return null;
+    if (!_supportsCameraQrScan) {
+      _showError(
+        'Camera scanning is unavailable on desktop. Paste the computer service target in Settings.',
+      );
+      return null;
+    }
     final shouldScan = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -3430,7 +3539,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     );
     if (!mounted || payload == null || payload.trim().isEmpty) return null;
 
-    final target = _repoTargetFromQrPayload(payload);
+    final scannedTarget = _repoTargetFromQrPayload(payload);
+    final target = scannedTarget == null
+        ? null
+        : await _confirmPairingTarget(scannedTarget);
     if (target == null) {
       _showError('QR did not contain a Nostr Codex target');
       return null;
@@ -3548,7 +3660,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<bool> _sendPairingSecretIfNeeded(RepoTarget? target) async {
     final secret = target?.pairingSecret?.trim();
+    final confirmation = target?.pairingConfirmation?.trim();
     if (target == null || secret == null || secret.isEmpty) return true;
+    if (confirmation == null || confirmation.isEmpty) {
+      _showError(
+        'Pairing target is missing its confirmation code. Scan the worker QR again.',
+      );
+      return false;
+    }
     if (!_connected || _connectedPeerPubkey != target.pubkey) return false;
 
     try {
@@ -3556,7 +3675,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       await _sendWithAutoRecovery(
         label: 'pairing request',
         sender: () => nostrSendQuery(
-          query: jsonEncode(_withActiveRoute({'pairing_secret': secret})),
+          query: jsonEncode(
+            _withActiveRoute({
+              'pairing_secret': secret,
+              'pairing_confirmation': confirmation,
+            }),
+          ),
         ),
       );
       _clearPairingSecret(target.id);
