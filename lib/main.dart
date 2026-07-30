@@ -41,7 +41,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.72+272';
+const _appVersion = '0.2.73+273';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -2740,6 +2740,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onNewTarget: () => unawaited(_createRepoTarget()),
             onScanTarget: () => unawaited(_scanRepoTargetQr()),
             onPasteTarget: () => unawaited(_pasteRepoTarget()),
+            onEnterInviteCode: () => unawaited(_enterWorkspaceInviteCode()),
             onDeleteTarget: _selectedRepoTargetId == null
                 ? null
                 : () => unawaited(_deleteSelectedRepoTarget()),
@@ -6544,10 +6545,7 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _createWorkspaceInvite() async {
-    if (!_connected) {
-      _showError('Connect to the workspace worker before creating an invite');
-      return;
-    }
+    if (!await _ensureConnectedToParentService()) return;
     await nostrSendQuery(
       query: jsonEncode({
         'create_invite': {'expires_in_seconds': 900},
@@ -6557,20 +6555,54 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _redeemWorkspaceInvite(String code) async {
-    if (!_connected) {
-      _showError('Connect to the workspace worker before joining');
+    final invite = parseWorkspaceInviteCode(code);
+    if (invite == null) {
+      _showError('Enter a valid workspace invite code');
       return;
     }
-    final normalized = normalizeWorkspaceInviteCode(code);
-    if (!isWorkspaceInviteCode(normalized)) {
-      _showError('Enter the 10-character invite code');
-      return;
-    }
+    final target = await _saveAndSelectRepoTarget(
+      invite.target,
+      status: 'Imported workspace target',
+    );
+    if (target == null || !await _ensureConnectedToParentService()) return;
     await nostrSendQuery(
       query: jsonEncode({
-        'redeem_invite': {'code': normalized},
+        'redeem_invite': {'code': invite.secret},
       }),
     );
     if (mounted) setState(() => _workspaceMemberStatus = 'Redeeming invite...');
+  }
+
+  Future<void> _enterWorkspaceInviteCode() async {
+    final controller = TextEditingController();
+    final code = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Enter invite code'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          minLines: 2,
+          maxLines: 4,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            hintText: 'Paste the workspace invite code',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Join workspace'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (!mounted || code == null || code.trim().isEmpty) return;
+    await _redeemWorkspaceInvite(code);
   }
 }

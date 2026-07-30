@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use futures_util::FutureExt;
 use nostr_sdk::prelude::{Keys, PublicKey, ToBech32};
 use qrcode::{Color, QrCode};
@@ -123,6 +124,7 @@ struct WorkerRuntimeConfig {
     audio_config: AudioConfig,
     transcribe_config: TranscribeConfig,
     relays: Vec<String>,
+    public_key: String,
     manager: RepoRuntimeManager,
     invites: InviteStore,
 }
@@ -718,6 +720,7 @@ async fn main() -> Result<()> {
         audio_config,
         transcribe_config,
         relays: nostr_config.relays,
+        public_key: server_pubkey,
         manager,
         invites,
     })
@@ -828,7 +831,12 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                         .send_wire_to_pubkey(
                             &message.sender_pubkey_hex,
                             WireMessage::invite_created(InviteCreated {
-                                code: invite.code,
+                                code: workspace_invite_code(
+                                    &invite.secret,
+                                    &config.public_key,
+                                    &config.relays,
+                                    &config.codex_config.working_dir,
+                                )?,
                                 expires_at: invite.expires_at,
                             }),
                         )
@@ -891,6 +899,48 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             }
         }
     }
+}
+
+#[derive(Serialize)]
+struct WorkspaceInvitePayload<'a> {
+    v: u8,
+    t: &'a str,
+    target: WorkspaceInviteTarget<'a>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceInviteTarget<'a> {
+    #[serde(rename = "type")]
+    target_type: &'static str,
+    version: u8,
+    id: String,
+    name: String,
+    pubkey: &'a str,
+    relays: &'a [String],
+}
+
+fn workspace_invite_code(
+    secret: &str,
+    pubkey: &str,
+    relays: &[String],
+    workdir: &Path,
+) -> Result<String> {
+    let payload = WorkspaceInvitePayload {
+        v: 1,
+        t: secret,
+        target: WorkspaceInviteTarget {
+            target_type: "nostr_codex_target",
+            version: 1,
+            id: format!("workspace-{}", &pubkey[..pubkey.len().min(16)]),
+            name: worker_target_name(workdir),
+            pubkey,
+            relays,
+        },
+    };
+    Ok(format!(
+        "nci1.{}",
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload)?)
+    ))
 }
 
 fn invite_creation_request(message: &IncomingMessage) -> Option<CreateInvite> {
