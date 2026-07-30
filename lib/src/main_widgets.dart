@@ -558,20 +558,6 @@ enum _WorkerAction { test, remove }
 
 enum _WorkspaceSection { channel, direct, people, sessions }
 
-class _WorkspaceMessage {
-  const _WorkspaceMessage(
-    this.author,
-    this.text,
-    this.time, {
-    this.agent = false,
-  });
-
-  final String author;
-  final String text;
-  final String time;
-  final bool agent;
-}
-
 class _TeamWorkspace extends StatefulWidget {
   const _TeamWorkspace({
     required this.sessions,
@@ -579,6 +565,9 @@ class _TeamWorkspace extends StatefulWidget {
     required this.onOpenSettings,
     required this.inviteCode,
     required this.memberStatus,
+    required this.workspace,
+    required this.ownPubkey,
+    required this.onRequest,
     required this.onCreateInvite,
     required this.onRedeemInvite,
   });
@@ -588,6 +577,9 @@ class _TeamWorkspace extends StatefulWidget {
   final VoidCallback onOpenSettings;
   final String? inviteCode;
   final String memberStatus;
+  final WorkspaceState workspace;
+  final String ownPubkey;
+  final Future<void> Function(Map<String, Object?> request) onRequest;
   final Future<void> Function() onCreateInvite;
   final Future<void> Function(String code) onRedeemInvite;
 
@@ -599,8 +591,13 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   final _composer = TextEditingController();
   _WorkspaceSection _section = _WorkspaceSection.channel;
   String _active = 'workspace';
-  _WorkspaceMessage? _thread;
-  final _messages = <String, List<_WorkspaceMessage>>{};
+  WorkspaceMessage? _thread;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(widget.onRequest({'action': 'list'}));
+  }
 
   @override
   void dispose() {
@@ -608,7 +605,14 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     super.dispose();
   }
 
-  List<_WorkspaceMessage> get _activeMessages => _messages[_active] ?? const [];
+  List<WorkspaceMessage> get _activeMessages =>
+      _section == _WorkspaceSection.channel
+      ? widget.workspace.messages[_active] ?? const []
+      : widget.workspace.messages[WorkspaceState.directKey(
+              widget.ownPubkey,
+              _active,
+            )] ??
+            const [];
 
   String get _title {
     switch (_section) {
@@ -626,12 +630,17 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   void _send() {
     final text = _composer.text.trim();
     if (text.isEmpty) return;
-    setState(() {
-      _messages
-          .putIfAbsent(_active, () => [])
-          .add(_WorkspaceMessage('You', text, 'Now'));
-      _composer.clear();
-    });
+    final request = <String, Object?>{
+      'action': _section == _WorkspaceSection.channel
+          ? 'send_channel_message'
+          : 'send_direct_message',
+      if (_section == _WorkspaceSection.channel) 'channel_id': _active,
+      if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
+      'body': text,
+      if (_thread != null) 'parent_id': _thread!.id,
+    };
+    _composer.clear();
+    unawaited(widget.onRequest(request));
   }
 
   void _select(_WorkspaceSection section, String id) {
@@ -640,6 +649,18 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _active = id;
       _thread = null;
     });
+    if (section == _WorkspaceSection.channel) {
+      unawaited(
+        widget.onRequest({'action': 'list_channel_messages', 'channel_id': id}),
+      );
+    } else if (section == _WorkspaceSection.direct) {
+      unawaited(
+        widget.onRequest({
+          'action': 'list_direct_messages',
+          'recipient_pubkey': id,
+        }),
+      );
+    }
   }
 
   @override
@@ -650,9 +671,13 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       selected: _section == _WorkspaceSection.channel ? _active : null,
       direct: _section == _WorkspaceSection.direct ? _active : null,
       sessions: widget.sessions,
+      channels: widget.workspace.channels,
+      members: widget.workspace.members,
+      ownPubkey: widget.ownPubkey,
       onSelect: _select,
       onSessions: widget.onOpenSessions,
       onSettings: widget.onOpenSettings,
+      onCreateChannel: () => _createChannel(context),
     );
     final conversation = _WorkspaceConversation(
       title: _title,
@@ -667,6 +692,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       memberStatus: widget.memberStatus,
       onCreateInvite: widget.onCreateInvite,
       onRedeemInvite: widget.onRedeemInvite,
+      members: widget.workspace.members,
+      ownPubkey: widget.ownPubkey,
     );
     final contextPane = _WorkspaceContext(
       message: _thread,
@@ -732,6 +759,37 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             ),
     );
   }
+
+  Future<void> _createChannel(BuildContext context) async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Create channel'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(hintText: 'engineering'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name != null && name.trim().isNotEmpty) {
+      await widget.onRequest({
+        'action': 'create_channel',
+        'channel_name': name.trim(),
+      });
+    }
+  }
 }
 
 class _WorkspaceSidebar extends StatelessWidget {
@@ -739,16 +797,24 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.selected,
     required this.direct,
     required this.sessions,
+    required this.channels,
+    required this.members,
+    required this.ownPubkey,
     required this.onSelect,
     required this.onSessions,
     required this.onSettings,
+    required this.onCreateChannel,
   });
   final String? selected;
   final String? direct;
   final List<RepoTarget> sessions;
+  final List<WorkspaceChannel> channels;
+  final List<String> members;
+  final String ownPubkey;
   final void Function(_WorkspaceSection, String) onSelect;
   final VoidCallback onSessions;
   final VoidCallback onSettings;
+  final VoidCallback onCreateChannel;
 
   @override
   Widget build(BuildContext context) {
@@ -818,8 +884,20 @@ class _WorkspaceSidebar extends StatelessWidget {
             ).textTheme.labelLarge?.copyWith(color: const Color(0xff9cc6bb)),
           ),
           const SizedBox(height: 6),
-          item(Icons.tag, 'No channels yet', selected: selected == 'workspace', onTap: () => onSelect(_WorkspaceSection.channel, 'workspace')),
-          item(Icons.add_circle_outline, 'Create or join a channel', onTap: () {}),
+          if (channels.isEmpty)
+            const ListTile(dense: true, title: Text('No channels yet')),
+          for (final channel in channels)
+            item(
+              Icons.tag,
+              channel.name,
+              selected: selected == channel.id,
+              onTap: () => onSelect(_WorkspaceSection.channel, channel.id),
+            ),
+          item(
+            Icons.add_circle_outline,
+            'Create channel',
+            onTap: onCreateChannel,
+          ),
           const SizedBox(height: 18),
           Text(
             'Direct messages',
@@ -828,7 +906,15 @@ class _WorkspaceSidebar extends StatelessWidget {
             ).textTheme.labelLarge?.copyWith(color: const Color(0xff9cc6bb)),
           ),
           const SizedBox(height: 6),
-          item(Icons.chat_bubble_outline, 'No direct messages yet', selected: direct == 'messages', onTap: () => onSelect(_WorkspaceSection.direct, 'messages')),
+          if (members.where((member) => member != ownPubkey).isEmpty)
+            const ListTile(dense: true, title: Text('No direct messages yet')),
+          for (final member in members.where((member) => member != ownPubkey))
+            item(
+              Icons.chat_bubble_outline,
+              compactIdentifier(member),
+              selected: direct == member,
+              onTap: () => onSelect(_WorkspaceSection.direct, member),
+            ),
           item(
             Icons.people_outline,
             'People & agents',
@@ -874,19 +960,23 @@ class _WorkspaceConversation extends StatelessWidget {
     required this.memberStatus,
     required this.onCreateInvite,
     required this.onRedeemInvite,
+    required this.members,
+    required this.ownPubkey,
   });
   final String title;
   final _WorkspaceSection section;
-  final List<_WorkspaceMessage> messages;
+  final List<WorkspaceMessage> messages;
   final TextEditingController composer;
   final VoidCallback onSend;
-  final ValueChanged<_WorkspaceMessage> onOpenThread;
+  final ValueChanged<WorkspaceMessage> onOpenThread;
   final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
   final String? inviteCode;
   final String memberStatus;
   final Future<void> Function() onCreateInvite;
   final Future<void> Function(String) onRedeemInvite;
+  final List<String> members;
+  final String ownPubkey;
   @override
   Widget build(BuildContext context) {
     if (section == _WorkspaceSection.people) {
@@ -895,6 +985,8 @@ class _WorkspaceConversation extends StatelessWidget {
         onOpenSettings: onOpenSettings,
         inviteCode: inviteCode,
         memberStatus: memberStatus,
+        members: members,
+        ownPubkey: ownPubkey,
         onCreateInvite: onCreateInvite,
         onRedeemInvite: onRedeemInvite,
       );
@@ -918,8 +1010,8 @@ class _WorkspaceConversation extends StatelessWidget {
                     const SizedBox(height: 2),
                     Text(
                       section == _WorkspaceSection.channel
-                          ? '6 members  ·  Team coordination and agent updates'
-                          : 'Direct message  ·  Active now',
+                          ? '${members.length} member${members.length == 1 ? '' : 's'}'
+                          : 'Direct message',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ],
@@ -973,7 +1065,7 @@ class _WorkspaceConversation extends StatelessWidget {
 
 class _WorkspaceMessageRow extends StatelessWidget {
   const _WorkspaceMessageRow({required this.message, required this.onThread});
-  final _WorkspaceMessage message;
+  final WorkspaceMessage message;
   final VoidCallback onThread;
   @override
   Widget build(BuildContext context) => Row(
@@ -981,13 +1073,8 @@ class _WorkspaceMessageRow extends StatelessWidget {
     children: [
       CircleAvatar(
         radius: 18,
-        backgroundColor: message.agent
-            ? const Color(0xff315a90)
-            : const Color(0xff7b5ea7),
-        child: Icon(
-          message.agent ? Icons.smart_toy_outlined : Icons.person,
-          size: 19,
-        ),
+        backgroundColor: const Color(0xff7b5ea7),
+        child: const Icon(Icons.person, size: 19),
       ),
       const SizedBox(width: 12),
       Expanded(
@@ -997,30 +1084,20 @@ class _WorkspaceMessageRow extends StatelessWidget {
             Row(
               children: [
                 Text(
-                  message.author,
+                  compactIdentifier(message.senderPubkey),
                   style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
-                if (message.agent)
-                  const Padding(
-                    padding: EdgeInsets.only(left: 6),
-                    child: Text(
-                      'AGENT',
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: Color(0xff65d8b1),
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
                 const SizedBox(width: 7),
                 Text(
-                  message.time,
+                  DateTime.fromMillisecondsSinceEpoch(
+                    message.createdAt * 1000,
+                  ).toLocal().toString().substring(11, 16),
                   style: Theme.of(context).textTheme.labelSmall,
                 ),
               ],
             ),
             const SizedBox(height: 3),
-            Text(message.text),
+            Text(message.body),
           ],
         ),
       ),
@@ -1034,7 +1111,7 @@ class _WorkspaceContext extends StatelessWidget {
     required this.title,
     required this.onClose,
   });
-  final _WorkspaceMessage? message;
+  final WorkspaceMessage? message;
   final String title;
   final VoidCallback onClose;
   @override
@@ -1051,7 +1128,10 @@ class _WorkspaceContext extends StatelessWidget {
                 ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
               ),
               const SizedBox(height: 18),
-              const _ContextLine(Icons.people_outline, '6 people and agents'),
+              const _ContextLine(
+                Icons.people_outline,
+                'Workspace members appear in People',
+              ),
               const _ContextLine(Icons.push_pin_outlined, 'No pinned messages'),
               const _ContextLine(
                 Icons.folder_outlined,
@@ -1082,39 +1162,15 @@ class _WorkspaceContext extends StatelessWidget {
               ),
               const Divider(),
               const SizedBox(height: 12),
-              Text(message!.text, style: Theme.of(context).textTheme.bodyLarge),
-              const SizedBox(height: 20),
-              const _WorkspaceMessageRow(
-                message: _WorkspaceMessage(
-                  'Maya Chen',
-                  'I can validate that from the Android side.',
-                  '09:22',
-                ),
-                onThread: _noop,
-              ),
-              const SizedBox(height: 16),
-              const _WorkspaceMessageRow(
-                message: _WorkspaceMessage(
-                  'Build agent',
-                  'I will attach relay diagnostics to the session.',
-                  '09:24',
-                  agent: true,
-                ),
-                onThread: _noop,
-              ),
+              Text(message!.body, style: Theme.of(context).textTheme.bodyLarge),
               const Spacer(),
-              TextField(
-                decoration: const InputDecoration(
-                  hintText: 'Reply in thread',
-                  border: OutlineInputBorder(),
-                ),
+              const Text(
+                'Thread replies are available from the channel composer after selecting this message.',
               ),
             ],
           ),
   );
 }
-
-void _noop() {}
 
 class _ContextLine extends StatelessWidget {
   const _ContextLine(this.icon, this.text);
@@ -1141,6 +1197,8 @@ class _PeopleDirectory extends StatefulWidget {
     required this.memberStatus,
     required this.onCreateInvite,
     required this.onRedeemInvite,
+    required this.members,
+    required this.ownPubkey,
   });
   final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
@@ -1148,6 +1206,8 @@ class _PeopleDirectory extends StatefulWidget {
   final String memberStatus;
   final Future<void> Function() onCreateInvite;
   final Future<void> Function(String) onRedeemInvite;
+  final List<String> members;
+  final String ownPubkey;
   @override
   State<_PeopleDirectory> createState() => _PeopleDirectoryState();
 }
@@ -1171,10 +1231,7 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
 
   @override
   Widget build(BuildContext context) {
-    final people = [
-      ('You', 'Human · ${widget.memberStatus}'),
-      ('Build agent', 'Agent · Local worker'),
-    ];
+    final people = widget.members;
     return ListView(
       padding: const EdgeInsets.all(24),
       children: [
@@ -1190,15 +1247,13 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
         for (final person in people)
           ListTile(
             contentPadding: EdgeInsets.zero,
-            leading: CircleAvatar(
-              child: Icon(
-                person.$2.startsWith('Agent')
-                    ? Icons.smart_toy_outlined
-                    : Icons.person_outline,
-              ),
+            leading: CircleAvatar(child: Icon(Icons.person_outline)),
+            title: Text(
+              person == widget.ownPubkey ? 'You' : compactIdentifier(person),
             ),
-            title: Text(person.$1),
-            subtitle: Text(person.$2),
+            subtitle: Text(
+              person == widget.ownPubkey ? widget.memberStatus : 'Member',
+            ),
           ),
         const Divider(height: 36),
         Text('Invite member', style: Theme.of(context).textTheme.titleMedium),

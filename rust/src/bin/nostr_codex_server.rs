@@ -34,12 +34,14 @@ use rust_lib_nostr_codex_phone::protocol::{
     parse_media_bundle_query, parse_wire_message, AudioReference, CreateInvite, InviteAccepted,
     InviteCreated, InviteRejected, MediaBundle, MediaReference, OpenCodeSessionList,
     OpenCodeSessionListEntry, RedeemInvite, RepoList, RepoListEntry, RepoListRoot, TargetInvite,
-    TargetParent, ToolResult, WireMessage,
+    TargetParent, ToolResult, WireMessage, WorkspaceChannelPayload, WorkspaceMessagePayload,
+    WorkspaceRequest, WorkspaceUpdate,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
     DownloadedAudio, TranscribeConfig,
 };
+use rust_lib_nostr_codex_phone::workspace::{WorkspaceMessage, WorkspaceStore};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
 use tracing::{error, info, warn};
@@ -127,6 +129,7 @@ struct WorkerRuntimeConfig {
     public_key: String,
     manager: RepoRuntimeManager,
     invites: InviteStore,
+    workspace: WorkspaceStore,
 }
 
 #[derive(Debug, Clone)]
@@ -708,6 +711,13 @@ async fn main() -> Result<()> {
         &codex_config.working_dir,
         "invites.sqlite3",
     ))?;
+    let workspace = WorkspaceStore::open(&worker_state_path(
+        &codex_config.working_dir,
+        "workspace.sqlite3",
+    ))?;
+    if let Some(owner) = &owner_peer_hex {
+        workspace.add_member(owner)?;
+    }
     run_worker_runtime(WorkerRuntimeConfig {
         messenger,
         worker_env,
@@ -723,6 +733,7 @@ async fn main() -> Result<()> {
         public_key: server_pubkey,
         manager,
         invites,
+        workspace,
     })
     .await
 }
@@ -772,6 +783,10 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                         config
                             .allowed_owner_hexes
                             .push(message.sender_pubkey_hex.clone());
+                        if let Err(err) = config.workspace.add_member(&message.sender_pubkey_hex) {
+                            warn!("failed to persist redeemed workspace member: {err:#}");
+                            continue;
+                        }
                         let _ = config
                             .messenger
                             .send_wire_to_pubkey(
@@ -807,6 +822,37 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                             .await;
                     }
                 }
+            }
+            continue;
+        }
+
+        if config.owner_peer_hex.as_deref() == Some(&message.sender_pubkey_hex) {
+            config.workspace.add_member(&message.sender_pubkey_hex)?;
+        }
+
+        // Authorization for workspace traffic is the persisted membership list,
+        // not the transport allowlist. This keeps revoked/unpersisted peers out.
+        if !config.workspace.is_member(&message.sender_pubkey_hex)? {
+            warn!(
+                "ignored workspace-unenrolled peer {}",
+                message.sender_pubkey_hex
+            );
+            continue;
+        }
+
+        if let Some(request) = workspace_request(&message) {
+            if let Err(err) = process_workspace_request(
+                &config.workspace,
+                config.messenger.as_ref(),
+                &message.sender_pubkey_hex,
+                request,
+            )
+            .await
+            {
+                let _ = config
+                    .messenger
+                    .send_error_to(&message.sender_pubkey_hex, err.to_string())
+                    .await;
             }
             continue;
         }
@@ -966,6 +1012,148 @@ fn invite_redemption_code(message: &IncomingMessage) -> Option<String> {
             redeem_invite: RedeemInvite { code },
         } => Some(code),
         _ => None,
+    }
+}
+
+fn workspace_request(message: &IncomingMessage) -> Option<WorkspaceRequest> {
+    match parse_wire_message(&message.raw_json).ok()? {
+        WireMessage::WorkspaceRequest { workspace_request } => Some(workspace_request),
+        _ => None,
+    }
+}
+
+async fn process_workspace_request(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+    sender: &str,
+    request: WorkspaceRequest,
+) -> Result<()> {
+    let update = match request.action.as_str() {
+        "list" => WorkspaceUpdate {
+            action: "snapshot".to_string(),
+            channels: workspace
+                .channels()?
+                .into_iter()
+                .map(channel_payload)
+                .collect(),
+            members: workspace.members()?,
+            messages: vec![],
+        },
+        "create_channel" => {
+            let channel = workspace
+                .create_channel(request.channel_name.as_deref().unwrap_or_default(), sender)?;
+            let update = WorkspaceUpdate {
+                action: "channel_created".to_string(),
+                channels: vec![channel_payload(channel)],
+                members: vec![],
+                messages: vec![],
+            };
+            broadcast_workspace_update(workspace, messenger, &update).await?;
+            return Ok(());
+        }
+        "list_channel_messages" => WorkspaceUpdate {
+            action: "channel_messages".to_string(),
+            channels: vec![],
+            members: vec![],
+            messages: workspace
+                .channel_messages(request.channel_id.as_deref().unwrap_or_default())?
+                .into_iter()
+                .map(message_payload)
+                .collect(),
+        },
+        "list_direct_messages" => WorkspaceUpdate {
+            action: "direct_messages".to_string(),
+            channels: vec![],
+            members: vec![],
+            messages: workspace
+                .direct_messages(
+                    sender,
+                    request.recipient_pubkey.as_deref().unwrap_or_default(),
+                )?
+                .into_iter()
+                .map(message_payload)
+                .collect(),
+        },
+        "send_channel_message" => {
+            let message = workspace.add_channel_message(
+                sender,
+                request.channel_id.as_deref().unwrap_or_default(),
+                request.body.as_deref().unwrap_or_default(),
+                request.parent_id.as_deref(),
+            )?;
+            let update = WorkspaceUpdate {
+                action: "message_created".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![message_payload(message)],
+            };
+            broadcast_workspace_update(workspace, messenger, &update).await?;
+            return Ok(());
+        }
+        "send_direct_message" => {
+            let message = workspace.add_direct_message(
+                sender,
+                request.recipient_pubkey.as_deref().unwrap_or_default(),
+                request.body.as_deref().unwrap_or_default(),
+                request.parent_id.as_deref(),
+            )?;
+            let update = WorkspaceUpdate {
+                action: "message_created".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![message_payload(message)],
+            };
+            // A direct message is only delivered to its two participants.
+            for member in [
+                sender,
+                request.recipient_pubkey.as_deref().unwrap_or_default(),
+            ] {
+                messenger
+                    .send_wire_to_pubkey(member, WireMessage::workspace_update(update.clone()))
+                    .await?;
+            }
+            return Ok(());
+        }
+        _ => bail!("unsupported workspace request"),
+    };
+    messenger
+        .send_wire_to_pubkey(sender, WireMessage::workspace_update(update))
+        .await?;
+    Ok(())
+}
+
+async fn broadcast_workspace_update(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+    update: &WorkspaceUpdate,
+) -> Result<()> {
+    for member in workspace.members()? {
+        messenger
+            .send_wire_to_pubkey(&member, WireMessage::workspace_update(update.clone()))
+            .await?;
+    }
+    Ok(())
+}
+
+fn channel_payload(
+    channel: rust_lib_nostr_codex_phone::workspace::WorkspaceChannel,
+) -> WorkspaceChannelPayload {
+    WorkspaceChannelPayload {
+        id: channel.id,
+        name: channel.name,
+        created_by: channel.created_by,
+        created_at: channel.created_at,
+    }
+}
+fn message_payload(message: WorkspaceMessage) -> WorkspaceMessagePayload {
+    WorkspaceMessagePayload {
+        id: message.id,
+        channel_id: message.channel_id,
+        recipient_pubkey: message.recipient_pubkey,
+        sender_pubkey: message.sender_pubkey,
+        body: message.body,
+        parent_id: message.parent_id,
+        created_at: message.created_at,
     }
 }
 
