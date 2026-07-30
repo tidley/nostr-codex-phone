@@ -41,7 +41,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.73+273';
+const _appVersion = '0.2.74+274';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -6559,6 +6559,10 @@ Return a concise catch-up summary of what happened after that point: completed w
     if (invite == null) {
       _showError('Enter a valid workspace invite code');
       return;
+    }
+    if (_secretKeyController.text.trim().isEmpty) {
+      await _generateKey();
+      if (_secretKeyController.text.trim().isEmpty) return;
     }
     final target = await _saveAndSelectRepoTarget(
       invite.target,
