@@ -3,6 +3,7 @@ pub mod audio_crypto;
 pub mod blossom;
 pub mod codex;
 mod frb_generated;
+pub mod invite;
 pub mod nostr_client;
 pub mod protocol;
 pub mod transcribe;

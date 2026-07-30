@@ -25,13 +25,15 @@ use rust_lib_nostr_codex_phone::codex::{
     run_codex_session_with_cancel_and_events, AgentBackend, CodexCancelToken, CodexConfig,
     CodexRunResult, OpenCodeSessionInfo,
 };
+use rust_lib_nostr_codex_phone::invite::InviteStore;
 use rust_lib_nostr_codex_phone::nostr_client::{
     default_relays, IncomingMessage, NostrConfig, NostrMessenger,
 };
 use rust_lib_nostr_codex_phone::protocol::{
-    parse_media_bundle_query, parse_wire_message, AudioReference, MediaBundle, MediaReference,
-    OpenCodeSessionList, OpenCodeSessionListEntry, RepoList, RepoListEntry, RepoListRoot,
-    TargetInvite, TargetParent, ToolResult, WireMessage,
+    parse_media_bundle_query, parse_wire_message, AudioReference, CreateInvite, InviteAccepted,
+    InviteCreated, InviteRejected, MediaBundle, MediaReference, OpenCodeSessionList,
+    OpenCodeSessionListEntry, RedeemInvite, RepoList, RepoListEntry, RepoListRoot, TargetInvite,
+    TargetParent, ToolResult, WireMessage,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
@@ -122,6 +124,7 @@ struct WorkerRuntimeConfig {
     transcribe_config: TranscribeConfig,
     relays: Vec<String>,
     manager: RepoRuntimeManager,
+    invites: InviteStore,
 }
 
 #[derive(Debug, Clone)]
@@ -625,7 +628,9 @@ async fn main() -> Result<()> {
         codex_config.backend == AgentBackend::Codex,
     );
     let memory_probe = open_memory_store(memory_config.clone());
-    let messenger = Arc::new(NostrMessenger::connect(nostr_config.clone()).await?);
+    let messenger = Arc::new(
+        NostrMessenger::connect_with_unrestricted_inbox(nostr_config.clone(), true).await?,
+    );
     let owner_peer_hex = nostr_config
         .peer_pubkey
         .as_deref()
@@ -697,6 +702,10 @@ async fn main() -> Result<()> {
     drop(memory_probe);
 
     let manager = RepoRuntimeManager::new();
+    let invites = InviteStore::open(&worker_state_path(
+        &codex_config.working_dir,
+        "invites.sqlite3",
+    ))?;
     run_worker_runtime(WorkerRuntimeConfig {
         messenger,
         worker_env,
@@ -710,6 +719,7 @@ async fn main() -> Result<()> {
         transcribe_config,
         relays: nostr_config.relays,
         manager,
+        invites,
     })
     .await
 }
@@ -736,6 +746,106 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             &config.pairing_secret,
             &message,
         ) {
+            if let Some(code) = invite_redemption_code(&message) {
+                match config.invites.redeem(&code, &message.sender_pubkey_hex) {
+                    Ok(true) => {
+                        let mut allowed = env_csv("NOSTR_RECEIVE_PUBKEYS").unwrap_or_default();
+                        if let Some(owner) = env_nonempty("NOSTR_PEER_PUBKEY") {
+                            if !allowed.iter().any(|key| key == &owner) {
+                                allowed.push(owner);
+                            }
+                        }
+                        if !allowed.iter().any(|key| key == &message.sender_pubkey) {
+                            allowed.push(message.sender_pubkey.clone());
+                        }
+                        if let Err(err) = upsert_env_file_values(
+                            &config.worker_env.path,
+                            &[("NOSTR_RECEIVE_PUBKEYS", allowed.join(",").as_str())],
+                        ) {
+                            warn!("failed to persist redeemed member: {err:#}");
+                            let _ = config.messenger.send_wire_to_pubkey(&message.sender_pubkey_hex, WireMessage::invite_rejected(InviteRejected { reason: "Invite could not be saved; ask the owner to create a new code.".to_string() })).await;
+                            continue;
+                        }
+                        config
+                            .allowed_owner_hexes
+                            .push(message.sender_pubkey_hex.clone());
+                        let _ = config
+                            .messenger
+                            .send_wire_to_pubkey(
+                                &message.sender_pubkey_hex,
+                                WireMessage::invite_accepted(InviteAccepted {
+                                    recipient_pubkey: message.sender_pubkey.clone(),
+                                }),
+                            )
+                            .await;
+                    }
+                    Ok(false) => {
+                        let _ = config
+                            .messenger
+                            .send_wire_to_pubkey(
+                                &message.sender_pubkey_hex,
+                                WireMessage::invite_rejected(InviteRejected {
+                                    reason: "Invite code is invalid, expired, or already used."
+                                        .to_string(),
+                                }),
+                            )
+                            .await;
+                    }
+                    Err(err) => {
+                        warn!("invite redemption failed: {err:#}");
+                        let _ = config
+                            .messenger
+                            .send_wire_to_pubkey(
+                                &message.sender_pubkey_hex,
+                                WireMessage::invite_rejected(InviteRejected {
+                                    reason: "Invite code could not be redeemed.".to_string(),
+                                }),
+                            )
+                            .await;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if let Some(request) = invite_creation_request(&message) {
+            if config.owner_peer_hex.as_deref() != Some(&message.sender_pubkey_hex) {
+                let _ = config
+                    .messenger
+                    .send_wire_to_pubkey(
+                        &message.sender_pubkey_hex,
+                        WireMessage::invite_rejected(InviteRejected {
+                            reason: "Only the workspace owner can create invites.".to_string(),
+                        }),
+                    )
+                    .await;
+                continue;
+            }
+            match config.invites.create(request.expires_in_seconds) {
+                Ok(invite) => {
+                    let _ = config
+                        .messenger
+                        .send_wire_to_pubkey(
+                            &message.sender_pubkey_hex,
+                            WireMessage::invite_created(InviteCreated {
+                                code: invite.code,
+                                expires_at: invite.expires_at,
+                            }),
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    let _ = config
+                        .messenger
+                        .send_wire_to_pubkey(
+                            &message.sender_pubkey_hex,
+                            WireMessage::invite_rejected(InviteRejected {
+                                reason: err.to_string(),
+                            }),
+                        )
+                        .await;
+                }
+            }
             continue;
         }
 
@@ -780,6 +890,32 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                 session_workers.insert(worker_key, sender);
             }
         }
+    }
+}
+
+fn invite_creation_request(message: &IncomingMessage) -> Option<CreateInvite> {
+    let raw = if message.kind == "create_invite" {
+        &message.raw_json
+    } else {
+        &message.text
+    };
+    match parse_wire_message(raw).ok()? {
+        WireMessage::CreateInvite { create_invite } => Some(create_invite),
+        _ => None,
+    }
+}
+
+fn invite_redemption_code(message: &IncomingMessage) -> Option<String> {
+    let raw = if message.kind == "redeem_invite" {
+        &message.raw_json
+    } else {
+        &message.text
+    };
+    match parse_wire_message(raw).ok()? {
+        WireMessage::RedeemInvite {
+            redeem_invite: RedeemInvite { code },
+        } => Some(code),
+        _ => None,
     }
 }
 
