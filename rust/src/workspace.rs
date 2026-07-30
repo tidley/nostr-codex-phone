@@ -213,6 +213,14 @@ impl WorkspaceStore {
         self.messages("channel_id IS NULL AND ((sender_pubkey = ?1 AND recipient_pubkey = ?2) OR (sender_pubkey = ?2 AND recipient_pubkey = ?1))", [&member, &peer])
     }
 
+    pub fn snapshot_messages(&self, member: &str) -> Result<Vec<WorkspaceMessage>> {
+        let member = required("member pubkey", member)?;
+        self.messages(
+            "channel_id IS NOT NULL OR sender_pubkey = ?1 OR recipient_pubkey = ?1",
+            [&member],
+        )
+    }
+
     fn messages<P: rusqlite::Params>(
         &self,
         predicate: &str,
@@ -327,6 +335,33 @@ mod tests {
             .unwrap()
             .iter()
             .any(|message| message.parent_id.as_deref() == Some(parent.id.as_str())));
+    }
+
+    #[test]
+    fn snapshot_includes_channels_and_only_member_direct_messages() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        store.add_member("member").unwrap();
+        store.add_member("other").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let channel_message = store
+            .add_channel_message("owner", &channel.id, "team", None)
+            .unwrap();
+        let member_message = store
+            .add_direct_message("owner", "member", "private", None)
+            .unwrap();
+        store
+            .add_direct_message("owner", "other", "not for member", None)
+            .unwrap();
+
+        let messages = store.snapshot_messages("member").unwrap();
+        assert!(messages
+            .iter()
+            .any(|message| message.id == channel_message.id));
+        assert!(messages
+            .iter()
+            .any(|message| message.id == member_message.id));
+        assert_eq!(messages.len(), 2);
     }
     #[test]
     fn rejects_unrelated_direct_thread_and_non_members() {

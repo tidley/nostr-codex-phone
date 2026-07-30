@@ -896,6 +896,7 @@ fn validate_redeem_invite(invite: &RedeemInvite) -> Result<()> {
 fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
     match request.action.as_str() {
         "list" => Ok(()),
+        "set_profile" => Ok(()),
         "create_channel"
             if request
                 .channel_name
@@ -1300,6 +1301,16 @@ mod tests {
 
         assert_eq!(parsed.kind(), "workspace_update");
         assert_eq!(parsed.text(), "profile_updated");
+    }
+
+    #[test]
+    fn parses_workspace_profile_request() {
+        let parsed = parse_wire_message(
+            r#"{"workspace_request":{"action":"set_profile","display_name":"Ada"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.kind(), "workspace_request");
     }
 
     #[test]

@@ -43,7 +43,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.76+276';
+const _appVersion = '0.2.77+277';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -328,6 +328,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _peerPubkeyController = TextEditingController();
   final _relayController = TextEditingController();
   final _blossomServerController = TextEditingController();
+  final _workspaceDisplayNameController = TextEditingController();
   final _queryController = TextEditingController();
   final _queryFocusNode = FocusNode();
   final _recorder = AudioRecorder();
@@ -643,6 +644,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _peerPubkeyController.dispose();
     _relayController.dispose();
     _blossomServerController.dispose();
+    _workspaceDisplayNameController.dispose();
     _queryController.dispose();
     _queryFocusNode.dispose();
     _menuNotificationPulseController.dispose();
@@ -831,6 +833,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _cachedRepoChoices = _decodeRepoChoicesCache(repoChoices);
       _recentSessionIds = _decodeStringList(recentSessionIds);
       _workspaceDisplayName = _cleanStoredString(workspaceDisplayName) ?? '';
+      _workspaceDisplayNameController.text = _workspaceDisplayName;
       _workspaceMemberAliases = decodeWorkspaceMemberAliases(
         workspaceMemberAliases,
       );
@@ -942,7 +945,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   void _setWorkspaceDisplayName(String value) {
     final displayName = value.trim();
-    setState(() => _workspaceDisplayName = displayName);
+    setState(() {
+      _workspaceDisplayName = displayName;
+      _workspaceDisplayNameController.text = displayName;
+    });
     unawaited(_saveWorkspaceIdentity());
     unawaited(
       _sendWorkspaceRequest({
@@ -2755,6 +2761,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             computerServiceTarget: _computerServiceTarget,
             selectedRepoTargetId: _selectedRepoTargetId,
             activeTargetName: _activeTargetName(),
+            profileNameController: _workspaceDisplayNameController,
             targetNameController: _targetNameController,
             secretKeyController: _secretKeyController,
             peerPubkeyController: _peerPubkeyController,
@@ -2792,6 +2799,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onTargetChanged: (value) {
               if (value != null) unawaited(_selectRepoTarget(value));
             },
+            onProfileNameChanged: _setWorkspaceDisplayName,
             onSaveTarget: () => unawaited(_saveCurrentRepoTarget()),
             onNewTarget: () => unawaited(_createRepoTarget()),
             onScanTarget: () => unawaited(_scanRepoTargetQr()),
@@ -3472,6 +3480,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       });
       _startPolling();
       unawaited(_fetchRecentInboxMessages());
+      unawaited(_sendWorkspaceRequest({'action': 'list'}));
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -3549,7 +3558,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
 
     if (_connected) {
-      if (_connectedPeerPubkey == parent.pubkey) return true;
+      if (_connectedPeerPubkey == parent.pubkey) {
+        return _sendPairingSecretIfNeeded(parent);
+      }
       await _disconnect(expand: false);
     }
 
@@ -3771,6 +3782,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         ),
       );
       _clearPairingSecret(target.id);
+      await nostrSendQuery(
+        query: jsonEncode({
+          'workspace_request': {'action': 'list'},
+        }),
+      );
       if (mounted) setState(() => _status = 'Paired ${target.displayName}');
       await _saveSettings();
       return true;

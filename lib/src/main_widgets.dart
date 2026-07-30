@@ -2977,6 +2977,7 @@ class _SettingsPage extends StatelessWidget {
     required this.computerServiceTarget,
     required this.selectedRepoTargetId,
     required this.activeTargetName,
+    required this.profileNameController,
     required this.targetNameController,
     required this.secretKeyController,
     required this.peerPubkeyController,
@@ -3013,6 +3014,7 @@ class _SettingsPage extends StatelessWidget {
     required this.relayResults,
     required this.messagesInActiveConversation,
     required this.onTargetChanged,
+    required this.onProfileNameChanged,
     required this.onSaveTarget,
     required this.onNewTarget,
     required this.onScanTarget,
@@ -3055,6 +3057,7 @@ class _SettingsPage extends StatelessWidget {
   final RepoTarget? computerServiceTarget;
   final String? selectedRepoTargetId;
   final String activeTargetName;
+  final TextEditingController profileNameController;
   final TextEditingController targetNameController;
   final TextEditingController secretKeyController;
   final TextEditingController peerPubkeyController;
@@ -3091,6 +3094,7 @@ class _SettingsPage extends StatelessWidget {
   final List<_RelayProbeResult> relayResults;
   final int messagesInActiveConversation;
   final ValueChanged<String?> onTargetChanged;
+  final ValueChanged<String> onProfileNameChanged;
   final VoidCallback onSaveTarget;
   final VoidCallback onNewTarget;
   final VoidCallback onScanTarget;
@@ -3136,6 +3140,28 @@ class _SettingsPage extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: TextField(
+                controller: profileNameController,
+                textInputAction: TextInputAction.done,
+                onSubmitted: onProfileNameChanged,
+                decoration: InputDecoration(
+                  labelText: 'Profile name',
+                  hintText: 'How workspace members see you',
+                  border: const OutlineInputBorder(),
+                  suffixIcon: IconButton(
+                    tooltip: 'Save profile name',
+                    icon: const Icon(Icons.save_outlined),
+                    onPressed: () =>
+                        onProfileNameChanged(profileNameController.text),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
           _ConnectionPanel(
             repoTargets: repoTargets,
             selectedRepoTargetId: selectedRepoTargetId,
