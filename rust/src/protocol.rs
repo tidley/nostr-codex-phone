@@ -500,10 +500,10 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
         ));
     }
     if let Some(value) = object.get("redeem_invite") {
-        return Ok(WireMessage::redeem_invite(
-            serde_json::from_value(value.clone())
-                .map_err(|err| anyhow!("field `redeem_invite` is invalid: {err}"))?,
-        ));
+        let redeem_invite: RedeemInvite = serde_json::from_value(value.clone())
+            .map_err(|err| anyhow!("field `redeem_invite` is invalid: {err}"))?;
+        validate_redeem_invite(&redeem_invite)?;
+        return Ok(WireMessage::redeem_invite(redeem_invite));
     }
     if let Some(value) = object.get("invite_accepted") {
         return Ok(WireMessage::invite_accepted(
@@ -788,6 +788,18 @@ fn validate_target_invite(invite: &TargetInvite) -> Result<()> {
         return Err(anyhow!(
             "field `target_invite.relays` must contain at least one relay"
         ));
+    }
+    Ok(())
+}
+
+fn validate_redeem_invite(invite: &RedeemInvite) -> Result<()> {
+    let secret = invite.code.trim();
+    if secret.len() != 43
+        || !secret
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(anyhow!("field `redeem_invite.code` is invalid"));
     }
     Ok(())
 }
@@ -1104,8 +1116,10 @@ mod tests {
         .unwrap();
         assert_eq!(created.kind(), "invite_created");
         assert_eq!(created.text(), "A1B2C3D4E5");
-        let redeem =
-            parse_wire_message(r#"{ "redeem_invite": { "code": "A1B2C3D4E5" } }"#).unwrap();
+        let redeem = parse_wire_message(
+            r#"{ "redeem_invite": { "code": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }"#,
+        )
+        .unwrap();
         assert_eq!(redeem.kind(), "redeem_invite");
     }
 

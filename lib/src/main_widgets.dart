@@ -662,6 +662,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onSend: _send,
       onOpenThread: (message) => setState(() => _thread = message),
       onOpenSessions: widget.onOpenSessions,
+      onOpenSettings: widget.onOpenSettings,
       inviteCode: widget.inviteCode,
       memberStatus: widget.memberStatus,
       onCreateInvite: widget.onCreateInvite,
@@ -868,6 +869,7 @@ class _WorkspaceConversation extends StatelessWidget {
     required this.onSend,
     required this.onOpenThread,
     required this.onOpenSessions,
+    required this.onOpenSettings,
     required this.inviteCode,
     required this.memberStatus,
     required this.onCreateInvite,
@@ -880,6 +882,7 @@ class _WorkspaceConversation extends StatelessWidget {
   final VoidCallback onSend;
   final ValueChanged<_WorkspaceMessage> onOpenThread;
   final VoidCallback onOpenSessions;
+  final VoidCallback onOpenSettings;
   final String? inviteCode;
   final String memberStatus;
   final Future<void> Function() onCreateInvite;
@@ -889,6 +892,7 @@ class _WorkspaceConversation extends StatelessWidget {
     if (section == _WorkspaceSection.people) {
       return _PeopleDirectory(
         onOpenSessions: onOpenSessions,
+        onOpenSettings: onOpenSettings,
         inviteCode: inviteCode,
         memberStatus: memberStatus,
         onCreateInvite: onCreateInvite,
@@ -1132,12 +1136,14 @@ class _ContextLine extends StatelessWidget {
 class _PeopleDirectory extends StatefulWidget {
   const _PeopleDirectory({
     required this.onOpenSessions,
+    required this.onOpenSettings,
     required this.inviteCode,
     required this.memberStatus,
     required this.onCreateInvite,
     required this.onRedeemInvite,
   });
   final VoidCallback onOpenSessions;
+  final VoidCallback onOpenSettings;
   final String? inviteCode;
   final String memberStatus;
   final Future<void> Function() onCreateInvite;
@@ -1200,7 +1206,7 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
         FilledButton.icon(
           onPressed: () => widget.onCreateInvite(),
           icon: const Icon(Icons.person_add_alt_1),
-          label: const Text('Generate 15-minute code'),
+          label: const Text('Generate workspace invite code'),
         ),
         if (widget.inviteCode != null)
           ListTile(
@@ -1222,12 +1228,22 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
         const Divider(height: 36),
         Text('Join workspace', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
+        const Text(
+          'New members can paste one invite code in Settings. It includes the workspace connection details.',
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: widget.onOpenSettings,
+          icon: const Icon(Icons.settings_outlined),
+          label: const Text('Enter invite code in Settings'),
+        ),
+        const SizedBox(height: 12),
         TextField(
           controller: _code,
           textCapitalization: TextCapitalization.characters,
           decoration: InputDecoration(
             border: OutlineInputBorder(),
-            hintText: 'Paste or scan invite code',
+            hintText: 'Paste workspace invite code',
             suffixIcon: _supportsCameraQrScan
                 ? IconButton(
                     icon: const Icon(Icons.qr_code_scanner),
@@ -1240,7 +1256,7 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
         const SizedBox(height: 8),
         FilledButton(
           onPressed: () => widget.onRedeemInvite(_code.text),
-          child: const Text('Redeem code'),
+          child: const Text('Join with code'),
         ),
         ListTile(
           contentPadding: EdgeInsets.zero,
@@ -2775,6 +2791,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onNewTarget,
     required this.onScanTarget,
     required this.onPasteTarget,
+    required this.onEnterInviteCode,
     required this.onDeleteTarget,
     required this.onGenerateKey,
     required this.onSecretChanged,
@@ -2852,6 +2869,7 @@ class _SettingsPage extends StatelessWidget {
   final VoidCallback onNewTarget;
   final VoidCallback onScanTarget;
   final VoidCallback onPasteTarget;
+  final VoidCallback onEnterInviteCode;
   final VoidCallback? onDeleteTarget;
   final VoidCallback onGenerateKey;
   final ValueChanged<String> onSecretChanged;
@@ -2922,6 +2940,7 @@ class _SettingsPage extends StatelessWidget {
             onNewTarget: onNewTarget,
             onScanTarget: onScanTarget,
             onPasteTarget: onPasteTarget,
+            onEnterInviteCode: onEnterInviteCode,
             onDeleteTarget: onDeleteTarget,
             onGenerateKey: onGenerateKey,
             onSecretChanged: onSecretChanged,
@@ -3585,6 +3604,7 @@ class _ConnectionPanel extends StatelessWidget {
     required this.onNewTarget,
     required this.onScanTarget,
     required this.onPasteTarget,
+    required this.onEnterInviteCode,
     required this.onDeleteTarget,
     required this.onGenerateKey,
     required this.onSecretChanged,
@@ -3632,6 +3652,7 @@ class _ConnectionPanel extends StatelessWidget {
   final VoidCallback onNewTarget;
   final VoidCallback onScanTarget;
   final VoidCallback onPasteTarget;
+  final VoidCallback onEnterInviteCode;
   final VoidCallback? onDeleteTarget;
   final VoidCallback onGenerateKey;
   final ValueChanged<String> onSecretChanged;
@@ -3733,6 +3754,12 @@ class _ConnectionPanel extends StatelessWidget {
                   icon: const Icon(Icons.delete_outline),
                 ),
               ],
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: connecting ? null : onEnterInviteCode,
+              icon: const Icon(Icons.group_add_outlined),
+              label: const Text('Enter workspace invite code'),
             ),
             const Divider(height: 28),
             Text('Relay session', style: theme.textTheme.titleSmall),
