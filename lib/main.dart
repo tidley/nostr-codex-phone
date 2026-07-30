@@ -40,7 +40,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.70+270';
+const _appVersion = '0.2.71+271';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
