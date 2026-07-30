@@ -567,6 +567,11 @@ class _TeamWorkspace extends StatefulWidget {
     required this.memberStatus,
     required this.workspace,
     required this.ownPubkey,
+    required this.displayName,
+    required this.memberAliases,
+    required this.memberNames,
+    required this.onDisplayNameChanged,
+    required this.onMemberAliasChanged,
     required this.onRequest,
     required this.onCreateInvite,
     required this.onRedeemInvite,
@@ -579,6 +584,11 @@ class _TeamWorkspace extends StatefulWidget {
   final String memberStatus;
   final WorkspaceState workspace;
   final String ownPubkey;
+  final String displayName;
+  final Map<String, String> memberAliases;
+  final Map<String, String> memberNames;
+  final ValueChanged<String> onDisplayNameChanged;
+  final void Function(String pubkey, String alias) onMemberAliasChanged;
   final Future<void> Function(Map<String, Object?> request) onRequest;
   final Future<void> Function() onCreateInvite;
   final Future<void> Function(String code) onRedeemInvite;
@@ -617,14 +627,24 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   String get _title {
     switch (_section) {
       case _WorkspaceSection.channel:
-        return '# ${_active.replaceAll('-', ' ')}';
+        return '# ${widget.workspace.channelName(_active) ?? _active}';
       case _WorkspaceSection.direct:
-        return 'Direct messages';
+        return _memberLabel(_active);
       case _WorkspaceSection.people:
         return 'People & agents';
       case _WorkspaceSection.sessions:
         return 'Sessions';
     }
+  }
+
+  String _memberLabel(String pubkey) {
+    if (pubkey == widget.ownPubkey) {
+      return widget.memberNames[pubkey] ??
+          (widget.displayName.isEmpty ? 'You' : widget.displayName);
+    }
+    return widget.memberAliases[pubkey] ??
+        widget.memberNames[pubkey] ??
+        compactIdentifier(pubkey);
   }
 
   void _send() {
@@ -674,6 +694,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       channels: widget.workspace.channels,
       members: widget.workspace.members,
       ownPubkey: widget.ownPubkey,
+      displayName: widget.displayName,
+      memberAliases: widget.memberAliases,
+      memberNames: widget.memberNames,
       onSelect: _select,
       onSessions: widget.onOpenSessions,
       onSettings: widget.onOpenSettings,
@@ -694,6 +717,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onRedeemInvite: widget.onRedeemInvite,
       members: widget.workspace.members,
       ownPubkey: widget.ownPubkey,
+      displayName: widget.displayName,
+      memberAliases: widget.memberAliases,
+      memberNames: widget.memberNames,
+      onOpenDirect: (pubkey) => _select(_WorkspaceSection.direct, pubkey),
+      onDisplayNameChanged: widget.onDisplayNameChanged,
+      onMemberAliasChanged: widget.onMemberAliasChanged,
     );
     final contextPane = _WorkspaceContext(
       message: _thread,
@@ -800,6 +829,9 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.channels,
     required this.members,
     required this.ownPubkey,
+    required this.displayName,
+    required this.memberAliases,
+    required this.memberNames,
     required this.onSelect,
     required this.onSessions,
     required this.onSettings,
@@ -811,6 +843,9 @@ class _WorkspaceSidebar extends StatelessWidget {
   final List<WorkspaceChannel> channels;
   final List<String> members;
   final String ownPubkey;
+  final String displayName;
+  final Map<String, String> memberAliases;
+  final Map<String, String> memberNames;
   final void Function(_WorkspaceSection, String) onSelect;
   final VoidCallback onSessions;
   final VoidCallback onSettings;
@@ -818,6 +853,11 @@ class _WorkspaceSidebar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    String memberLabel(String pubkey) => pubkey == ownPubkey
+        ? (memberNames[pubkey] ?? (displayName.isEmpty ? 'You' : displayName))
+        : memberAliases[pubkey] ??
+              memberNames[pubkey] ??
+              compactIdentifier(pubkey);
     Widget item(
       IconData icon,
       String label, {
@@ -911,7 +951,7 @@ class _WorkspaceSidebar extends StatelessWidget {
           for (final member in members.where((member) => member != ownPubkey))
             item(
               Icons.chat_bubble_outline,
-              compactIdentifier(member),
+              memberLabel(member),
               selected: direct == member,
               onTap: () => onSelect(_WorkspaceSection.direct, member),
             ),
@@ -962,6 +1002,12 @@ class _WorkspaceConversation extends StatelessWidget {
     required this.onRedeemInvite,
     required this.members,
     required this.ownPubkey,
+    required this.displayName,
+    required this.memberAliases,
+    required this.memberNames,
+    required this.onOpenDirect,
+    required this.onDisplayNameChanged,
+    required this.onMemberAliasChanged,
   });
   final String title;
   final _WorkspaceSection section;
@@ -977,6 +1023,23 @@ class _WorkspaceConversation extends StatelessWidget {
   final Future<void> Function(String) onRedeemInvite;
   final List<String> members;
   final String ownPubkey;
+  final String displayName;
+  final Map<String, String> memberAliases;
+  final Map<String, String> memberNames;
+  final ValueChanged<String> onOpenDirect;
+  final ValueChanged<String> onDisplayNameChanged;
+  final void Function(String pubkey, String alias) onMemberAliasChanged;
+
+  String _memberLabel(String pubkey) {
+    if (pubkey == ownPubkey) {
+      return memberNames[pubkey] ??
+          (displayName.isEmpty ? 'You' : displayName);
+    }
+    return memberAliases[pubkey] ??
+        memberNames[pubkey] ??
+        compactIdentifier(pubkey);
+  }
+
   @override
   Widget build(BuildContext context) {
     if (section == _WorkspaceSection.people) {
@@ -987,6 +1050,12 @@ class _WorkspaceConversation extends StatelessWidget {
         memberStatus: memberStatus,
         members: members,
         ownPubkey: ownPubkey,
+        displayName: displayName,
+        memberAliases: memberAliases,
+        memberNames: memberNames,
+        onOpenDirect: onOpenDirect,
+        onDisplayNameChanged: onDisplayNameChanged,
+        onMemberAliasChanged: onMemberAliasChanged,
         onCreateInvite: onCreateInvite,
         onRedeemInvite: onRedeemInvite,
       );
@@ -1033,6 +1102,7 @@ class _WorkspaceConversation extends StatelessWidget {
                     final m = messages[index];
                     return _WorkspaceMessageRow(
                       message: m,
+                      authorName: _memberLabel(m.senderPubkey),
                       onThread: () => onOpenThread(m),
                     );
                   },
@@ -1040,20 +1110,23 @@ class _WorkspaceConversation extends StatelessWidget {
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 18),
-          child: TextField(
-            controller: composer,
-            minLines: 1,
-            maxLines: 5,
-            onSubmitted: (_) => onSend(),
-            decoration: InputDecoration(
-              hintText: 'Message $title',
-              prefixIcon: const Icon(Icons.add_circle_outline),
-              suffixIcon: IconButton(
-                onPressed: onSend,
-                icon: const Icon(Icons.send),
-              ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
+          child: CallbackShortcuts(
+            bindings: {const SingleActivator(LogicalKeyboardKey.enter): onSend},
+            child: TextField(
+              controller: composer,
+              minLines: 1,
+              maxLines: 5,
+              textInputAction: TextInputAction.newline,
+              decoration: InputDecoration(
+                hintText: 'Message $title',
+                prefixIcon: const Icon(Icons.add_circle_outline),
+                suffixIcon: IconButton(
+                  onPressed: onSend,
+                  icon: const Icon(Icons.send),
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
             ),
           ),
@@ -1064,8 +1137,13 @@ class _WorkspaceConversation extends StatelessWidget {
 }
 
 class _WorkspaceMessageRow extends StatelessWidget {
-  const _WorkspaceMessageRow({required this.message, required this.onThread});
+  const _WorkspaceMessageRow({
+    required this.message,
+    required this.authorName,
+    required this.onThread,
+  });
   final WorkspaceMessage message;
+  final String authorName;
   final VoidCallback onThread;
   @override
   Widget build(BuildContext context) => Row(
@@ -1084,7 +1162,7 @@ class _WorkspaceMessageRow extends StatelessWidget {
             Row(
               children: [
                 Text(
-                  compactIdentifier(message.senderPubkey),
+                  authorName,
                   style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
                 const SizedBox(width: 7),
@@ -1199,6 +1277,12 @@ class _PeopleDirectory extends StatefulWidget {
     required this.onRedeemInvite,
     required this.members,
     required this.ownPubkey,
+    required this.displayName,
+    required this.memberAliases,
+    required this.memberNames,
+    required this.onOpenDirect,
+    required this.onDisplayNameChanged,
+    required this.onMemberAliasChanged,
   });
   final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
@@ -1208,12 +1292,21 @@ class _PeopleDirectory extends StatefulWidget {
   final Future<void> Function(String) onRedeemInvite;
   final List<String> members;
   final String ownPubkey;
+  final String displayName;
+  final Map<String, String> memberAliases;
+  final Map<String, String> memberNames;
+  final ValueChanged<String> onOpenDirect;
+  final ValueChanged<String> onDisplayNameChanged;
+  final void Function(String pubkey, String alias) onMemberAliasChanged;
   @override
   State<_PeopleDirectory> createState() => _PeopleDirectoryState();
 }
 
 class _PeopleDirectoryState extends State<_PeopleDirectory> {
   final _code = TextEditingController();
+  late final TextEditingController _displayName = TextEditingController(
+    text: widget.displayName,
+  );
 
   Future<void> _scanCode() async {
     if (!_supportsCameraQrScan) return;
@@ -1226,7 +1319,50 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
   @override
   void dispose() {
     _code.dispose();
+    _displayName.dispose();
     super.dispose();
+  }
+
+  String _memberLabel(String pubkey) {
+    if (pubkey == widget.ownPubkey) {
+      return widget.memberNames[pubkey] ??
+          (_displayName.text.trim().isEmpty ? 'You' : _displayName.text.trim());
+    }
+    return widget.memberAliases[pubkey] ??
+        widget.memberNames[pubkey] ??
+        compactIdentifier(pubkey);
+  }
+
+  Future<void> _editAlias(String pubkey) async {
+    final controller = TextEditingController(
+      text: widget.memberAliases[pubkey] ?? widget.memberNames[pubkey] ?? '',
+    );
+    final alias = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Member name'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'Local name',
+            helperText: 'Saved only on this device',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (alias != null) widget.onMemberAliasChanged(pubkey, alias);
   }
 
   @override
@@ -1244,16 +1380,51 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
         const SizedBox(height: 6),
         Text('Workspace status: ${widget.memberStatus}'),
         const SizedBox(height: 18),
+        Text('Your profile', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _displayName,
+          textInputAction: TextInputAction.done,
+          onSubmitted: widget.onDisplayNameChanged,
+          decoration: InputDecoration(
+            labelText: 'Display name',
+            hintText: 'How teammates see you',
+            border: const OutlineInputBorder(),
+            suffixIcon: IconButton(
+              tooltip: 'Save display name',
+              icon: const Icon(Icons.save_outlined),
+              onPressed: () => widget.onDisplayNameChanged(_displayName.text),
+            ),
+          ),
+        ),
+        const SizedBox(height: 24),
+        Text('Members', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 6),
+        if (people.isEmpty)
+          const ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text('No workspace members yet'),
+          ),
         for (final person in people)
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: CircleAvatar(child: Icon(Icons.person_outline)),
-            title: Text(
-              person == widget.ownPubkey ? 'You' : compactIdentifier(person),
-            ),
+            title: Text(_memberLabel(person)),
             subtitle: Text(
-              person == widget.ownPubkey ? widget.memberStatus : 'Member',
+              person == widget.ownPubkey
+                  ? '${widget.memberStatus} (you)'
+                  : 'Member',
             ),
+            trailing: person == widget.ownPubkey
+                ? null
+                : IconButton(
+                    icon: const Icon(Icons.edit_outlined),
+                    tooltip: 'Set local name',
+                    onPressed: () => _editAlias(person),
+                  ),
+            onTap: person == widget.ownPubkey
+                ? null
+                : () => widget.onOpenDirect(person),
           ),
         const Divider(height: 36),
         Text('Invite member', style: Theme.of(context).textTheme.titleMedium),
@@ -4889,6 +5060,7 @@ class _MessageTileState extends State<_MessageTile>
   bool _flash = false;
   bool _cancelHoldTriggered = false;
   Timer? _cancelHoldTimer;
+  final Set<String> _downloadingAttachments = {};
   late final AnimationController _equalizerController;
   late final AnimationController _cancelHoldController;
 
@@ -4980,6 +5152,40 @@ class _MessageTileState extends State<_MessageTile>
     _cancelHoldTimer = null;
     _cancelHoldTriggered = false;
     _cancelHoldController.reset();
+  }
+
+  Future<void> _downloadAndOpenAttachment(
+    BridgeAudioReference attachment,
+  ) async {
+    final key = attachment.sha256;
+    if (_downloadingAttachments.contains(key)) return;
+    setState(() => _downloadingAttachments.add(key));
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final downloaded = await blossomDownloadAttachment(
+        attachment: attachment,
+        destinationDir: '${directory.path}${Platform.pathSeparator}attachments',
+      );
+      final result = await OpenFilex.open(
+        downloaded.path,
+        type: downloaded.mediaType,
+      );
+      if (result.type != ResultType.done && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Downloaded ${downloaded.name}: ${result.message}'),
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Attachment download failed: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _downloadingAttachments.remove(key));
+    }
   }
 
   @override
@@ -5164,6 +5370,28 @@ class _MessageTileState extends State<_MessageTile>
             ],
           ),
           const SizedBox(height: 8),
+          if (widget.message.attachments.isNotEmpty) ...[
+            for (final attachment in widget.message.attachments)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: OutlinedButton.icon(
+                  onPressed: _downloadingAttachments.contains(attachment.sha256)
+                      ? null
+                      : () => _downloadAndOpenAttachment(attachment),
+                  icon: _downloadingAttachments.contains(attachment.sha256)
+                      ? const SizedBox.square(
+                          dimension: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.download_outlined),
+                  label: Text(
+                    _downloadingAttachments.contains(attachment.sha256)
+                        ? 'Downloading ${attachment.name ?? 'attachment'}...'
+                        : 'Download ${attachment.name ?? 'attachment'}',
+                  ),
+                ),
+              ),
+          ],
           if (transcribing)
             Align(
               alignment: Alignment.centerLeft,

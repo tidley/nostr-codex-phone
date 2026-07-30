@@ -41,10 +41,72 @@ void main() {
     expect(state.messages['channel-1']![1].parentId, 'message-1');
   });
 
+  test('workspace state applies a broadcast channel creation', () {
+    final state = WorkspaceState();
+
+    state.apply({
+      'workspace_update': {
+        'action': 'channel_created',
+        'channels': [
+          {
+            'id': 'channel-1',
+            'name': 'engineering',
+            'created_by': 'owner',
+            'created_at': 42,
+          },
+        ],
+      },
+    });
+
+    expect(state.channels, hasLength(1));
+    expect(state.channels.single.id, 'channel-1');
+    expect(state.channels.single.name, 'engineering');
+  });
+
   test('direct message keys are stable regardless of participant order', () {
     expect(
       WorkspaceState.directKey('alice', 'bob'),
       WorkspaceState.directKey('bob', 'alice'),
     );
+  });
+
+  test('workspace uses a channel name and accepts local member aliases', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'channels': [
+            {'id': 'channel-1', 'name': 'engineering'},
+          ],
+        },
+      });
+
+    expect(state.channelName('channel-1'), 'engineering');
+    expect(decodeWorkspaceMemberAliases('{"worker":"Desktop"}'), {
+      'worker': 'Desktop',
+    });
+    expect(decodeWorkspaceMemberAliases('not json'), isEmpty);
+  });
+
+  test('workspace stores synced member profile names', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'members': [
+            {'pubkey': 'worker', 'display_name': 'Desktop'},
+          ],
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'profile_updated',
+          'members': [
+            {'pubkey': 'worker', 'display_name': 'Build machine'},
+          ],
+        },
+      });
+
+    expect(state.members, ['worker']);
+    expect(state.memberNames['worker'], 'Build machine');
   });
 }
