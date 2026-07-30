@@ -34,8 +34,8 @@ use rust_lib_nostr_codex_phone::protocol::{
     parse_media_bundle_query, parse_wire_message, AudioReference, CreateInvite, InviteAccepted,
     InviteCreated, InviteRejected, MediaBundle, MediaReference, OpenCodeSessionList,
     OpenCodeSessionListEntry, RedeemInvite, RepoList, RepoListEntry, RepoListRoot, TargetInvite,
-    TargetParent, ToolResult, WireMessage, WorkspaceChannelPayload, WorkspaceMessagePayload,
-    WorkspaceRequest, WorkspaceUpdate,
+    TargetParent, ToolResult, WireMessage, WorkspaceChannelPayload, WorkspaceMemberPayload,
+    WorkspaceMessagePayload, WorkspaceRequest, WorkspaceUpdate,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
@@ -715,9 +715,7 @@ async fn main() -> Result<()> {
         &codex_config.working_dir,
         "workspace.sqlite3",
     ))?;
-    if let Some(owner) = &owner_peer_hex {
-        workspace.add_member(owner)?;
-    }
+    initialize_workspace_members(&workspace, owner_peer_hex.as_deref(), &allowed_owner_hexes)?;
     run_worker_runtime(WorkerRuntimeConfig {
         messenger,
         worker_env,
@@ -1016,7 +1014,12 @@ fn invite_redemption_code(message: &IncomingMessage) -> Option<String> {
 }
 
 fn workspace_request(message: &IncomingMessage) -> Option<WorkspaceRequest> {
-    match parse_wire_message(&message.raw_json).ok()? {
+    let raw = if message.kind == "workspace_request" {
+        &message.raw_json
+    } else {
+        &message.text
+    };
+    match parse_wire_message(raw).ok()? {
         WireMessage::WorkspaceRequest { workspace_request } => Some(workspace_request),
         _ => None,
     }
@@ -1036,7 +1039,11 @@ async fn process_workspace_request(
                 .into_iter()
                 .map(channel_payload)
                 .collect(),
-            members: workspace.members()?,
+            members: workspace
+                .members()?
+                .into_iter()
+                .map(member_payload)
+                .collect(),
             messages: vec![],
         },
         "create_channel" => {
@@ -1046,6 +1053,20 @@ async fn process_workspace_request(
                 action: "channel_created".to_string(),
                 channels: vec![channel_payload(channel)],
                 members: vec![],
+                messages: vec![],
+            };
+            broadcast_workspace_update(workspace, messenger, &update).await?;
+            return Ok(());
+        }
+        "set_profile" => {
+            let member = workspace.set_member_display_name(
+                sender,
+                request.display_name.as_deref().unwrap_or_default(),
+            )?;
+            let update = WorkspaceUpdate {
+                action: "profile_updated".to_string(),
+                channels: vec![],
+                members: vec![member_payload(member)],
                 messages: vec![],
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
@@ -1129,8 +1150,27 @@ async fn broadcast_workspace_update(
 ) -> Result<()> {
     for member in workspace.members()? {
         messenger
-            .send_wire_to_pubkey(&member, WireMessage::workspace_update(update.clone()))
+            .send_wire_to_pubkey(
+                &member.pubkey,
+                WireMessage::workspace_update(update.clone()),
+            )
             .await?;
+    }
+    Ok(())
+}
+
+fn initialize_workspace_members(
+    workspace: &WorkspaceStore,
+    owner: Option<&str>,
+    allowed_members: &[String],
+) -> Result<()> {
+    if let Some(owner) = owner {
+        workspace.add_member(owner)?;
+    }
+    // Existing trusted worker recipients are workspace members on first start.
+    // This preserves established owner/peer access when workspace storage is added.
+    for member in allowed_members {
+        workspace.add_member(member)?;
     }
     Ok(())
 }
@@ -1143,6 +1183,15 @@ fn channel_payload(
         name: channel.name,
         created_by: channel.created_by,
         created_at: channel.created_at,
+    }
+}
+
+fn member_payload(
+    member: rust_lib_nostr_codex_phone::workspace::WorkspaceMember,
+) -> WorkspaceMemberPayload {
+    WorkspaceMemberPayload {
+        pubkey: member.pubkey,
+        display_name: member.display_name,
     }
 }
 fn message_payload(message: WorkspaceMessage) -> WorkspaceMessagePayload {
@@ -5253,6 +5302,25 @@ mod tests {
                 model: None,
             },
         }
+    }
+
+    #[test]
+    fn seeds_all_trusted_recipients_as_workspace_members() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceStore::open(&temp_dir.path().join("workspace.sqlite3")).unwrap();
+        let trusted = vec!["phone".to_string(), "desktop".to_string()];
+
+        initialize_workspace_members(&workspace, Some("owner"), &trusted).unwrap();
+
+        let mut members = workspace.members().unwrap();
+        members.sort_by(|left, right| left.pubkey.cmp(&right.pubkey));
+        assert_eq!(
+            members
+                .into_iter()
+                .map(|member| member.pubkey)
+                .collect::<Vec<_>>(),
+            vec!["desktop", "owner", "phone"],
+        );
     }
 
     #[test]

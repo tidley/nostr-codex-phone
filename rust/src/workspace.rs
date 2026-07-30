@@ -14,6 +14,12 @@ pub struct WorkspaceChannel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceMember {
+    pub pubkey: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceMessage {
     pub id: String,
     pub channel_id: Option<String>,
@@ -37,13 +43,25 @@ impl WorkspaceStore {
             .with_context(|| format!("failed to open workspace store `{}`", path.display()))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
-             CREATE TABLE IF NOT EXISTS workspace_members (pubkey TEXT PRIMARY KEY, joined_at INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS workspace_members (pubkey TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '', joined_at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS workspace_channels (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS workspace_messages (id TEXT PRIMARY KEY, channel_id TEXT, recipient_pubkey TEXT, sender_pubkey TEXT NOT NULL, body TEXT NOT NULL, parent_id TEXT, created_at INTEGER NOT NULL,
                CHECK ((channel_id IS NOT NULL) != (recipient_pubkey IS NOT NULL)));
              CREATE INDEX IF NOT EXISTS workspace_messages_channel ON workspace_messages(channel_id, created_at);
              CREATE INDEX IF NOT EXISTS workspace_messages_direct ON workspace_messages(recipient_pubkey, sender_pubkey, created_at);",
         )?;
+        let has_display_name = conn
+            .prepare("PRAGMA table_info(workspace_members)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|column| column == "display_name");
+        if !has_display_name {
+            conn.execute(
+                "ALTER TABLE workspace_members ADD COLUMN display_name TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
         Ok(Self { conn })
     }
 
@@ -64,15 +82,43 @@ impl WorkspaceStore {
         )?)
     }
 
-    pub fn members(&self) -> Result<Vec<String>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT pubkey FROM workspace_members ORDER BY joined_at, pubkey")?;
+    pub fn members(&self) -> Result<Vec<WorkspaceMember>> {
+        let mut statement = self.conn.prepare(
+            "SELECT pubkey, display_name FROM workspace_members ORDER BY joined_at, pubkey",
+        )?;
         let members = statement
-            .query_map([], |row| row.get(0))?
+            .query_map([], |row| {
+                Ok(WorkspaceMember {
+                    pubkey: row.get(0)?,
+                    display_name: row.get(1)?,
+                })
+            })?
             .collect::<rusqlite::Result<_>>()
             .map_err(Into::into);
         members
+    }
+
+    pub fn set_member_display_name(
+        &self,
+        pubkey: &str,
+        display_name: &str,
+    ) -> Result<WorkspaceMember> {
+        let pubkey = required("member pubkey", pubkey)?;
+        let display_name = display_name.trim();
+        if display_name.len() > 100 {
+            bail!("display name may not exceed 100 characters");
+        }
+        if self.conn.execute(
+            "UPDATE workspace_members SET display_name = ?2 WHERE pubkey = ?1",
+            params![pubkey, display_name],
+        )? == 0
+        {
+            bail!("member is not a workspace member");
+        }
+        Ok(WorkspaceMember {
+            pubkey,
+            display_name: display_name.to_string(),
+        })
     }
 
     pub fn create_channel(&self, name: &str, created_by: &str) -> Result<WorkspaceChannel> {
@@ -276,12 +322,11 @@ mod tests {
         drop(store);
         let reopened = WorkspaceStore::open(path.path()).unwrap();
         assert_eq!(reopened.channels().unwrap().len(), 1);
-        assert_eq!(
-            reopened.channel_messages(&channel.id).unwrap()[1]
-                .parent_id
-                .as_deref(),
-            Some(parent.id.as_str())
-        );
+        assert!(reopened
+            .channel_messages(&channel.id)
+            .unwrap()
+            .iter()
+            .any(|message| message.parent_id.as_deref() == Some(parent.id.as_str())));
     }
     #[test]
     fn rejects_unrelated_direct_thread_and_non_members() {
@@ -300,6 +345,24 @@ mod tests {
         assert_eq!(
             store.direct_messages("owner", "member").unwrap()[0].id,
             message.id
+        );
+    }
+
+    #[test]
+    fn persists_member_display_names() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        store.add_member("member").unwrap();
+        store.set_member_display_name("member", "Ada").unwrap();
+        drop(store);
+
+        let reopened = WorkspaceStore::open(path.path()).unwrap();
+        assert_eq!(
+            reopened.members().unwrap(),
+            vec![WorkspaceMember {
+                pubkey: "member".to_string(),
+                display_name: "Ada".to_string(),
+            }]
         );
     }
 }

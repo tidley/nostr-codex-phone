@@ -12,6 +12,7 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
 import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
 import 'package:nostr_codex_phone/src/bridge_json.dart';
@@ -42,7 +43,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.75+275';
+const _appVersion = '0.2.76+276';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -279,6 +280,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _unreadCountsStorageKey = 'unread_counts_v1';
   static const _repoChoicesStorageKey = 'repo_choices_v1';
   static const _recentSessionIdsStorageKey = 'recent_session_ids_v1';
+  static const _workspaceDisplayNameStorageKey = 'workspace_display_name';
+  static const _workspaceMemberAliasesStorageKey = 'workspace_member_aliases';
   static const _profileStorageKeys = <String>[
     _secretKeyStorageKey,
     _peerPubkeyStorageKey,
@@ -312,6 +315,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _unreadCountsStorageKey,
     _repoChoicesStorageKey,
     _recentSessionIdsStorageKey,
+    _workspaceDisplayNameStorageKey,
+    _workspaceMemberAliasesStorageKey,
   ];
   static const _recentMessagesWindow = Duration(days: 4);
   static const _maxConversationMessages = 200;
@@ -416,6 +421,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   String? _workspaceInviteCode;
   String _workspaceMemberStatus = 'Owner';
   final WorkspaceState _workspace = WorkspaceState();
+  String _workspaceDisplayName = '';
+  Map<String, String> _workspaceMemberAliases = {};
 
   bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
 
@@ -718,6 +725,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final recentSessionIds = await _storage.read(
       key: _recentSessionIdsStorageKey,
     );
+    final workspaceDisplayName = await _storage.read(
+      key: _workspaceDisplayNameStorageKey,
+    );
+    final workspaceMemberAliases = await _storage.read(
+      key: _workspaceMemberAliasesStorageKey,
+    );
 
     final migratedRelays = relays?.replaceAll(',', '\n') ?? defaultRelays;
     final targets = _decodeRepoTargets(repoTargets);
@@ -817,6 +830,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         ..addAll(_decodeUnreadCounts(unreadCounts));
       _cachedRepoChoices = _decodeRepoChoicesCache(repoChoices);
       _recentSessionIds = _decodeStringList(recentSessionIds);
+      _workspaceDisplayName = _cleanStoredString(workspaceDisplayName) ?? '';
+      _workspaceMemberAliases = decodeWorkspaceMemberAliases(
+        workspaceMemberAliases,
+      );
       _loadingSettings = false;
     });
     await _loadConversationHistoryForActiveSession();
@@ -909,6 +926,42 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _saveReceiveVibrationEnabled();
     await _saveInactiveReplyPopupEnabled();
     await _saveInactiveReplyAudioEnabled();
+    await _saveWorkspaceIdentity();
+  }
+
+  Future<void> _saveWorkspaceIdentity() => Future.wait([
+    _storage.write(
+      key: _workspaceDisplayNameStorageKey,
+      value: _workspaceDisplayName,
+    ),
+    _storage.write(
+      key: _workspaceMemberAliasesStorageKey,
+      value: jsonEncode(_workspaceMemberAliases),
+    ),
+  ]);
+
+  void _setWorkspaceDisplayName(String value) {
+    final displayName = value.trim();
+    setState(() => _workspaceDisplayName = displayName);
+    unawaited(_saveWorkspaceIdentity());
+    unawaited(
+      _sendWorkspaceRequest({
+        'action': 'set_profile',
+        'display_name': displayName,
+      }),
+    );
+  }
+
+  void _setWorkspaceMemberAlias(String pubkey, String value) {
+    final alias = value.trim();
+    setState(() {
+      if (alias.isEmpty) {
+        _workspaceMemberAliases.remove(pubkey);
+      } else {
+        _workspaceMemberAliases[pubkey] = alias;
+      }
+    });
+    unawaited(_saveWorkspaceIdentity());
   }
 
   Future<void> _exportProfile() async {
@@ -3361,6 +3414,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _status = 'Checking recent messages...';
       });
       await _fetchRecentInboxMessages(allowCatchUpSpeech: true);
+      await _sendWorkspaceRequest({'action': 'list'});
       if (!mounted) return;
       setState(() {
         _connecting = false;
@@ -4147,6 +4201,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       text: message.text,
       eventId: message.eventId,
       timestamp: DateTime.now(),
+      attachments: attachmentsFromWireJson(message.kind, message.rawJson),
     );
     setState(() {
       if (message.kind == 'response') {
@@ -6381,6 +6436,21 @@ Return a concise catch-up summary of what happened after that point: completed w
         memberStatus: _workspaceMemberStatus,
         workspace: _workspace,
         ownPubkey: _ownPubkeyHex ?? '',
+        displayName: _workspaceDisplayName,
+        memberAliases: _workspaceMemberAliases,
+        memberNames: {
+          ..._workspace.memberNames,
+          if ((_ownPubkeyHex ?? '').isNotEmpty &&
+              _workspaceDisplayName.isNotEmpty &&
+              !_workspace.memberNames.containsKey(_ownPubkeyHex))
+            _ownPubkeyHex!: _workspaceDisplayName,
+          for (final target in _computerServiceTargets)
+            if (target.pubkey.trim().isNotEmpty)
+              target.pubkey:
+                  _workspace.memberNames[target.pubkey] ?? target.displayName,
+        },
+        onDisplayNameChanged: _setWorkspaceDisplayName,
+        onMemberAliasChanged: _setWorkspaceMemberAlias,
         onRequest: _sendWorkspaceRequest,
         onCreateInvite: _createWorkspaceInvite,
         onRedeemInvite: _redeemWorkspaceInvite,

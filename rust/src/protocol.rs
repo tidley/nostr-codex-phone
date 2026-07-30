@@ -187,6 +187,8 @@ pub struct WorkspaceRequest {
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,9 +197,16 @@ pub struct WorkspaceUpdate {
     #[serde(default)]
     pub channels: Vec<WorkspaceChannelPayload>,
     #[serde(default)]
-    pub members: Vec<String>,
+    pub members: Vec<WorkspaceMemberPayload>,
     #[serde(default)]
     pub messages: Vec<WorkspaceMessagePayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceMemberPayload {
+    pub pubkey: String,
+    #[serde(default)]
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1269,6 +1278,28 @@ mod tests {
             r#"{"workspace_request":{"action":"send_direct_message","body":"missing recipient"}}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn parses_channel_created_workspace_update() {
+        let parsed = parse_wire_message(
+            r#"{"workspace_update":{"action":"channel_created","channels":[{"id":"channel-1","name":"engineering","created_by":"owner","created_at":42}]}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.kind(), "workspace_update");
+        assert_eq!(parsed.text(), "channel_created");
+    }
+
+    #[test]
+    fn parses_workspace_profile_update() {
+        let parsed = parse_wire_message(
+            r#"{"workspace_update":{"action":"profile_updated","members":[{"pubkey":"member","display_name":"Ada"}]}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.kind(), "workspace_update");
+        assert_eq!(parsed.text(), "profile_updated");
     }
 
     #[test]
