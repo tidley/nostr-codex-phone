@@ -44,6 +44,12 @@ pub enum WireMessage {
     InviteRejected {
         invite_rejected: InviteRejected,
     },
+    WorkspaceRequest {
+        workspace_request: WorkspaceRequest,
+    },
+    WorkspaceUpdate {
+        workspace_update: WorkspaceUpdate,
+    },
     RepoList {
         repo_list: RepoList,
     },
@@ -169,6 +175,53 @@ pub struct InviteRejected {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRequest {
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceUpdate {
+    pub action: String,
+    #[serde(default)]
+    pub channels: Vec<WorkspaceChannelPayload>,
+    #[serde(default)]
+    pub members: Vec<String>,
+    #[serde(default)]
+    pub messages: Vec<WorkspaceMessagePayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceChannelPayload {
+    pub id: String,
+    pub name: String,
+    pub created_by: String,
+    pub created_at: i64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceMessagePayload {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipient_pubkey: Option<String>,
+    pub sender_pubkey: String,
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetParent {
     pub name: String,
     pub pubkey: String,
@@ -277,6 +330,12 @@ impl WireMessage {
     pub fn invite_rejected(invite_rejected: InviteRejected) -> Self {
         Self::InviteRejected { invite_rejected }
     }
+    pub fn workspace_request(workspace_request: WorkspaceRequest) -> Self {
+        Self::WorkspaceRequest { workspace_request }
+    }
+    pub fn workspace_update(workspace_update: WorkspaceUpdate) -> Self {
+        Self::WorkspaceUpdate { workspace_update }
+    }
 
     pub fn repo_list(repo_list: RepoList) -> Self {
         Self::RepoList { repo_list }
@@ -334,6 +393,8 @@ impl WireMessage {
             Self::RedeemInvite { .. } => "redeem_invite",
             Self::InviteAccepted { .. } => "invite_accepted",
             Self::InviteRejected { .. } => "invite_rejected",
+            Self::WorkspaceRequest { .. } => "workspace_request",
+            Self::WorkspaceUpdate { .. } => "workspace_update",
             Self::RepoList { .. } => "repo_list",
             Self::OpenCodeSessionList { .. } => "opencode_sessions",
             Self::ToolResult { .. } => "tool_result",
@@ -359,6 +420,8 @@ impl WireMessage {
             Self::RedeemInvite { redeem_invite } => &redeem_invite.code,
             Self::InviteAccepted { invite_accepted } => &invite_accepted.recipient_pubkey,
             Self::InviteRejected { invite_rejected } => &invite_rejected.reason,
+            Self::WorkspaceRequest { workspace_request } => &workspace_request.action,
+            Self::WorkspaceUpdate { workspace_update } => &workspace_update.action,
             Self::RepoList { .. } => "repo list",
             Self::OpenCodeSessionList { .. } => "OpenCode sessions",
             Self::ToolResult { tool_result } => &tool_result.tool,
@@ -401,6 +464,12 @@ impl WireMessage {
             }
             Self::InviteRejected { invite_rejected } => {
                 json!({ "invite_rejected": invite_rejected })
+            }
+            Self::WorkspaceRequest { workspace_request } => {
+                json!({ "workspace_request": workspace_request })
+            }
+            Self::WorkspaceUpdate { workspace_update } => {
+                json!({ "workspace_update": workspace_update })
             }
             Self::RepoList { repo_list } => json!({ "repo_list": repo_list }),
             Self::OpenCodeSessionList { opencode_sessions } => {
@@ -516,6 +585,17 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
             serde_json::from_value(value.clone())
                 .map_err(|err| anyhow!("field `invite_rejected` is invalid: {err}"))?,
         ));
+    }
+    if let Some(value) = object.get("workspace_request") {
+        let request: WorkspaceRequest = serde_json::from_value(value.clone())
+            .map_err(|err| anyhow!("field `workspace_request` is invalid: {err}"))?;
+        validate_workspace_request(&request)?;
+        return Ok(WireMessage::workspace_request(request));
+    }
+    if let Some(value) = object.get("workspace_update") {
+        let update: WorkspaceUpdate = serde_json::from_value(value.clone())
+            .map_err(|err| anyhow!("field `workspace_update` is invalid: {err}"))?;
+        return Ok(WireMessage::workspace_update(update));
     }
 
     if let Some(repo_list) = object.get("repo_list") {
@@ -802,6 +882,63 @@ fn validate_redeem_invite(invite: &RedeemInvite) -> Result<()> {
         return Err(anyhow!("field `redeem_invite.code` is invalid"));
     }
     Ok(())
+}
+
+fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
+    match request.action.as_str() {
+        "list" => Ok(()),
+        "create_channel"
+            if request
+                .channel_name
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        "list_channel_messages"
+            if request
+                .channel_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        "list_direct_messages"
+            if request
+                .recipient_pubkey
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        "send_channel_message"
+            if request
+                .channel_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && request
+                    .body
+                    .as_deref()
+                    .is_some_and(|body| !body.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        "send_direct_message"
+            if request
+                .recipient_pubkey
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && request
+                    .body
+                    .as_deref()
+                    .is_some_and(|body| !body.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        _ => Err(anyhow!(
+            "workspace request is incomplete or has an unsupported action"
+        )),
+    }
 }
 
 fn validate_repo_list(repo_list: &RepoList) -> Result<()> {
@@ -1121,6 +1258,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(redeem.kind(), "redeem_invite");
+    }
+
+    #[test]
+    fn parses_workspace_request_contract() {
+        let parsed = parse_wire_message(r#"{"workspace_request":{"action":"send_channel_message","channel_id":"c1","body":"hello","parent_id":"p1"}}"#).unwrap();
+        assert_eq!(parsed.kind(), "workspace_request");
+        assert!(parsed.to_json().unwrap().contains("parent_id"));
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"send_direct_message","body":"missing recipient"}}"#
+        )
+        .is_err());
     }
 
     #[test]

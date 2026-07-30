@@ -27,6 +27,7 @@ import 'package:nostr_codex_phone/src/text_utils.dart';
 import 'package:nostr_codex_phone/src/tool_result_models.dart';
 import 'package:nostr_codex_phone/src/working_animation.dart';
 import 'package:nostr_codex_phone/src/workspace_invite.dart';
+import 'package:nostr_codex_phone/src/workspace_models.dart';
 import 'package:nostr_codex_phone/src/voice_recording.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -41,7 +42,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.74+274';
+const _appVersion = '0.2.75+275';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -407,12 +408,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   VoiceRecordingFormat? _activeRecordingFormat;
   Duration _voiceSendWipeDuration = defaultVoiceTranscriptionEstimate;
   String? _ownPubkey;
+  String? _ownPubkeyHex;
   String? _status;
   MediaSelection? _pendingMediaAttachment;
   String? _pendingMediaFileName;
   bool _showTeamWorkspace = true;
   String? _workspaceInviteCode;
   String _workspaceMemberStatus = 'Owner';
+  final WorkspaceState _workspace = WorkspaceState();
 
   bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
 
@@ -3288,6 +3291,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       setState(() {
         _secretKeyController.text = pair.secretKey;
         _ownPubkey = pair.publicKey;
+        _ownPubkeyHex = pair.publicKeyHex;
         _status = 'Generated local key';
       });
       await _saveSettings();
@@ -3299,15 +3303,24 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   void _refreshOwnPubkey() {
     final secret = _secretKeyController.text.trim();
     if (secret.isEmpty) {
-      setState(() => _ownPubkey = null);
+      setState(() {
+        _ownPubkey = null;
+        _ownPubkeyHex = null;
+      });
       return;
     }
 
     try {
       final pair = nostrPublicKey(secretKey: secret);
-      setState(() => _ownPubkey = pair.publicKey);
+      setState(() {
+        _ownPubkey = pair.publicKey;
+        _ownPubkeyHex = pair.publicKeyHex;
+      });
     } catch (_) {
-      setState(() => _ownPubkey = null);
+      setState(() {
+        _ownPubkey = null;
+        _ownPubkeyHex = null;
+      });
     }
   }
 
@@ -3344,6 +3357,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _connectedPeerPubkey = peer;
         _connectedRelays = relays;
         _ownPubkey = status.publicKey;
+        _ownPubkeyHex = status.publicKeyHex;
         _status = 'Checking recent messages...';
       });
       await _fetchRecentInboxMessages(allowCatchUpSpeech: true);
@@ -3399,6 +3413,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _connectedPeerPubkey = peer;
         _connectedRelays = relays;
         _ownPubkey = status.publicKey;
+        _ownPubkeyHex = status.publicKeyHex;
         _status = 'Connected to ${target.displayName}';
       });
       _startPolling();
@@ -3834,6 +3849,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _connected = true;
         _connecting = false;
         _ownPubkey = status.publicKey;
+        _ownPubkeyHex = status.publicKeyHex;
         _status = 'Reconnected to ${status.relayCount} relays';
       });
       _startPolling();
@@ -3980,6 +3996,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               rejected?['reason']?.toString() ?? 'Invite rejected';
         }
       });
+      return true;
+    }
+
+    if (message.kind == 'workspace_update') {
+      if (!_incomingFromActivePeer(message)) return false;
+      try {
+        final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
+        setState(() => _workspace.apply(decoded));
+      } catch (_) {
+        _showError('Received malformed workspace update');
+      }
       return true;
     }
 
@@ -6352,6 +6379,9 @@ Return a concise catch-up summary of what happened after that point: completed w
         onOpenSettings: () => unawaited(_openSettings()),
         inviteCode: _workspaceInviteCode,
         memberStatus: _workspaceMemberStatus,
+        workspace: _workspace,
+        ownPubkey: _ownPubkeyHex ?? '',
+        onRequest: _sendWorkspaceRequest,
         onCreateInvite: _createWorkspaceInvite,
         onRedeemInvite: _redeemWorkspaceInvite,
       );
@@ -6552,6 +6582,11 @@ Return a concise catch-up summary of what happened after that point: completed w
       }),
     );
     if (mounted) setState(() => _workspaceMemberStatus = 'Creating invite...');
+  }
+
+  Future<void> _sendWorkspaceRequest(Map<String, Object?> request) async {
+    if (!await _ensureConnectedToParentService()) return;
+    await nostrSendQuery(query: jsonEncode({'workspace_request': request}));
   }
 
   Future<void> _redeemWorkspaceInvite(String code) async {
