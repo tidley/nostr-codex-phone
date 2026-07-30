@@ -40,6 +40,15 @@ pub struct NostrMessenger {
 
 impl NostrMessenger {
     pub async fn connect(config: NostrConfig) -> Result<Self> {
+        Self::connect_with_unrestricted_inbox(config, false).await
+    }
+
+    // Workers authorize invite redemption after decrypting the DM, so they must
+    // receive unlisted senders long enough to reject or consume an invite.
+    pub async fn connect_with_unrestricted_inbox(
+        config: NostrConfig,
+        unrestricted_inbox: bool,
+    ) -> Result<Self> {
         if config.relays.is_empty() {
             bail!("at least one relay URL is required");
         }
@@ -54,7 +63,12 @@ impl NostrMessenger {
             .map(PublicKey::parse)
             .transpose()
             .context("invalid peer public key")?;
-        let receive_peers = parse_receive_peers(config.receive_pubkeys, peer)?;
+        let receive_peers = if unrestricted_inbox {
+            parse_receive_peers(config.receive_pubkeys, peer)?;
+            None
+        } else {
+            parse_receive_peers(config.receive_pubkeys, peer)?
+        };
         let client = Client::default();
 
         for relay in &config.relays {

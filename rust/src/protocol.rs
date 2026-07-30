@@ -29,6 +29,21 @@ pub enum WireMessage {
     TargetInvite {
         target_invite: TargetInvite,
     },
+    CreateInvite {
+        create_invite: CreateInvite,
+    },
+    InviteCreated {
+        invite_created: InviteCreated,
+    },
+    RedeemInvite {
+        redeem_invite: RedeemInvite,
+    },
+    InviteAccepted {
+        invite_accepted: InviteAccepted,
+    },
+    InviteRejected {
+        invite_rejected: InviteRejected,
+    },
     RepoList {
         repo_list: RepoList,
     },
@@ -131,6 +146,29 @@ pub struct TargetInvite {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateInvite {
+    #[serde(default)]
+    pub expires_in_seconds: Option<u64>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteCreated {
+    pub code: String,
+    pub expires_at: i64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedeemInvite {
+    pub code: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteAccepted {
+    pub recipient_pubkey: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InviteRejected {
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetParent {
     pub name: String,
     pub pubkey: String,
@@ -224,6 +262,21 @@ impl WireMessage {
     pub fn target_invite(target_invite: TargetInvite) -> Self {
         Self::TargetInvite { target_invite }
     }
+    pub fn create_invite(create_invite: CreateInvite) -> Self {
+        Self::CreateInvite { create_invite }
+    }
+    pub fn invite_created(invite_created: InviteCreated) -> Self {
+        Self::InviteCreated { invite_created }
+    }
+    pub fn redeem_invite(redeem_invite: RedeemInvite) -> Self {
+        Self::RedeemInvite { redeem_invite }
+    }
+    pub fn invite_accepted(invite_accepted: InviteAccepted) -> Self {
+        Self::InviteAccepted { invite_accepted }
+    }
+    pub fn invite_rejected(invite_rejected: InviteRejected) -> Self {
+        Self::InviteRejected { invite_rejected }
+    }
 
     pub fn repo_list(repo_list: RepoList) -> Self {
         Self::RepoList { repo_list }
@@ -276,6 +329,11 @@ impl WireMessage {
             Self::MediaBundle { .. } => "media_bundle",
             Self::AudioRetry { .. } => "audio_retry",
             Self::TargetInvite { .. } => "target_invite",
+            Self::CreateInvite { .. } => "create_invite",
+            Self::InviteCreated { .. } => "invite_created",
+            Self::RedeemInvite { .. } => "redeem_invite",
+            Self::InviteAccepted { .. } => "invite_accepted",
+            Self::InviteRejected { .. } => "invite_rejected",
             Self::RepoList { .. } => "repo_list",
             Self::OpenCodeSessionList { .. } => "opencode_sessions",
             Self::ToolResult { .. } => "tool_result",
@@ -296,6 +354,11 @@ impl WireMessage {
             }
             Self::AudioRetry { audio_retry } => &audio_retry.reason,
             Self::TargetInvite { target_invite } => &target_invite.name,
+            Self::CreateInvite { .. } => "create invite",
+            Self::InviteCreated { invite_created } => &invite_created.code,
+            Self::RedeemInvite { redeem_invite } => &redeem_invite.code,
+            Self::InviteAccepted { invite_accepted } => &invite_accepted.recipient_pubkey,
+            Self::InviteRejected { invite_rejected } => &invite_rejected.reason,
             Self::RepoList { .. } => "repo list",
             Self::OpenCodeSessionList { .. } => "OpenCode sessions",
             Self::ToolResult { tool_result } => &tool_result.tool,
@@ -330,6 +393,15 @@ impl WireMessage {
             }
             Self::AudioRetry { audio_retry } => json!({ "audio_retry": audio_retry }),
             Self::TargetInvite { target_invite } => json!({ "target_invite": target_invite }),
+            Self::CreateInvite { create_invite } => json!({ "create_invite": create_invite }),
+            Self::InviteCreated { invite_created } => json!({ "invite_created": invite_created }),
+            Self::RedeemInvite { redeem_invite } => json!({ "redeem_invite": redeem_invite }),
+            Self::InviteAccepted { invite_accepted } => {
+                json!({ "invite_accepted": invite_accepted })
+            }
+            Self::InviteRejected { invite_rejected } => {
+                json!({ "invite_rejected": invite_rejected })
+            }
             Self::RepoList { repo_list } => json!({ "repo_list": repo_list }),
             Self::OpenCodeSessionList { opencode_sessions } => {
                 json!({ "opencode_sessions": opencode_sessions })
@@ -414,6 +486,36 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
             .map_err(|err| anyhow!("field `target_invite` is invalid: {err}"))?;
         validate_target_invite(&target_invite)?;
         return Ok(WireMessage::target_invite(target_invite));
+    }
+    if let Some(value) = object.get("create_invite") {
+        return Ok(WireMessage::create_invite(
+            serde_json::from_value(value.clone())
+                .map_err(|err| anyhow!("field `create_invite` is invalid: {err}"))?,
+        ));
+    }
+    if let Some(value) = object.get("invite_created") {
+        return Ok(WireMessage::invite_created(
+            serde_json::from_value(value.clone())
+                .map_err(|err| anyhow!("field `invite_created` is invalid: {err}"))?,
+        ));
+    }
+    if let Some(value) = object.get("redeem_invite") {
+        return Ok(WireMessage::redeem_invite(
+            serde_json::from_value(value.clone())
+                .map_err(|err| anyhow!("field `redeem_invite` is invalid: {err}"))?,
+        ));
+    }
+    if let Some(value) = object.get("invite_accepted") {
+        return Ok(WireMessage::invite_accepted(
+            serde_json::from_value(value.clone())
+                .map_err(|err| anyhow!("field `invite_accepted` is invalid: {err}"))?,
+        ));
+    }
+    if let Some(value) = object.get("invite_rejected") {
+        return Ok(WireMessage::invite_rejected(
+            serde_json::from_value(value.clone())
+                .map_err(|err| anyhow!("field `invite_rejected` is invalid: {err}"))?,
+        ));
     }
 
     if let Some(repo_list) = object.get("repo_list") {
@@ -992,6 +1094,19 @@ mod tests {
             parsed.to_json().unwrap(),
             r#"{"target_invite":{"name":"repo","pubkey":"npub123","pubkey_hex":"abc123","relays":["wss://relay.damus.io","wss://nos.lol"],"type":"nostr_codex_target","version":1,"workdir":"/home/tom/code/repo"}}"#
         );
+    }
+
+    #[test]
+    fn parses_invite_protocol_contracts() {
+        let created = parse_wire_message(
+            r#"{ "invite_created": { "code": "A1B2C3D4E5", "expires_at": 42 } }"#,
+        )
+        .unwrap();
+        assert_eq!(created.kind(), "invite_created");
+        assert_eq!(created.text(), "A1B2C3D4E5");
+        let redeem =
+            parse_wire_message(r#"{ "redeem_invite": { "code": "A1B2C3D4E5" } }"#).unwrap();
+        assert_eq!(redeem.kind(), "redeem_invite");
     }
 
     #[test]

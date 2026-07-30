@@ -556,6 +556,703 @@ class _WorkersPage extends StatelessWidget {
 
 enum _WorkerAction { test, remove }
 
+enum _WorkspaceSection { channel, direct, people, sessions }
+
+class _WorkspaceMessage {
+  const _WorkspaceMessage(
+    this.author,
+    this.text,
+    this.time, {
+    this.agent = false,
+  });
+
+  final String author;
+  final String text;
+  final String time;
+  final bool agent;
+}
+
+class _TeamWorkspace extends StatefulWidget {
+  const _TeamWorkspace({
+    required this.sessions,
+    required this.onOpenSessions,
+    required this.onOpenSettings,
+    required this.inviteCode,
+    required this.memberStatus,
+    required this.onCreateInvite,
+    required this.onRedeemInvite,
+  });
+
+  final List<RepoTarget> sessions;
+  final VoidCallback onOpenSessions;
+  final VoidCallback onOpenSettings;
+  final String? inviteCode;
+  final String memberStatus;
+  final Future<void> Function() onCreateInvite;
+  final Future<void> Function(String code) onRedeemInvite;
+
+  @override
+  State<_TeamWorkspace> createState() => _TeamWorkspaceState();
+}
+
+class _TeamWorkspaceState extends State<_TeamWorkspace> {
+  final _composer = TextEditingController();
+  _WorkspaceSection _section = _WorkspaceSection.channel;
+  String _active = 'workspace';
+  _WorkspaceMessage? _thread;
+  final _messages = <String, List<_WorkspaceMessage>>{};
+
+  @override
+  void dispose() {
+    _composer.dispose();
+    super.dispose();
+  }
+
+  List<_WorkspaceMessage> get _activeMessages => _messages[_active] ?? const [];
+
+  String get _title {
+    switch (_section) {
+      case _WorkspaceSection.channel:
+        return '# ${_active.replaceAll('-', ' ')}';
+      case _WorkspaceSection.direct:
+        return 'Direct messages';
+      case _WorkspaceSection.people:
+        return 'People & agents';
+      case _WorkspaceSection.sessions:
+        return 'Sessions';
+    }
+  }
+
+  void _send() {
+    final text = _composer.text.trim();
+    if (text.isEmpty) return;
+    setState(() {
+      _messages
+          .putIfAbsent(_active, () => [])
+          .add(_WorkspaceMessage('You', text, 'Now'));
+      _composer.clear();
+    });
+  }
+
+  void _select(_WorkspaceSection section, String id) {
+    setState(() {
+      _section = section;
+      _active = id;
+      _thread = null;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final wide = MediaQuery.sizeOf(context).width >= 1080;
+    final medium = MediaQuery.sizeOf(context).width >= 720;
+    final sidebar = _WorkspaceSidebar(
+      selected: _section == _WorkspaceSection.channel ? _active : null,
+      direct: _section == _WorkspaceSection.direct ? _active : null,
+      sessions: widget.sessions,
+      onSelect: _select,
+      onSessions: widget.onOpenSessions,
+      onSettings: widget.onOpenSettings,
+    );
+    final conversation = _WorkspaceConversation(
+      title: _title,
+      section: _section,
+      messages: _activeMessages,
+      composer: _composer,
+      onSend: _send,
+      onOpenThread: (message) => setState(() => _thread = message),
+      onOpenSessions: widget.onOpenSessions,
+      inviteCode: widget.inviteCode,
+      memberStatus: widget.memberStatus,
+      onCreateInvite: widget.onCreateInvite,
+      onRedeemInvite: widget.onRedeemInvite,
+    );
+    final contextPane = _WorkspaceContext(
+      message: _thread,
+      title: _title,
+      onClose: () => setState(() => _thread = null),
+    );
+
+    return Scaffold(
+      backgroundColor: const Color(0xff101a19),
+      appBar: wide
+          ? null
+          : AppBar(
+              title: const Text('Code Call'),
+              actions: [
+                IconButton(
+                  onPressed: widget.onOpenSettings,
+                  icon: const Icon(Icons.tune_outlined),
+                ),
+              ],
+            ),
+      drawer: wide ? null : Drawer(child: SafeArea(child: sidebar)),
+      body: SafeArea(
+        child: Row(
+          children: [
+            if (wide) SizedBox(width: 280, child: sidebar),
+            if (wide) const VerticalDivider(width: 1),
+            Expanded(child: conversation),
+            if (medium) ...[
+              const VerticalDivider(width: 1),
+              SizedBox(width: wide ? 340 : 300, child: contextPane),
+            ],
+          ],
+        ),
+      ),
+      bottomNavigationBar: wide
+          ? null
+          : NavigationBar(
+              selectedIndex: _section.index.clamp(0, 2),
+              onDestinationSelected: (index) {
+                if (index == 0) {
+                  _select(_WorkspaceSection.channel, 'workspace');
+                }
+                if (index == 1) _select(_WorkspaceSection.direct, 'messages');
+                if (index == 2) _select(_WorkspaceSection.people, 'people');
+              },
+              destinations: const [
+                NavigationDestination(
+                  icon: Icon(Icons.forum_outlined),
+                  selectedIcon: Icon(Icons.forum),
+                  label: 'Channels',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.chat_bubble_outline),
+                  selectedIcon: Icon(Icons.chat_bubble),
+                  label: 'Messages',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.groups_outlined),
+                  selectedIcon: Icon(Icons.groups),
+                  label: 'People',
+                ),
+              ],
+            ),
+    );
+  }
+}
+
+class _WorkspaceSidebar extends StatelessWidget {
+  const _WorkspaceSidebar({
+    required this.selected,
+    required this.direct,
+    required this.sessions,
+    required this.onSelect,
+    required this.onSessions,
+    required this.onSettings,
+  });
+  final String? selected;
+  final String? direct;
+  final List<RepoTarget> sessions;
+  final void Function(_WorkspaceSection, String) onSelect;
+  final VoidCallback onSessions;
+  final VoidCallback onSettings;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget item(
+      IconData icon,
+      String label, {
+      bool selected = false,
+      VoidCallback? onTap,
+      String? badge,
+    }) => ListTile(
+      dense: true,
+      selected: selected,
+      selectedTileColor: const Color(0xff1d403b),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      leading: Icon(icon, size: 19),
+      title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+      trailing: badge == null
+          ? null
+          : Text(badge, style: Theme.of(context).textTheme.labelSmall),
+      onTap: onTap,
+    );
+    return ColoredBox(
+      color: const Color(0xff142321),
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(12, 18, 12, 16),
+        children: [
+          Row(
+            children: [
+              const CircleAvatar(
+                backgroundColor: Color(0xff65d8b1),
+                child: Icon(Icons.bolt, color: Color(0xff082019)),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Code Call',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const Text(
+                      'TEAM WORKSPACE',
+                      style: TextStyle(
+                        fontSize: 10,
+                        letterSpacing: 1.1,
+                        color: Color(0xff9cc6bb),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: onSettings,
+                icon: const Icon(Icons.settings_outlined),
+                tooltip: 'Settings',
+              ),
+            ],
+          ),
+          const SizedBox(height: 22),
+          Text(
+            'Conversations',
+            style: Theme.of(
+              context,
+            ).textTheme.labelLarge?.copyWith(color: const Color(0xff9cc6bb)),
+          ),
+          const SizedBox(height: 6),
+          item(Icons.tag, 'No channels yet', selected: selected == 'workspace', onTap: () => onSelect(_WorkspaceSection.channel, 'workspace')),
+          item(Icons.add_circle_outline, 'Create or join a channel', onTap: () {}),
+          const SizedBox(height: 18),
+          Text(
+            'Direct messages',
+            style: Theme.of(
+              context,
+            ).textTheme.labelLarge?.copyWith(color: const Color(0xff9cc6bb)),
+          ),
+          const SizedBox(height: 6),
+          item(Icons.chat_bubble_outline, 'No direct messages yet', selected: direct == 'messages', onTap: () => onSelect(_WorkspaceSection.direct, 'messages')),
+          item(
+            Icons.people_outline,
+            'People & agents',
+            onTap: () => onSelect(_WorkspaceSection.people, 'people'),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            'Focused work',
+            style: Theme.of(
+              context,
+            ).textTheme.labelLarge?.copyWith(color: const Color(0xff9cc6bb)),
+          ),
+          const SizedBox(height: 6),
+          item(
+            Icons.workspaces_outline,
+            'Sessions',
+            badge: sessions.isEmpty ? null : '${sessions.length}',
+            onTap: onSessions,
+          ),
+          for (final session in sessions.take(3))
+            item(
+              Icons.terminal_outlined,
+              session.displayName,
+              onTap: onSessions,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WorkspaceConversation extends StatelessWidget {
+  const _WorkspaceConversation({
+    required this.title,
+    required this.section,
+    required this.messages,
+    required this.composer,
+    required this.onSend,
+    required this.onOpenThread,
+    required this.onOpenSessions,
+    required this.inviteCode,
+    required this.memberStatus,
+    required this.onCreateInvite,
+    required this.onRedeemInvite,
+  });
+  final String title;
+  final _WorkspaceSection section;
+  final List<_WorkspaceMessage> messages;
+  final TextEditingController composer;
+  final VoidCallback onSend;
+  final ValueChanged<_WorkspaceMessage> onOpenThread;
+  final VoidCallback onOpenSessions;
+  final String? inviteCode;
+  final String memberStatus;
+  final Future<void> Function() onCreateInvite;
+  final Future<void> Function(String) onRedeemInvite;
+  @override
+  Widget build(BuildContext context) {
+    if (section == _WorkspaceSection.people) {
+      return _PeopleDirectory(
+        onOpenSessions: onOpenSessions,
+        inviteCode: inviteCode,
+        memberStatus: memberStatus,
+        onCreateInvite: onCreateInvite,
+        onRedeemInvite: onRedeemInvite,
+      );
+    }
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(24, 18, 20, 14),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      section == _WorkspaceSection.channel
+                          ? '6 members  ·  Team coordination and agent updates'
+                          : 'Direct message  ·  Active now',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(onPressed: () {}, icon: const Icon(Icons.search)),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: messages.isEmpty
+              ? const Center(child: Text('Start the conversation.'))
+              : ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
+                  itemCount: messages.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 18),
+                  itemBuilder: (context, index) {
+                    final m = messages[index];
+                    return _WorkspaceMessageRow(
+                      message: m,
+                      onThread: () => onOpenThread(m),
+                    );
+                  },
+                ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 18),
+          child: TextField(
+            controller: composer,
+            minLines: 1,
+            maxLines: 5,
+            onSubmitted: (_) => onSend(),
+            decoration: InputDecoration(
+              hintText: 'Message $title',
+              prefixIcon: const Icon(Icons.add_circle_outline),
+              suffixIcon: IconButton(
+                onPressed: onSend,
+                icon: const Icon(Icons.send),
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _WorkspaceMessageRow extends StatelessWidget {
+  const _WorkspaceMessageRow({required this.message, required this.onThread});
+  final _WorkspaceMessage message;
+  final VoidCallback onThread;
+  @override
+  Widget build(BuildContext context) => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      CircleAvatar(
+        radius: 18,
+        backgroundColor: message.agent
+            ? const Color(0xff315a90)
+            : const Color(0xff7b5ea7),
+        child: Icon(
+          message.agent ? Icons.smart_toy_outlined : Icons.person,
+          size: 19,
+        ),
+      ),
+      const SizedBox(width: 12),
+      Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  message.author,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                if (message.agent)
+                  const Padding(
+                    padding: EdgeInsets.only(left: 6),
+                    child: Text(
+                      'AGENT',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: Color(0xff65d8b1),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                const SizedBox(width: 7),
+                Text(
+                  message.time,
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+              ],
+            ),
+            const SizedBox(height: 3),
+            Text(message.text),
+          ],
+        ),
+      ),
+    ],
+  );
+}
+
+class _WorkspaceContext extends StatelessWidget {
+  const _WorkspaceContext({
+    required this.message,
+    required this.title,
+    required this.onClose,
+  });
+  final _WorkspaceMessage? message;
+  final String title;
+  final VoidCallback onClose;
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.all(20),
+    child: message == null
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Conversation details',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 18),
+              const _ContextLine(Icons.people_outline, '6 people and agents'),
+              const _ContextLine(Icons.push_pin_outlined, 'No pinned messages'),
+              const _ContextLine(
+                Icons.folder_outlined,
+                'Shared files will appear here',
+              ),
+              const Spacer(),
+              Text(
+                'Select a reply count to open a thread.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          )
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Thread',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  IconButton(onPressed: onClose, icon: const Icon(Icons.close)),
+                ],
+              ),
+              const Divider(),
+              const SizedBox(height: 12),
+              Text(message!.text, style: Theme.of(context).textTheme.bodyLarge),
+              const SizedBox(height: 20),
+              const _WorkspaceMessageRow(
+                message: _WorkspaceMessage(
+                  'Maya Chen',
+                  'I can validate that from the Android side.',
+                  '09:22',
+                ),
+                onThread: _noop,
+              ),
+              const SizedBox(height: 16),
+              const _WorkspaceMessageRow(
+                message: _WorkspaceMessage(
+                  'Build agent',
+                  'I will attach relay diagnostics to the session.',
+                  '09:24',
+                  agent: true,
+                ),
+                onThread: _noop,
+              ),
+              const Spacer(),
+              TextField(
+                decoration: const InputDecoration(
+                  hintText: 'Reply in thread',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+  );
+}
+
+void _noop() {}
+
+class _ContextLine extends StatelessWidget {
+  const _ContextLine(this.icon, this.text);
+  final IconData icon;
+  final String text;
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 16),
+    child: Row(
+      children: [
+        Icon(icon, size: 19),
+        const SizedBox(width: 10),
+        Expanded(child: Text(text)),
+      ],
+    ),
+  );
+}
+
+class _PeopleDirectory extends StatefulWidget {
+  const _PeopleDirectory({
+    required this.onOpenSessions,
+    required this.inviteCode,
+    required this.memberStatus,
+    required this.onCreateInvite,
+    required this.onRedeemInvite,
+  });
+  final VoidCallback onOpenSessions;
+  final String? inviteCode;
+  final String memberStatus;
+  final Future<void> Function() onCreateInvite;
+  final Future<void> Function(String) onRedeemInvite;
+  @override
+  State<_PeopleDirectory> createState() => _PeopleDirectoryState();
+}
+
+class _PeopleDirectoryState extends State<_PeopleDirectory> {
+  final _code = TextEditingController();
+
+  Future<void> _scanCode() async {
+    if (!_supportsCameraQrScan) return;
+    final value = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const _RepoTargetQrScannerPage()),
+    );
+    if (value != null) _code.text = value;
+  }
+
+  @override
+  void dispose() {
+    _code.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final people = [
+      ('You', 'Human · ${widget.memberStatus}'),
+      ('Build agent', 'Agent · Local worker'),
+    ];
+    return ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        Text(
+          'People & access',
+          style: Theme.of(
+            context,
+          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 6),
+        Text('Workspace status: ${widget.memberStatus}'),
+        const SizedBox(height: 18),
+        for (final person in people)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: CircleAvatar(
+              child: Icon(
+                person.$2.startsWith('Agent')
+                    ? Icons.smart_toy_outlined
+                    : Icons.person_outline,
+              ),
+            ),
+            title: Text(person.$1),
+            subtitle: Text(person.$2),
+          ),
+        const Divider(height: 36),
+        Text('Invite member', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        FilledButton.icon(
+          onPressed: () => widget.onCreateInvite(),
+          icon: const Icon(Icons.person_add_alt_1),
+          label: const Text('Generate 15-minute code'),
+        ),
+        if (widget.inviteCode != null)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: SelectableText(
+              widget.inviteCode!,
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+                letterSpacing: 2,
+              ),
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.copy),
+              onPressed: () =>
+                  Clipboard.setData(ClipboardData(text: widget.inviteCode!)),
+              tooltip: 'Copy code',
+            ),
+          ),
+        const Divider(height: 36),
+        Text('Join workspace', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _code,
+          textCapitalization: TextCapitalization.characters,
+          decoration: InputDecoration(
+            border: OutlineInputBorder(),
+            hintText: 'Paste or scan invite code',
+            suffixIcon: _supportsCameraQrScan
+                ? IconButton(
+                    icon: const Icon(Icons.qr_code_scanner),
+                    tooltip: 'Scan code',
+                    onPressed: _scanCode,
+                  )
+                : null,
+          ),
+        ),
+        const SizedBox(height: 8),
+        FilledButton(
+          onPressed: () => widget.onRedeemInvite(_code.text),
+          child: const Text('Redeem code'),
+        ),
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.workspaces_outline),
+          title: const Text('Open focused sessions'),
+          onTap: widget.onOpenSessions,
+        ),
+      ],
+    );
+  }
+}
+
 class _SpawnSessionRequest {
   const _SpawnSessionRequest({required this.path, required this.create});
 

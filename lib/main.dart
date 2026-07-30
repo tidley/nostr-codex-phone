@@ -26,6 +26,7 @@ import 'package:nostr_codex_phone/src/media_models.dart';
 import 'package:nostr_codex_phone/src/text_utils.dart';
 import 'package:nostr_codex_phone/src/tool_result_models.dart';
 import 'package:nostr_codex_phone/src/working_animation.dart';
+import 'package:nostr_codex_phone/src/workspace_invite.dart';
 import 'package:nostr_codex_phone/src/voice_recording.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -40,7 +41,7 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.71+271';
+const _appVersion = '0.2.72+272';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -409,6 +410,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   String? _status;
   MediaSelection? _pendingMediaAttachment;
   String? _pendingMediaFileName;
+  bool _showTeamWorkspace = true;
+  String? _workspaceInviteCode;
+  String _workspaceMemberStatus = 'Owner';
 
   bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
 
@@ -827,7 +831,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       if (!mounted) return;
       setState(() {
         _loadingSettings = false;
-        _status = 'Saved settings could not be loaded. Open Settings to reconnect.';
+        _status =
+            'Saved settings could not be loaded. Open Settings to reconnect.';
       });
     }
   }
@@ -3956,6 +3961,27 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return false;
     }
 
+    if (message.kind == 'invite_created' ||
+        message.kind == 'invite_accepted' ||
+        message.kind == 'invite_rejected') {
+      if (!_incomingFromActivePeer(message)) return false;
+      final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
+      setState(() {
+        if (message.kind == 'invite_created') {
+          final invite = decoded['invite_created'] as Map<String, dynamic>?;
+          _workspaceInviteCode = invite?['code']?.toString();
+          _workspaceMemberStatus = 'Invite ready';
+        } else if (message.kind == 'invite_accepted') {
+          _workspaceMemberStatus = 'Joined workspace';
+        } else {
+          final rejected = decoded['invite_rejected'] as Map<String, dynamic>?;
+          _workspaceMemberStatus =
+              rejected?['reason']?.toString() ?? 'Invite rejected';
+        }
+      });
+      return true;
+    }
+
     if (message.kind == 'target_invite') {
       if (!_incomingFromActivePeer(message)) return false;
       final parsedTarget = _repoTargetFromInvitePayload(message.rawJson);
@@ -6318,6 +6344,18 @@ Return a concise catch-up summary of what happened after that point: completed w
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
+    if (_showTeamWorkspace) {
+      return _TeamWorkspace(
+        sessions: _repoTargets,
+        onOpenSessions: () => setState(() => _showTeamWorkspace = false),
+        onOpenSettings: () => unawaited(_openSettings()),
+        inviteCode: _workspaceInviteCode,
+        memberStatus: _workspaceMemberStatus,
+        onCreateInvite: _createWorkspaceInvite,
+        onRedeemInvite: _redeemWorkspaceInvite,
+      );
+    }
+
     final hasUnreadConversations = _unreadCountsByTarget.values.any(
       (count) => count > 0,
     );
@@ -6356,6 +6394,11 @@ Return a concise catch-up summary of what happened after that point: completed w
         ),
         title: _buildSessionTitle(activeTargets),
         actions: [
+          IconButton(
+            tooltip: 'Open workspace',
+            onPressed: () => setState(() => _showTeamWorkspace = true),
+            icon: const Icon(Icons.dashboard_outlined),
+          ),
           IconButton(
             tooltip: 'OpenCode tools',
             onPressed: _connected && !_connecting
@@ -6498,5 +6541,36 @@ Return a concise catch-up summary of what happened after that point: completed w
         ),
       ),
     );
+  }
+
+  Future<void> _createWorkspaceInvite() async {
+    if (!_connected) {
+      _showError('Connect to the workspace worker before creating an invite');
+      return;
+    }
+    await nostrSendQuery(
+      query: jsonEncode({
+        'create_invite': {'expires_in_seconds': 900},
+      }),
+    );
+    if (mounted) setState(() => _workspaceMemberStatus = 'Creating invite...');
+  }
+
+  Future<void> _redeemWorkspaceInvite(String code) async {
+    if (!_connected) {
+      _showError('Connect to the workspace worker before joining');
+      return;
+    }
+    final normalized = normalizeWorkspaceInviteCode(code);
+    if (!isWorkspaceInviteCode(normalized)) {
+      _showError('Enter the 10-character invite code');
+      return;
+    }
+    await nostrSendQuery(
+      query: jsonEncode({
+        'redeem_invite': {'code': normalized},
+      }),
+    );
+    if (mounted) setState(() => _workspaceMemberStatus = 'Redeeming invite...');
   }
 }
