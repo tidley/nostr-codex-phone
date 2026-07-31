@@ -6,9 +6,9 @@ use nostr_sdk::prelude::*;
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
 
-use crate::blossom::{upload_audio, BlossomUploadConfig};
+use crate::blossom::{download_attachment, upload_audio, BlossomUploadConfig};
 use crate::nostr_client::{default_relays, IncomingMessage, NostrConfig, NostrMessenger};
-use crate::protocol::{AudioEncryption, AudioReference};
+use crate::protocol::{AudioEncryption, AudioReference, MediaReference};
 
 static SESSION: Lazy<Mutex<Option<Arc<NostrMessenger>>>> = Lazy::new(|| Mutex::new(None));
 
@@ -72,6 +72,13 @@ pub struct BridgeBlossomUploadConfig {
     pub file_path: String,
     pub content_type: String,
     pub file_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeDownloadedAttachment {
+    pub path: String,
+    pub media_type: String,
+    pub name: String,
 }
 
 #[flutter_rust_bridge::frb(sync)]
@@ -142,6 +149,17 @@ pub async fn nostr_send_query(query: String) -> Result<String> {
     active_session().await?.send_query(query).await
 }
 
+pub async fn nostr_send_ephemeral_query(query: String, expires_in_seconds: u64) -> Result<String> {
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Err(anyhow!("query cannot be empty"));
+    }
+    active_session()
+        .await?
+        .send_ephemeral_query(query, Duration::from_secs(expires_in_seconds.clamp(1, 30)))
+        .await
+}
+
 pub async fn blossom_upload_audio(
     config: BridgeBlossomUploadConfig,
 ) -> Result<BridgeAudioReference> {
@@ -154,6 +172,29 @@ pub async fn blossom_upload_audio(
     })
     .await
     .map(BridgeAudioReference::from)
+}
+
+pub async fn blossom_download_attachment(
+    attachment: BridgeAudioReference,
+    destination_dir: String,
+) -> Result<BridgeDownloadedAttachment> {
+    download_attachment(
+        MediaReference {
+            url: attachment.url,
+            sha256: attachment.sha256,
+            size: attachment.size,
+            media_type: attachment.media_type,
+            name: attachment.name,
+            encryption: attachment.encryption.map(AudioEncryption::from),
+        },
+        &destination_dir,
+    )
+    .await
+    .map(|attachment| BridgeDownloadedAttachment {
+        path: attachment.path,
+        media_type: attachment.media_type,
+        name: attachment.name,
+    })
 }
 
 pub async fn nostr_send_audio(audio: BridgeAudioReference) -> Result<String> {

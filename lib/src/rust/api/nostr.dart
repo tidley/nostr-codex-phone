@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `active_session`, `clean_relays`, `key_pair_from_keys`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`
 
 List<String> nostrDefaultRelays() =>
     RustLib.instance.api.crateApiNostrNostrDefaultRelays();
@@ -26,9 +26,25 @@ Future<void> nostrStop() => RustLib.instance.api.crateApiNostrNostrStop();
 Future<String> nostrSendQuery({required String query}) =>
     RustLib.instance.api.crateApiNostrNostrSendQuery(query: query);
 
+Future<String> nostrSendEphemeralQuery({
+  required String query,
+  required BigInt expiresInSeconds,
+}) => RustLib.instance.api.crateApiNostrNostrSendEphemeralQuery(
+  query: query,
+  expiresInSeconds: expiresInSeconds,
+);
+
 Future<BridgeAudioReference> blossomUploadAudio({
   required BridgeBlossomUploadConfig config,
 }) => RustLib.instance.api.crateApiNostrBlossomUploadAudio(config: config);
+
+Future<BridgeDownloadedAttachment> blossomDownloadAttachment({
+  required BridgeAudioReference attachment,
+  required String destinationDir,
+}) => RustLib.instance.api.crateApiNostrBlossomDownloadAttachment(
+  attachment: attachment,
+  destinationDir: destinationDir,
+);
 
 Future<String> nostrSendAudio({required BridgeAudioReference audio}) =>
     RustLib.instance.api.crateApiNostrNostrSendAudio(audio: audio);
@@ -162,6 +178,30 @@ class BridgeBlossomUploadConfig {
           filePath == other.filePath &&
           contentType == other.contentType &&
           fileName == other.fileName;
+}
+
+class BridgeDownloadedAttachment {
+  final String path;
+  final String mediaType;
+  final String name;
+
+  const BridgeDownloadedAttachment({
+    required this.path,
+    required this.mediaType,
+    required this.name,
+  });
+
+  @override
+  int get hashCode => path.hashCode ^ mediaType.hashCode ^ name.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeDownloadedAttachment &&
+          runtimeType == other.runtimeType &&
+          path == other.path &&
+          mediaType == other.mediaType &&
+          name == other.name;
 }
 
 class BridgeIncomingMessage {

@@ -62,6 +62,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  BridgeDownloadedAttachment dco_decode_bridge_downloaded_attachment(
+    dynamic raw,
+  );
+
+  @protected
   BridgeIncomingMessage dco_decode_bridge_incoming_message(dynamic raw);
 
   @protected
@@ -155,6 +160,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BridgeBlossomUploadConfig sse_decode_bridge_blossom_upload_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BridgeDownloadedAttachment sse_decode_bridge_downloaded_attachment(
     SseDeserializer deserializer,
   );
 
@@ -272,6 +282,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_bridge_blossom_upload_config(
     BridgeBlossomUploadConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bridge_downloaded_attachment(
+    BridgeDownloadedAttachment self,
     SseSerializer serializer,
   );
 

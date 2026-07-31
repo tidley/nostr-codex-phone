@@ -124,7 +124,6 @@ NOSTR_PEER_PUBKEY='npub...phone public key...'
 NOSTR_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://nostr.mom'
 
 AGENT_BACKEND='opencode'
-OPENCODE_URL='http://127.0.0.1:4096'
 OPENCODE_BIN='opencode'
 OPENCODE_AGENT='build'
 OPENCODE_MODEL='openai/gpt-5.5'
@@ -134,7 +133,7 @@ TRANSCRIBE_BIN='/home/user/.local/bin/whisper-cpp'
 TRANSCRIBE_ARGS='-m /path/to/ggml-base.en.bin -f {audio} -otxt -of {output_dir}/transcript -nt'
 ```
 
-With the default local OpenCode URL, the worker starts `opencode serve --hostname 127.0.0.1 --port 4096` if needed. For non-local URLs, start and secure OpenCode yourself.
+The worker uses the local `opencode` CLI directly. It runs `opencode run --format json --dir ... --session ... --agent ...`; no `OPENCODE_URL` or OpenCode HTTP server is required.
 
 ## Development
 

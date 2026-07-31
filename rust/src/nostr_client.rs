@@ -158,6 +158,18 @@ impl NostrMessenger {
         self.send_wire(WireMessage::query(query)).await
     }
 
+    pub async fn send_ephemeral_query(
+        &self,
+        query: impl Into<String>,
+        expires_in: Duration,
+    ) -> Result<String> {
+        let receiver = self
+            .peer
+            .ok_or_else(|| anyhow!("peer public key is not configured"))?;
+        self.send_ephemeral_wire_to(receiver, WireMessage::query(query), expires_in)
+            .await
+    }
+
     pub async fn send_audio(&self, audio: AudioReference) -> Result<String> {
         self.send_wire(WireMessage::audio(audio)).await
     }
@@ -259,10 +271,42 @@ impl NostrMessenger {
         self.send_payload_to(receiver, payload).await
     }
 
+    pub async fn send_ephemeral_wire_to(
+        &self,
+        receiver: PublicKey,
+        message: WireMessage,
+        expires_in: Duration,
+    ) -> Result<String> {
+        let payload = message.to_json()?;
+        self.send_ephemeral_payload_to(receiver, payload, expires_in)
+            .await
+    }
+
     async fn send_payload_to(&self, receiver: PublicKey, payload: String) -> Result<String> {
         let event = PrivateDirectMessageBuilder::new(receiver, payload)
             .finalize(&self.keys)
             .context("failed to build GiftWrapped DM")?;
+        self.send_event(event).await
+    }
+
+    async fn send_ephemeral_payload_to(
+        &self,
+        receiver: PublicKey,
+        payload: String,
+        expires_in: Duration,
+    ) -> Result<String> {
+        let expires_at = Timestamp::now()
+            .as_secs()
+            .saturating_add(expires_in.as_secs());
+        let event = PrivateDirectMessageBuilder::new(receiver, payload)
+            // NIP-40 directs relays to discard the GiftWrap after this lease.
+            .extra_tags([Tag::parse(["expiration", &expires_at.to_string()])?])
+            .finalize(&self.keys)
+            .context("failed to build expiring GiftWrapped DM")?;
+        self.send_event(event).await
+    }
+
+    async fn send_event(&self, event: Event) -> Result<String> {
         let client = self.client.clone();
         let mut send_task = tokio::spawn(async move {
             client

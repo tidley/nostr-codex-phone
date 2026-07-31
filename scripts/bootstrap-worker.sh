@@ -54,7 +54,6 @@ export NOSTR_RELAYS="${NOSTR_RELAYS:-wss://relay.damus.io,wss://nos.lol,wss://no
 export NOSTR_CODEX_ENV_FILE="${NOSTR_CODEX_ENV_FILE:-$state_dir/.env.server}"
 export CODEX_MEMORY_DB="${CODEX_MEMORY_DB:-$state_dir/memory.sqlite3}"
 export AGENT_BACKEND="${AGENT_BACKEND:-opencode}"
-export OPENCODE_URL="${OPENCODE_URL:-http://127.0.0.1:4096}"
 export OPENCODE_BIN="${OPENCODE_BIN:-$default_opencode_bin}"
 export OPENCODE_AGENT="${OPENCODE_AGENT:-build}"
 export CODEX_BIN="${CODEX_BIN:-codex}"

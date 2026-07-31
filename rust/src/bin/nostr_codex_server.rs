@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -24,7 +24,7 @@ use rust_lib_nostr_codex_phone::codex::{
     ensure_opencode_session, is_codex_usage_limit_error, list_opencode_models,
     list_opencode_sessions, new_opencode_session, run_codex,
     run_codex_session_with_cancel_and_events, AgentBackend, CodexCancelToken, CodexConfig,
-    CodexRunResult, OpenCodeSessionInfo,
+    CodexRunResult, OpenCodeModel, OpenCodeSessionInfo,
 };
 use rust_lib_nostr_codex_phone::invite::InviteStore;
 use rust_lib_nostr_codex_phone::nostr_client::{
@@ -34,14 +34,18 @@ use rust_lib_nostr_codex_phone::protocol::{
     parse_media_bundle_query, parse_wire_message, AudioReference, CreateInvite, InviteAccepted,
     InviteCreated, InviteRejected, MediaBundle, MediaReference, OpenCodeSessionList,
     OpenCodeSessionListEntry, RedeemInvite, RepoList, RepoListEntry, RepoListRoot, TargetInvite,
-    TargetParent, ToolResult, WireMessage, WorkspaceChannelPayload, WorkspaceMemberPayload,
-    WorkspaceMessagePayload, WorkspaceRequest, WorkspaceUpdate,
+    TargetParent, ToolResult, WireMessage, WorkspaceAgentPayload, WorkspaceChannelPayload,
+    WorkspaceConversationAgentPayload, WorkspaceMemberPayload, WorkspaceMessagePayload,
+    WorkspaceRequest, WorkspaceTypingPayload, WorkspaceUpdate,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
     DownloadedAudio, TranscribeConfig,
 };
-use rust_lib_nostr_codex_phone::workspace::{WorkspaceMessage, WorkspaceStore};
+use rust_lib_nostr_codex_phone::workspace::{
+    WorkspaceAgent, WorkspaceAgentOpenCodeProfile, WorkspaceConversationAgent, WorkspaceMessage,
+    WorkspaceStore,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
 use tracing::{error, info, warn};
@@ -667,8 +671,8 @@ async fn main() -> Result<()> {
     match codex_config.backend {
         AgentBackend::OpenCode => {
             info!(
-                "agent backend: opencode {} agent={}",
-                codex_config.opencode.base_url, codex_config.opencode.agent
+                "agent backend: opencode CLI {} agent={}",
+                codex_config.opencode.bin, codex_config.opencode.agent
             );
         }
         AgentBackend::Codex => {
@@ -844,6 +848,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                 config.messenger.as_ref(),
                 &message.sender_pubkey_hex,
                 request,
+                &config.codex_config,
             )
             .await
             {
@@ -1030,14 +1035,66 @@ async fn process_workspace_request(
     messenger: &NostrMessenger,
     sender: &str,
     request: WorkspaceRequest,
+    codex_config: &CodexConfig,
 ) -> Result<()> {
     let update = match request.action.as_str() {
+        "typing" => {
+            let expires_in = request.expires_in_seconds.unwrap_or(6).clamp(1, 30);
+            let expires_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+                + expires_in as i64;
+            let update = WorkspaceUpdate {
+                action: "typing".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![],
+                agents: vec![],
+                conversation_agents: vec![],
+                typing: Some(WorkspaceTypingPayload {
+                    sender_pubkey: sender.to_string(),
+                    channel_id: request.channel_id.clone(),
+                    recipient_pubkey: request.recipient_pubkey.clone(),
+                    expires_at,
+                }),
+            };
+            if request.channel_id.is_some() {
+                for member in workspace.members()? {
+                    if member.pubkey != sender {
+                        messenger
+                            .send_ephemeral_wire_to(
+                                PublicKey::parse(&member.pubkey)?,
+                                WireMessage::workspace_update(update.clone()),
+                                Duration::from_secs(expires_in),
+                            )
+                            .await?;
+                    }
+                }
+            } else {
+                let recipient = request.recipient_pubkey.as_deref().unwrap_or_default();
+                messenger
+                    .send_ephemeral_wire_to(
+                        PublicKey::parse(recipient)?,
+                        WireMessage::workspace_update(update),
+                        Duration::from_secs(expires_in),
+                    )
+                    .await?;
+            }
+            return Ok(());
+        }
         "list" => WorkspaceUpdate {
             action: "snapshot".to_string(),
             channels: workspace
                 .channels()?
                 .into_iter()
                 .map(channel_payload)
+                .collect(),
+            agents: workspace.agents()?.into_iter().map(agent_payload).collect(),
+            conversation_agents: workspace
+                .conversation_agents()?
+                .into_iter()
+                .map(conversation_agent_payload)
                 .collect(),
             members: workspace
                 .members()?
@@ -1049,6 +1106,7 @@ async fn process_workspace_request(
                 .into_iter()
                 .map(message_payload)
                 .collect(),
+            typing: None,
         },
         "create_channel" => {
             let channel = workspace
@@ -1058,6 +1116,9 @@ async fn process_workspace_request(
                 channels: vec![channel_payload(channel)],
                 members: vec![],
                 messages: vec![],
+                agents: vec![],
+                conversation_agents: vec![],
+                typing: None,
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
             return Ok(());
@@ -1072,6 +1133,9 @@ async fn process_workspace_request(
                 channels: vec![],
                 members: vec![member_payload(member)],
                 messages: vec![],
+                agents: vec![],
+                conversation_agents: vec![],
+                typing: None,
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
             return Ok(());
@@ -1085,6 +1149,16 @@ async fn process_workspace_request(
                 .into_iter()
                 .map(message_payload)
                 .collect(),
+            agents: vec![],
+            conversation_agents: workspace
+                .conversation_agents()?
+                .into_iter()
+                .filter(|membership| {
+                    membership.channel_id.as_deref() == request.channel_id.as_deref()
+                })
+                .map(conversation_agent_payload)
+                .collect(),
+            typing: None,
         },
         "list_direct_messages" => WorkspaceUpdate {
             action: "direct_messages".to_string(),
@@ -1098,35 +1172,71 @@ async fn process_workspace_request(
                 .into_iter()
                 .map(message_payload)
                 .collect(),
+            agents: vec![],
+            conversation_agents: workspace
+                .conversation_agents()?
+                .into_iter()
+                .filter(|membership| {
+                    direct_membership_matches(
+                        membership,
+                        sender,
+                        request.recipient_pubkey.as_deref().unwrap_or_default(),
+                    )
+                })
+                .map(conversation_agent_payload)
+                .collect(),
+            typing: None,
         },
         "send_channel_message" => {
-            let message = workspace.add_channel_message(
+            let message = workspace.add_channel_message_with_main(
                 sender,
                 request.channel_id.as_deref().unwrap_or_default(),
                 request.body.as_deref().unwrap_or_default(),
+                &request.attachments,
+                &request.mentions,
                 request.parent_id.as_deref(),
+                request.also_send_to_main,
             )?;
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
                 channels: vec![],
                 members: vec![],
                 messages: vec![message_payload(message)],
+                agents: vec![],
+                conversation_agents: vec![],
+                typing: None,
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
+            route_conversation_agents(
+                workspace,
+                messenger,
+                codex_config,
+                Some(request.channel_id.as_deref().unwrap_or_default()),
+                None,
+                None,
+                &request.body.unwrap_or_default(),
+            )
+            .await?;
             return Ok(());
         }
         "send_direct_message" => {
-            let message = workspace.add_direct_message(
+            let message = workspace.add_direct_message_with_main(
                 sender,
                 request.recipient_pubkey.as_deref().unwrap_or_default(),
                 request.body.as_deref().unwrap_or_default(),
+                &request.attachments,
+                &request.mentions,
                 request.parent_id.as_deref(),
+                request.also_send_to_main,
             )?;
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
                 channels: vec![],
                 members: vec![],
                 messages: vec![message_payload(message)],
+                agents: vec![],
+                conversation_agents: vec![],
+                typing: None,
             };
             // A direct message is only delivered to its two participants.
             for member in [
@@ -1137,6 +1247,212 @@ async fn process_workspace_request(
                     .send_wire_to_pubkey(member, WireMessage::workspace_update(update.clone()))
                     .await?;
             }
+            route_conversation_agents(
+                workspace,
+                messenger,
+                codex_config,
+                None,
+                Some(sender),
+                request.recipient_pubkey.as_deref(),
+                &request.body.unwrap_or_default(),
+            )
+            .await?;
+            return Ok(());
+        }
+        "toggle_reaction" => {
+            let message = workspace.toggle_reaction(
+                sender,
+                request.parent_id.as_deref().unwrap_or_default(),
+                request.reaction.as_deref().unwrap_or_default(),
+            )?;
+            let update = WorkspaceUpdate {
+                action: "message_updated".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![message_payload(message)],
+                agents: vec![],
+                conversation_agents: vec![],
+                typing: None,
+            };
+            if update.messages[0].channel_id.is_some() {
+                broadcast_workspace_update(workspace, messenger, &update).await?;
+            } else {
+                for member in [
+                    sender,
+                    update.messages[0]
+                        .recipient_pubkey
+                        .as_deref()
+                        .unwrap_or_default(),
+                ] {
+                    messenger
+                        .send_wire_to_pubkey(member, WireMessage::workspace_update(update.clone()))
+                        .await?;
+                }
+            }
+            return Ok(());
+        }
+        "list_agents" => WorkspaceUpdate {
+            action: "agents".to_string(),
+            channels: vec![],
+            members: vec![],
+            messages: vec![],
+            agents: workspace.agents()?.into_iter().map(agent_payload).collect(),
+            conversation_agents: workspace
+                .conversation_agents()?
+                .into_iter()
+                .map(conversation_agent_payload)
+                .collect(),
+            typing: None,
+        },
+        "create_agent" => {
+            let profile = workspace_agent_profile_from_request(&request, codex_config)?;
+            let agent_config = codex_config_for_workspace_agent(codex_config, &profile)?;
+            let (session_id, session_status, session_error) =
+                provision_workspace_agent_session(&agent_config).await;
+            let agent = workspace.create_agent_with_profile(
+                request.agent_name.as_deref().unwrap_or_default(),
+                request.agent_role.as_deref().unwrap_or_default(),
+                request.agent_traits.as_deref().unwrap_or_default(),
+                &request.agent_skills,
+                request.agent_preset.as_deref(),
+                profile,
+                session_id.as_deref(),
+                &session_status,
+                session_error.as_deref(),
+                sender,
+            )?;
+            let update = WorkspaceUpdate {
+                action: "agent_created".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![],
+                agents: vec![agent_payload(agent)],
+                conversation_agents: vec![],
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, &update).await?;
+            return Ok(());
+        }
+        "rename_agent" => {
+            let agent = workspace.rename_agent(
+                request.agent_id.as_deref().unwrap_or_default(),
+                request.agent_name.as_deref().unwrap_or_default(),
+            )?;
+            let update = WorkspaceUpdate {
+                action: "agent_renamed".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![],
+                agents: vec![agent_payload(agent)],
+                conversation_agents: vec![],
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, &update).await?;
+            return Ok(());
+        }
+        "restart_agent_session" => {
+            let agent_id = request.agent_id.as_deref().unwrap_or_default();
+            let agent = workspace
+                .agents()?
+                .into_iter()
+                .find(|agent| agent.id == agent_id)
+                .ok_or_else(|| anyhow::anyhow!("agent does not exist"))?;
+            let agent_config = codex_config_for_workspace_agent_record(codex_config, &agent)?;
+            let (session_id, session_status, session_error) =
+                provision_workspace_agent_session(&agent_config).await;
+            let agent = workspace.update_agent_session(
+                &agent.id,
+                session_id.as_deref(),
+                &session_status,
+                session_error.as_deref(),
+            )?;
+            let update = WorkspaceUpdate {
+                action: "agent_session_restarted".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![],
+                agents: vec![agent_payload(agent)],
+                conversation_agents: vec![],
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, &update).await?;
+            return Ok(());
+        }
+        "update_agent_profile" => {
+            let agent_id = request.agent_id.as_deref().unwrap_or_default();
+            let profile = workspace_agent_profile_from_request(&request, codex_config)?;
+            let agent_config = codex_config_for_workspace_agent(codex_config, &profile)?;
+            let (session_id, session_status, session_error) =
+                provision_workspace_agent_session(&agent_config).await;
+            let agent = workspace.update_agent_profile_and_session(
+                agent_id,
+                profile,
+                session_id.as_deref(),
+                &session_status,
+                session_error.as_deref(),
+            )?;
+            let update = WorkspaceUpdate {
+                action: "agent_profile_updated".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![],
+                agents: vec![agent_payload(agent)],
+                conversation_agents: vec![],
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, &update).await?;
+            return Ok(());
+        }
+        "delete_agent" => {
+            workspace.delete_agent(request.agent_id.as_deref().unwrap_or_default())?;
+            let update = WorkspaceUpdate {
+                action: "agent_deleted".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![],
+                agents: workspace.agents()?.into_iter().map(agent_payload).collect(),
+                conversation_agents: workspace
+                    .conversation_agents()?
+                    .into_iter()
+                    .map(conversation_agent_payload)
+                    .collect(),
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, &update).await?;
+            return Ok(());
+        }
+        "add_conversation_agent" | "remove_conversation_agent" => {
+            let channel_id = request.channel_id.as_deref();
+            let recipient = request.recipient_pubkey.as_deref();
+            if request.action == "add_conversation_agent" {
+                workspace.add_conversation_agent(
+                    request.agent_id.as_deref().unwrap_or_default(),
+                    channel_id,
+                    channel_id.is_none().then_some(sender),
+                    recipient,
+                )?;
+            } else {
+                workspace.remove_conversation_agent(
+                    request.agent_id.as_deref().unwrap_or_default(),
+                    channel_id,
+                    channel_id.is_none().then_some(sender),
+                    recipient,
+                )?;
+            }
+            let update = WorkspaceUpdate {
+                action: "conversation_agents_updated".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![],
+                agents: vec![],
+                conversation_agents: workspace
+                    .conversation_agents()?
+                    .into_iter()
+                    .map(conversation_agent_payload)
+                    .collect(),
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, &update).await?;
             return Ok(());
         }
         _ => bail!("unsupported workspace request"),
@@ -1205,9 +1521,333 @@ fn message_payload(message: WorkspaceMessage) -> WorkspaceMessagePayload {
         recipient_pubkey: message.recipient_pubkey,
         sender_pubkey: message.sender_pubkey,
         body: message.body,
+        attachments: message.attachments,
+        mentions: message.mentions,
         parent_id: message.parent_id,
+        also_send_to_main: message.also_send_to_main,
+        reactions: message.reactions,
         created_at: message.created_at,
     }
+}
+fn agent_payload(
+    agent: rust_lib_nostr_codex_phone::workspace::WorkspaceAgent,
+) -> WorkspaceAgentPayload {
+    WorkspaceAgentPayload {
+        id: agent.id,
+        name: agent.name,
+        role: agent.role,
+        traits: agent.traits,
+        skills: agent.skills,
+        preset: agent.preset,
+        opencode_provider_id: agent.opencode_provider_id,
+        opencode_provider_name: agent.opencode_provider_name,
+        opencode_model_id: agent.opencode_model_id,
+        opencode_model_name: agent.opencode_model_name,
+        opencode_agent: agent.opencode_agent,
+        workdir: agent.workdir,
+        restart_on_failure: agent.restart_on_failure,
+        opencode_session_id: agent.opencode_session_id,
+        session_status: agent.session_status,
+        session_error: agent.session_error,
+        instance_id: agent.instance_id,
+        created_by: agent.created_by,
+        created_at: agent.created_at,
+    }
+}
+fn conversation_agent_payload(
+    agent: WorkspaceConversationAgent,
+) -> WorkspaceConversationAgentPayload {
+    WorkspaceConversationAgentPayload {
+        agent_id: agent.agent_id,
+        channel_id: agent.channel_id,
+        member_pubkey: agent.member_pubkey,
+        peer_pubkey: agent.peer_pubkey,
+    }
+}
+
+fn direct_membership_matches(
+    membership: &WorkspaceConversationAgent,
+    one: &str,
+    two: &str,
+) -> bool {
+    let mut participants = [one, two];
+    participants.sort();
+    membership.member_pubkey.as_deref() == Some(participants[0])
+        && membership.peer_pubkey.as_deref() == Some(participants[1])
+}
+
+async fn provision_workspace_agent_session(
+    codex_config: &CodexConfig,
+) -> (Option<String>, String, Option<String>) {
+    if codex_config.backend != AgentBackend::OpenCode {
+        return (
+            None,
+            "failed".to_string(),
+            Some("OpenCode is not the configured agent backend".to_string()),
+        );
+    }
+
+    match new_opencode_session(codex_config).await {
+        Ok(session_id) => (Some(session_id), "ready".to_string(), None),
+        Err(err) => (
+            None,
+            "failed".to_string(),
+            Some(format!("OpenCode session provisioning failed: {err:#}")),
+        ),
+    }
+}
+
+fn workspace_agent_profile_from_request(
+    request: &WorkspaceRequest,
+    codex_config: &CodexConfig,
+) -> Result<WorkspaceAgentOpenCodeProfile> {
+    let provider_id =
+        optional_opencode_segment("provider", request.opencode_provider_id.as_deref())?;
+    let model_id = optional_opencode_segment("model", request.opencode_model_id.as_deref())?;
+    if provider_id.is_some() != model_id.is_some() {
+        bail!("choose both an OpenCode provider and model, or leave both as worker default");
+    }
+    let agent = optional_opencode_segment("OpenCode agent", request.opencode_agent.as_deref())?;
+    let workdir = request
+        .agent_workdir
+        .as_deref()
+        .map(|value| {
+            let requested = PathBuf::from(value.trim());
+            let canonical = requested.canonicalize().with_context(|| {
+                format!("agent workdir `{}` is not accessible", requested.display())
+            })?;
+            if !canonical.is_dir() {
+                bail!("agent workdir `{}` is not a directory", canonical.display());
+            }
+            ensure_spawn_existing_allowed(
+                &canonical,
+                &canonical_allowed_workdir_roots(&codex_config.working_dir)?,
+            )?;
+            Ok(canonical.to_string_lossy().to_string())
+        })
+        .transpose()?;
+    Ok(WorkspaceAgentOpenCodeProfile {
+        provider_name: request
+            .opencode_provider_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        model_name: request
+            .opencode_model_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        provider_id,
+        model_id,
+        agent,
+        workdir,
+        restart_on_failure: request.restart_agent_session_on_failure,
+    })
+}
+
+fn optional_opencode_segment(label: &str, value: Option<&str>) -> Result<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > 100
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!("{label} must contain only letters, numbers, `.`, `_`, or `-`");
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn codex_config_for_workspace_agent(
+    config: &CodexConfig,
+    profile: &WorkspaceAgentOpenCodeProfile,
+) -> Result<CodexConfig> {
+    let mut resolved = config.clone();
+    if let (Some(provider_id), Some(model_id)) = (&profile.provider_id, &profile.model_id) {
+        resolved.opencode.model = Some(OpenCodeModel {
+            provider_id: provider_id.clone(),
+            model_id: model_id.clone(),
+        });
+    }
+    if let Some(agent) = &profile.agent {
+        resolved.opencode.agent = agent.clone();
+    }
+    if let Some(workdir) = &profile.workdir {
+        resolved.working_dir = PathBuf::from(workdir);
+    }
+    Ok(resolved)
+}
+
+fn codex_config_for_workspace_agent_record(
+    config: &CodexConfig,
+    agent: &WorkspaceAgent,
+) -> Result<CodexConfig> {
+    let profile = WorkspaceAgentOpenCodeProfile {
+        provider_id: agent.opencode_provider_id.clone(),
+        provider_name: agent.opencode_provider_name.clone(),
+        model_id: agent.opencode_model_id.clone(),
+        model_name: agent.opencode_model_name.clone(),
+        agent: agent.opencode_agent.clone(),
+        workdir: agent.workdir.clone(),
+        restart_on_failure: agent.restart_on_failure,
+    };
+    if let Some(workdir) = &profile.workdir {
+        let canonical = PathBuf::from(workdir)
+            .canonicalize()
+            .with_context(|| format!("agent workdir `{workdir}` is not accessible"))?;
+        ensure_spawn_existing_allowed(
+            &canonical,
+            &canonical_allowed_workdir_roots(&config.working_dir)?,
+        )?;
+    }
+    codex_config_for_workspace_agent(config, &profile)
+}
+
+async fn route_conversation_agents(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+    codex_config: &CodexConfig,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+    body: &str,
+) -> Result<()> {
+    for agent in workspace.agents_for_conversation(channel_id, member, peer)? {
+        let Some(session_id) = (agent.session_status == "ready")
+            .then_some(agent.opencode_session_id.as_deref())
+            .flatten()
+        else {
+            warn!(agent = %agent.id, status = %agent.session_status, "workspace agent is not ready to respond");
+            continue;
+        };
+        let agent_config = match codex_config_for_workspace_agent_record(codex_config, &agent) {
+            Ok(config) => config,
+            Err(err) => {
+                warn!(agent = %agent.id, "workspace agent configuration is invalid: {err:#}");
+                continue;
+            }
+        };
+        let response = match run_codex_session_with_cancel_and_events(
+            body,
+            &agent_config,
+            Some(session_id),
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(result) if !result.response.trim().is_empty() => result.response,
+            Ok(_) => continue,
+            Err(err) if agent.restart_on_failure => {
+                warn!(agent = %agent.id, "workspace agent response failed; restarting dedicated session: {err:#}");
+                let (new_session_id, status, session_error) =
+                    provision_workspace_agent_session(&agent_config).await;
+                let Some(new_session_id) = new_session_id else {
+                    let updated = workspace.update_agent_session(
+                        &agent.id,
+                        None,
+                        &status,
+                        session_error.as_deref(),
+                    )?;
+                    broadcast_workspace_update(
+                        workspace,
+                        messenger,
+                        &WorkspaceUpdate {
+                            action: "agent_session_restarted".to_string(),
+                            channels: vec![],
+                            members: vec![],
+                            messages: vec![],
+                            agents: vec![agent_payload(updated)],
+                            conversation_agents: vec![],
+                            typing: None,
+                        },
+                    )
+                    .await?;
+                    continue;
+                };
+                let updated = workspace.update_agent_session(
+                    &agent.id,
+                    Some(&new_session_id),
+                    &status,
+                    None,
+                )?;
+                broadcast_workspace_update(
+                    workspace,
+                    messenger,
+                    &WorkspaceUpdate {
+                        action: "agent_session_restarted".to_string(),
+                        channels: vec![],
+                        members: vec![],
+                        messages: vec![],
+                        agents: vec![agent_payload(updated)],
+                        conversation_agents: vec![],
+                        typing: None,
+                    },
+                )
+                .await?;
+                match run_codex_session_with_cancel_and_events(
+                    body,
+                    &agent_config,
+                    Some(&new_session_id),
+                    None,
+                    None,
+                )
+                .await
+                {
+                    Ok(result) if !result.response.trim().is_empty() => result.response,
+                    Ok(_) => continue,
+                    Err(restart_err) => {
+                        warn!(agent = %agent.id, "workspace agent response failed after restart: {restart_err:#}");
+                        continue;
+                    }
+                }
+            }
+            Err(err) => {
+                warn!(agent = %agent.id, "workspace agent response failed: {err:#}");
+                continue;
+            }
+        };
+        let message = match channel_id {
+            Some(channel_id) => workspace.add_channel_message(
+                &format!("agent:{}", agent.id),
+                channel_id,
+                &response,
+                &[],
+                &[],
+                None,
+            )?,
+            None => workspace.add_direct_message(
+                &format!("agent:{}", agent.id),
+                peer.unwrap_or_default(),
+                &response,
+                &[],
+                &[],
+                None,
+            )?,
+        };
+        let update = WorkspaceUpdate {
+            action: "message_created".to_string(),
+            channels: vec![],
+            members: vec![],
+            messages: vec![message_payload(message)],
+            agents: vec![],
+            conversation_agents: vec![],
+            typing: None,
+        };
+        if channel_id.is_some() {
+            broadcast_workspace_update(workspace, messenger, &update).await?;
+        } else {
+            for recipient in [member.unwrap_or_default(), peer.unwrap_or_default()] {
+                messenger
+                    .send_wire_to_pubkey(recipient, WireMessage::workspace_update(update.clone()))
+                    .await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn session_worker_key(message: &IncomingMessage) -> String {
@@ -3939,12 +4579,11 @@ fn release_help_text() -> String {
 
 fn agent_config_text() -> String {
     let backend = env::var("AGENT_BACKEND").unwrap_or_else(|_| "opencode".to_string());
-    let opencode_url =
-        env::var("OPENCODE_URL").unwrap_or_else(|_| "http://127.0.0.1:4096".to_string());
+    let opencode_bin = env::var("OPENCODE_BIN").unwrap_or_else(|_| "opencode".to_string());
     let agent = env::var("OPENCODE_AGENT").unwrap_or_else(|_| "build".to_string());
     let model = env::var("OPENCODE_MODEL").unwrap_or_else(|_| "default".to_string());
     format!(
-        "Agent config\nBackend: {backend}\nOpenCode URL: {opencode_url}\nAgent: {agent}\nModel: {model}\n\nSubagents are configured in OpenCode config/skills; this app can show current env-selected agent/model."
+        "Agent config\nBackend: {backend}\nOpenCode CLI: {opencode_bin}\nAgent: {agent}\nModel: {model}\n\nSubagents are configured in OpenCode config/skills; this app can show current env-selected agent/model."
     )
 }
 
@@ -5297,11 +5936,7 @@ mod tests {
             persist_sessions: true,
             usage_limit_fallback_model: None,
             opencode: OpenCodeConfig {
-                base_url: "http://127.0.0.1:4096".to_string(),
                 bin: "opencode".to_string(),
-                auto_start: true,
-                username: None,
-                password: None,
                 agent: "build".to_string(),
                 model: None,
             },
@@ -5666,11 +6301,7 @@ mod tests {
             persist_sessions: true,
             usage_limit_fallback_model: None,
             opencode: OpenCodeConfig {
-                base_url: "http://127.0.0.1:4096".to_string(),
                 bin: "opencode".to_string(),
-                auto_start: true,
-                username: None,
-                password: None,
                 agent: "build".to_string(),
                 model: None,
             },

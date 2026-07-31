@@ -563,6 +563,7 @@ class _TeamWorkspace extends StatefulWidget {
     required this.sessions,
     required this.onOpenSessions,
     required this.onOpenSettings,
+    required this.onOpenAgents,
     required this.inviteCode,
     required this.memberStatus,
     required this.workspace,
@@ -573,6 +574,9 @@ class _TeamWorkspace extends StatefulWidget {
     required this.onDisplayNameChanged,
     required this.onMemberAliasChanged,
     required this.onRequest,
+    required this.onTyping,
+    required this.onAttach,
+    required this.onOpenAttachment,
     required this.onCreateInvite,
     required this.onRedeemInvite,
   });
@@ -580,6 +584,7 @@ class _TeamWorkspace extends StatefulWidget {
   final List<RepoTarget> sessions;
   final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
+  final VoidCallback onOpenAgents;
   final String? inviteCode;
   final String memberStatus;
   final WorkspaceState workspace;
@@ -590,6 +595,9 @@ class _TeamWorkspace extends StatefulWidget {
   final ValueChanged<String> onDisplayNameChanged;
   final void Function(String pubkey, String alias) onMemberAliasChanged;
   final Future<void> Function(Map<String, Object?> request) onRequest;
+  final Future<void> Function(Map<String, Object?> request) onTyping;
+  final Future<bool> Function(Map<String, Object?> request) onAttach;
+  final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
   final Future<void> Function() onCreateInvite;
   final Future<void> Function(String code) onRedeemInvite;
 
@@ -599,20 +607,115 @@ class _TeamWorkspace extends StatefulWidget {
 
 class _TeamWorkspaceState extends State<_TeamWorkspace> {
   final _composer = TextEditingController();
+  final _composerFocus = FocusNode();
+  Timer? _typingRefreshTimer;
+  Timer? _typingExpiryTimer;
   _WorkspaceSection _section = _WorkspaceSection.channel;
   String _active = 'workspace';
   WorkspaceMessage? _thread;
+  bool _alsoSendToMain = false;
 
   @override
   void initState() {
     super.initState();
+    _composer.addListener(_onComposerChanged);
+    _composerFocus.addListener(_onComposerChanged);
     unawaited(widget.onRequest({'action': 'list'}));
   }
 
   @override
   void dispose() {
+    _composer.removeListener(_onComposerChanged);
     _composer.dispose();
+    _composerFocus.removeListener(_onComposerChanged);
+    _composerFocus.dispose();
+    _typingRefreshTimer?.cancel();
+    _typingExpiryTimer?.cancel();
     super.dispose();
+  }
+
+  void _onComposerChanged() {
+    setState(() {});
+    _syncTypingLease();
+  }
+
+  bool get _canSendTyping =>
+      (_section == _WorkspaceSection.channel ||
+          _section == _WorkspaceSection.direct) &&
+      _composerFocus.hasFocus &&
+      _composer.text.trim().isNotEmpty;
+
+  void _syncTypingLease() {
+    if (!_canSendTyping) {
+      _typingRefreshTimer?.cancel();
+      _typingRefreshTimer = null;
+      return;
+    }
+    _sendTypingLease();
+    _typingRefreshTimer ??= Timer.periodic(
+      const Duration(seconds: 3),
+      (_) => _sendTypingLease(),
+    );
+  }
+
+  void _sendTypingLease() {
+    if (!_canSendTyping) return;
+    unawaited(
+      widget.onTyping({
+        'action': 'typing',
+        if (_section == _WorkspaceSection.channel) 'channel_id': _active,
+        if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
+        'expires_in_seconds': 6,
+      }),
+    );
+  }
+
+  List<WorkspaceMention> get _mentionOptions {
+    final options = <WorkspaceMention>[
+      for (final member in widget.workspace.members)
+        WorkspaceMention(
+          kind: 'member',
+          id: member,
+          label: _memberLabel(member),
+        ),
+      for (final agent in _activeAgents)
+        WorkspaceMention(kind: 'agent', id: agent.id, label: agent.name),
+    ];
+    final query = _mentionQuery;
+    if (query == null) return const [];
+    final normalized = query.toLowerCase();
+    return options
+        .where((option) => option.label.toLowerCase().contains(normalized))
+        .toList(growable: false);
+  }
+
+  String? get _mentionQuery {
+    final selection = _composer.selection;
+    final cursor = selection.isValid ? selection.start : _composer.text.length;
+    final prefix = _composer.text.substring(
+      0,
+      cursor.clamp(0, _composer.text.length),
+    );
+    final start = prefix.lastIndexOf('@');
+    if (start < 0 || prefix.substring(start).contains(RegExp(r'\s'))) {
+      return null;
+    }
+    return prefix.substring(start + 1);
+  }
+
+  void _insertMention(WorkspaceMention mention) {
+    final selection = _composer.selection;
+    final cursor = selection.isValid ? selection.start : _composer.text.length;
+    final text = _composer.text;
+    final start = text
+        .substring(0, cursor.clamp(0, text.length))
+        .lastIndexOf('@');
+    if (start < 0) return;
+    final replacement = '${workspaceMentionSyntax(mention)} ';
+    _composer.value = TextEditingValue(
+      text: text.replaceRange(start, cursor, replacement),
+      selection: TextSelection.collapsed(offset: start + replacement.length),
+    );
   }
 
   List<WorkspaceMessage> get _activeMessages =>
@@ -623,6 +726,25 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
               _active,
             )] ??
             const [];
+
+  List<WorkspaceMessage> get _threadReplies => _thread == null
+      ? const []
+      : _activeMessages
+            .where((message) => message.parentId == _thread!.id)
+            .toList(growable: false);
+
+  List<WorkspaceAgent> get _activeAgents =>
+      widget.workspace.agents.where((agent) {
+        return widget.workspace.conversationAgents.any((membership) {
+          if (membership.agentId != agent.id) return false;
+          if (_section == _WorkspaceSection.channel) {
+            return membership.channelId == _active;
+          }
+          final participants = [widget.ownPubkey, _active]..sort();
+          return membership.memberPubkey == participants[0] &&
+              membership.peerPubkey == participants[1];
+        });
+      }).toList();
 
   String get _title {
     switch (_section) {
@@ -657,10 +779,31 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       if (_section == _WorkspaceSection.channel) 'channel_id': _active,
       if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
       'body': text,
+      'mentions': workspaceMentionsIn(
+        text,
+      ).map((mention) => mention.toJson()).toList(),
       if (_thread != null) 'parent_id': _thread!.id,
+      if (_thread != null) 'also_send_to_main': _alsoSendToMain,
     };
     _composer.clear();
     unawaited(widget.onRequest(request));
+  }
+
+  Future<void> _attach() async {
+    final sent = await widget.onAttach({
+      'action': _section == _WorkspaceSection.channel
+          ? 'send_channel_message'
+          : 'send_direct_message',
+      if (_section == _WorkspaceSection.channel) 'channel_id': _active,
+      if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
+      'body': _composer.text.trim(),
+      'mentions': workspaceMentionsIn(
+        _composer.text,
+      ).map((mention) => mention.toJson()).toList(),
+      if (_thread != null) 'parent_id': _thread!.id,
+      if (_thread != null) 'also_send_to_main': _alsoSendToMain,
+    });
+    if (sent && mounted) _composer.clear();
   }
 
   void _select(_WorkspaceSection section, String id) {
@@ -668,7 +811,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _section = section;
       _active = id;
       _thread = null;
+      _alsoSendToMain = false;
     });
+    _syncTypingLease();
     if (section == _WorkspaceSection.channel) {
       unawaited(
         widget.onRequest({'action': 'list_channel_messages', 'channel_id': id}),
@@ -685,6 +830,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   @override
   Widget build(BuildContext context) {
+    final typing = _activeTyping;
+    _scheduleTypingExpiry(typing);
     final wide = MediaQuery.sizeOf(context).width >= 1080;
     final medium = MediaQuery.sizeOf(context).width >= 720;
     final sidebar = _WorkspaceSidebar(
@@ -700,15 +847,47 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onSelect: _select,
       onSessions: widget.onOpenSessions,
       onSettings: widget.onOpenSettings,
+      onOpenAgents: widget.onOpenAgents,
       onCreateChannel: () => _createChannel(context),
     );
     final conversation = _WorkspaceConversation(
       title: _title,
       section: _section,
-      messages: _activeMessages,
+      messages: _activeMessages
+          .where(
+            (message) => message.parentId == null || message.alsoSendToMain,
+          )
+          .toList(growable: false),
+      threadReplyCounts: {
+        for (final message in _activeMessages.where(
+          (message) => message.parentId != null,
+        ))
+          message.parentId!: _activeMessages
+              .where((reply) => reply.parentId == message.parentId)
+              .length,
+      },
       composer: _composer,
+      composerFocus: _composerFocus,
       onSend: _send,
-      onOpenThread: (message) => setState(() => _thread = message),
+      onAttach: _attach,
+      onOpenAttachment: widget.onOpenAttachment,
+      onOpenThread: (message) => setState(() {
+        _thread = message;
+        _alsoSendToMain = false;
+      }),
+      onCloseThread: () => setState(() {
+        _thread = null;
+        _alsoSendToMain = false;
+      }),
+      onToggleReaction: (message, emoji) => widget.onRequest({
+        'action': 'toggle_reaction',
+        'parent_id': message.id,
+        'reaction': emoji,
+      }),
+      thread: _thread,
+      alsoSendToMain: _alsoSendToMain,
+      onAlsoSendToMainChanged: (value) =>
+          setState(() => _alsoSendToMain = value),
       onOpenSessions: widget.onOpenSessions,
       onOpenSettings: widget.onOpenSettings,
       inviteCode: widget.inviteCode,
@@ -723,15 +902,32 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onOpenDirect: (pubkey) => _select(_WorkspaceSection.direct, pubkey),
       onDisplayNameChanged: widget.onDisplayNameChanged,
       onMemberAliasChanged: widget.onMemberAliasChanged,
+      agents: _activeAgents,
+      onManageAgents:
+          _section == _WorkspaceSection.channel ||
+              _section == _WorkspaceSection.direct
+          ? () => _manageAgents(context)
+          : null,
+      mentionOptions: _mentionOptions,
+      onMentionSelected: _insertMention,
+      typingLabels: typing
+          .map((status) => _memberLabel(status.senderPubkey))
+          .toList(),
     );
     final contextPane = _WorkspaceContext(
       message: _thread,
+      replies: _threadReplies,
       title: _title,
-      onClose: () => setState(() => _thread = null),
+      onClose: () => setState(() {
+        _thread = null;
+        _alsoSendToMain = false;
+      }),
     );
 
     return Scaffold(
-      backgroundColor: const Color(0xff101a19),
+      backgroundColor: Theme.of(
+        context,
+      ).extension<_WorkspacePalette>()!.background,
       appBar: wide
           ? null
           : AppBar(
@@ -789,6 +985,28 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     );
   }
 
+  List<WorkspaceTyping> get _activeTyping => widget.workspace.activeTyping(
+    channelId: _section == _WorkspaceSection.channel ? _active : null,
+    ownPubkey: widget.ownPubkey,
+    peerPubkey: _section == _WorkspaceSection.direct ? _active : null,
+    nowSeconds: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+  );
+
+  void _scheduleTypingExpiry(List<WorkspaceTyping> typing) {
+    _typingExpiryTimer?.cancel();
+    if (typing.isEmpty) return;
+    final nextExpiry = typing
+        .map((status) => status.expiresAt)
+        .reduce((a, b) => a < b ? a : b);
+    final delay = Duration(
+      seconds: (nextExpiry - DateTime.now().millisecondsSinceEpoch ~/ 1000)
+          .clamp(1, 30),
+    );
+    _typingExpiryTimer = Timer(delay, () {
+      if (mounted) setState(() {});
+    });
+  }
+
   Future<void> _createChannel(BuildContext context) async {
     final controller = TextEditingController();
     final name = await showDialog<String>(
@@ -819,6 +1037,47 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       });
     }
   }
+
+  Future<void> _manageAgents(BuildContext context) async {
+    final attached = _activeAgents.map((agent) => agent.id).toSet();
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(title: Text('Conversation agents')),
+            for (final agent in widget.workspace.agents)
+              CheckboxListTile(
+                value: attached.contains(agent.id),
+                title: Text(agent.name),
+                subtitle: Text(
+                  agent.openCodeSessionId == null
+                      ? 'No OpenCode session attached'
+                      : agent.role,
+                ),
+                onChanged: (_) {
+                  final action = attached.contains(agent.id)
+                      ? 'remove_conversation_agent'
+                      : 'add_conversation_agent';
+                  unawaited(
+                    widget.onRequest({
+                      'action': action,
+                      'agent_id': agent.id,
+                      if (_section == _WorkspaceSection.channel)
+                        'channel_id': _active,
+                      if (_section == _WorkspaceSection.direct)
+                        'recipient_pubkey': _active,
+                    }),
+                  );
+                  Navigator.pop(context);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _WorkspaceSidebar extends StatelessWidget {
@@ -835,6 +1094,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.onSelect,
     required this.onSessions,
     required this.onSettings,
+    required this.onOpenAgents,
     required this.onCreateChannel,
   });
   final String? selected;
@@ -849,10 +1109,12 @@ class _WorkspaceSidebar extends StatelessWidget {
   final void Function(_WorkspaceSection, String) onSelect;
   final VoidCallback onSessions;
   final VoidCallback onSettings;
+  final VoidCallback onOpenAgents;
   final VoidCallback onCreateChannel;
 
   @override
   Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<_WorkspacePalette>()!;
     String memberLabel(String pubkey) => pubkey == ownPubkey
         ? (memberNames[pubkey] ?? (displayName.isEmpty ? 'You' : displayName))
         : memberAliases[pubkey] ??
@@ -867,7 +1129,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     }) => ListTile(
       dense: true,
       selected: selected,
-      selectedTileColor: const Color(0xff1d403b),
+      selectedTileColor: palette.selected,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       leading: Icon(icon, size: 19),
       title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -877,15 +1139,15 @@ class _WorkspaceSidebar extends StatelessWidget {
       onTap: onTap,
     );
     return ColoredBox(
-      color: const Color(0xff142321),
+      color: palette.sidebar,
       child: ListView(
         padding: const EdgeInsets.fromLTRB(12, 18, 12, 16),
         children: [
           Row(
             children: [
-              const CircleAvatar(
-                backgroundColor: Color(0xff65d8b1),
-                child: Icon(Icons.bolt, color: Color(0xff082019)),
+              CircleAvatar(
+                backgroundColor: palette.brand,
+                child: Icon(Icons.bolt, color: palette.brandForeground),
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -898,12 +1160,12 @@ class _WorkspaceSidebar extends StatelessWidget {
                         fontWeight: FontWeight.w800,
                       ),
                     ),
-                    const Text(
+                    Text(
                       'TEAM WORKSPACE',
                       style: TextStyle(
                         fontSize: 10,
                         letterSpacing: 1.1,
-                        color: Color(0xff9cc6bb),
+                        color: palette.label,
                       ),
                     ),
                   ],
@@ -921,7 +1183,7 @@ class _WorkspaceSidebar extends StatelessWidget {
             'Conversations',
             style: Theme.of(
               context,
-            ).textTheme.labelLarge?.copyWith(color: const Color(0xff9cc6bb)),
+            ).textTheme.labelLarge?.copyWith(color: palette.label),
           ),
           const SizedBox(height: 6),
           if (channels.isEmpty)
@@ -943,7 +1205,7 @@ class _WorkspaceSidebar extends StatelessWidget {
             'Direct messages',
             style: Theme.of(
               context,
-            ).textTheme.labelLarge?.copyWith(color: const Color(0xff9cc6bb)),
+            ).textTheme.labelLarge?.copyWith(color: palette.label),
           ),
           const SizedBox(height: 6),
           if (members.where((member) => member != ownPubkey).isEmpty)
@@ -960,12 +1222,13 @@ class _WorkspaceSidebar extends StatelessWidget {
             'People & agents',
             onTap: () => onSelect(_WorkspaceSection.people, 'people'),
           ),
+          item(Icons.smart_toy_outlined, 'Agents', onTap: onOpenAgents),
           const SizedBox(height: 18),
           Text(
             'Focused work',
             style: Theme.of(
               context,
-            ).textTheme.labelLarge?.copyWith(color: const Color(0xff9cc6bb)),
+            ).textTheme.labelLarge?.copyWith(color: palette.label),
           ),
           const SizedBox(height: 6),
           item(
@@ -986,14 +1249,23 @@ class _WorkspaceSidebar extends StatelessWidget {
   }
 }
 
-class _WorkspaceConversation extends StatelessWidget {
+class _WorkspaceConversation extends StatefulWidget {
   const _WorkspaceConversation({
     required this.title,
     required this.section,
     required this.messages,
+    required this.threadReplyCounts,
     required this.composer,
+    required this.composerFocus,
     required this.onSend,
+    required this.onAttach,
+    required this.onOpenAttachment,
     required this.onOpenThread,
+    required this.onCloseThread,
+    required this.onToggleReaction,
+    required this.thread,
+    required this.alsoSendToMain,
+    required this.onAlsoSendToMainChanged,
     required this.onOpenSessions,
     required this.onOpenSettings,
     required this.inviteCode,
@@ -1008,13 +1280,28 @@ class _WorkspaceConversation extends StatelessWidget {
     required this.onOpenDirect,
     required this.onDisplayNameChanged,
     required this.onMemberAliasChanged,
+    required this.agents,
+    required this.onManageAgents,
+    required this.mentionOptions,
+    required this.onMentionSelected,
+    required this.typingLabels,
   });
   final String title;
   final _WorkspaceSection section;
   final List<WorkspaceMessage> messages;
+  final Map<String, int> threadReplyCounts;
   final TextEditingController composer;
+  final FocusNode composerFocus;
   final VoidCallback onSend;
+  final Future<void> Function() onAttach;
+  final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
   final ValueChanged<WorkspaceMessage> onOpenThread;
+  final VoidCallback onCloseThread;
+  final Future<void> Function(WorkspaceMessage message, String emoji)
+  onToggleReaction;
+  final WorkspaceMessage? thread;
+  final bool alsoSendToMain;
+  final ValueChanged<bool> onAlsoSendToMainChanged;
   final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
   final String? inviteCode;
@@ -1029,35 +1316,109 @@ class _WorkspaceConversation extends StatelessWidget {
   final ValueChanged<String> onOpenDirect;
   final ValueChanged<String> onDisplayNameChanged;
   final void Function(String pubkey, String alias) onMemberAliasChanged;
+  final List<WorkspaceAgent> agents;
+  final VoidCallback? onManageAgents;
+  final List<WorkspaceMention> mentionOptions;
+  final ValueChanged<WorkspaceMention> onMentionSelected;
+  final List<String> typingLabels;
+
+  @override
+  State<_WorkspaceConversation> createState() => _WorkspaceConversationState();
+}
+
+class _WorkspaceConversationState extends State<_WorkspaceConversation> {
+  final _scrollController = ScrollController();
+  final _latestMessageKey = GlobalKey();
+  String? _lastMessageId;
+  double? _lastViewportHeight;
+  bool _scrollQueued = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _lastMessageId = _latestMessageId;
+    _queueScrollToLatest();
+  }
+
+  @override
+  void didUpdateWidget(covariant _WorkspaceConversation oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_lastMessageId != _latestMessageId) {
+      _lastMessageId = _latestMessageId;
+      _queueScrollToLatest();
+    }
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  String? get _latestMessageId =>
+      widget.messages.isEmpty ? null : widget.messages.last.id;
+
+  void _queueScrollToLatest() {
+    if (_scrollQueued) return;
+    _scrollQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollQueued = false;
+      final target = _latestMessageKey.currentContext;
+      if (!mounted || target == null) return;
+      Scrollable.ensureVisible(
+        target,
+        alignment: 1,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      );
+      // Rich text and attachment controls can increase height after this frame.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _latestMessageKey.currentContext != null) {
+          Scrollable.ensureVisible(
+            _latestMessageKey.currentContext!,
+            alignment: 1,
+            duration: Duration.zero,
+          );
+        }
+      });
+    });
+  }
 
   String _memberLabel(String pubkey) {
-    if (pubkey == ownPubkey) {
-      return memberNames[pubkey] ??
-          (displayName.isEmpty ? 'You' : displayName);
+    if (pubkey.startsWith('agent:')) {
+      final id = pubkey.substring('agent:'.length);
+      for (final agent in widget.agents) {
+        if (agent.id == id) return agent.name;
+      }
+      return 'Agent';
     }
-    return memberAliases[pubkey] ??
-        memberNames[pubkey] ??
+    if (pubkey == widget.ownPubkey) {
+      return widget.memberNames[pubkey] ??
+          (widget.displayName.isEmpty ? 'You' : widget.displayName);
+    }
+    return widget.memberAliases[pubkey] ??
+        widget.memberNames[pubkey] ??
         compactIdentifier(pubkey);
   }
 
   @override
   Widget build(BuildContext context) {
-    if (section == _WorkspaceSection.people) {
+    if (widget.section == _WorkspaceSection.people) {
       return _PeopleDirectory(
-        onOpenSessions: onOpenSessions,
-        onOpenSettings: onOpenSettings,
-        inviteCode: inviteCode,
-        memberStatus: memberStatus,
-        members: members,
-        ownPubkey: ownPubkey,
-        displayName: displayName,
-        memberAliases: memberAliases,
-        memberNames: memberNames,
-        onOpenDirect: onOpenDirect,
-        onDisplayNameChanged: onDisplayNameChanged,
-        onMemberAliasChanged: onMemberAliasChanged,
-        onCreateInvite: onCreateInvite,
-        onRedeemInvite: onRedeemInvite,
+        onOpenSessions: widget.onOpenSessions,
+        onOpenSettings: widget.onOpenSettings,
+        inviteCode: widget.inviteCode,
+        memberStatus: widget.memberStatus,
+        members: widget.members,
+        ownPubkey: widget.ownPubkey,
+        displayName: widget.displayName,
+        memberAliases: widget.memberAliases,
+        memberNames: widget.memberNames,
+        onOpenDirect: widget.onOpenDirect,
+        onDisplayNameChanged: widget.onDisplayNameChanged,
+        onMemberAliasChanged: widget.onMemberAliasChanged,
+        onCreateInvite: widget.onCreateInvite,
+        onRedeemInvite: widget.onRedeemInvite,
       );
     }
     return Column(
@@ -1071,64 +1432,162 @@ class _WorkspaceConversation extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      title,
+                      widget.title,
                       style: Theme.of(context).textTheme.titleLarge?.copyWith(
                         fontWeight: FontWeight.w800,
                       ),
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      section == _WorkspaceSection.channel
-                          ? '${members.length} member${members.length == 1 ? '' : 's'}'
-                          : 'Direct message',
+                      '${widget.section == _WorkspaceSection.channel ? '${widget.members.length} member${widget.members.length == 1 ? '' : 's'}' : 'Direct message'}${widget.agents.isEmpty ? '' : ' · ${widget.agents.map((agent) => agent.name).join(', ')}'}',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ],
                 ),
               ),
-              IconButton(onPressed: () {}, icon: const Icon(Icons.search)),
+              if (widget.onManageAgents != null)
+                IconButton(
+                  onPressed: widget.onManageAgents,
+                  icon: const Icon(Icons.person_add_alt_1_outlined),
+                  tooltip: 'Manage agents',
+                ),
             ],
           ),
         ),
         const Divider(height: 1),
         Expanded(
-          child: messages.isEmpty
-              ? const Center(child: Text('Start the conversation.'))
-              : ListView.separated(
-                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
-                  itemCount: messages.length,
-                  separatorBuilder: (_, _) => const SizedBox(height: 18),
-                  itemBuilder: (context, index) {
-                    final m = messages[index];
-                    return _WorkspaceMessageRow(
-                      message: m,
-                      authorName: _memberLabel(m.senderPubkey),
-                      onThread: () => onOpenThread(m),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              if (_lastViewportHeight != constraints.maxHeight) {
+                _lastViewportHeight = constraints.maxHeight;
+                _queueScrollToLatest();
+              }
+              return widget.messages.isEmpty
+                  ? const Center(child: Text('Start the conversation.'))
+                  : ListView.separated(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
+                      itemCount: widget.messages.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 18),
+                      itemBuilder: (context, index) {
+                        final m = widget.messages[index];
+                        return KeyedSubtree(
+                          key: index == widget.messages.length - 1
+                              ? _latestMessageKey
+                              : ValueKey(m.id),
+                          child: _WorkspaceMessageRow(
+                            message: m,
+                            authorName: _memberLabel(m.senderPubkey),
+                            onThread: () => widget.onOpenThread(m),
+                            threadReplyCount:
+                                widget.threadReplyCounts[m.id] ?? 0,
+                            onReact: (emoji) =>
+                                unawaited(widget.onToggleReaction(m, emoji)),
+                            onOpenAttachment: widget.onOpenAttachment,
+                          ),
+                        );
+                      },
                     );
-                  },
-                ),
+            },
+          ),
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 18),
-          child: CallbackShortcuts(
-            bindings: {const SingleActivator(LogicalKeyboardKey.enter): onSend},
-            child: TextField(
-              controller: composer,
-              minLines: 1,
-              maxLines: 5,
-              textInputAction: TextInputAction.newline,
-              decoration: InputDecoration(
-                hintText: 'Message $title',
-                prefixIcon: const Icon(Icons.add_circle_outline),
-                suffixIcon: IconButton(
-                  onPressed: onSend,
-                  icon: const Icon(Icons.send),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (widget.typingLabels.isNotEmpty)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    '${widget.typingLabels.join(', ')} ${widget.typingLabels.length == 1 ? 'is' : 'are'} typing...',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
                 ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
+              if (widget.thread != null)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Row(
+                    children: [
+                      IconButton(
+                        tooltip: 'Close thread',
+                        onPressed: widget.onCloseThread,
+                        icon: const Icon(Icons.forum_outlined, size: 18),
+                      ),
+                      Expanded(
+                        child: Text(
+                          'Replying in thread',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                      Checkbox(
+                        value: widget.alsoSendToMain,
+                        onChanged: (value) =>
+                            widget.onAlsoSendToMainChanged(value ?? false),
+                      ),
+                      const Text('Also send to main'),
+                    ],
+                  ),
+                ),
+              if (widget.mentionOptions.isNotEmpty)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Material(
+                    elevation: 4,
+                    borderRadius: BorderRadius.circular(10),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 176),
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          for (final mention in widget.mentionOptions)
+                            ListTile(
+                              dense: true,
+                              leading: Icon(
+                                mention.kind == 'agent'
+                                    ? Icons.smart_toy_outlined
+                                    : Icons.person_outline,
+                              ),
+                              title: Text('@${mention.label}'),
+                              subtitle: Text(
+                                mention.kind == 'agent' ? 'Agent' : 'Member',
+                              ),
+                              onTap: () => widget.onMentionSelected(mention),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              CallbackShortcuts(
+                bindings: {
+                  const SingleActivator(LogicalKeyboardKey.enter):
+                      widget.onSend,
+                },
+                child: TextField(
+                  controller: widget.composer,
+                  focusNode: widget.composerFocus,
+                  minLines: 1,
+                  maxLines: 5,
+                  textInputAction: TextInputAction.newline,
+                  decoration: InputDecoration(
+                    hintText: 'Message ${widget.title}',
+                    prefixIcon: IconButton(
+                      tooltip: 'Attach file',
+                      onPressed: () => unawaited(widget.onAttach()),
+                      icon: const Icon(Icons.attach_file),
+                    ),
+                    suffixIcon: IconButton(
+                      onPressed: widget.onSend,
+                      icon: const Icon(Icons.send),
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
                 ),
               ),
-            ),
+            ],
           ),
         ),
       ],
@@ -1136,60 +1595,203 @@ class _WorkspaceConversation extends StatelessWidget {
   }
 }
 
-class _WorkspaceMessageRow extends StatelessWidget {
+class _WorkspaceMessageRow extends StatefulWidget {
   const _WorkspaceMessageRow({
     required this.message,
     required this.authorName,
     required this.onThread,
+    required this.onReact,
+    required this.threadReplyCount,
+    required this.onOpenAttachment,
   });
   final WorkspaceMessage message;
   final String authorName;
   final VoidCallback onThread;
+  final ValueChanged<String> onReact;
+  final int threadReplyCount;
+  final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
   @override
-  Widget build(BuildContext context) => Row(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      CircleAvatar(
-        radius: 18,
-        backgroundColor: const Color(0xff7b5ea7),
-        child: const Icon(Icons.person, size: 19),
-      ),
-      const SizedBox(width: 12),
-      Expanded(
-        child: Column(
+  State<_WorkspaceMessageRow> createState() => _WorkspaceMessageRowState();
+}
+
+class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) => MouseRegion(
+    onEnter: (_) => setState(() => _hovered = true),
+    onExit: (_) => setState(() => _hovered = false),
+    child: Stack(
+      children: [
+        Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Text(
-                  authorName,
-                  style: const TextStyle(fontWeight: FontWeight.w800),
-                ),
-                const SizedBox(width: 7),
-                Text(
-                  DateTime.fromMillisecondsSinceEpoch(
-                    message.createdAt * 1000,
-                  ).toLocal().toString().substring(11, 16),
-                  style: Theme.of(context).textTheme.labelSmall,
-                ),
-              ],
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+              foregroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
+              child: const Icon(Icons.person, size: 19),
             ),
-            const SizedBox(height: 3),
-            Text(message.body),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        widget.authorName,
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(width: 7),
+                      Text(
+                        DateTime.fromMillisecondsSinceEpoch(
+                          widget.message.createdAt * 1000,
+                        ).toLocal().toString().substring(11, 16),
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  if (widget.message.body.isNotEmpty)
+                    _WorkspaceMessageBody(widget.message.body),
+                  if (widget.message.reactions.isNotEmpty)
+                    Wrap(
+                      spacing: 4,
+                      children: [
+                        for (final emoji
+                            in widget.message.reactions
+                                .map((reaction) => reaction.emoji)
+                                .toSet())
+                          ActionChip(
+                            visualDensity: VisualDensity.compact,
+                            label: Text(
+                              '$emoji ${widget.message.reactions.where((reaction) => reaction.emoji == emoji).length}',
+                            ),
+                            onPressed: () => widget.onReact(emoji),
+                          ),
+                      ],
+                    ),
+                  if (widget.threadReplyCount > 0)
+                    TextButton.icon(
+                      onPressed: widget.onThread,
+                      icon: const Icon(Icons.forum_outlined, size: 16),
+                      label: Text(
+                        '${widget.threadReplyCount} ${widget.threadReplyCount == 1 ? 'reply' : 'replies'}',
+                      ),
+                    ),
+                  for (final attachment in widget.message.attachments)
+                    TextButton.icon(
+                      onPressed: () =>
+                          unawaited(widget.onOpenAttachment(attachment)),
+                      icon: const Icon(Icons.download_outlined, size: 18),
+                      label: Text(attachment.name ?? 'Attachment'),
+                    ),
+                ],
+              ),
+            ),
           ],
         ),
-      ),
-    ],
+        if (_hovered)
+          Positioned(
+            top: -8,
+            right: 0,
+            child: Material(
+              elevation: 3,
+              borderRadius: BorderRadius.circular(8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: 'Copy',
+                    icon: const Icon(Icons.copy_outlined, size: 18),
+                    onPressed: () => Clipboard.setData(
+                      ClipboardData(text: widget.message.body),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Reply in thread',
+                    icon: const Icon(Icons.reply_outlined, size: 18),
+                    onPressed: widget.onThread,
+                  ),
+                  PopupMenuButton<String>(
+                    tooltip: 'React',
+                    icon: const Icon(Icons.add_reaction_outlined, size: 18),
+                    onSelected: widget.onReact,
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: '👍', child: Text('👍')),
+                      PopupMenuItem(value: '❤️', child: Text('❤️')),
+                      PopupMenuItem(value: '👀', child: Text('👀')),
+                    ],
+                  ),
+                  PopupMenuButton<String>(
+                    tooltip: 'More',
+                    icon: const Icon(Icons.more_horiz, size: 18),
+                    onSelected: (value) {
+                      if (value == 'copy') {
+                        Clipboard.setData(
+                          ClipboardData(text: widget.message.body),
+                        );
+                      }
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'copy', child: Text('Copy text')),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    ),
   );
+}
+
+class _WorkspaceMessageBody extends StatelessWidget {
+  const _WorkspaceMessageBody(this.text);
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final matches = RegExp(
+      r'@\[([^\]\r\n]+)\]\((?:member|agent):[^\)\s]+\)',
+    ).allMatches(text);
+    if (matches.isEmpty) return SelectionArea(child: Text(text));
+    final style = DefaultTextStyle.of(context).style;
+    final spans = <InlineSpan>[];
+    var offset = 0;
+    for (final match in matches) {
+      if (match.start > offset) {
+        spans.add(TextSpan(text: text.substring(offset, match.start)));
+      }
+      spans.add(
+        TextSpan(
+          text: '@${match.group(1)}',
+          style: style.copyWith(
+            color: Theme.of(context).extension<_WorkspacePalette>()!.label,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      );
+      offset = match.end;
+    }
+    if (offset < text.length) spans.add(TextSpan(text: text.substring(offset)));
+    return SelectionArea(
+      child: RichText(
+        text: TextSpan(style: style, children: spans),
+      ),
+    );
+  }
 }
 
 class _WorkspaceContext extends StatelessWidget {
   const _WorkspaceContext({
     required this.message,
+    required this.replies,
     required this.title,
     required this.onClose,
   });
   final WorkspaceMessage? message;
+  final List<WorkspaceMessage> replies;
   final String title;
   final VoidCallback onClose;
   @override
@@ -1240,10 +1842,26 @@ class _WorkspaceContext extends StatelessWidget {
               ),
               const Divider(),
               const SizedBox(height: 12),
-              Text(message!.body, style: Theme.of(context).textTheme.bodyLarge),
+              SelectionArea(
+                child: Text(
+                  message!.body,
+                  style: Theme.of(context).textTheme.bodyLarge,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+              const SizedBox(height: 8),
+              for (final reply in replies)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: SelectionArea(child: Text(reply.body)),
+                ),
               const Spacer(),
               const Text(
-                'Thread replies are available from the channel composer after selecting this message.',
+                'Reply from the composer. Enable Also send to main to show the reply in the conversation.',
               ),
             ],
           ),
@@ -1264,6 +1882,596 @@ class _ContextLine extends StatelessWidget {
         Expanded(child: Text(text)),
       ],
     ),
+  );
+}
+
+class _AgentsPage extends StatefulWidget {
+  const _AgentsPage({
+    required this.workspace,
+    required this.workspaceRevision,
+    required this.onRequest,
+    required this.onLoadOpenCodeModels,
+    required this.onOpenConversation,
+  });
+  final WorkspaceState workspace;
+  final ValueListenable<int> workspaceRevision;
+  final Future<void> Function(Map<String, Object?> request) onRequest;
+  final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
+  final Future<void> Function(WorkspaceAgent agent) onOpenConversation;
+  @override
+  State<_AgentsPage> createState() => _AgentsPageState();
+}
+
+class _AgentsPageState extends State<_AgentsPage> {
+  static const _presets = [
+    (
+      'Builder',
+      'Build and implement focused changes.',
+      Icons.handyman_outlined,
+    ),
+    (
+      'Reviewer',
+      'Review changes for bugs, risk, and test gaps.',
+      Icons.fact_check_outlined,
+    ),
+    (
+      'Researcher',
+      'Investigate options and report concise evidence.',
+      Icons.travel_explore_outlined,
+    ),
+    (
+      'Coordinator',
+      'Break work down and coordinate the next steps.',
+      Icons.account_tree_outlined,
+    ),
+  ];
+  @override
+  void initState() {
+    super.initState();
+    unawaited(widget.onRequest({'action': 'list_agents'}));
+  }
+
+  Future<void> _createPreset((String, String, IconData) preset) =>
+      widget.onRequest({
+        'action': 'create_agent',
+        'agent_name': preset.$1,
+        'agent_role': preset.$2,
+        'agent_preset': preset.$1.toLowerCase(),
+        'agent_skills': const <String>[],
+      });
+  Future<void> _createCustom() async {
+    final result = await showDialog<Map<String, Object?>>(
+      context: context,
+      builder: (_) =>
+          _AgentEditorDialog(onLoadOpenCodeModels: widget.onLoadOpenCodeModels),
+    );
+    if (result != null) {
+      await widget.onRequest({'action': 'create_agent', ...result});
+    }
+  }
+
+  Future<void> _renameAgent(WorkspaceAgent agent) async {
+    final controller = TextEditingController(text: agent.name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename agent'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 100,
+          decoration: const InputDecoration(labelText: 'Name'),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Rename'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name != null && name.trim().isNotEmpty && name.trim() != agent.name) {
+      await widget.onRequest({
+        'action': 'rename_agent',
+        'agent_id': agent.id,
+        'agent_name': name.trim(),
+      });
+    }
+  }
+
+  Future<void> _editOpenCodeProfile(WorkspaceAgent agent) async {
+    final result = await showDialog<Map<String, Object?>>(
+      context: context,
+      builder: (_) => _AgentOpenCodeProfileDialog(
+        agent: agent,
+        onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
+      ),
+    );
+    if (result != null) {
+      await widget.onRequest({
+        'action': 'update_agent_profile',
+        'agent_id': agent.id,
+        ...result,
+      });
+    }
+  }
+
+  Future<void> _deleteAgent(WorkspaceAgent agent) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete agent?'),
+        content: Text(
+          'Delete ${agent.name} and remove it from every channel and direct message?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+              foregroundColor: Theme.of(context).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await widget.onRequest({'action': 'delete_agent', 'agent_id': agent.id});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Agents')),
+    floatingActionButton: FloatingActionButton.extended(
+      onPressed: _createCustom,
+      icon: const Icon(Icons.add),
+      label: const Text('Custom agent'),
+    ),
+    body: ListView(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 100),
+      children: [
+        Text(
+          'START WITH A ROLE',
+          style: Theme.of(context).textTheme.labelLarge?.copyWith(
+            letterSpacing: 1.2,
+            color: Theme.of(context).extension<_WorkspacePalette>()!.label,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Agents receive a dedicated OpenCode session in this workspace when created.',
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 16),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: [
+            for (final preset in _presets)
+              SizedBox(
+                width: 170,
+                child: OutlinedButton.icon(
+                  onPressed: () => _createPreset(preset),
+                  icon: Icon(preset.$3),
+                  label: Text(preset.$1),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 28),
+        Text(
+          'YOUR AGENTS',
+          style: Theme.of(context).textTheme.labelLarge?.copyWith(
+            letterSpacing: 1.2,
+            color: Theme.of(context).extension<_WorkspacePalette>()!.label,
+          ),
+        ),
+        const SizedBox(height: 8),
+        ValueListenableBuilder<int>(
+          valueListenable: widget.workspaceRevision,
+          builder: (context, _, _) => Column(
+            children: [
+              if (widget.workspace.agents.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 32),
+                  child: Center(
+                    child: Text('Add a preset or create a custom agent.'),
+                  ),
+                ),
+              for (final agent in widget.workspace.agents) _agentCard(agent),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Widget _agentCard(WorkspaceAgent agent) => Card(
+    child: ListTile(
+      leading: CircleAvatar(
+        child: Icon(
+          agent.preset == 'reviewer'
+              ? Icons.fact_check
+              : Icons.smart_toy_outlined,
+        ),
+      ),
+      title: Text(agent.name),
+      subtitle: Text(
+        '${agent.role}\n${agent.sessionStatus == 'ready' ? 'OpenCode ready' : agent.sessionError ?? 'OpenCode provisioning failed'}\n${_profileSummary(agent)}',
+        maxLines: 4,
+        overflow: TextOverflow.ellipsis,
+      ),
+      isThreeLine: true,
+      trailing: PopupMenuButton<String>(
+        onSelected: (action) => switch (action) {
+          'rename' => _renameAgent(agent),
+          'profile' => _editOpenCodeProfile(agent),
+          'restart' => widget.onRequest({
+            'action': 'restart_agent_session',
+            'agent_id': agent.id,
+          }),
+          'delete' => _deleteAgent(agent),
+          _ => null,
+        },
+        itemBuilder: (context) => const [
+          PopupMenuItem(value: 'rename', child: Text('Rename')),
+          PopupMenuItem(value: 'profile', child: Text('OpenCode profile')),
+          PopupMenuItem(value: 'restart', child: Text('Restart session')),
+          PopupMenuItem(value: 'delete', child: Text('Delete')),
+        ],
+      ),
+      onTap: () => widget.onOpenConversation(agent),
+    ),
+  );
+
+  String _profileSummary(WorkspaceAgent agent) {
+    final model =
+        agent.openCodeProviderId == null || agent.openCodeModelId == null
+        ? 'Model: worker default'
+        : 'Model: ${agent.openCodeProviderName ?? agent.openCodeProviderId} / ${agent.openCodeModelName ?? agent.openCodeModelId}';
+    final openCodeAgent = agent.openCodeAgent == null
+        ? 'Agent: worker default'
+        : 'Agent: ${agent.openCodeAgent}';
+    final workdir = agent.workdir == null
+        ? 'Folder: worker default'
+        : 'Folder: ${agent.workdir}';
+    return '$model · $openCodeAgent\n$workdir';
+  }
+}
+
+class _AgentEditorDialog extends StatefulWidget {
+  const _AgentEditorDialog({required this.onLoadOpenCodeModels});
+  final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
+  @override
+  State<_AgentEditorDialog> createState() => _AgentEditorDialogState();
+}
+
+class _AgentEditorDialogState extends State<_AgentEditorDialog> {
+  static const _skills = [
+    'Code changes',
+    'Code review',
+    'Research',
+    'Planning',
+    'Testing',
+    'Documentation',
+    'Debugging',
+    'Git',
+  ];
+  final _name = TextEditingController();
+  final _role = TextEditingController();
+  final _traits = TextEditingController();
+  final _openCodeAgent = TextEditingController();
+  final _workdir = TextEditingController();
+  final _profileFieldsKey = GlobalKey<_OpenCodeProfileFieldsState>();
+  bool _restartOnFailure = true;
+  final _selected = <String>{};
+  @override
+  void dispose() {
+    _name.dispose();
+    _role.dispose();
+    _traits.dispose();
+    _openCodeAgent.dispose();
+    _workdir.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Create custom agent'),
+    content: SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _name,
+            autofocus: true,
+            decoration: const InputDecoration(labelText: 'Name'),
+          ),
+          TextField(
+            controller: _role,
+            decoration: const InputDecoration(labelText: 'Role'),
+          ),
+          TextField(
+            controller: _traits,
+            maxLines: 2,
+            decoration: const InputDecoration(
+              labelText: 'Traits',
+              hintText: 'Concise, skeptical, detail-oriented',
+            ),
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Skills (up to 8)',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+          ),
+          Wrap(
+            spacing: 6,
+            children: [
+              for (final skill in _skills)
+                FilterChip(
+                  label: Text(skill),
+                  selected: _selected.contains(skill),
+                  onSelected: (selected) => setState(() {
+                    if (selected) {
+                      _selected.add(skill);
+                    } else {
+                      _selected.remove(skill);
+                    }
+                  }),
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _OpenCodeProfileFields(
+            key: _profileFieldsKey,
+            onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
+            openCodeAgent: _openCodeAgent,
+            workdir: _workdir,
+            restartOnFailure: _restartOnFailure,
+            onRestartOnFailureChanged: (value) =>
+                setState(() => _restartOnFailure = value),
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () {
+          if (_name.text.trim().isEmpty || _role.text.trim().isEmpty) return;
+          Navigator.pop(context, {
+            'agent_name': _name.text.trim(),
+            'agent_role': _role.text.trim(),
+            'agent_traits': _traits.text.trim(),
+            'agent_skills': _selected.toList(),
+            if (_profileFieldsKey.currentState?.selectedModel case final model?)
+              'opencode_provider_id': model.providerId,
+            if (_profileFieldsKey.currentState?.selectedModel case final model?)
+              'opencode_provider_name': model.providerName,
+            if (_profileFieldsKey.currentState?.selectedModel case final model?)
+              'opencode_model_id': model.modelId,
+            if (_profileFieldsKey.currentState?.selectedModel case final model?)
+              'opencode_model_name': model.modelName,
+            if (_openCodeAgent.text.trim().isNotEmpty)
+              'opencode_agent': _openCodeAgent.text.trim(),
+            if (_workdir.text.trim().isNotEmpty)
+              'agent_workdir': _workdir.text.trim(),
+            'restart_agent_session_on_failure': _restartOnFailure,
+          });
+        },
+        child: const Text('Create'),
+      ),
+    ],
+  );
+}
+
+class _AgentOpenCodeProfileDialog extends StatefulWidget {
+  const _AgentOpenCodeProfileDialog({
+    required this.agent,
+    required this.onLoadOpenCodeModels,
+  });
+  final WorkspaceAgent agent;
+  final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
+
+  @override
+  State<_AgentOpenCodeProfileDialog> createState() =>
+      _AgentOpenCodeProfileDialogState();
+}
+
+class _AgentOpenCodeProfileDialogState
+    extends State<_AgentOpenCodeProfileDialog> {
+  late final _openCodeAgent = TextEditingController(
+    text: widget.agent.openCodeAgent ?? '',
+  );
+  late final _workdir = TextEditingController(text: widget.agent.workdir ?? '');
+  final _profileFieldsKey = GlobalKey<_OpenCodeProfileFieldsState>();
+  late bool _restartOnFailure = widget.agent.restartOnFailure;
+
+  @override
+  void dispose() {
+    _openCodeAgent.dispose();
+    _workdir.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text('${widget.agent.name} OpenCode profile'),
+    content: SingleChildScrollView(
+      child: _OpenCodeProfileFields(
+        key: _profileFieldsKey,
+        initialModel:
+            widget.agent.openCodeProviderId == null ||
+                widget.agent.openCodeModelId == null
+            ? null
+            : _OpenCodeModelChoice(
+                providerId: widget.agent.openCodeProviderId!,
+                providerName:
+                    widget.agent.openCodeProviderName ??
+                    widget.agent.openCodeProviderId!,
+                modelId: widget.agent.openCodeModelId!,
+                modelName:
+                    widget.agent.openCodeModelName ??
+                    widget.agent.openCodeModelId!,
+              ),
+        onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
+        openCodeAgent: _openCodeAgent,
+        workdir: _workdir,
+        restartOnFailure: _restartOnFailure,
+        onRestartOnFailureChanged: (value) =>
+            setState(() => _restartOnFailure = value),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () {
+          final model = _profileFieldsKey.currentState?.selectedModel;
+          Navigator.pop(context, {
+            if (model != null) 'opencode_provider_id': model.providerId,
+            if (model != null) 'opencode_provider_name': model.providerName,
+            if (model != null) 'opencode_model_id': model.modelId,
+            if (model != null) 'opencode_model_name': model.modelName,
+            if (_openCodeAgent.text.trim().isNotEmpty)
+              'opencode_agent': _openCodeAgent.text.trim(),
+            if (_workdir.text.trim().isNotEmpty)
+              'agent_workdir': _workdir.text.trim(),
+            'restart_agent_session_on_failure': _restartOnFailure,
+          });
+        },
+        child: const Text('Save and restart'),
+      ),
+    ],
+  );
+}
+
+class _OpenCodeProfileFields extends StatefulWidget {
+  const _OpenCodeProfileFields({
+    super.key,
+    this.initialModel,
+    required this.onLoadOpenCodeModels,
+    required this.openCodeAgent,
+    required this.workdir,
+    required this.restartOnFailure,
+    required this.onRestartOnFailureChanged,
+  });
+
+  final _OpenCodeModelChoice? initialModel;
+  final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
+  final TextEditingController openCodeAgent;
+  final TextEditingController workdir;
+  final bool restartOnFailure;
+  final ValueChanged<bool> onRestartOnFailureChanged;
+
+  @override
+  State<_OpenCodeProfileFields> createState() => _OpenCodeProfileFieldsState();
+}
+
+class _OpenCodeProfileFieldsState extends State<_OpenCodeProfileFields> {
+  late _OpenCodeModelChoice? selectedModel = widget.initialModel;
+
+  Future<void> _chooseModel() async {
+    try {
+      final models = await widget.onLoadOpenCodeModels();
+      if (!mounted) return;
+      if (models.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('OpenCode did not return any configured models'),
+          ),
+        );
+        return;
+      }
+      final value = await Navigator.of(context).push<String>(
+        MaterialPageRoute(
+          builder: (_) => _OpenCodeModelPickerPage(
+            models: models,
+            selectedModel: selectedModel?.value,
+          ),
+        ),
+      );
+      if (value == null || !mounted) return;
+      _OpenCodeModelChoice? choice;
+      for (final model in models) {
+        if (model.value == value) {
+          choice = model;
+          break;
+        }
+      }
+      setState(() {
+        selectedModel = value.isEmpty ? null : choice;
+      });
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not load OpenCode models')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text('OpenCode overrides', style: Theme.of(context).textTheme.labelLarge),
+      const SizedBox(height: 4),
+      const Text('Choose a configured model or use the worker default.'),
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: const Icon(Icons.memory_outlined),
+        title: Text(
+          selectedModel == null ? 'Server default' : selectedModel!.modelName,
+        ),
+        subtitle: Text(
+          selectedModel == null
+              ? 'Use OpenCode’s configured default model'
+              : '${selectedModel!.providerName} · ${selectedModel!.value}',
+        ),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: _chooseModel,
+      ),
+      TextField(
+        controller: widget.openCodeAgent,
+        maxLength: 100,
+        decoration: const InputDecoration(labelText: 'OpenCode agent'),
+      ),
+      TextField(
+        controller: widget.workdir,
+        maxLength: 1000,
+        decoration: const InputDecoration(
+          labelText: 'Working folder',
+          helperText: 'Must be inside a worker allowed folder.',
+        ),
+      ),
+      SwitchListTile.adaptive(
+        contentPadding: EdgeInsets.zero,
+        title: const Text('Restart session after a failed turn'),
+        value: widget.restartOnFailure,
+        onChanged: widget.onRestartOnFailureChanged,
+      ),
+    ],
   );
 }
 
@@ -2973,6 +4181,7 @@ class _SpawnSessionPageState extends State<_SpawnSessionPage> {
 
 class _SettingsPage extends StatelessWidget {
   const _SettingsPage({
+    required this.theme,
     required this.repoTargets,
     required this.computerServiceTarget,
     required this.selectedRepoTargetId,
@@ -3013,6 +4222,7 @@ class _SettingsPage extends StatelessWidget {
     required this.checkingRelays,
     required this.relayResults,
     required this.messagesInActiveConversation,
+    required this.onThemeChanged,
     required this.onTargetChanged,
     required this.onProfileNameChanged,
     required this.onSaveTarget,
@@ -3053,6 +4263,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onImportProfile,
   });
 
+  final AppTheme theme;
   final List<RepoTarget> repoTargets;
   final RepoTarget? computerServiceTarget;
   final String? selectedRepoTargetId;
@@ -3093,6 +4304,7 @@ class _SettingsPage extends StatelessWidget {
   final bool checkingRelays;
   final List<_RelayProbeResult> relayResults;
   final int messagesInActiveConversation;
+  final ValueChanged<AppTheme> onThemeChanged;
   final ValueChanged<String?> onTargetChanged;
   final ValueChanged<String> onProfileNameChanged;
   final VoidCallback onSaveTarget;
@@ -3134,7 +4346,7 @@ class _SettingsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final materialTheme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
       body: ListView(
@@ -3161,6 +4373,8 @@ class _SettingsPage extends StatelessWidget {
               ),
             ),
           ),
+          const SizedBox(height: 16),
+          _ThemeSettings(theme: theme, onChanged: onThemeChanged),
           const SizedBox(height: 16),
           _ConnectionPanel(
             repoTargets: repoTargets,
@@ -3255,7 +4469,7 @@ class _SettingsPage extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('App info', style: theme.textTheme.titleMedium),
+                  Text('App info', style: materialTheme.textTheme.titleMedium),
                   const SizedBox(height: 8),
                   Text('Active session: $activeTargetName'),
                   Text('Messages: $messagesInActiveConversation'),
@@ -3299,6 +4513,87 @@ class _SettingsPage extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ThemeSettings extends StatelessWidget {
+  const _ThemeSettings({required this.theme, required this.onChanged});
+
+  final AppTheme theme;
+  final ValueChanged<AppTheme> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Theme.of(context).extension<_WorkspacePalette>()!;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Appearance', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(
+              'Choose the workspace color system.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 8),
+            RadioGroup<AppTheme>(
+              groupValue: theme,
+              onChanged: (value) {
+                if (value != null) onChanged(value);
+              },
+              child: Column(
+                children: [
+                  for (final option in AppTheme.values)
+                    RadioListTile<AppTheme>(
+                      contentPadding: EdgeInsets.zero,
+                      value: option,
+                      title: Text(option.label),
+                      subtitle: Text(option.description),
+                      secondary: _ThemeSwatch(theme: option),
+                    ),
+                ],
+              ),
+            ),
+            Container(
+              width: double.infinity,
+              height: 1,
+              color: palette.label.withValues(alpha: 0.25),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ThemeSwatch extends StatelessWidget {
+  const _ThemeSwatch({required this.theme});
+
+  final AppTheme theme;
+
+  @override
+  Widget build(BuildContext context) {
+    final ember = theme == AppTheme.ember;
+    return Container(
+      width: 34,
+      height: 34,
+      decoration: BoxDecoration(
+        color: ember ? const Color(0xff161615) : const Color(0xff142321),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: ember ? const Color(0xffffb74d) : const Color(0xff65d8b1),
+        ),
+      ),
+      child: Center(
+        child: Container(
+          width: 14,
+          height: 4,
+          color: ember ? const Color(0xff56d8d2) : const Color(0xff9cc6bb),
+        ),
       ),
     );
   }

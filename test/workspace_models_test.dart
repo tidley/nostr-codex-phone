@@ -41,6 +41,68 @@ void main() {
     expect(state.messages['channel-1']![1].parentId, 'message-1');
   });
 
+  test(
+    'workspace rehydrates broadcast reactions and main-thread visibility',
+    () {
+      final state = WorkspaceState()
+        ..apply({
+          'workspace_update': {
+            'action': 'message_updated',
+            'messages': [
+              {
+                'id': 'reply-1',
+                'channel_id': 'channel-1',
+                'sender_pubkey': 'member',
+                'body': 'Visible reply',
+                'parent_id': 'message-1',
+                'also_send_to_main': true,
+                'reactions': [
+                  {'emoji': '👍', 'sender_pubkey': 'owner'},
+                ],
+                'created_at': 3,
+              },
+            ],
+          },
+        });
+
+      final message = state.messages['channel-1']!.single;
+      expect(message.alsoSendToMain, isTrue);
+      expect(message.reactions.single.emoji, '👍');
+      expect(message.reactions.single.senderPubkey, 'owner');
+    },
+  );
+
+  test('workspace state retains attachment references on messages', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'message_created',
+          'messages': [
+            {
+              'id': 'message-1',
+              'channel_id': 'channel-1',
+              'sender_pubkey': 'owner',
+              'body': '',
+              'attachments': [
+                {
+                  'url': 'https://cdn.example/report',
+                  'sha256': 'a' * 64,
+                  'size': 4,
+                  'type': 'application/pdf',
+                  'name': 'report.pdf',
+                },
+              ],
+              'created_at': 2,
+            },
+          ],
+        },
+      });
+
+    final attachment = state.messages['channel-1']!.single.attachments.single;
+    expect(attachment.name, 'report.pdf');
+    expect(attachment.mediaType, 'application/pdf');
+  });
+
   test('workspace snapshot rehydrates messages and replaces stale state', () {
     final state = WorkspaceState()
       ..apply({
@@ -154,4 +216,207 @@ void main() {
     expect(state.members, ['worker']);
     expect(state.memberNames['worker'], 'Build machine');
   });
+
+  test('workspace rehydrates durable agents with OpenCode associations', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'agents': [
+            {
+              'id': 'agent-1',
+              'name': 'Scout',
+              'role': 'Researcher',
+              'traits': 'Careful',
+              'skills': ['Research'],
+              'opencode_session_id': 'ses_1',
+              'opencode_provider_id': 'openai',
+              'opencode_provider_name': 'OpenAI',
+              'opencode_model_id': 'gpt-5',
+              'opencode_model_name': 'GPT-5',
+              'opencode_agent': 'review',
+              'workdir': '/workspace/phone',
+              'restart_on_failure': false,
+            },
+          ],
+        },
+      });
+
+    expect(state.agents.single.name, 'Scout');
+    expect(state.agents.single.openCodeSessionId, 'ses_1');
+    expect(state.agents.single.sessionStatus, 'ready');
+    expect(state.agents.single.skills, ['Research']);
+    expect(state.agents.single.openCodeProviderId, 'openai');
+    expect(state.agents.single.openCodeProviderName, 'OpenAI');
+    expect(state.agents.single.openCodeModelId, 'gpt-5');
+    expect(state.agents.single.openCodeModelName, 'GPT-5');
+    expect(state.agents.single.openCodeAgent, 'review');
+    expect(state.agents.single.workdir, '/workspace/phone');
+    expect(state.agents.single.restartOnFailure, isFalse);
+  });
+
+  test('workspace mention syntax round-trips into stable metadata', () {
+    const mention = WorkspaceMention(
+      kind: 'agent',
+      id: 'agent-1',
+      label: 'Scout',
+    );
+    final syntax = workspaceMentionSyntax(mention);
+
+    expect(syntax, '@[Scout](agent:agent-1)');
+    expect(workspaceMentionsIn('Please ask $syntax').single.id, 'agent-1');
+  });
+
+  test('workspace state merges broadcast agent renames', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'agents': [
+            {'id': 'agent-1', 'name': 'Scout', 'role': 'Researcher'},
+          ],
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'agent_renamed',
+          'agents': [
+            {'id': 'agent-1', 'name': 'Navigator', 'role': 'Researcher'},
+          ],
+        },
+      });
+
+    expect(state.agents.single.name, 'Navigator');
+  });
+
+  test('workspace state applies agent provisioning failures', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'agent_created',
+          'agents': [
+            {
+              'id': 'agent-1',
+              'name': 'Rev',
+              'role': 'Reviewer',
+              'session_status': 'failed',
+              'session_error': 'OpenCode is unavailable',
+            },
+          ],
+        },
+      });
+
+    expect(state.agents.single.sessionStatus, 'failed');
+    expect(state.agents.single.sessionError, 'OpenCode is unavailable');
+  });
+
+  test('workspace state removes deleted agents and their memberships', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'agents': [
+            {'id': 'agent-1', 'name': 'Scout', 'role': 'Researcher'},
+          ],
+          'conversation_agents': [
+            {'agent_id': 'agent-1', 'channel_id': 'channel-1'},
+          ],
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'agent_deleted',
+          'agents': [],
+          'conversation_agents': [],
+        },
+      });
+
+    expect(state.agents, isEmpty);
+    expect(state.conversationAgents, isEmpty);
+  });
+
+  test('workspace retains durable conversation agent memberships', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'conversation_agents': [
+            {'agent_id': 'agent-1', 'channel_id': 'channel-1'},
+          ],
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'conversation_agents_updated',
+          'conversation_agents': [
+            {
+              'agent_id': 'agent-1',
+              'member_pubkey': 'alice',
+              'peer_pubkey': 'bob',
+            },
+          ],
+        },
+      });
+
+    expect(state.conversationAgents.single.peerPubkey, 'bob');
+  });
+
+  test(
+    'workspace typing is scoped to its conversation and expires in memory',
+    () {
+      final state = WorkspaceState()
+        ..apply({
+          'workspace_update': {
+            'action': 'typing',
+            'typing': {
+              'sender_pubkey': 'alice',
+              'channel_id': 'engineering',
+              'expires_at': 200,
+            },
+          },
+        })
+        ..apply({
+          'workspace_update': {
+            'action': 'typing',
+            'typing': {
+              'sender_pubkey': 'bob',
+              'recipient_pubkey': 'you',
+              'expires_at': 200,
+            },
+          },
+        });
+
+      expect(
+        state
+            .activeTyping(
+              channelId: 'engineering',
+              ownPubkey: 'you',
+              peerPubkey: null,
+              nowSeconds: 199,
+            )
+            .map((status) => status.senderPubkey),
+        ['alice'],
+      );
+      expect(
+        state
+            .activeTyping(
+              channelId: null,
+              ownPubkey: 'you',
+              peerPubkey: 'bob',
+              nowSeconds: 199,
+            )
+            .map((status) => status.senderPubkey),
+        ['bob'],
+      );
+      expect(
+        state.activeTyping(
+          channelId: 'engineering',
+          ownPubkey: 'you',
+          peerPubkey: null,
+          nowSeconds: 200,
+        ),
+        isEmpty,
+      );
+    },
+  );
 }
