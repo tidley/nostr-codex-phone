@@ -13,7 +13,7 @@ import 'package:nostr_codex_phone/src/voice_recording.dart';
 
 void main() {
   test('app widget is available', () {
-    expect(const NostrCodexApp(), isA<StatelessWidget>());
+    expect(const NostrCodexApp(), isA<StatefulWidget>());
   });
 
   test('cleans markdown before text to speech', () {

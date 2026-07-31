@@ -185,10 +185,55 @@ pub struct WorkspaceRequest {
     pub recipient_pubkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<MediaReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<WorkspaceMentionPayload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub also_send_to_main: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reaction: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_traits: Option<String>,
+    #[serde(default)]
+    pub agent_skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_provider_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_workdir: Option<String>,
+    #[serde(default = "default_restart_agent_session")]
+    pub restart_agent_session_on_failure: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceMentionPayload {
+    pub kind: String,
+    pub id: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,6 +245,77 @@ pub struct WorkspaceUpdate {
     pub members: Vec<WorkspaceMemberPayload>,
     #[serde(default)]
     pub messages: Vec<WorkspaceMessagePayload>,
+    #[serde(default)]
+    pub agents: Vec<WorkspaceAgentPayload>,
+    #[serde(default)]
+    pub conversation_agents: Vec<WorkspaceConversationAgentPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing: Option<WorkspaceTypingPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceTypingPayload {
+    pub sender_pubkey: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_pubkey: Option<String>,
+    pub expires_at: i64,
+}
+
+fn default_agent_session_status() -> String {
+    "failed".to_string()
+}
+
+fn default_restart_agent_session() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceAgentPayload {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    #[serde(default)]
+    pub traits: String,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_provider_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+    #[serde(default = "default_restart_agent_session")]
+    pub restart_on_failure: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_session_id: Option<String>,
+    #[serde(default = "default_agent_session_status")]
+    pub session_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_error: Option<String>,
+    #[serde(default)]
+    pub instance_id: String,
+    pub created_by: String,
+    pub created_at: i64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceConversationAgentPayload {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,9 +341,23 @@ pub struct WorkspaceMessagePayload {
     pub recipient_pubkey: Option<String>,
     pub sender_pubkey: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<MediaReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentions: Vec<WorkspaceMentionPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub also_send_to_main: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<WorkspaceReactionPayload>,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceReactionPayload {
+    pub emoji: String,
+    pub sender_pubkey: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -896,7 +1026,87 @@ fn validate_redeem_invite(invite: &RedeemInvite) -> Result<()> {
 fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
     match request.action.as_str() {
         "list" => Ok(()),
+        "typing"
+            if request
+                .expires_in_seconds
+                .is_some_and(|seconds| (1..=30).contains(&seconds))
+                && (request
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || request
+                        .recipient_pubkey
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty())) =>
+        {
+            Ok(())
+        }
         "set_profile" => Ok(()),
+        "list_agents" => Ok(()),
+        "add_conversation_agent" | "remove_conversation_agent"
+            if request
+                .agent_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && (request
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || request
+                        .recipient_pubkey
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty())) =>
+        {
+            Ok(())
+        }
+        "create_agent"
+            if request
+                .agent_name
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+                && request
+                    .agent_role
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        "rename_agent"
+            if request
+                .agent_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+                && request
+                    .agent_name
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        "restart_agent_session"
+            if request
+                .agent_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        "update_agent_profile"
+            if request
+                .agent_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        "delete_agent"
+            if request
+                .agent_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()) =>
+        {
+            Ok(())
+        }
         "create_channel"
             if request
                 .channel_name
@@ -926,10 +1136,22 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
                 .channel_id
                 .as_deref()
                 .is_some_and(|id| !id.trim().is_empty())
-                && request
+                && (request
                     .body
                     .as_deref()
-                    .is_some_and(|body| !body.trim().is_empty()) =>
+                    .is_some_and(|body| !body.trim().is_empty())
+                    || !request.attachments.is_empty()) =>
+        {
+            Ok(())
+        }
+        "toggle_reaction"
+            if request
+                .parent_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && request.reaction.as_deref().is_some_and(|emoji| {
+                    !emoji.trim().is_empty() && emoji.chars().count() <= 16
+                }) =>
         {
             Ok(())
         }
@@ -938,17 +1160,33 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
                 .recipient_pubkey
                 .as_deref()
                 .is_some_and(|id| !id.trim().is_empty())
-                && request
+                && (request
                     .body
                     .as_deref()
-                    .is_some_and(|body| !body.trim().is_empty()) =>
+                    .is_some_and(|body| !body.trim().is_empty())
+                    || !request.attachments.is_empty()) =>
         {
             Ok(())
         }
         _ => Err(anyhow!(
             "workspace request is incomplete or has an unsupported action"
         )),
+    }?;
+    for attachment in &request.attachments {
+        validate_media_reference(attachment)?;
     }
+    if request.mentions.len() > 32
+        || request.mentions.iter().any(|mention| {
+            !matches!(mention.kind.as_str(), "member" | "agent")
+                || mention.id.trim().is_empty()
+                || mention.id.len() > 256
+                || mention.label.trim().is_empty()
+                || mention.label.len() > 100
+        })
+    {
+        return Err(anyhow!("workspace mentions are invalid"));
+    }
+    Ok(())
 }
 
 fn validate_repo_list(repo_list: &RepoList) -> Result<()> {
@@ -1282,6 +1520,62 @@ mod tests {
     }
 
     #[test]
+    fn parses_reaction_and_main_thread_workspace_requests() {
+        let reaction = parse_wire_message(r#"{"workspace_request":{"action":"toggle_reaction","parent_id":"message-1","reaction":"👍"}}"#).unwrap();
+        assert_eq!(reaction.kind(), "workspace_request");
+        let reply = parse_wire_message(r#"{"workspace_request":{"action":"send_channel_message","channel_id":"c1","body":"reply","parent_id":"message-1","also_send_to_main":true}}"#).unwrap();
+        assert!(reply.to_json().unwrap().contains("also_send_to_main"));
+    }
+
+    #[test]
+    fn validates_short_lived_workspace_typing_requests() {
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"typing","channel_id":"c1","expires_in_seconds":6}}"#
+        )
+        .is_ok());
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"typing","channel_id":"c1","expires_in_seconds":31}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parses_attachment_only_workspace_message() {
+        let parsed = parse_wire_message(
+            r#"{"workspace_request":{"action":"send_channel_message","channel_id":"c1","attachments":[{"url":"https://cdn.example/report","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":4,"type":"application/pdf","name":"report.pdf"}]}}"#,
+        )
+        .unwrap();
+        let WireMessage::WorkspaceRequest { workspace_request } = parsed else {
+            panic!("expected workspace request");
+        };
+        assert_eq!(workspace_request.attachments.len(), 1);
+        assert_eq!(
+            workspace_request.attachments[0].name.as_deref(),
+            Some("report.pdf")
+        );
+    }
+
+    #[test]
+    fn parses_workspace_mentions_and_agent_management_requests() {
+        let parsed = parse_wire_message(
+            r#"{"workspace_request":{"action":"send_channel_message","channel_id":"c1","body":"@[Scout](agent:a1)","mentions":[{"kind":"agent","id":"a1","label":"Scout"}]}}"#,
+        )
+        .unwrap();
+        let WireMessage::WorkspaceRequest { workspace_request } = parsed else {
+            panic!("expected workspace request");
+        };
+        assert_eq!(workspace_request.mentions[0].id, "a1");
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"rename_agent","agent_id":"a1","agent_name":"Navigator"}}"#
+        )
+        .is_ok());
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"delete_agent","agent_id":"a1"}}"#
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn parses_channel_created_workspace_update() {
         let parsed = parse_wire_message(
             r#"{"workspace_update":{"action":"channel_created","channels":[{"id":"channel-1","name":"engineering","created_by":"owner","created_at":42}]}}"#,
@@ -1311,6 +1605,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(parsed.kind(), "workspace_request");
+    }
+
+    #[test]
+    fn parses_agent_workspace_request_and_update() {
+        let parsed = parse_wire_message(r#"{"workspace_request":{"action":"create_agent","agent_name":"Scout","agent_role":"Researcher","agent_skills":["Research"],"opencode_session_id":"ses_1"}}"#).unwrap();
+        assert_eq!(parsed.kind(), "workspace_request");
+        let update = parse_wire_message(r#"{"workspace_update":{"action":"agent_created","agents":[{"id":"agent-1","name":"Scout","role":"Researcher","traits":"Careful","skills":["Research"],"opencode_session_id":"ses_1","created_by":"owner","created_at":42}]}}"#).unwrap();
+        assert_eq!(update.kind(), "workspace_update");
+    }
+
+    #[test]
+    fn parses_conversation_agent_membership_requests_and_updates() {
+        let request = parse_wire_message(r#"{"workspace_request":{"action":"add_conversation_agent","channel_id":"channel-1","agent_id":"agent-1"}}"#).unwrap();
+        assert_eq!(request.kind(), "workspace_request");
+        let update = parse_wire_message(r#"{"workspace_update":{"action":"conversation_agents_updated","conversation_agents":[{"agent_id":"agent-1","channel_id":"channel-1"}]}}"#).unwrap();
+        assert_eq!(update.kind(), "workspace_update");
     }
 
     #[test]

@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1116164920;
+  int get rustContentHash => -1634567451;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -77,6 +77,11 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  Future<BridgeDownloadedAttachment> crateApiNostrBlossomDownloadAttachment({
+    required BridgeAudioReference attachment,
+    required String destinationDir,
+  });
+
   Future<BridgeAudioReference> crateApiNostrBlossomUploadAudio({
     required BridgeBlossomUploadConfig config,
   });
@@ -103,6 +108,11 @@ abstract class RustLibApi extends BaseApi {
     required BridgeAudioReference audio,
   });
 
+  Future<String> crateApiNostrNostrSendEphemeralQuery({
+    required String query,
+    required BigInt expiresInSeconds,
+  });
+
   Future<String> crateApiNostrNostrSendError({required String error});
 
   Future<String> crateApiNostrNostrSendQuery({required String query});
@@ -125,6 +135,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
+  Future<BridgeDownloadedAttachment> crateApiNostrBlossomDownloadAttachment({
+    required BridgeAudioReference attachment,
+    required String destinationDir,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_audio_reference(attachment, serializer);
+          sse_encode_String(destinationDir, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 1,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_downloaded_attachment,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrBlossomDownloadAttachmentConstMeta,
+        argValues: [attachment, destinationDir],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrBlossomDownloadAttachmentConstMeta =>
+      const TaskConstMeta(
+        debugName: "blossom_download_attachment",
+        argNames: ["attachment", "destinationDir"],
+      );
+
+  @override
   Future<BridgeAudioReference> crateApiNostrBlossomUploadAudio({
     required BridgeBlossomUploadConfig config,
   }) {
@@ -139,7 +184,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 1,
+            funcId: 2,
             port: port_,
           );
         },
@@ -169,7 +214,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 2,
+            funcId: 3,
             port: port_,
           );
         },
@@ -193,7 +238,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_String,
@@ -221,7 +266,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 5,
             port: port_,
           );
         },
@@ -248,7 +293,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 5)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bridge_key_pair,
@@ -273,7 +318,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 7,
             port: port_,
           );
         },
@@ -303,7 +348,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 8,
             port: port_,
           );
         },
@@ -331,7 +376,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(secretKey, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bridge_key_pair,
@@ -362,7 +407,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 10,
             port: port_,
           );
         },
@@ -381,6 +426,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "nostr_send_audio", argNames: ["audio"]);
 
   @override
+  Future<String> crateApiNostrNostrSendEphemeralQuery({
+    required String query,
+    required BigInt expiresInSeconds,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(query, serializer);
+          sse_encode_u_64(expiresInSeconds, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 11,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrNostrSendEphemeralQueryConstMeta,
+        argValues: [query, expiresInSeconds],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrNostrSendEphemeralQueryConstMeta =>
+      const TaskConstMeta(
+        debugName: "nostr_send_ephemeral_query",
+        argNames: ["query", "expiresInSeconds"],
+      );
+
+  @override
   Future<String> crateApiNostrNostrSendError({required String error}) {
     return handler.executeNormal(
       NormalTask(
@@ -390,7 +470,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 12,
             port: port_,
           );
         },
@@ -418,7 +498,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 13,
             port: port_,
           );
         },
@@ -446,7 +526,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 14,
             port: port_,
           );
         },
@@ -479,7 +559,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 15,
             port: port_,
           );
         },
@@ -506,7 +586,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 16,
             port: port_,
           );
         },
@@ -626,6 +706,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       filePath: dco_decode_String(arr[2]),
       contentType: dco_decode_String(arr[3]),
       fileName: dco_decode_opt_String(arr[4]),
+    );
+  }
+
+  @protected
+  BridgeDownloadedAttachment dco_decode_bridge_downloaded_attachment(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return BridgeDownloadedAttachment(
+      path: dco_decode_String(arr[0]),
+      mediaType: dco_decode_String(arr[1]),
+      name: dco_decode_String(arr[2]),
     );
   }
 
@@ -878,6 +973,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       filePath: var_filePath,
       contentType: var_contentType,
       fileName: var_fileName,
+    );
+  }
+
+  @protected
+  BridgeDownloadedAttachment sse_decode_bridge_downloaded_attachment(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_path = sse_decode_String(deserializer);
+    var var_mediaType = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    return BridgeDownloadedAttachment(
+      path: var_path,
+      mediaType: var_mediaType,
+      name: var_name,
     );
   }
 
@@ -1156,6 +1266,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.filePath, serializer);
     sse_encode_String(self.contentType, serializer);
     sse_encode_opt_String(self.fileName, serializer);
+  }
+
+  @protected
+  void sse_encode_bridge_downloaded_attachment(
+    BridgeDownloadedAttachment self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.path, serializer);
+    sse_encode_String(self.mediaType, serializer);
+    sse_encode_String(self.name, serializer);
   }
 
   @protected

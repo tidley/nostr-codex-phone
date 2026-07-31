@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
+
 Map<String, String> decodeWorkspaceMemberAliases(String? raw) {
   if (raw == null || raw.isEmpty) return {};
   try {
@@ -37,6 +39,10 @@ class WorkspaceMessage {
     this.channelId,
     this.recipientPubkey,
     this.parentId,
+    this.alsoSendToMain = false,
+    this.attachments = const [],
+    this.mentions = const [],
+    this.reactions = const [],
   });
   final String id;
   final String? channelId;
@@ -44,6 +50,10 @@ class WorkspaceMessage {
   final String senderPubkey;
   final String body;
   final String? parentId;
+  final bool alsoSendToMain;
+  final List<BridgeAudioReference> attachments;
+  final List<WorkspaceMention> mentions;
+  final List<WorkspaceReaction> reactions;
   final int createdAt;
 
   factory WorkspaceMessage.fromJson(Map<String, dynamic> json) =>
@@ -54,7 +64,238 @@ class WorkspaceMessage {
         senderPubkey: json['sender_pubkey']?.toString() ?? '',
         body: json['body']?.toString() ?? '',
         parentId: json['parent_id']?.toString(),
+        alsoSendToMain: json['also_send_to_main'] == true,
+        attachments: _attachments(json['attachments']),
+        mentions: _mentions(json['mentions']),
+        reactions: _reactions(json['reactions']),
         createdAt: (json['created_at'] as num?)?.toInt() ?? 0,
+      );
+}
+
+class WorkspaceReaction {
+  const WorkspaceReaction({required this.emoji, required this.senderPubkey});
+  final String emoji;
+  final String senderPubkey;
+}
+
+List<WorkspaceReaction> _reactions(Object? raw) => raw is List
+    ? raw
+          .whereType<Map>()
+          .map(
+            (item) => WorkspaceReaction(
+              emoji: item['emoji']?.toString() ?? '',
+              senderPubkey: item['sender_pubkey']?.toString() ?? '',
+            ),
+          )
+          .where(
+            (item) => item.emoji.isNotEmpty && item.senderPubkey.isNotEmpty,
+          )
+          .toList(growable: false)
+    : const [];
+
+class WorkspaceMention {
+  const WorkspaceMention({
+    required this.kind,
+    required this.id,
+    required this.label,
+  });
+
+  final String kind;
+  final String id;
+  final String label;
+
+  Map<String, Object> toJson() => {'kind': kind, 'id': id, 'label': label};
+}
+
+String workspaceMentionSyntax(WorkspaceMention mention) =>
+    '@[${mention.label}](${mention.kind}:${mention.id})';
+
+List<WorkspaceMention> workspaceMentionsIn(String text) {
+  final pattern = RegExp(r'@\[([^\]\r\n]+)\]\((member|agent):([^\)\s]+)\)');
+  return pattern
+      .allMatches(text)
+      .map(
+        (match) => WorkspaceMention(
+          label: match.group(1)!,
+          kind: match.group(2)!,
+          id: match.group(3)!,
+        ),
+      )
+      .toList(growable: false);
+}
+
+List<BridgeAudioReference> _attachments(Object? raw) {
+  if (raw is! List) return const [];
+  return raw
+      .whereType<Map>()
+      .map((item) {
+        final encryption = item['encryption'];
+        return BridgeAudioReference(
+          url: item['url']?.toString() ?? '',
+          sha256: item['sha256']?.toString() ?? '',
+          size: BigInt.tryParse(item['size']?.toString() ?? '') ?? BigInt.zero,
+          mediaType: (item['type'] ?? item['mediaType'])?.toString() ?? '',
+          name: item['name']?.toString(),
+          encryption: encryption is Map
+              ? BridgeAudioEncryption(
+                  algorithm: encryption['algorithm']?.toString() ?? '',
+                  key: encryption['key']?.toString() ?? '',
+                  nonce: encryption['nonce']?.toString() ?? '',
+                  plaintextSha256:
+                      (encryption['plaintext_sha256'] ??
+                              encryption['plaintextSha256'])
+                          ?.toString() ??
+                      '',
+                  plaintextSize:
+                      BigInt.tryParse(
+                        (encryption['plaintext_size'] ??
+                                    encryption['plaintextSize'])
+                                ?.toString() ??
+                            '',
+                      ) ??
+                      BigInt.zero,
+                  plaintextMediaType:
+                      (encryption['plaintext_type'] ??
+                              encryption['plaintextMediaType'])
+                          ?.toString() ??
+                      '',
+                )
+              : null,
+        );
+      })
+      .where(
+        (attachment) =>
+            attachment.url.isNotEmpty &&
+            attachment.sha256.isNotEmpty &&
+            attachment.size > BigInt.zero &&
+            attachment.mediaType.isNotEmpty,
+      )
+      .toList(growable: false);
+}
+
+List<WorkspaceMention> _mentions(Object? raw) {
+  if (raw is! List) return const [];
+  return raw
+      .whereType<Map>()
+      .map(
+        (item) => WorkspaceMention(
+          kind: item['kind']?.toString() ?? '',
+          id: item['id']?.toString() ?? '',
+          label: item['label']?.toString() ?? '',
+        ),
+      )
+      .where(
+        (mention) =>
+            (mention.kind == 'member' || mention.kind == 'agent') &&
+            mention.id.isNotEmpty &&
+            mention.label.isNotEmpty,
+      )
+      .toList(growable: false);
+}
+
+class WorkspaceAgent {
+  const WorkspaceAgent({
+    required this.id,
+    required this.name,
+    required this.role,
+    required this.traits,
+    required this.skills,
+    this.preset,
+    this.openCodeProviderId,
+    this.openCodeProviderName,
+    this.openCodeModelId,
+    this.openCodeModelName,
+    this.openCodeAgent,
+    this.workdir,
+    this.restartOnFailure = true,
+    this.openCodeSessionId,
+    this.sessionStatus = 'failed',
+    this.sessionError,
+  });
+  final String id;
+  final String name;
+  final String role;
+  final String traits;
+  final List<String> skills;
+  final String? preset;
+  final String? openCodeProviderId;
+  final String? openCodeProviderName;
+  final String? openCodeModelId;
+  final String? openCodeModelName;
+  final String? openCodeAgent;
+  final String? workdir;
+  final bool restartOnFailure;
+  final String? openCodeSessionId;
+  final String sessionStatus;
+  final String? sessionError;
+
+  factory WorkspaceAgent.fromJson(Map<String, dynamic> json) => WorkspaceAgent(
+    id: json['id']?.toString() ?? '',
+    name: json['name']?.toString() ?? '',
+    role: json['role']?.toString() ?? '',
+    traits: json['traits']?.toString() ?? '',
+    skills: json['skills'] is List
+        ? (json['skills'] as List)
+              .map((value) => value.toString())
+              .where((value) => value.isNotEmpty)
+              .toList()
+        : const [],
+    preset: json['preset']?.toString(),
+    openCodeProviderId: json['opencode_provider_id']?.toString(),
+    openCodeProviderName: json['opencode_provider_name']?.toString(),
+    openCodeModelId: json['opencode_model_id']?.toString(),
+    openCodeModelName: json['opencode_model_name']?.toString(),
+    openCodeAgent: json['opencode_agent']?.toString(),
+    workdir: json['workdir']?.toString(),
+    restartOnFailure: json['restart_on_failure'] != false,
+    openCodeSessionId: json['opencode_session_id']?.toString(),
+    sessionStatus:
+        json['session_status']?.toString() ??
+        (json['opencode_session_id'] == null ? 'failed' : 'ready'),
+    sessionError: json['session_error']?.toString(),
+  );
+}
+
+class WorkspaceConversationAgent {
+  const WorkspaceConversationAgent({
+    required this.agentId,
+    this.channelId,
+    this.memberPubkey,
+    this.peerPubkey,
+  });
+  final String agentId;
+  final String? channelId;
+  final String? memberPubkey;
+  final String? peerPubkey;
+
+  factory WorkspaceConversationAgent.fromJson(Map<String, dynamic> json) =>
+      WorkspaceConversationAgent(
+        agentId: json['agent_id']?.toString() ?? '',
+        channelId: json['channel_id']?.toString(),
+        memberPubkey: json['member_pubkey']?.toString(),
+        peerPubkey: json['peer_pubkey']?.toString(),
+      );
+}
+
+class WorkspaceTyping {
+  const WorkspaceTyping({
+    required this.senderPubkey,
+    this.channelId,
+    this.recipientPubkey,
+    required this.expiresAt,
+  });
+
+  final String senderPubkey;
+  final String? channelId;
+  final String? recipientPubkey;
+  final int expiresAt;
+
+  factory WorkspaceTyping.fromJson(Map<String, dynamic> json) =>
+      WorkspaceTyping(
+        senderPubkey: json['sender_pubkey']?.toString() ?? '',
+        channelId: json['channel_id']?.toString(),
+        recipientPubkey: json['recipient_pubkey']?.toString(),
+        expiresAt: (json['expires_at'] as num?)?.toInt() ?? 0,
       );
 }
 
@@ -63,6 +304,9 @@ class WorkspaceState {
   List<String> members = [];
   final Map<String, String> memberNames = {};
   final Map<String, List<WorkspaceMessage>> messages = {};
+  List<WorkspaceAgent> agents = [];
+  List<WorkspaceConversationAgent> conversationAgents = [];
+  final Map<String, WorkspaceTyping> typing = {};
 
   void apply(Map<String, dynamic> raw) {
     final update = raw['workspace_update'];
@@ -74,6 +318,36 @@ class WorkspaceState {
       members = [];
       memberNames.clear();
       messages.clear();
+      agents = [];
+      conversationAgents = [];
+      typing.clear();
+    }
+    final incomingTyping = data['typing'];
+    if (incomingTyping is Map) {
+      final status = WorkspaceTyping.fromJson(
+        Map<String, dynamic>.from(incomingTyping),
+      );
+      if (status.senderPubkey.isNotEmpty && status.expiresAt > 0) {
+        typing[status.senderPubkey] = status;
+      }
+    }
+    final incomingConversationAgents = _conversationAgents(
+      data['conversation_agents'],
+    );
+    if (isSnapshot ||
+        data['action'] == 'conversation_agents_updated' ||
+        data['action'] == 'agent_deleted') {
+      conversationAgents = incomingConversationAgents;
+    }
+    final incomingAgents = _agents(data['agents']);
+    if (isSnapshot || data['action'] == 'agent_deleted') {
+      agents = incomingAgents;
+    } else if (incomingAgents.isNotEmpty) {
+      final byId = {for (final agent in agents) agent.id: agent};
+      for (final agent in incomingAgents) {
+        byId[agent.id] = agent;
+      }
+      agents = byId.values.toList();
     }
     final incomingChannels = _channels(data['channels']);
     if (incomingChannels.isNotEmpty) {
@@ -100,9 +374,7 @@ class WorkspaceState {
       }
     }
     for (final message in _messages(data['messages'])) {
-      final key =
-          message.channelId ??
-          _directKey(message.senderPubkey, message.recipientPubkey);
+      final key = message.channelId ?? _messageDirectKey(message);
       final current = {for (final item in messages[key] ?? []) item.id: item};
       current[message.id] = message;
       messages[key] = current.values.cast<WorkspaceMessage>().toList()
@@ -111,6 +383,25 @@ class WorkspaceState {
   }
 
   static String directKey(String one, String? two) => _directKey(one, two);
+  List<WorkspaceTyping> activeTyping({
+    required String? channelId,
+    required String ownPubkey,
+    required String? peerPubkey,
+    required int nowSeconds,
+  }) {
+    typing.removeWhere((_, status) => status.expiresAt <= nowSeconds);
+    return typing.values
+        .where((status) {
+          if (status.channelId != null) return status.channelId == channelId;
+          return channelId == null &&
+              ((status.senderPubkey == ownPubkey &&
+                      status.recipientPubkey == peerPubkey) ||
+                  (status.senderPubkey == peerPubkey &&
+                      status.recipientPubkey == ownPubkey));
+        })
+        .toList(growable: false);
+  }
+
   String? channelName(String id) {
     for (final channel in channels) {
       if (channel.id == id && channel.name.isNotEmpty) return channel.name;
@@ -120,6 +411,22 @@ class WorkspaceState {
 
   static String _directKey(String one, String? two) =>
       ([one, two ?? '']..sort()).join(':');
+  String _messageDirectKey(WorkspaceMessage message) {
+    if (!message.senderPubkey.startsWith('agent:')) {
+      return _directKey(message.senderPubkey, message.recipientPubkey);
+    }
+    final agentId = message.senderPubkey.substring('agent:'.length);
+    for (final membership in conversationAgents) {
+      if (membership.agentId == agentId &&
+          membership.channelId == null &&
+          (membership.memberPubkey == message.recipientPubkey ||
+              membership.peerPubkey == message.recipientPubkey)) {
+        return _directKey(membership.memberPubkey!, membership.peerPubkey);
+      }
+    }
+    return _directKey(message.senderPubkey, message.recipientPubkey);
+  }
+
   static Map<String, String> _members(Object? raw) {
     if (raw is! List) return {};
     final members = <String, String>{};
@@ -153,6 +460,28 @@ class WorkspaceState {
                   WorkspaceMessage.fromJson(Map<String, dynamic>.from(item)),
             )
             .where((item) => item.id.isNotEmpty)
+            .toList()
+      : [];
+  static List<WorkspaceAgent> _agents(Object? raw) => raw is List
+      ? raw
+            .whereType<Map>()
+            .map(
+              (item) =>
+                  WorkspaceAgent.fromJson(Map<String, dynamic>.from(item)),
+            )
+            .where((item) => item.id.isNotEmpty)
+            .toList()
+      : [];
+  static List<WorkspaceConversationAgent> _conversationAgents(Object? raw) =>
+      raw is List
+      ? raw
+            .whereType<Map>()
+            .map(
+              (item) => WorkspaceConversationAgent.fromJson(
+                Map<String, dynamic>.from(item),
+              ),
+            )
+            .where((item) => item.agentId.isNotEmpty)
             .toList()
       : [];
 }

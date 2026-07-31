@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
 
 enum MessageDirection { incoming, outgoing }
@@ -10,6 +12,7 @@ class ConversationMessage {
     required this.eventId,
     required this.timestamp,
     this.audio,
+    this.attachments = const [],
   });
 
   final MessageDirection direction;
@@ -18,6 +21,7 @@ class ConversationMessage {
   final String eventId;
   final DateTime timestamp;
   final BridgeAudioReference? audio;
+  final List<BridgeAudioReference> attachments;
 
   Map<String, dynamic> toJson() => {
     'direction': direction == MessageDirection.incoming
@@ -28,6 +32,10 @@ class ConversationMessage {
     'eventId': eventId,
     'timestamp': timestamp.toIso8601String(),
     if (audio != null) 'audio': _serializeBridgeAudioReference(audio!),
+    if (attachments.isNotEmpty)
+      'attachments': attachments
+          .map(_serializeBridgeAudioReference)
+          .toList(growable: false),
   };
 
   static ConversationMessage? fromJson(dynamic raw) {
@@ -46,6 +54,7 @@ class ConversationMessage {
       eventId: eventId,
       timestamp: timestamp ?? DateTime.now(),
       audio: _deserializeBridgeAudioReference(raw['audio']),
+      attachments: _deserializeBridgeAudioReferences(raw['attachments']),
     );
   }
 
@@ -53,6 +62,24 @@ class ConversationMessage {
     final direction = raw?.toString();
     if (direction == 'incoming') return MessageDirection.incoming;
     return MessageDirection.outgoing;
+  }
+}
+
+List<BridgeAudioReference> attachmentsFromWireJson(
+  String kind,
+  String rawJson,
+) {
+  try {
+    final raw = jsonDecode(rawJson);
+    if (raw is! Map) return const [];
+    if (kind == 'audio') {
+      final attachment = _deserializeBridgeAudioReference(raw['audio']);
+      return attachment == null ? const [] : [attachment];
+    }
+    final bundle = raw['media_bundle'] is Map ? raw['media_bundle'] : raw;
+    return _deserializeBridgeAudioReferences((bundle as Map)['attachments']);
+  } on FormatException {
+    return const [];
   }
 }
 
@@ -161,7 +188,7 @@ BridgeAudioReference? _deserializeBridgeAudioReference(dynamic raw) {
   final url = raw['url']?.toString();
   final sha256 = raw['sha256']?.toString();
   final sizeRaw = raw['size']?.toString();
-  final mediaType = raw['mediaType']?.toString();
+  final mediaType = (raw['mediaType'] ?? raw['type'])?.toString();
   if (url == null || sha256 == null || sizeRaw == null || mediaType == null) {
     return null;
   }
@@ -183,13 +210,27 @@ BridgeAudioReference? _deserializeBridgeAudioReference(dynamic raw) {
   );
 }
 
+List<BridgeAudioReference> _deserializeBridgeAudioReferences(dynamic raw) {
+  if (raw is! List) return const [];
+  return raw
+      .map(_deserializeBridgeAudioReference)
+      .whereType<BridgeAudioReference>()
+      .toList(growable: false);
+}
+
 BridgeAudioEncryption? _deserializeBridgeAudioEncryption(Map encryptionRaw) {
   final algorithm = encryptionRaw['algorithm']?.toString();
   final key = encryptionRaw['key']?.toString();
   final nonce = encryptionRaw['nonce']?.toString();
-  final plaintextSha256 = encryptionRaw['plaintextSha256']?.toString();
-  final plaintextSizeRaw = encryptionRaw['plaintextSize']?.toString();
-  final plaintextMediaType = encryptionRaw['plaintextMediaType']?.toString();
+  final plaintextSha256 =
+      (encryptionRaw['plaintextSha256'] ?? encryptionRaw['plaintext_sha256'])
+          ?.toString();
+  final plaintextSizeRaw =
+      (encryptionRaw['plaintextSize'] ?? encryptionRaw['plaintext_size'])
+          ?.toString();
+  final plaintextMediaType =
+      (encryptionRaw['plaintextMediaType'] ?? encryptionRaw['plaintext_type'])
+          ?.toString();
   final plaintextSize = BigInt.tryParse(plaintextSizeRaw ?? '');
   if (algorithm == null ||
       algorithm.isEmpty ||

@@ -8,17 +8,13 @@ use std::sync::{
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use futures_util::StreamExt;
-use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 
-const OPENCODE_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 // OpenCode session IDs are `ses_` plus 1-124 ASCII alphanumeric characters.
 const OPENCODE_SESSION_ID_MAX_LEN: usize = 128;
 
@@ -42,11 +38,7 @@ pub enum AgentBackend {
 
 #[derive(Debug, Clone)]
 pub struct OpenCodeConfig {
-    pub base_url: String,
     pub bin: String,
-    pub auto_start: bool,
-    pub username: Option<String>,
-    pub password: Option<String>,
     pub agent: String,
     pub model: Option<OpenCodeModel>,
 }
@@ -180,24 +172,7 @@ impl CodexConfig {
 
 impl OpenCodeConfig {
     fn from_env() -> Result<Self> {
-        let base_url = env::var("OPENCODE_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:4096".to_string())
-            .trim_end_matches('/')
-            .to_string();
         let bin = env::var("OPENCODE_BIN").unwrap_or_else(|_| default_opencode_bin());
-        let auto_start = env::var("OPENCODE_AUTO_START")
-            .ok()
-            .map(|value| !is_falsey(&value))
-            .unwrap_or(true);
-        let password = env::var("OPENCODE_PASSWORD")
-            .or_else(|_| env::var("OPENCODE_SERVER_PASSWORD"))
-            .ok()
-            .filter(|value| !value.trim().is_empty());
-        let username = env::var("OPENCODE_USERNAME")
-            .or_else(|_| env::var("OPENCODE_SERVER_USERNAME"))
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| password.as_ref().map(|_| "opencode".to_string()));
         let agent = env::var("OPENCODE_AGENT")
             .ok()
             .map(|value| value.trim().to_string())
@@ -213,15 +188,7 @@ impl OpenCodeConfig {
             })
             .transpose()?;
 
-        Ok(Self {
-            base_url,
-            bin,
-            auto_start,
-            username,
-            password,
-            agent,
-            model,
-        })
+        Ok(Self { bin, agent, model })
     }
 }
 
@@ -311,39 +278,40 @@ pub async fn list_opencode_sessions(config: &CodexConfig) -> Result<Vec<OpenCode
     if config.backend != AgentBackend::OpenCode {
         return Err(anyhow!("OpenCode sessions require AGENT_BACKEND=opencode"));
     }
-
-    let client = reqwest::Client::new();
-    ensure_opencode_available(&client, config).await?;
-    list_opencode_sessions_with_client(&client, config).await
+    let output = run_opencode_cli(
+        config,
+        vec![
+            "session".into(),
+            "list".into(),
+            "--format".into(),
+            "json".into(),
+            "--max-count".into(),
+            "50".into(),
+        ],
+        None,
+    )
+    .await?;
+    parse_opencode_session_list(
+        &serde_json::from_slice(&output.stdout)
+            .context("OpenCode session list returned invalid JSON")?,
+    )
 }
 
 pub async fn list_opencode_models(config: &CodexConfig) -> Result<Vec<OpenCodeModelInfo>> {
     if config.backend != AgentBackend::OpenCode {
         return Err(anyhow!("OpenCode models require AGENT_BACKEND=opencode"));
     }
-
-    let client = reqwest::Client::new();
-    ensure_opencode_available(&client, config).await?;
-    let response = timeout(
-        OPENCODE_CONTROL_TIMEOUT,
-        opencode_request(&client, config, reqwest::Method::GET, "/config/providers").send(),
-    )
-    .await
-    .context("timed out listing OpenCode models")?
-    .context("failed to list OpenCode models")?;
-    parse_opencode_model_list(&opencode_json_response(response).await?)
+    let output = run_opencode_cli(config, vec!["models".into()], None).await?;
+    parse_opencode_model_list(&String::from_utf8_lossy(&output.stdout))
 }
 
 pub async fn ensure_opencode_session(config: &CodexConfig) -> Result<String> {
     if config.backend != AgentBackend::OpenCode {
         return Err(anyhow!("OpenCode sessions require AGENT_BACKEND=opencode"));
     }
-
-    let client = reqwest::Client::new();
-    ensure_opencode_available(&client, config).await?;
-    match latest_opencode_session_id(&client, config).await? {
+    match latest_opencode_session_id(config).await? {
         Some(session_id) => Ok(session_id),
-        None => create_opencode_session(&client, config).await,
+        None => create_opencode_session(config).await,
     }
 }
 
@@ -351,10 +319,7 @@ pub async fn new_opencode_session(config: &CodexConfig) -> Result<String> {
     if config.backend != AgentBackend::OpenCode {
         return Err(anyhow!("OpenCode sessions require AGENT_BACKEND=opencode"));
     }
-
-    let client = reqwest::Client::new();
-    ensure_opencode_available(&client, config).await?;
-    create_opencode_session(&client, config).await
+    create_opencode_session(config).await
 }
 
 async fn run_opencode_session(
@@ -364,58 +329,21 @@ async fn run_opencode_session(
     cancel_token: Option<&CodexCancelToken>,
     event_sender: Option<CodexJsonEventSender>,
 ) -> Result<CodexRunResult> {
-    let client = reqwest::Client::new();
-    ensure_opencode_available(&client, config).await?;
-    let session_id = match session_id.filter(|session_id| !session_id.is_empty()) {
-        Some(session_id) => validate_opencode_session_id(session_id)?.to_string(),
-        None => match latest_opencode_session_id(&client, config).await? {
-            Some(session_id) => session_id,
-            None => create_opencode_session(&client, config).await?,
-        },
+    let session_id = match session_id.filter(|id| !id.is_empty()) {
+        Some(id) => validate_opencode_session_id(id)?.to_owned(),
+        None => ensure_opencode_session(config).await?,
     };
-    let body = opencode_prompt_body(prompt, &config.opencode);
-    let request = opencode_session_request(
-        &client,
-        config,
-        reqwest::Method::POST,
-        &session_id,
-        "message",
-    )?
-    .json(&body);
-
-    let event_task = event_sender.map(|sender| {
-        let client = client.clone();
-        let config = config.clone();
-        let session_id = session_id.clone();
-        tokio::spawn(async move {
-            let _ = stream_opencode_events(&client, &config, &session_id, sender).await;
-        })
-    });
-    let result = tokio::select! {
-        response = request.send() => response.context("failed to send prompt to OpenCode"),
-        _ = wait_for_cancel(cancel_token), if cancel_token.is_some() => {
-            let _ = abort_opencode_session(&client, config, &session_id).await;
-            Err(anyhow!("Codex cancelled"))
-        }
-        _ = sleep(config.timeout) => {
-            Err(anyhow!(
-                "OpenCode is still busy after {}s",
-                config.timeout.as_secs()
-            ))
-        }
-    };
-    if let Some(task) = event_task {
-        task.abort();
-    }
-    let response = result?;
-    let value = opencode_json_response(response).await?;
+    let mut args = opencode_run_args(config, Some(&session_id));
+    args.push(prompt.to_string());
+    let output = run_opencode_cli_with_cancel(config, args, cancel_token, event_sender).await?;
+    let parsed = parse_opencode_json_output(&String::from_utf8_lossy(&output.stdout))?;
     Ok(CodexRunResult {
-        response: opencode_response_text(&value)?,
-        session_id: Some(session_id),
+        response: parsed.response,
+        session_id: parsed.session_id.or(Some(session_id)),
     })
 }
 
-async fn stream_opencode_events(
+/*async fn old_stream_opencode_events(
     client: &reqwest::Client,
     config: &CodexConfig,
     session_id: &str,
@@ -833,6 +761,266 @@ fn opencode_response_text(value: &Value) -> Result<String> {
     ))
 }
 
+*/
+
+fn parse_opencode_session_list(value: &Value) -> Result<Vec<OpenCodeSessionInfo>> {
+    let sessions = value
+        .as_array()
+        .or_else(|| value.get("sessions").and_then(Value::as_array))
+        .ok_or_else(|| anyhow!("OpenCode session list response was not an array: {value}"))?;
+    let mut sessions = sessions
+        .iter()
+        .filter_map(|value| {
+            let id = value
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| validate_opencode_session_id(id).is_ok())?
+                .to_owned();
+            Some(OpenCodeSessionInfo {
+                title: value
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&id)
+                    .to_owned(),
+                directory: value
+                    .get("directory")
+                    .or_else(|| value.pointer("/path/cwd"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                created_at: value
+                    .get("created")
+                    .or_else(|| value.get("createdAt"))
+                    .or_else(|| value.pointer("/time/created"))
+                    .map(|value| value.to_string().trim_matches('"').to_owned()),
+                updated_at: value
+                    .get("updated")
+                    .or_else(|| value.get("updatedAt"))
+                    .or_else(|| value.pointer("/time/updated"))
+                    .map(|value| value.to_string().trim_matches('"').to_owned()),
+                id,
+            })
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| right.sort_key().cmp(left.sort_key()));
+    Ok(sessions)
+}
+
+fn latest_opencode_session_id_for_directory(
+    sessions: Vec<OpenCodeSessionInfo>,
+    directory: &str,
+) -> Option<String> {
+    sessions
+        .into_iter()
+        .find(|session| session.directory.as_deref() == Some(directory))
+        .map(|session| session.id)
+}
+
+fn validate_opencode_session_id(session_id: &str) -> Result<&str> {
+    let suffix = session_id
+        .strip_prefix("ses_")
+        .filter(|suffix| !suffix.is_empty());
+    if session_id.len() <= OPENCODE_SESSION_ID_MAX_LEN
+        && suffix.is_some_and(|suffix| suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    {
+        Ok(session_id)
+    } else {
+        Err(anyhow!("invalid OpenCode session ID"))
+    }
+}
+
+fn opencode_run_args(config: &CodexConfig, session_id: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "run".into(),
+        "--format".into(),
+        "json".into(),
+        "--dir".into(),
+        config.working_dir.to_string_lossy().into_owned(),
+        "--agent".into(),
+        config.opencode.agent.clone(),
+    ];
+    if let Some(session_id) = session_id {
+        args.extend(["--session".into(), session_id.to_owned()]);
+    }
+    if let Some(model) = &config.opencode.model {
+        args.extend([
+            "--model".into(),
+            format!("{}/{}", model.provider_id, model.model_id),
+        ]);
+    }
+    args
+}
+
+async fn latest_opencode_session_id(config: &CodexConfig) -> Result<Option<String>> {
+    let directory = config.working_dir.to_string_lossy();
+    Ok(latest_opencode_session_id_for_directory(
+        list_opencode_sessions(config).await?,
+        directory.as_ref(),
+    ))
+}
+
+async fn create_opencode_session(config: &CodexConfig) -> Result<String> {
+    let mut args = opencode_run_args(config, None);
+    args.extend([
+        "--title".into(),
+        "Nostr workspace agent".into(),
+        "Initialize this dedicated workspace session. Reply only READY.".into(),
+    ]);
+    let output = run_opencode_cli(config, args, None).await?;
+    parse_opencode_json_output(&String::from_utf8_lossy(&output.stdout))?
+        .session_id
+        .ok_or_else(|| anyhow!("OpenCode did not emit a session ID while creating a session"))
+}
+
+async fn run_opencode_cli(
+    config: &CodexConfig,
+    args: Vec<String>,
+    event_sender: Option<CodexJsonEventSender>,
+) -> Result<Output> {
+    run_opencode_cli_with_cancel(config, args, None, event_sender).await
+}
+
+async fn run_opencode_cli_with_cancel(
+    config: &CodexConfig,
+    args: Vec<String>,
+    cancel_token: Option<&CodexCancelToken>,
+    event_sender: Option<CodexJsonEventSender>,
+) -> Result<Output> {
+    let mut child = Command::new(&config.opencode.bin)
+        .args(args)
+        .current_dir(&config.working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to run `{}`; install OpenCode or set OPENCODE_BIN",
+                config.opencode.bin
+            )
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to open OpenCode stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("failed to open OpenCode stderr"))?;
+    let stdout_task = tokio::spawn(read_stdout(stdout, event_sender));
+    let stderr_task = tokio::spawn(read_output(stderr));
+    let status = tokio::select! {
+        status = child.wait() => status.context("failed to wait for OpenCode output"),
+        _ = wait_for_cancel(cancel_token), if cancel_token.is_some() => { let _ = child.kill().await; Err(anyhow!("OpenCode cancelled")) }
+        _ = sleep(config.timeout) => { let _ = child.kill().await; Err(anyhow!("OpenCode timed out after {}s", config.timeout.as_secs())) }
+    }?;
+    let stdout = stdout_task
+        .await
+        .context("failed to join OpenCode stdout reader")??;
+    let stderr = stderr_task
+        .await
+        .context("failed to join OpenCode stderr reader")??;
+    if status.success() {
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
+    } else {
+        Err(codex_exit_error(
+            status,
+            &String::from_utf8_lossy(&stdout),
+            &String::from_utf8_lossy(&stderr),
+        ))
+    }
+}
+
+fn parse_opencode_model_list(output: &str) -> Result<Vec<OpenCodeModelInfo>> {
+    let mut models = output
+        .lines()
+        .filter_map(|line| line.trim().split_once('/'))
+        .map(|(provider_id, model_id)| OpenCodeModelInfo {
+            provider_id: provider_id.to_owned(),
+            provider_name: provider_id.to_owned(),
+            model_id: model_id.to_owned(),
+            model_name: model_id.to_owned(),
+        })
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return Err(anyhow!("OpenCode did not return any configured models"));
+    }
+    models.sort_by(|left, right| {
+        (&left.provider_name, &left.model_name).cmp(&(&right.provider_name, &right.model_name))
+    });
+    Ok(models)
+}
+
+fn parse_opencode_json_output(stdout: &str) -> Result<CodexRunResult> {
+    let mut session_id = None;
+    let mut response = None;
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let value: Value = serde_json::from_str(line)
+            .with_context(|| format!("OpenCode emitted invalid JSONL event: {line}"))?;
+        find_opencode_session_id(&value, &mut session_id);
+        if let Some(text) = find_opencode_text(&value) {
+            response = Some(text);
+        }
+    }
+    response
+        .filter(|text| !text.is_empty())
+        .map(|response| CodexRunResult {
+            response,
+            session_id,
+        })
+        .ok_or_else(|| anyhow!("OpenCode completed but produced no text response"))
+}
+
+fn find_opencode_session_id(value: &Value, session_id: &mut Option<String>) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if matches!(key.as_str(), "sessionID" | "sessionId" | "id") {
+                    if let Some(value) = value.as_str().filter(|value| value.starts_with("ses_")) {
+                        if validate_opencode_session_id(value).is_ok() {
+                            *session_id = Some(value.to_owned());
+                        }
+                    }
+                }
+                find_opencode_session_id(value, session_id);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                find_opencode_session_id(value, session_id);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn find_opencode_text(value: &Value) -> Option<String> {
+    let part = value
+        .get("part")
+        .or_else(|| value.pointer("/properties/part"))
+        .unwrap_or(value);
+    (part.get("type").and_then(Value::as_str) == Some("text"))
+        .then(|| {
+            part.get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .flatten()
+}
+
+// OpenCode's `run --format json` emits one JSON object per line. Forwarding these
+// objects preserves tool and progress events for the phone without an HTTP SSE bridge.
+
 async fn run_codex_command(
     prompt: &str,
     config: &CodexConfig,
@@ -1207,6 +1395,7 @@ fn parse_opencode_model(value: &str) -> Option<OpenCodeModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn builds_new_session_args_without_ephemeral() {
@@ -1311,26 +1500,6 @@ mod tests {
     }
 
     #[test]
-    fn filters_opencode_sse_events_by_session() {
-        let event = "data: {\"directory\":\"/tmp\",\"payload\":{\"type\":\"session.status\",\"properties\":{\"sessionID\":\"session-1\",\"status\":{\"type\":\"busy\"}}}}\n\n";
-
-        let payload = opencode_sse_event_for_session(event, "session-1").unwrap();
-
-        assert_eq!(payload["type"], "session.status");
-        assert!(opencode_sse_event_for_session(event, "session-2").is_none());
-    }
-
-    #[test]
-    fn filters_direct_opencode_sse_events_by_session() {
-        let event = "data: {\"id\":\"evt-1\",\"type\":\"session.status\",\"properties\":{\"sessionID\":\"session-1\",\"status\":{\"type\":\"busy\"}}}\n\n";
-
-        let payload = opencode_sse_event_for_session(event, "session-1").unwrap();
-
-        assert_eq!(payload["type"], "session.status");
-        assert!(opencode_sse_event_for_session(event, "session-2").is_none());
-    }
-
-    #[test]
     fn parses_jsonl_response_and_session() {
         let parsed = parse_codex_json_output(
             r#"{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-bbab2a035a53"}
@@ -1345,6 +1514,18 @@ mod tests {
             parsed.session_id.as_deref(),
             Some("0199a213-81c0-7800-8aa1-bbab2a035a53")
         );
+    }
+
+    #[test]
+    fn parses_opencode_jsonl_response_and_session() {
+        let parsed = parse_opencode_json_output(
+            r#"{"type":"session.created","properties":{"info":{"id":"ses_Abc123"}}}
+{"type":"text","text":"Done."}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.session_id.as_deref(), Some("ses_Abc123"));
+        assert_eq!(parsed.response, "Done.");
     }
 
     #[test]
@@ -1432,63 +1613,14 @@ mod tests {
     }
 
     #[test]
-    fn builds_opencode_session_urls_from_path_segments() {
-        let config = CodexConfig {
-            backend: AgentBackend::OpenCode,
-            bin: "codex".to_string(),
-            args: Vec::new(),
-            working_dir: PathBuf::from("/repo"),
-            timeout: Duration::from_secs(1),
-            persist_sessions: true,
-            usage_limit_fallback_model: None,
-            opencode: OpenCodeConfig {
-                base_url: "http://127.0.0.1:4096/api/".to_string(),
-                bin: "opencode".to_string(),
-                auto_start: false,
-                username: None,
-                password: None,
-                agent: "build".to_string(),
-                model: None,
-            },
-        };
-
-        let request = opencode_session_request(
-            &reqwest::Client::new(),
-            &config,
-            reqwest::Method::POST,
-            "ses_Abc123",
-            "message",
-        )
-        .unwrap()
-        .build()
-        .unwrap();
-
-        assert_eq!(
-            request.url().as_str(),
-            "http://127.0.0.1:4096/api/session/ses_Abc123/message?directory=%2Frepo"
-        );
-    }
-
-    #[test]
     fn parses_opencode_models_from_configured_providers() {
-        let value = json!({
-            "providers": [{
-                "id": "openai",
-                "name": "OpenAI",
-                "models": {
-                    "gpt-5.5": { "name": "GPT-5.5" },
-                    "gpt-5-mini": { "id": "gpt-5-mini" }
-                }
-            }]
-        });
-
-        let models = parse_opencode_model_list(&value).unwrap();
+        let models = parse_opencode_model_list("openai/gpt-5.5\nopenai/gpt-5-mini\n").unwrap();
 
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].provider_id, "openai");
-        assert_eq!(models[0].model_id, "gpt-5.5");
-        assert_eq!(models[0].model_name, "GPT-5.5");
-        assert_eq!(models[1].model_name, "gpt-5-mini");
+        assert_eq!(models[0].model_id, "gpt-5-mini");
+        assert_eq!(models[0].model_name, "gpt-5-mini");
+        assert_eq!(models[1].model_name, "gpt-5.5");
     }
 
     #[test]

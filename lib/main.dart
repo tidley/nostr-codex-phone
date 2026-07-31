@@ -43,13 +43,82 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.77+277';
+const _appVersion = '0.2.78+278';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
 enum _PendingMessageCompletion { transcript, response }
 
 enum _RelayProbeStrength { strong, fair, weak, offline }
+
+enum AppTheme { mint, ember }
+
+extension on AppTheme {
+  String get storageValue => name;
+
+  String get label => switch (this) {
+    AppTheme.mint => 'Mint',
+    AppTheme.ember => 'Ember',
+  };
+
+  String get description => switch (this) {
+    AppTheme.mint => 'Deep green workspace with mint actions',
+    AppTheme.ember => 'Graphite workspace with amber actions and cyan labels',
+  };
+}
+
+AppTheme _appThemeFromStorage(String? value) => switch (value) {
+  'ember' => AppTheme.ember,
+  _ => AppTheme.mint,
+};
+
+class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
+  const _WorkspacePalette({
+    required this.background,
+    required this.sidebar,
+    required this.selected,
+    required this.label,
+    required this.brand,
+    required this.brandForeground,
+  });
+
+  final Color background;
+  final Color sidebar;
+  final Color selected;
+  final Color label;
+  final Color brand;
+  final Color brandForeground;
+
+  @override
+  _WorkspacePalette copyWith({
+    Color? background,
+    Color? sidebar,
+    Color? selected,
+    Color? label,
+    Color? brand,
+    Color? brandForeground,
+  }) => _WorkspacePalette(
+    background: background ?? this.background,
+    sidebar: sidebar ?? this.sidebar,
+    selected: selected ?? this.selected,
+    label: label ?? this.label,
+    brand: brand ?? this.brand,
+    brandForeground: brandForeground ?? this.brandForeground,
+  );
+
+  @override
+  _WorkspacePalette lerp(_WorkspacePalette? other, double t) {
+    if (other is! _WorkspacePalette) return this;
+    return _WorkspacePalette(
+      background: Color.lerp(background, other.background, t)!,
+      sidebar: Color.lerp(sidebar, other.sidebar, t)!,
+      selected: Color.lerp(selected, other.selected, t)!,
+      label: Color.lerp(label, other.label, t)!,
+      brand: Color.lerp(brand, other.brand, t)!,
+      brandForeground: Color.lerp(brandForeground, other.brandForeground, t)!,
+    );
+  }
+}
 
 class _RelayProbeResult {
   const _RelayProbeResult({
@@ -198,42 +267,113 @@ Future<void> main() async {
   runApp(const NostrCodexApp());
 }
 
-class NostrCodexApp extends StatelessWidget {
+class NostrCodexApp extends StatefulWidget {
   const NostrCodexApp({super.key});
+
+  @override
+  State<NostrCodexApp> createState() => _NostrCodexAppState();
+}
+
+class _NostrCodexAppState extends State<NostrCodexApp> {
+  static const _storage = FlutterSecureStorage();
+  static const _themeStorageKey = 'app_theme';
+  AppTheme _selectedTheme = AppTheme.mint;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTheme();
+  }
+
+  Future<void> _loadTheme() async {
+    final storedTheme = await _storage.read(key: _themeStorageKey);
+    if (mounted) {
+      setState(() => _selectedTheme = _appThemeFromStorage(storedTheme));
+    }
+  }
+
+  void _selectTheme(AppTheme theme) {
+    if (_selectedTheme == theme) return;
+    setState(() => _selectedTheme = theme);
+    unawaited(_storage.write(key: _themeStorageKey, value: theme.storageValue));
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Code Call',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff1f7a63)),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xff42d3a6),
-          brightness: Brightness.dark,
-        ),
-        scaffoldBackgroundColor: const Color(0xff0c1110),
-        cardTheme: const CardThemeData(
-          color: Color(0xff151b1a),
-          surfaceTintColor: Color(0xff42d3a6),
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xff0c1110),
-          foregroundColor: Color(0xffe8f3ef),
-        ),
-        useMaterial3: true,
-      ),
+      theme: _appTheme(_selectedTheme),
       themeMode: ThemeMode.dark,
-      home: const NostrCodexHome(),
+      home: NostrCodexHome(theme: _selectedTheme, onThemeChanged: _selectTheme),
     );
   }
 }
 
+ThemeData _appTheme(AppTheme theme) {
+  final ember = theme == AppTheme.ember;
+  final scheme =
+      ColorScheme.fromSeed(
+        seedColor: ember ? const Color(0xffffb74d) : const Color(0xff42d3a6),
+        brightness: Brightness.dark,
+      ).copyWith(
+        primary: ember ? const Color(0xffffb74d) : const Color(0xff42d3a6),
+        onPrimary: ember ? const Color(0xff281900) : const Color(0xff06251b),
+        secondary: ember ? const Color(0xff56d8d2) : const Color(0xff8ed1bd),
+        onSecondary: const Color(0xff071c1c),
+        surface: ember ? const Color(0xff171717) : const Color(0xff151b1a),
+        onSurface: ember ? const Color(0xffeee8df) : const Color(0xffe8f3ef),
+        surfaceContainerHighest: ember
+            ? const Color(0xff242321)
+            : const Color(0xff24302d),
+        outline: ember ? const Color(0xff73552c) : const Color(0xff37574e),
+      );
+  final workspace = ember
+      ? const _WorkspacePalette(
+          background: Color(0xff101010),
+          sidebar: Color(0xff161615),
+          selected: Color(0xff332816),
+          label: Color(0xff71ded9),
+          brand: Color(0xffffb74d),
+          brandForeground: Color(0xff281900),
+        )
+      : const _WorkspacePalette(
+          background: Color(0xff101a19),
+          sidebar: Color(0xff142321),
+          selected: Color(0xff1d403b),
+          label: Color(0xff9cc6bb),
+          brand: Color(0xff65d8b1),
+          brandForeground: Color(0xff082019),
+        );
+  return ThemeData(
+    colorScheme: scheme,
+    scaffoldBackgroundColor: ember
+        ? const Color(0xff101010)
+        : const Color(0xff0c1110),
+    cardTheme: CardThemeData(
+      color: scheme.surface,
+      surfaceTintColor: scheme.primary,
+    ),
+    appBarTheme: AppBarTheme(
+      backgroundColor: ember
+          ? const Color(0xff101010)
+          : const Color(0xff0c1110),
+      foregroundColor: scheme.onSurface,
+    ),
+    extensions: [workspace],
+    useMaterial3: true,
+  );
+}
+
 class NostrCodexHome extends StatefulWidget {
-  const NostrCodexHome({super.key});
+  const NostrCodexHome({
+    required this.theme,
+    required this.onThemeChanged,
+    super.key,
+  });
+
+  final AppTheme theme;
+  final ValueChanged<AppTheme> onThemeChanged;
 
   @override
   State<NostrCodexHome> createState() => _NostrCodexHomeState();
@@ -371,6 +511,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _recordingDurationLabel = ValueNotifier<String>('00:00');
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   final _pendingToolViews = <String, _PendingToolView>{};
+  Completer<List<_OpenCodeModelChoice>>? _pendingOpenCodeModelListCompleter;
   final _completedVoiceEventIds = <String>{};
   Completer<List<RepoChoice>>? _pendingRepoListCompleter;
   Completer<List<_OpenCodeSessionChoice>>? _pendingOpenCodeSessionsCompleter;
@@ -422,6 +563,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   String? _workspaceInviteCode;
   String _workspaceMemberStatus = 'Owner';
   final WorkspaceState _workspace = WorkspaceState();
+  final ValueNotifier<int> _workspaceRevision = ValueNotifier(0);
   String _workspaceDisplayName = '';
   Map<String, String> _workspaceMemberAliases = {};
 
@@ -645,6 +787,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _relayController.dispose();
     _blossomServerController.dispose();
     _workspaceDisplayNameController.dispose();
+    _workspaceRevision.dispose();
     _queryController.dispose();
     _queryFocusNode.dispose();
     _menuNotificationPulseController.dispose();
@@ -2744,6 +2887,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _openSettings() async {
+    var settingsTheme = widget.theme;
     var settingsConnected = _connected;
     var settingsConnecting = _connecting;
     var settingsOwnPubkey = _ownPubkey;
@@ -2757,6 +2901,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       MaterialPageRoute(
         builder: (_) => StatefulBuilder(
           builder: (settingsContext, refreshSettings) => _SettingsPage(
+            theme: settingsTheme,
             repoTargets: _repoTargets,
             computerServiceTarget: _computerServiceTarget,
             selectedRepoTargetId: _selectedRepoTargetId,
@@ -2798,6 +2943,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             relayResults: settingsRelayResults,
             onTargetChanged: (value) {
               if (value != null) unawaited(_selectRepoTarget(value));
+            },
+            onThemeChanged: (theme) {
+              refreshSettings(() => settingsTheme = theme);
+              widget.onThemeChanged(theme);
             },
             onProfileNameChanged: _setWorkspaceDisplayName,
             onSaveTarget: () => unawaited(_saveCurrentRepoTarget()),
@@ -4073,7 +4222,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       if (!_incomingFromActivePeer(message)) return false;
       try {
         final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
-        setState(() => _workspace.apply(decoded));
+        setState(() {
+          _workspace.apply(decoded);
+          _workspaceRevision.value++;
+        });
       } catch (_) {
         _showError('Received malformed workspace update');
       }
@@ -4142,6 +4294,24 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         return true;
       }
       final pending = _pendingToolViews.remove(result.requestId);
+      final pendingModelList = _pendingOpenCodeModelListCompleter;
+      if (result.tool == 'model_list' && pendingModelList != null) {
+        _pendingOpenCodeModelListCompleter = null;
+        if (result.error case final error?) {
+          pendingModelList.completeError(StateError(error));
+        } else {
+          final rawModels = result.data['models'];
+          pendingModelList.complete(
+            rawModels is Iterable
+                ? rawModels
+                      .map(_OpenCodeModelChoice.fromJson)
+                      .whereType<_OpenCodeModelChoice>()
+                      .toList()
+                : const [],
+          );
+        }
+        return true;
+      }
       final targetKey =
           pending?.conversationKey ?? _conversationKeyForIncoming(message);
       if (targetKey != null) {
@@ -6448,6 +6618,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         sessions: _repoTargets,
         onOpenSessions: () => setState(() => _showTeamWorkspace = false),
         onOpenSettings: () => unawaited(_openSettings()),
+        onOpenAgents: () => unawaited(_openWorkspaceAgents()),
         inviteCode: _workspaceInviteCode,
         memberStatus: _workspaceMemberStatus,
         workspace: _workspace,
@@ -6468,6 +6639,9 @@ Return a concise catch-up summary of what happened after that point: completed w
         onDisplayNameChanged: _setWorkspaceDisplayName,
         onMemberAliasChanged: _setWorkspaceMemberAlias,
         onRequest: _sendWorkspaceRequest,
+        onTyping: _sendWorkspaceTyping,
+        onAttach: _sendWorkspaceAttachment,
+        onOpenAttachment: _downloadAndOpenWorkspaceAttachment,
         onCreateInvite: _createWorkspaceInvite,
         onRedeemInvite: _redeemWorkspaceInvite,
       );
@@ -6673,6 +6847,155 @@ Return a concise catch-up summary of what happened after that point: completed w
   Future<void> _sendWorkspaceRequest(Map<String, Object?> request) async {
     if (!await _ensureConnectedToParentService()) return;
     await nostrSendQuery(query: jsonEncode({'workspace_request': request}));
+  }
+
+  Future<List<_OpenCodeModelChoice>> _loadOpenCodeModels() async {
+    if (_pendingOpenCodeModelListCompleter != null) {
+      return _pendingOpenCodeModelListCompleter!.future;
+    }
+    if (!await _ensureConnectedForSend()) return const [];
+    final completer = Completer<List<_OpenCodeModelChoice>>();
+    _pendingOpenCodeModelListCompleter = completer;
+    final requestId = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+    try {
+      await _sendWithAutoRecovery(
+        label: 'OpenCode model list request',
+        sender: () => nostrSendQuery(
+          query: jsonEncode({
+            'tool_request': 'model_list',
+            'request_id': requestId,
+            'opencode_model_list_request': true,
+          }),
+        ),
+      );
+      return completer.future;
+    } catch (error) {
+      if (_pendingOpenCodeModelListCompleter == completer) {
+        _pendingOpenCodeModelListCompleter = null;
+      }
+      completer.completeError(error);
+      return completer.future;
+    }
+  }
+
+  Future<void> _sendWorkspaceTyping(Map<String, Object?> request) async {
+    if (!await _ensureConnectedToParentService()) return;
+    await nostrSendEphemeralQuery(
+      query: jsonEncode({'workspace_request': request}),
+      expiresInSeconds: BigInt.from(6),
+    );
+  }
+
+  Future<bool> _sendWorkspaceAttachment(Map<String, Object?> request) async {
+    if (_sendingMedia) return false;
+    final selected = await _pickMediaAttachment();
+    if (selected == null) return false;
+    if (!await _ensureConnectedToParentService()) return false;
+    setState(() {
+      _sendingMedia = true;
+      _status = 'Uploading encrypted workspace attachment to Blossom...';
+    });
+    try {
+      final attachment = await _uploadAudioToBlossom(
+        selected.path,
+        selected.fileName,
+        selected.contentType,
+      );
+      request['attachments'] = [_workspaceAttachmentPayload(attachment)];
+      await _sendWorkspaceRequest(request);
+      if (mounted) setState(() => _status = 'Workspace attachment sent');
+      return true;
+    } catch (error) {
+      if (mounted) _showError('Workspace attachment failed: $error');
+      return false;
+    } finally {
+      if (mounted) setState(() => _sendingMedia = false);
+    }
+  }
+
+  Map<String, Object?> _workspaceAttachmentPayload(
+    BridgeAudioReference attachment,
+  ) => {
+    'url': attachment.url,
+    'sha256': attachment.sha256,
+    'size': bridgeUIntToJsonInt(attachment.size),
+    'type': attachment.mediaType,
+    if (attachment.name != null) 'name': attachment.name!,
+    if (attachment.encryption case final encryption?)
+      'encryption': {
+        'algorithm': encryption.algorithm,
+        'key': encryption.key,
+        'nonce': encryption.nonce,
+        'plaintext_sha256': encryption.plaintextSha256,
+        'plaintext_size': bridgeUIntToJsonInt(encryption.plaintextSize),
+        'plaintext_type': encryption.plaintextMediaType,
+      },
+  };
+
+  Future<void> _downloadAndOpenWorkspaceAttachment(
+    BridgeAudioReference attachment,
+  ) async {
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final downloaded = await blossomDownloadAttachment(
+        attachment: attachment,
+        destinationDir: '${directory.path}${Platform.pathSeparator}attachments',
+      );
+      final result = await OpenFilex.open(
+        downloaded.path,
+        type: downloaded.mediaType,
+      );
+      if (result.type != ResultType.done && mounted) {
+        _showError('Downloaded ${downloaded.name}: ${result.message}');
+      }
+    } catch (error) {
+      if (mounted) _showError('Attachment download failed: $error');
+    }
+  }
+
+  Future<void> _openWorkspaceAgents() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _AgentsPage(
+          workspace: _workspace,
+          workspaceRevision: _workspaceRevision,
+          onRequest: _sendWorkspaceRequest,
+          onLoadOpenCodeModels: _loadOpenCodeModels,
+          onOpenConversation: (agent) async {
+            final sessionId = agent.openCodeSessionId;
+            if (agent.sessionStatus != 'ready' ||
+                sessionId == null ||
+                sessionId.isEmpty) {
+              _showStatus(
+                agent.sessionError ??
+                    '${agent.name} is not ready because OpenCode session provisioning failed.',
+              );
+              return;
+            }
+            final target = _targetById(_repoTargets, _selectedRepoTargetId);
+            if (target == null) {
+              _showError(
+                'Select a repo session before opening an agent conversation',
+              );
+              return;
+            }
+            final updated = target.copyWith(
+              opencodeSessionId: sessionId,
+              opencodeSessionTitle: agent.name,
+            );
+            setState(() {
+              _repoTargets = [
+                for (final item in _repoTargets)
+                  if (item.id == updated.id) updated else item,
+              ];
+              _showTeamWorkspace = false;
+            });
+            await _saveSettings();
+            await _loadConversationHistoryForActiveSession();
+          },
+        ),
+      ),
+    );
   }
 
   Future<void> _redeemWorkspaceInvite(String code) async {
