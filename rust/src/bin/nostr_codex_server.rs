@@ -2078,10 +2078,9 @@ async fn route_conversation_agents(
 }
 
 fn conversation_agent_is_targeted(agent_id: &str, mentions: &[WorkspaceMentionPayload]) -> bool {
-    !mentions.iter().any(|mention| mention.kind == "agent")
-        || mentions
-            .iter()
-            .any(|mention| mention.kind == "agent" && mention.id == agent_id)
+    mentions
+        .iter()
+        .any(|mention| mention.kind == "agent" && mention.id == agent_id)
 }
 
 fn session_worker_key(message: &IncomingMessage) -> String {
@@ -6209,15 +6208,15 @@ mod tests {
     }
 
     #[test]
-    fn broadcasts_to_conversation_agents_without_agent_mentions() {
+    fn does_not_route_conversation_agents_without_agent_mentions() {
         let member_mentions = vec![WorkspaceMentionPayload {
             kind: "member".to_string(),
             id: "member".to_string(),
             label: "Member".to_string(),
         }];
 
-        assert!(conversation_agent_is_targeted("scout", &[]));
-        assert!(conversation_agent_is_targeted("writer", &member_mentions));
+        assert!(!conversation_agent_is_targeted("scout", &[]));
+        assert!(!conversation_agent_is_targeted("writer", &member_mentions));
     }
 
     #[test]
