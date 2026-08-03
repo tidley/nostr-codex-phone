@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
 
-/// Android-only H.264 capture and Flutter texture decode bridge.
+/// Android- and Linux-native H.264 capture and Flutter texture decode bridge.
 class RealtimeVideo {
   RealtimeVideo._();
 
