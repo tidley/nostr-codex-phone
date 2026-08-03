@@ -51,7 +51,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.2+302';
+const _appVersion = '0.3.3+303';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -237,60 +237,6 @@ class _RelayProbeResult {
       _RelayProbeStrength.offline => 'Offline',
     };
   }
-}
-
-class _OpenCodeSessionChoice {
-  const _OpenCodeSessionChoice({
-    required this.id,
-    required this.title,
-    this.directory,
-    this.updatedAt,
-    this.createdAt,
-  });
-
-  final String id;
-  final String title;
-  final String? directory;
-  final String? updatedAt;
-  final String? createdAt;
-
-  String get displayTitle {
-    final cleaned = title.trim();
-    return cleaned.isEmpty ? id : cleaned;
-  }
-
-  String get subtitle {
-    final parts = [
-      if (directory != null && directory!.trim().isNotEmpty) directory!.trim(),
-      if ((updatedAt ?? createdAt)?.trim().isNotEmpty == true)
-        'Updated ${(updatedAt ?? createdAt)!.trim()}',
-    ];
-    return parts.isEmpty ? id : parts.join(' - ');
-  }
-
-  static _OpenCodeSessionChoice? fromJson(dynamic raw) {
-    if (raw is! Map<String, dynamic>) return null;
-    final id = raw['id']?.toString().trim() ?? '';
-    if (id.isEmpty) return null;
-    final title = raw['title']?.toString().trim();
-    final directory = raw['directory']?.toString().trim();
-    final updatedAt = raw['updated_at']?.toString().trim();
-    final createdAt = raw['created_at']?.toString().trim();
-    return _OpenCodeSessionChoice(
-      id: id,
-      title: title == null || title.isEmpty ? id : title,
-      directory: directory == null || directory.isEmpty ? null : directory,
-      updatedAt: updatedAt == null || updatedAt.isEmpty ? null : updatedAt,
-      createdAt: createdAt == null || createdAt.isEmpty ? null : createdAt,
-    );
-  }
-}
-
-class _OpenCodeSessionSelection {
-  const _OpenCodeSessionSelection.latest() : session = null;
-  const _OpenCodeSessionSelection.session(this.session);
-
-  final _OpenCodeSessionChoice? session;
 }
 
 class _OpenCodeModelChoice {
@@ -620,7 +566,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Completer<List<_OpenCodeModelChoice>>? _pendingOpenCodeModelListCompleter;
   final _completedVoiceEventIds = <String>{};
   Completer<List<RepoChoice>>? _pendingRepoListCompleter;
-  Completer<List<_OpenCodeSessionChoice>>? _pendingOpenCodeSessionsCompleter;
   _PendingSessionStart? _pendingSessionStart;
   List<RepoChoice> _cachedRepoChoices = const [];
   bool _autoSpeak = true;
@@ -2169,25 +2114,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         ),
       );
       return choices;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  List<_OpenCodeSessionChoice>? _openCodeSessionsFromPayload(String raw) {
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map<String, dynamic>) return null;
-      final sessionList = decoded['opencode_sessions'];
-      if (sessionList is! Map<String, dynamic>) return null;
-      final rawSessions = sessionList['sessions'];
-      if (rawSessions is! Iterable) return const [];
-      final sessions = <_OpenCodeSessionChoice>[];
-      for (final rawSession in rawSessions) {
-        final session = _OpenCodeSessionChoice.fromJson(rawSession);
-        if (session != null) sessions.add(session);
-      }
-      return sessions;
     } catch (_) {
       return null;
     }
@@ -4521,21 +4447,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return true;
     }
 
-    if (message.kind == 'opencode_sessions') {
-      if (!_incomingFromActivePeer(message)) return false;
-      final sessions = _openCodeSessionsFromPayload(message.rawJson);
-      if (sessions == null) {
-        _showError('Received malformed OpenCode session list');
-        return true;
-      }
-      final pending = _pendingOpenCodeSessionsCompleter;
-      if (pending != null && !pending.isCompleted) {
-        pending.complete(sessions);
-      }
-      setState(() => _status = 'Loaded ${sessions.length} OpenCode sessions');
-      return true;
-    }
-
     if (message.kind == 'tool_result') {
       final result = _toolResultFromPayload(message.rawJson);
       if (result == null) {
@@ -5522,150 +5433,6 @@ Return a concise catch-up summary of what happened after that point: completed w
         });
       }
     }
-  }
-
-  Future<List<_OpenCodeSessionChoice>> _requestOpenCodeSessions() async {
-    final target = _targetById(_repoTargets, _selectedRepoTargetId);
-    final workdir = target?.workdir?.trim();
-    if (target == null || workdir == null || workdir.isEmpty) {
-      throw StateError('Select a repo session first');
-    }
-    if (!await _ensureConnectedForSend()) {
-      throw StateError('Connect to ${target.displayName} first');
-    }
-
-    final existing = _pendingOpenCodeSessionsCompleter;
-    if (existing != null && !existing.isCompleted) {
-      return existing.future;
-    }
-    final completer = Completer<List<_OpenCodeSessionChoice>>();
-    _pendingOpenCodeSessionsCompleter = completer;
-    final payload = jsonEncode(
-      _withActiveRoute({'opencode_session_list_request': {}}),
-    );
-
-    try {
-      setState(() {
-        _sending = true;
-        _sendingConversationKey = _activeConversationKey;
-        _status = 'Requesting OpenCode sessions...';
-      });
-      await _sendWithAutoRecovery(
-        label: 'OpenCode session list request',
-        sender: () => nostrSendQuery(query: payload),
-      );
-      if (mounted) setState(() => _status = 'Waiting for OpenCode sessions...');
-      return await completer.future.timeout(
-        const Duration(seconds: 15),
-        onTimeout: () =>
-            throw TimeoutException('OpenCode session request timed out'),
-      );
-    } finally {
-      if (identical(_pendingOpenCodeSessionsCompleter, completer)) {
-        _pendingOpenCodeSessionsCompleter = null;
-      }
-      if (mounted) {
-        setState(() {
-          _sending = false;
-          _sendingConversationKey = null;
-        });
-      }
-    }
-  }
-
-  Future<void> _openOpenCodeSessions() async {
-    final target = _targetById(_repoTargets, _selectedRepoTargetId);
-    final workdir = target?.workdir?.trim();
-    if (target == null || workdir == null || workdir.isEmpty) {
-      _showError('Select a repo session first');
-      return;
-    }
-
-    final List<_OpenCodeSessionChoice> sessions;
-    try {
-      sessions = await _requestOpenCodeSessions();
-    } catch (error) {
-      if (mounted) _showError('Could not load OpenCode sessions: $error');
-      return;
-    }
-    if (!mounted) return;
-
-    if (sessions.isEmpty) {
-      await _setOpenCodeSession(null);
-      if (mounted) {
-        setState(
-          () => _status = 'No OpenCode sessions in ${target.displayName}',
-        );
-      }
-      return;
-    }
-
-    final selectedId = target.opencodeSessionId?.trim();
-    final selection = await showModalBottomSheet<_OpenCodeSessionSelection>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.history_toggle_off),
-              title: const Text('Auto latest'),
-              selected: selectedId == null || selectedId.isEmpty,
-              onTap: () => Navigator.of(
-                context,
-              ).pop(const _OpenCodeSessionSelection.latest()),
-            ),
-            const Divider(height: 1),
-            for (final session in sessions)
-              ListTile(
-                leading: const Icon(Icons.account_tree_outlined),
-                title: Text(
-                  session.displayTitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                subtitle: Text(
-                  session.subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                selected: session.id == selectedId,
-                onTap: () => Navigator.of(
-                  context,
-                ).pop(_OpenCodeSessionSelection.session(session)),
-              ),
-          ],
-        ),
-      ),
-    );
-    if (selection == null || !mounted) return;
-    await _setOpenCodeSession(selection.session);
-  }
-
-  Future<void> _setOpenCodeSession(_OpenCodeSessionChoice? session) async {
-    final selectedId = _selectedRepoTargetId;
-    if (selectedId == null) return;
-    final targets = [..._repoTargets];
-    final index = targets.indexWhere((target) => target.id == selectedId);
-    if (index == -1) return;
-
-    final current = targets[index];
-    final updated = session == null
-        ? current.copyWith(clearOpenCodeSession: true)
-        : current.copyWith(
-            opencodeSessionId: session.id,
-            opencodeSessionTitle: session.displayTitle,
-          );
-    targets[index] = updated;
-    setState(() {
-      _repoTargets = targets;
-      _applyRepoTargetFields(updated);
-      _status = session == null
-          ? 'Using latest OpenCode session'
-          : 'Selected OpenCode session ${session.displayTitle}';
-    });
-    await _saveSettings();
   }
 
   Future<void> _sendMediaOrText() async {
@@ -6994,7 +6761,6 @@ Return a concise catch-up summary of what happened after that point: completed w
         workingAnimationSpeed: _workingAnimationSpeed,
         onSelectTarget: (targetId) => unawaited(_selectRepoTarget(targetId)),
         onSpawnSession: () => unawaited(_requestSpawnSession()),
-        onOpenCodeSessions: () => unawaited(_openOpenCodeSessions()),
         onCatchUpTarget: (target) => unawaited(_catchUpRepoTarget(target)),
         onRestartTarget: (target) => unawaited(_restartRepoTarget(target)),
         onRenameTarget: (target) => unawaited(_renameRepoTarget(target)),

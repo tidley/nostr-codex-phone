@@ -14,7 +14,6 @@ class _SessionDrawer extends StatelessWidget {
     required this.workingAnimationSpeed,
     required this.onSelectTarget,
     required this.onSpawnSession,
-    required this.onOpenCodeSessions,
     required this.onCatchUpTarget,
     required this.onRestartTarget,
     required this.onRenameTarget,
@@ -36,7 +35,6 @@ class _SessionDrawer extends StatelessWidget {
   final double workingAnimationSpeed;
   final ValueChanged<String> onSelectTarget;
   final VoidCallback onSpawnSession;
-  final VoidCallback onOpenCodeSessions;
   final ValueChanged<RepoTarget> onCatchUpTarget;
   final ValueChanged<RepoTarget> onRestartTarget;
   final ValueChanged<RepoTarget> onRenameTarget;
@@ -47,17 +45,6 @@ class _SessionDrawer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    RepoTarget? selectedTarget;
-    for (final target in targets) {
-      if (target.id == selectedTargetId) {
-        selectedTarget = target;
-        break;
-      }
-    }
-    final canOpenCodeSessions =
-        canSelectTargets && selectedTarget?.workdir?.trim().isNotEmpty == true;
-    final selectedOpenCodeSession = selectedTarget?.opencodeSessionTitle
-        ?.trim();
     final recentRank = {
       for (var i = 0; i < recentTargetIds.length; i++) recentTargetIds[i]: i,
     };
@@ -93,25 +80,6 @@ class _SessionDrawer extends StatelessWidget {
                 Navigator.of(context).pop();
                 onSpawnSession();
               },
-            ),
-            ListTile(
-              leading: const Icon(Icons.account_tree_outlined),
-              title: const Text('OpenCode sessions'),
-              subtitle:
-                  selectedOpenCodeSession != null &&
-                      selectedOpenCodeSession.isNotEmpty
-                  ? Text(
-                      selectedOpenCodeSession,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    )
-                  : null,
-              onTap: canOpenCodeSessions
-                  ? () {
-                      Navigator.of(context).pop();
-                      onOpenCodeSessions();
-                    }
-                  : null,
             ),
             const Divider(height: 1),
             Expanded(
