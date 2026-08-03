@@ -49,7 +49,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.84+284';
+const _appVersion = '0.2.85+285';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -4260,7 +4260,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         message.kind == 'call_hangup') {
       final callId = _callIdFromMessage(message);
       if (callId == null) return true;
-      final sender = message.senderPubkeyHex.trim();
+      final sender = message.senderPubkey.trim().isNotEmpty
+          ? message.senderPubkey.trim()
+          : message.senderPubkeyHex.trim();
       if (sender.isEmpty) return true;
       if (message.kind == 'call_invite') {
         if (_callPhase == _CallPhase.idle) {
@@ -4273,7 +4275,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         } else {
           unawaited(_sendCallControl('call_hangup', sender, callId));
         }
-      } else if (_callId == callId && _callPeerPubkey == sender) {
+      } else if (_callId == callId && _callPeerMatchesMessage(message)) {
         if (message.kind == 'call_answer' &&
             _callPhase == _CallPhase.outgoing) {
           setState(() => _callPhase = _CallPhase.connecting);
@@ -4660,6 +4662,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             connectedPeer.isNotEmpty &&
             (message.senderPubkey == connectedPeer ||
                 message.senderPubkeyHex == connectedPeer));
+  }
+
+  bool _callPeerMatchesMessage(BridgeIncomingMessage message) {
+    final peer = _callPeerPubkey?.trim();
+    return peer != null &&
+        peer.isNotEmpty &&
+        (peer == message.senderPubkey || peer == message.senderPubkeyHex);
   }
 
   void _cacheRepoChoices(List<RepoChoice> choices) {
