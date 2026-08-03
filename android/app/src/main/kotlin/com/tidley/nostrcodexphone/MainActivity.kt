@@ -3,7 +3,9 @@ package com.tidley.nostrcodexphone
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioTrack
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -16,12 +18,16 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private val channelName = "nostr_codex_phone/tts_control"
+    private val callAudioChannelName = "nostr_codex_phone/call_audio"
     private var hardStopTts: TextToSpeech? = null
     private var pendingHardStop = false
+    private var callAudioTrack: AudioTrack? = null
+    private var realtimeAudio: RealtimeAudio? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         ensureHardStopTts()
+        realtimeAudio = RealtimeAudio(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
             when (call.method) {
                 "hardStop" -> {
@@ -54,6 +60,26 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, callAudioChannelName).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> {
+                    startCallAudio(call.argument<Int>("sampleRate") ?: 16000)
+                    result.success(null)
+                }
+                "write" -> {
+                    val pcm = call.argument<ByteArray>("pcm")
+                    if (pcm != null) callAudioTrack?.write(
+                        pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING
+                    )
+                    result.success(null)
+                }
+                "stop" -> {
+                    stopCallAudio()
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     private fun ensureHardStopTts() {
@@ -72,6 +98,44 @@ class MainActivity : FlutterActivity() {
         pendingHardStop = true
         ensureHardStopTts()
         hardStopTts?.stop()
+    }
+
+    private fun startCallAudio(sampleRate: Int) {
+        stopCallAudio()
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        @Suppress("DEPRECATION")
+        audioManager.isSpeakerphoneOn = true
+        val minBuffer = AudioTrack.getMinBufferSize(
+            sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
+        ).coerceAtLeast(sampleRate / 10)
+        callAudioTrack = AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .build()
+            )
+            .setBufferSizeInBytes(minBuffer * 2)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+            .also { it.play() }
+    }
+
+    private fun stopCallAudio() {
+        callAudioTrack?.pause()
+        callAudioTrack?.flush()
+        callAudioTrack?.release()
+        callAudioTrack = null
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        audioManager?.mode = AudioManager.MODE_NORMAL
     }
 
     private fun hapticTap() {
@@ -126,6 +190,9 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        realtimeAudio?.dispose()
+        realtimeAudio = null
+        stopCallAudio()
         hardStopTts?.stop()
         hardStopTts?.shutdown()
         hardStopTts = null

@@ -280,21 +280,33 @@ class WorkspaceConversationAgent {
 class WorkspaceTyping {
   const WorkspaceTyping({
     required this.senderPubkey,
+    this.agentId,
+    this.agentName,
     this.channelId,
     this.recipientPubkey,
+    this.memberPubkey,
+    this.peerPubkey,
     required this.expiresAt,
   });
 
   final String senderPubkey;
+  final String? agentId;
+  final String? agentName;
   final String? channelId;
   final String? recipientPubkey;
+  final String? memberPubkey;
+  final String? peerPubkey;
   final int expiresAt;
 
   factory WorkspaceTyping.fromJson(Map<String, dynamic> json) =>
       WorkspaceTyping(
         senderPubkey: json['sender_pubkey']?.toString() ?? '',
+        agentId: json['agent_id']?.toString(),
+        agentName: json['agent_name']?.toString(),
         channelId: json['channel_id']?.toString(),
         recipientPubkey: json['recipient_pubkey']?.toString(),
+        memberPubkey: json['member_pubkey']?.toString(),
+        peerPubkey: json['peer_pubkey']?.toString(),
         expiresAt: (json['expires_at'] as num?)?.toInt() ?? 0,
       );
 }
@@ -327,8 +339,11 @@ class WorkspaceState {
       final status = WorkspaceTyping.fromJson(
         Map<String, dynamic>.from(incomingTyping),
       );
+      final key = _typingKey(status);
       if (status.senderPubkey.isNotEmpty && status.expiresAt > 0) {
-        typing[status.senderPubkey] = status;
+        typing[key] = status;
+      } else {
+        typing.remove(key);
       }
     }
     final incomingConversationAgents = _conversationAgents(
@@ -373,7 +388,15 @@ class WorkspaceState {
         }
       }
     }
-    for (final message in _messages(data['messages'])) {
+    final incomingMessages = _messages(data['messages']);
+    if (data['action'] == 'message_created') {
+      for (final message in incomingMessages) {
+        typing.removeWhere(
+          (_, status) => _typingMatchesMessage(status, message),
+        );
+      }
+    }
+    for (final message in incomingMessages) {
       final key = message.channelId ?? _messageDirectKey(message);
       final current = {for (final item in messages[key] ?? []) item.id: item};
       current[message.id] = message;
@@ -383,6 +406,27 @@ class WorkspaceState {
   }
 
   static String directKey(String one, String? two) => _directKey(one, two);
+  static String _typingKey(WorkspaceTyping status) => [
+    status.senderPubkey,
+    status.channelId ?? '',
+    status.memberPubkey ?? '',
+    status.peerPubkey ?? '',
+    status.recipientPubkey ?? '',
+  ].join(':');
+  static bool _typingMatchesMessage(
+    WorkspaceTyping status,
+    WorkspaceMessage message,
+  ) {
+    if (status.senderPubkey != message.senderPubkey) return false;
+    if (status.channelId != null) return status.channelId == message.channelId;
+    if (status.agentId != null) {
+      return message.channelId == null &&
+          status.peerPubkey == message.recipientPubkey;
+    }
+    return message.channelId == null &&
+        status.recipientPubkey == message.recipientPubkey;
+  }
+
   List<WorkspaceTyping> activeTyping({
     required String? channelId,
     required String ownPubkey,
@@ -393,6 +437,13 @@ class WorkspaceState {
     return typing.values
         .where((status) {
           if (status.channelId != null) return status.channelId == channelId;
+          if (status.agentId != null) {
+            return channelId == null &&
+                ((status.memberPubkey == ownPubkey &&
+                        status.peerPubkey == peerPubkey) ||
+                    (status.memberPubkey == peerPubkey &&
+                        status.peerPubkey == ownPubkey));
+          }
           return channelId == null &&
               ((status.senderPubkey == ownPubkey &&
                       status.recipientPubkey == peerPubkey) ||

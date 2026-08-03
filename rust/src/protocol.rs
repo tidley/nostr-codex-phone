@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 
 pub const AUDIO_ENCRYPTION_ALGORITHM: &str = "xchacha20poly1305";
@@ -25,6 +25,15 @@ pub enum WireMessage {
     },
     AudioRetry {
         audio_retry: AudioRetryRequest,
+    },
+    CallInvite {
+        call_invite: CallControl,
+    },
+    CallAnswer {
+        call_answer: CallControl,
+    },
+    CallHangup {
+        call_hangup: CallControl,
     },
     TargetInvite {
         target_invite: TargetInvite,
@@ -88,6 +97,11 @@ pub struct AudioReference {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encryption: Option<AudioEncryption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallControl {
+    pub call_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +241,8 @@ pub struct WorkspaceRequest {
     pub agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_in_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,7 +257,7 @@ pub struct WorkspaceUpdate {
     pub action: String,
     #[serde(default)]
     pub channels: Vec<WorkspaceChannelPayload>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_workspace_members")]
     pub members: Vec<WorkspaceMemberPayload>,
     #[serde(default)]
     pub messages: Vec<WorkspaceMessagePayload>,
@@ -257,9 +273,17 @@ pub struct WorkspaceUpdate {
 pub struct WorkspaceTypingPayload {
     pub sender_pubkey: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_pubkey: Option<String>,
     pub expires_at: i64,
 }
 
@@ -323,6 +347,36 @@ pub struct WorkspaceMemberPayload {
     pub pubkey: String,
     #[serde(default)]
     pub display_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WorkspaceMemberWire {
+    Payload(WorkspaceMemberPayload),
+    LegacyPubkey(String),
+}
+
+fn deserialize_workspace_members<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<WorkspaceMemberPayload>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<WorkspaceMemberWire>::deserialize(deserializer).map(|members| {
+        members
+            .into_iter()
+            .filter_map(|member| match member {
+                WorkspaceMemberWire::Payload(member) => Some(member),
+                WorkspaceMemberWire::LegacyPubkey(pubkey) => {
+                    let pubkey = pubkey.trim().to_string();
+                    (!pubkey.is_empty()).then_some(WorkspaceMemberPayload {
+                        pubkey,
+                        display_name: String::new(),
+                    })
+                }
+            })
+            .collect()
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -450,6 +504,27 @@ impl WireMessage {
             },
         }
     }
+    pub fn call_invite(call_id: impl Into<String>) -> Self {
+        Self::CallInvite {
+            call_invite: CallControl {
+                call_id: call_id.into(),
+            },
+        }
+    }
+    pub fn call_answer(call_id: impl Into<String>) -> Self {
+        Self::CallAnswer {
+            call_answer: CallControl {
+                call_id: call_id.into(),
+            },
+        }
+    }
+    pub fn call_hangup(call_id: impl Into<String>) -> Self {
+        Self::CallHangup {
+            call_hangup: CallControl {
+                call_id: call_id.into(),
+            },
+        }
+    }
 
     pub fn target_invite(target_invite: TargetInvite) -> Self {
         Self::TargetInvite { target_invite }
@@ -526,6 +601,9 @@ impl WireMessage {
             Self::Audio { .. } => "audio",
             Self::MediaBundle { .. } => "media_bundle",
             Self::AudioRetry { .. } => "audio_retry",
+            Self::CallInvite { .. } => "call_invite",
+            Self::CallAnswer { .. } => "call_answer",
+            Self::CallHangup { .. } => "call_hangup",
             Self::TargetInvite { .. } => "target_invite",
             Self::CreateInvite { .. } => "create_invite",
             Self::InviteCreated { .. } => "invite_created",
@@ -553,6 +631,13 @@ impl WireMessage {
                 media_bundle.query.as_deref().unwrap_or("[media bundle]")
             }
             Self::AudioRetry { audio_retry } => &audio_retry.reason,
+            Self::CallInvite { call_invite }
+            | Self::CallAnswer {
+                call_answer: call_invite,
+            }
+            | Self::CallHangup {
+                call_hangup: call_invite,
+            } => &call_invite.call_id,
             Self::TargetInvite { target_invite } => &target_invite.name,
             Self::CreateInvite { .. } => "create invite",
             Self::InviteCreated { invite_created } => &invite_created.code,
@@ -594,6 +679,9 @@ impl WireMessage {
                 json!({ "media_bundle": media_bundle })
             }
             Self::AudioRetry { audio_retry } => json!({ "audio_retry": audio_retry }),
+            Self::CallInvite { call_invite } => json!({ "call_invite": call_invite }),
+            Self::CallAnswer { call_answer } => json!({ "call_answer": call_answer }),
+            Self::CallHangup { call_hangup } => json!({ "call_hangup": call_hangup }),
             Self::TargetInvite { target_invite } => json!({ "target_invite": target_invite }),
             Self::CreateInvite { create_invite } => json!({ "create_invite": create_invite }),
             Self::InviteCreated { invite_created } => json!({ "invite_created": invite_created }),
@@ -687,6 +775,27 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
             audio_retry.format,
             audio_retry.reason,
         ));
+    }
+    for (field, constructor) in [
+        (
+            "call_invite",
+            WireMessage::call_invite as fn(String) -> WireMessage,
+        ),
+        (
+            "call_answer",
+            WireMessage::call_answer as fn(String) -> WireMessage,
+        ),
+        (
+            "call_hangup",
+            WireMessage::call_hangup as fn(String) -> WireMessage,
+        ),
+    ] {
+        if let Some(value) = object.get(field) {
+            let control: CallControl = serde_json::from_value(value.clone())
+                .map_err(|err| anyhow!("field `{field}` is invalid: {err}"))?;
+            validate_call_id(&control.call_id)?;
+            return Ok(constructor(control.call_id));
+        }
     }
 
     if let Some(target_invite) = object.get("target_invite") {
@@ -987,6 +1096,19 @@ fn validate_audio_retry_request(request: &AudioRetryRequest) -> Result<()> {
     Ok(())
 }
 
+fn validate_call_id(call_id: &str) -> Result<()> {
+    let call_id = call_id.trim();
+    if call_id.is_empty()
+        || call_id.len() > 128
+        || !call_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(anyhow!("call_id must be 1-128 URL-safe characters"));
+    }
+    Ok(())
+}
+
 fn validate_target_invite(invite: &TargetInvite) -> Result<()> {
     if invite.target_type != "nostr_codex_target" && invite.target_type != "nostr-codex-target" {
         return Err(anyhow!(
@@ -1165,6 +1287,18 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
                     .as_deref()
                     .is_some_and(|body| !body.trim().is_empty())
                     || !request.attachments.is_empty()) =>
+        {
+            Ok(())
+        }
+        "call_invite" | "call_answer" | "call_hangup"
+            if request
+                .recipient_pubkey
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && request
+                    .call_id
+                    .as_deref()
+                    .is_some_and(|id| validate_call_id(id).is_ok()) =>
         {
             Ok(())
         }
@@ -1520,6 +1654,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_direct_call_control_workspace_requests() {
+        let parsed = parse_wire_message(
+            r#"{"workspace_request":{"action":"call_invite","recipient_pubkey":"peer","call_id":"call_123"}}"#,
+        )
+        .unwrap();
+        let WireMessage::WorkspaceRequest { workspace_request } = parsed else {
+            panic!("expected workspace request");
+        };
+        assert_eq!(workspace_request.call_id.as_deref(), Some("call_123"));
+
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"call_answer","recipient_pubkey":"peer","call_id":"invalid call"}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
     fn parses_reaction_and_main_thread_workspace_requests() {
         let reaction = parse_wire_message(r#"{"workspace_request":{"action":"toggle_reaction","parent_id":"message-1","reaction":"👍"}}"#).unwrap();
         assert_eq!(reaction.kind(), "workspace_request");
@@ -1537,6 +1688,22 @@ mod tests {
             r#"{"workspace_request":{"action":"typing","channel_id":"c1","expires_in_seconds":31}}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn parses_agent_workspace_typing_identity_and_direct_scope() {
+        let parsed = parse_wire_message(
+            r#"{"workspace_update":{"action":"typing","typing":{"sender_pubkey":"agent:rev","agent_id":"rev","agent_name":"Rev","member_pubkey":"alice","peer_pubkey":"bob","expires_at":200}}}"#,
+        )
+        .unwrap();
+        let WireMessage::WorkspaceUpdate { workspace_update } = parsed else {
+            panic!("expected workspace update");
+        };
+        let typing = workspace_update.typing.unwrap();
+        assert_eq!(typing.agent_id.as_deref(), Some("rev"));
+        assert_eq!(typing.agent_name.as_deref(), Some("Rev"));
+        assert_eq!(typing.member_pubkey.as_deref(), Some("alice"));
+        assert_eq!(typing.peer_pubkey.as_deref(), Some("bob"));
     }
 
     #[test]
@@ -1595,6 +1762,23 @@ mod tests {
 
         assert_eq!(parsed.kind(), "workspace_update");
         assert_eq!(parsed.text(), "profile_updated");
+    }
+
+    #[test]
+    fn parses_legacy_workspace_member_pubkeys() {
+        let parsed = parse_wire_message(
+            r#"{"workspace_update":{"action":"snapshot","members":["2fb895af9d059dba6e3ee29506f75ba4c03d7438835f2255924e94311d445b8e"]}}"#,
+        )
+        .unwrap();
+
+        let WireMessage::WorkspaceUpdate { workspace_update } = parsed else {
+            panic!("expected workspace update");
+        };
+        assert_eq!(
+            workspace_update.members[0].pubkey,
+            "2fb895af9d059dba6e3ee29506f75ba4c03d7438835f2255924e94311d445b8e"
+        );
+        assert!(workspace_update.members[0].display_name.is_empty());
     }
 
     #[test]

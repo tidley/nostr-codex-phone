@@ -6,8 +6,9 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `active_session`, `clean_relays`, `key_pair_from_keys`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`
+// These functions are ignored because they are not marked as `pub`: `active_session`, `build_fips_call_session`, `clean_relays`, `fips_call_status`, `key_pair_from_keys`, `new`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RealtimeAudioPipeline`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 List<String> nostrDefaultRelays() =>
     RustLib.instance.api.crateApiNostrNostrDefaultRelays();
@@ -66,6 +67,51 @@ Future<List<BridgeIncomingMessage>> nostrFetchRecentMessages({
 
 Future<bool> nostrIsStarted() =>
     RustLib.instance.api.crateApiNostrNostrIsStarted();
+
+Future<BridgeFipsCallStatus> fipsCallConnect({
+  required BridgeFipsCallConfig config,
+  required String peerNpub,
+}) => RustLib.instance.api.crateApiNostrFipsCallConnect(
+  config: config,
+  peerNpub: peerNpub,
+);
+
+Future<BridgeFipsCallStatus> fipsCallAccept({
+  required BridgeFipsCallConfig config,
+}) => RustLib.instance.api.crateApiNostrFipsCallAccept(config: config);
+
+Future<void> fipsCallSendDatagram({required List<int> payload}) =>
+    RustLib.instance.api.crateApiNostrFipsCallSendDatagram(payload: payload);
+
+Future<Uint8List?> fipsCallReceiveDatagram({required BigInt timeoutMs}) =>
+    RustLib.instance.api.crateApiNostrFipsCallReceiveDatagram(
+      timeoutMs: timeoutMs,
+    );
+
+Future<void> fipsCallSendRealtimeAudio({
+  required BridgeRealtimeAudioPacket packet,
+}) =>
+    RustLib.instance.api.crateApiNostrFipsCallSendRealtimeAudio(packet: packet);
+
+Future<BridgeRealtimeAudioPacket?> fipsCallReceiveRealtimeAudio({
+  required BigInt timeoutMs,
+}) => RustLib.instance.api.crateApiNostrFipsCallReceiveRealtimeAudio(
+  timeoutMs: timeoutMs,
+);
+
+/// Encodes one 20 ms, 48 kHz mono signed-16-bit PCM frame and sends it as an
+/// Opus realtime datagram.
+Future<void> fipsCallSendRealtimePcm({required List<int> pcm}) =>
+    RustLib.instance.api.crateApiNostrFipsCallSendRealtimePcm(pcm: pcm);
+
+/// Receives an Opus realtime datagram and returns PCM only when the small
+/// reorder buffer has a frame ready for playout.
+Future<Uint8List?> fipsCallReceiveRealtimePcm({required BigInt timeoutMs}) =>
+    RustLib.instance.api.crateApiNostrFipsCallReceiveRealtimePcm(
+      timeoutMs: timeoutMs,
+    );
+
+Future<void> fipsCallStop() => RustLib.instance.api.crateApiNostrFipsCallStop();
 
 class BridgeAudioEncryption {
   final String algorithm;
@@ -204,6 +250,49 @@ class BridgeDownloadedAttachment {
           name == other.name;
 }
 
+class BridgeFipsCallConfig {
+  final String secretKey;
+  final List<String> relays;
+  final List<String> stunServers;
+
+  const BridgeFipsCallConfig({
+    required this.secretKey,
+    required this.relays,
+    required this.stunServers,
+  });
+
+  @override
+  int get hashCode =>
+      secretKey.hashCode ^ relays.hashCode ^ stunServers.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeFipsCallConfig &&
+          runtimeType == other.runtimeType &&
+          secretKey == other.secretKey &&
+          relays == other.relays &&
+          stunServers == other.stunServers;
+}
+
+class BridgeFipsCallStatus {
+  final String state;
+  final int? maxDatagramBytes;
+
+  const BridgeFipsCallStatus({required this.state, this.maxDatagramBytes});
+
+  @override
+  int get hashCode => state.hashCode ^ maxDatagramBytes.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeFipsCallStatus &&
+          runtimeType == other.runtimeType &&
+          state == other.state &&
+          maxDatagramBytes == other.maxDatagramBytes;
+}
+
 class BridgeIncomingMessage {
   final String senderPubkey;
   final String senderPubkeyHex;
@@ -297,6 +386,37 @@ class BridgeNostrConfig {
           peerPubkey == other.peerPubkey &&
           receivePubkeys == other.receivePubkeys &&
           relays == other.relays;
+}
+
+class BridgeRealtimeAudioPacket {
+  final int sequence;
+  final int timestamp48Khz;
+  final int flags;
+  final Uint8List opusPayload;
+
+  const BridgeRealtimeAudioPacket({
+    required this.sequence,
+    required this.timestamp48Khz,
+    required this.flags,
+    required this.opusPayload,
+  });
+
+  @override
+  int get hashCode =>
+      sequence.hashCode ^
+      timestamp48Khz.hashCode ^
+      flags.hashCode ^
+      opusPayload.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeRealtimeAudioPacket &&
+          runtimeType == other.runtimeType &&
+          sequence == other.sequence &&
+          timestamp48Khz == other.timestamp48Khz &&
+          flags == other.flags &&
+          opusPayload == other.opusPayload;
 }
 
 class BridgeSessionStatus {

@@ -579,6 +579,12 @@ class _TeamWorkspace extends StatefulWidget {
     required this.onOpenAttachment,
     required this.onCreateInvite,
     required this.onRedeemInvite,
+    required this.callPhase,
+    required this.callPeerPubkey,
+    required this.onStartCall,
+    required this.onAcceptCall,
+    required this.onRejectCall,
+    required this.onHangupCall,
   });
 
   final List<RepoTarget> sessions;
@@ -600,6 +606,12 @@ class _TeamWorkspace extends StatefulWidget {
   final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
   final Future<void> Function() onCreateInvite;
   final Future<void> Function(String code) onRedeemInvite;
+  final _CallPhase callPhase;
+  final String? callPeerPubkey;
+  final ValueChanged<String> onStartCall;
+  final VoidCallback onAcceptCall;
+  final VoidCallback onRejectCall;
+  final VoidCallback onHangupCall;
 
   @override
   State<_TeamWorkspace> createState() => _TeamWorkspaceState();
@@ -665,7 +677,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         'action': 'typing',
         if (_section == _WorkspaceSection.channel) 'channel_id': _active,
         if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
-        'expires_in_seconds': 6,
+        'expires_in_seconds': 4,
       }),
     );
   }
@@ -853,6 +865,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final conversation = _WorkspaceConversation(
       title: _title,
       section: _section,
+      directPeer: _section == _WorkspaceSection.direct ? _active : null,
       messages: _activeMessages
           .where(
             (message) => message.parentId == null || message.alsoSendToMain,
@@ -911,8 +924,16 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       mentionOptions: _mentionOptions,
       onMentionSelected: _insertMention,
       typingLabels: typing
-          .map((status) => _memberLabel(status.senderPubkey))
+          .map(
+            (status) => status.agentName ?? _memberLabel(status.senderPubkey),
+          )
           .toList(),
+      callPhase: widget.callPhase,
+      callPeerPubkey: widget.callPeerPubkey,
+      onStartCall: widget.onStartCall,
+      onAcceptCall: widget.onAcceptCall,
+      onRejectCall: widget.onRejectCall,
+      onHangupCall: widget.onHangupCall,
     );
     final contextPane = _WorkspaceContext(
       message: _thread,
@@ -1253,6 +1274,7 @@ class _WorkspaceConversation extends StatefulWidget {
   const _WorkspaceConversation({
     required this.title,
     required this.section,
+    required this.directPeer,
     required this.messages,
     required this.threadReplyCounts,
     required this.composer,
@@ -1285,9 +1307,16 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.mentionOptions,
     required this.onMentionSelected,
     required this.typingLabels,
+    required this.callPhase,
+    required this.callPeerPubkey,
+    required this.onStartCall,
+    required this.onAcceptCall,
+    required this.onRejectCall,
+    required this.onHangupCall,
   });
   final String title;
   final _WorkspaceSection section;
+  final String? directPeer;
   final List<WorkspaceMessage> messages;
   final Map<String, int> threadReplyCounts;
   final TextEditingController composer;
@@ -1321,6 +1350,12 @@ class _WorkspaceConversation extends StatefulWidget {
   final List<WorkspaceMention> mentionOptions;
   final ValueChanged<WorkspaceMention> onMentionSelected;
   final List<String> typingLabels;
+  final _CallPhase callPhase;
+  final String? callPeerPubkey;
+  final ValueChanged<String> onStartCall;
+  final VoidCallback onAcceptCall;
+  final VoidCallback onRejectCall;
+  final VoidCallback onHangupCall;
 
   @override
   State<_WorkspaceConversation> createState() => _WorkspaceConversationState();
@@ -1450,6 +1485,18 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                   onPressed: widget.onManageAgents,
                   icon: const Icon(Icons.person_add_alt_1_outlined),
                   tooltip: 'Manage agents',
+                ),
+              if (widget.section == _WorkspaceSection.direct)
+                _CallControl(
+                  phase:
+                      widget.callPeerPubkey == null ||
+                          widget.callPeerPubkey == widget.directPeer
+                      ? widget.callPhase
+                      : _CallPhase.idle,
+                  onStart: () => widget.onStartCall(widget.directPeer!),
+                  onAccept: widget.onAcceptCall,
+                  onReject: widget.onRejectCall,
+                  onHangup: widget.onHangupCall,
                 ),
             ],
           ),
@@ -1593,6 +1640,48 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
       ],
     );
   }
+}
+
+class _CallControl extends StatelessWidget {
+  const _CallControl({
+    required this.phase,
+    required this.onStart,
+    required this.onAccept,
+    required this.onReject,
+    required this.onHangup,
+  });
+
+  final _CallPhase phase;
+  final VoidCallback onStart;
+  final VoidCallback onAccept;
+  final VoidCallback onReject;
+  final VoidCallback onHangup;
+
+  @override
+  Widget build(BuildContext context) => switch (phase) {
+    _CallPhase.idle => IconButton(
+      tooltip: 'Start call',
+      onPressed: onStart,
+      icon: const Icon(Icons.call_outlined),
+    ),
+    _CallPhase.incoming => Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        TextButton(onPressed: onReject, child: const Text('Reject')),
+        FilledButton(onPressed: onAccept, child: const Text('Answer')),
+      ],
+    ),
+    _CallPhase.outgoing || _CallPhase.connecting => TextButton.icon(
+      onPressed: onHangup,
+      icon: const Icon(Icons.call_end_outlined),
+      label: const Text('Connecting...'),
+    ),
+    _CallPhase.active => TextButton.icon(
+      onPressed: onHangup,
+      icon: const Icon(Icons.call_end),
+      label: const Text('Call active'),
+    ),
+  };
 }
 
 class _WorkspaceMessageRow extends StatefulWidget {
