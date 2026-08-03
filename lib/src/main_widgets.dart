@@ -1658,27 +1658,39 @@ class _CallControl extends StatelessWidget {
       onPressed: onStart,
       icon: const Icon(Icons.call_outlined),
     ),
-    _CallPhase.incoming => Row(
+    _CallPhase.incoming => Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        TextButton(onPressed: onReject, child: const Text('Reject')),
-        FilledButton(
-          // FIPS traversal runs after its responder advert is published. Do
-          // not make the Nostr answer signal wait for that network operation.
-          onPressed: onAccept,
-          child: const Text('Answer'),
+        const Text('Preparing FIPS direct connection...'),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextButton(onPressed: onReject, child: const Text('Reject')),
+            FilledButton(
+              // FIPS traversal runs after its responder advert is published.
+              // Do not make the Nostr answer signal wait for that operation.
+              onPressed: onAccept,
+              child: const Text('Answer'),
+            ),
+          ],
         ),
       ],
     ),
-    _CallPhase.outgoing || _CallPhase.connecting => TextButton.icon(
+    _CallPhase.outgoing => TextButton.icon(
       onPressed: onHangup,
       icon: const Icon(Icons.call_end_outlined),
-      label: const Text('Connecting...'),
+      label: const Text('Waiting for answer...'),
+    ),
+    _CallPhase.connecting => TextButton.icon(
+      onPressed: onHangup,
+      icon: const Icon(Icons.call_end_outlined),
+      label: const Text('Establishing FIPS connection...'),
     ),
     _CallPhase.active => TextButton.icon(
       onPressed: onHangup,
       icon: const Icon(Icons.call_end),
-      label: const Text('Call active'),
+      label: const Text('FIPS call active'),
     ),
   };
 }
