@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use fips_mobile::{FipsMobileQuicSession, FipsMobileQuicSessionConfig, Identity};
 use nostr_sdk::prelude::*;
 use once_cell::sync::Lazy;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use crate::blossom::{download_attachment, upload_audio, BlossomUploadConfig};
 use crate::nostr_client::{default_relays, IncomingMessage, NostrConfig, NostrMessenger};
@@ -17,6 +17,8 @@ use crate::realtime_audio::{
 
 static SESSION: Lazy<Mutex<Option<Arc<NostrMessenger>>>> = Lazy::new(|| Mutex::new(None));
 static CALL_SESSION: Lazy<Mutex<Option<FipsMobileQuicSession>>> = Lazy::new(|| Mutex::new(None));
+static CALL_ACCEPT_CANCEL: Lazy<Mutex<Option<oneshot::Sender<()>>>> =
+    Lazy::new(|| Mutex::new(None));
 static REALTIME_AUDIO: Lazy<Mutex<Option<RealtimeAudioPipeline>>> = Lazy::new(|| Mutex::new(None));
 
 struct RealtimeAudioPipeline {
@@ -294,7 +296,14 @@ pub async fn fips_call_connect(
 pub async fn fips_call_accept(config: BridgeFipsCallConfig) -> Result<BridgeFipsCallStatus> {
     let audio = RealtimeAudioPipeline::new()?;
     let mut session = build_fips_call_session(config)?;
-    session.accept().await?;
+    let (cancel, cancelled) = oneshot::channel();
+    *CALL_ACCEPT_CANCEL.lock().await = Some(cancel);
+    let result: Result<()> = tokio::select! {
+        result = session.accept() => result.map_err(Into::into),
+        _ = cancelled => Err(anyhow!("FIPS call acceptance cancelled")),
+    };
+    CALL_ACCEPT_CANCEL.lock().await.take();
+    result?;
     let status = fips_call_status(&session);
     *CALL_SESSION.lock().await = Some(session);
     *REALTIME_AUDIO.lock().await = Some(audio);
@@ -375,6 +384,9 @@ pub async fn fips_call_receive_realtime_pcm(timeout_ms: u64) -> Result<Option<Ve
 }
 
 pub async fn fips_call_stop() -> Result<()> {
+    if let Some(cancel) = CALL_ACCEPT_CANCEL.lock().await.take() {
+        let _ = cancel.send(());
+    }
     let session = CALL_SESSION.lock().await.take();
     if let Some(mut session) = session {
         session.stop().await?;
@@ -430,6 +442,21 @@ fn clean_relays(relays: Vec<String>) -> Vec<String> {
         .map(|relay| relay.trim().to_string())
         .filter(|relay| !relay.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stopping_a_call_cancels_pending_acceptance() {
+        let (cancel, cancelled) = oneshot::channel();
+        *CALL_ACCEPT_CANCEL.lock().await = Some(cancel);
+
+        fips_call_stop().await.unwrap();
+
+        assert!(cancelled.await.is_ok());
+    }
 }
 
 impl From<IncomingMessage> for BridgeIncomingMessage {

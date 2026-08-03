@@ -578,9 +578,9 @@ class _TeamWorkspace extends StatefulWidget {
     required this.onAttach,
     required this.onOpenAttachment,
     required this.onCreateInvite,
-    required this.onRedeemInvite,
     required this.callPhase,
     required this.callPeerPubkey,
+    required this.incomingCallReady,
     required this.onStartCall,
     required this.onAcceptCall,
     required this.onRejectCall,
@@ -605,9 +605,9 @@ class _TeamWorkspace extends StatefulWidget {
   final Future<bool> Function(Map<String, Object?> request) onAttach;
   final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
   final Future<void> Function() onCreateInvite;
-  final Future<void> Function(String code) onRedeemInvite;
   final _CallPhase callPhase;
   final String? callPeerPubkey;
+  final bool incomingCallReady;
   final ValueChanged<String> onStartCall;
   final VoidCallback onAcceptCall;
   final VoidCallback onRejectCall;
@@ -906,7 +906,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       inviteCode: widget.inviteCode,
       memberStatus: widget.memberStatus,
       onCreateInvite: widget.onCreateInvite,
-      onRedeemInvite: widget.onRedeemInvite,
       members: widget.workspace.members,
       ownPubkey: widget.ownPubkey,
       displayName: widget.displayName,
@@ -930,6 +929,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           .toList(),
       callPhase: widget.callPhase,
       callPeerPubkey: widget.callPeerPubkey,
+      incomingCallReady: widget.incomingCallReady,
       onStartCall: widget.onStartCall,
       onAcceptCall: widget.onAcceptCall,
       onRejectCall: widget.onRejectCall,
@@ -1293,7 +1293,6 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.inviteCode,
     required this.memberStatus,
     required this.onCreateInvite,
-    required this.onRedeemInvite,
     required this.members,
     required this.ownPubkey,
     required this.displayName,
@@ -1309,6 +1308,7 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.typingLabels,
     required this.callPhase,
     required this.callPeerPubkey,
+    required this.incomingCallReady,
     required this.onStartCall,
     required this.onAcceptCall,
     required this.onRejectCall,
@@ -1336,7 +1336,6 @@ class _WorkspaceConversation extends StatefulWidget {
   final String? inviteCode;
   final String memberStatus;
   final Future<void> Function() onCreateInvite;
-  final Future<void> Function(String) onRedeemInvite;
   final List<String> members;
   final String ownPubkey;
   final String displayName;
@@ -1352,6 +1351,7 @@ class _WorkspaceConversation extends StatefulWidget {
   final List<String> typingLabels;
   final _CallPhase callPhase;
   final String? callPeerPubkey;
+  final bool incomingCallReady;
   final ValueChanged<String> onStartCall;
   final VoidCallback onAcceptCall;
   final VoidCallback onRejectCall;
@@ -1453,7 +1453,6 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         onDisplayNameChanged: widget.onDisplayNameChanged,
         onMemberAliasChanged: widget.onMemberAliasChanged,
         onCreateInvite: widget.onCreateInvite,
-        onRedeemInvite: widget.onRedeemInvite,
       );
     }
     return Column(
@@ -1493,6 +1492,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                           widget.callPeerPubkey == widget.directPeer
                       ? widget.callPhase
                       : _CallPhase.idle,
+                  incomingCallReady: widget.incomingCallReady,
                   onStart: () => widget.onStartCall(widget.directPeer!),
                   onAccept: widget.onAcceptCall,
                   onReject: widget.onRejectCall,
@@ -1645,6 +1645,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
 class _CallControl extends StatelessWidget {
   const _CallControl({
     required this.phase,
+    required this.incomingCallReady,
     required this.onStart,
     required this.onAccept,
     required this.onReject,
@@ -1652,6 +1653,7 @@ class _CallControl extends StatelessWidget {
   });
 
   final _CallPhase phase;
+  final bool incomingCallReady;
   final VoidCallback onStart;
   final VoidCallback onAccept;
   final VoidCallback onReject;
@@ -1668,7 +1670,10 @@ class _CallControl extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         TextButton(onPressed: onReject, child: const Text('Reject')),
-        FilledButton(onPressed: onAccept, child: const Text('Answer')),
+        FilledButton(
+          onPressed: incomingCallReady ? onAccept : null,
+          child: Text(incomingCallReady ? 'Answer' : 'Preparing...'),
+        ),
       ],
     ),
     _CallPhase.outgoing || _CallPhase.connecting => TextButton.icon(
@@ -2571,7 +2576,6 @@ class _PeopleDirectory extends StatefulWidget {
     required this.inviteCode,
     required this.memberStatus,
     required this.onCreateInvite,
-    required this.onRedeemInvite,
     required this.members,
     required this.ownPubkey,
     required this.displayName,
@@ -2586,7 +2590,6 @@ class _PeopleDirectory extends StatefulWidget {
   final String? inviteCode;
   final String memberStatus;
   final Future<void> Function() onCreateInvite;
-  final Future<void> Function(String) onRedeemInvite;
   final List<String> members;
   final String ownPubkey;
   final String displayName;
@@ -2600,22 +2603,12 @@ class _PeopleDirectory extends StatefulWidget {
 }
 
 class _PeopleDirectoryState extends State<_PeopleDirectory> {
-  final _code = TextEditingController();
   late final TextEditingController _displayName = TextEditingController(
     text: widget.displayName,
   );
 
-  Future<void> _scanCode() async {
-    if (!_supportsCameraQrScan) return;
-    final value = await Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => const _RepoTargetQrScannerPage()),
-    );
-    if (value != null) _code.text = value;
-  }
-
   @override
   void dispose() {
-    _code.dispose();
     _displayName.dispose();
     super.dispose();
   }
@@ -2751,35 +2744,12 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
         const Divider(height: 36),
         Text('Join workspace', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
-        const Text(
-          'New members can paste one invite code in Settings. It includes the workspace connection details.',
-        ),
+        Text('Status: ${widget.memberStatus}'),
         const SizedBox(height: 8),
         OutlinedButton.icon(
           onPressed: widget.onOpenSettings,
           icon: const Icon(Icons.settings_outlined),
-          label: const Text('Enter invite code in Settings'),
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _code,
-          textCapitalization: TextCapitalization.characters,
-          decoration: InputDecoration(
-            border: OutlineInputBorder(),
-            hintText: 'Paste workspace invite code',
-            suffixIcon: _supportsCameraQrScan
-                ? IconButton(
-                    icon: const Icon(Icons.qr_code_scanner),
-                    tooltip: 'Scan code',
-                    onPressed: _scanCode,
-                  )
-                : null,
-          ),
-        ),
-        const SizedBox(height: 8),
-        FilledButton(
-          onPressed: () => widget.onRedeemInvite(_code.text),
-          child: const Text('Join with code'),
+          label: const Text('Join with invite code'),
         ),
         ListTile(
           contentPadding: EdgeInsets.zero,

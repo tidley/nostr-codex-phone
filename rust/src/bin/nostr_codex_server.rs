@@ -756,6 +756,90 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             }
         };
         let Some(message) = message else { continue };
+        // Invite redemption must run before the owner gate because invitees are not
+        // members yet and desktop clients wrap the request in a query message.
+        if let Some(code) = invite_redemption_code(&message) {
+            match config.invites.redeem(&code, &message.sender_pubkey_hex) {
+                Ok(true) => {
+                    let mut allowed = env_csv("NOSTR_RECEIVE_PUBKEYS").unwrap_or_default();
+                    if let Some(owner) = env_nonempty("NOSTR_PEER_PUBKEY") {
+                        if !allowed.iter().any(|key| key == &owner) {
+                            allowed.push(owner);
+                        }
+                    }
+                    if !allowed.iter().any(|key| key == &message.sender_pubkey) {
+                        allowed.push(message.sender_pubkey.clone());
+                    }
+                    if let Err(err) = upsert_env_file_values(
+                        &config.worker_env.path,
+                        &[("NOSTR_RECEIVE_PUBKEYS", allowed.join(",").as_str())],
+                    ) {
+                        warn!("failed to persist redeemed member: {err:#}");
+                        let _ = config.messenger.send_wire_to_pubkey(&message.sender_pubkey_hex, WireMessage::invite_rejected(InviteRejected { reason: "Invite could not be saved; ask the owner to create a new code.".to_string() })).await;
+                        continue;
+                    }
+                    config
+                        .allowed_owner_hexes
+                        .push(message.sender_pubkey_hex.clone());
+                    if let Err(err) = config.workspace.add_member(&message.sender_pubkey_hex) {
+                        warn!("failed to persist redeemed workspace member: {err:#}");
+                        continue;
+                    }
+                    let _ = config
+                        .messenger
+                        .send_wire_to_pubkey(
+                            &message.sender_pubkey_hex,
+                            WireMessage::invite_accepted(InviteAccepted {
+                                recipient_pubkey: message.sender_pubkey.clone(),
+                            }),
+                        )
+                        .await;
+                    match workspace_snapshot(&config.workspace, &message.sender_pubkey_hex) {
+                        Ok(snapshot) => {
+                            if let Err(err) = config
+                                .messenger
+                                .send_wire_to_pubkey(
+                                    &message.sender_pubkey_hex,
+                                    WireMessage::workspace_update(snapshot),
+                                )
+                                .await
+                            {
+                                warn!("failed to send redeemed member workspace snapshot: {err:#}");
+                            }
+                        }
+                        Err(err) => {
+                            warn!("failed to build redeemed member workspace snapshot: {err:#}")
+                        }
+                    }
+                }
+                Ok(false) => {
+                    let _ = config
+                        .messenger
+                        .send_wire_to_pubkey(
+                            &message.sender_pubkey_hex,
+                            WireMessage::invite_rejected(InviteRejected {
+                                reason: "Invite code is invalid, expired, or already used."
+                                    .to_string(),
+                            }),
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    warn!("invite redemption failed: {err:#}");
+                    let _ = config
+                        .messenger
+                        .send_wire_to_pubkey(
+                            &message.sender_pubkey_hex,
+                            WireMessage::invite_rejected(InviteRejected {
+                                reason: "Invite code could not be redeemed.".to_string(),
+                            }),
+                        )
+                        .await;
+                }
+            }
+            continue;
+        }
+
         if !accept_or_claim_owner(
             &config.worker_env,
             &mut config.owner_peer_hex,
@@ -763,69 +847,6 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             &config.pairing_secret,
             &message,
         ) {
-            if let Some(code) = invite_redemption_code(&message) {
-                match config.invites.redeem(&code, &message.sender_pubkey_hex) {
-                    Ok(true) => {
-                        let mut allowed = env_csv("NOSTR_RECEIVE_PUBKEYS").unwrap_or_default();
-                        if let Some(owner) = env_nonempty("NOSTR_PEER_PUBKEY") {
-                            if !allowed.iter().any(|key| key == &owner) {
-                                allowed.push(owner);
-                            }
-                        }
-                        if !allowed.iter().any(|key| key == &message.sender_pubkey) {
-                            allowed.push(message.sender_pubkey.clone());
-                        }
-                        if let Err(err) = upsert_env_file_values(
-                            &config.worker_env.path,
-                            &[("NOSTR_RECEIVE_PUBKEYS", allowed.join(",").as_str())],
-                        ) {
-                            warn!("failed to persist redeemed member: {err:#}");
-                            let _ = config.messenger.send_wire_to_pubkey(&message.sender_pubkey_hex, WireMessage::invite_rejected(InviteRejected { reason: "Invite could not be saved; ask the owner to create a new code.".to_string() })).await;
-                            continue;
-                        }
-                        config
-                            .allowed_owner_hexes
-                            .push(message.sender_pubkey_hex.clone());
-                        if let Err(err) = config.workspace.add_member(&message.sender_pubkey_hex) {
-                            warn!("failed to persist redeemed workspace member: {err:#}");
-                            continue;
-                        }
-                        let _ = config
-                            .messenger
-                            .send_wire_to_pubkey(
-                                &message.sender_pubkey_hex,
-                                WireMessage::invite_accepted(InviteAccepted {
-                                    recipient_pubkey: message.sender_pubkey.clone(),
-                                }),
-                            )
-                            .await;
-                    }
-                    Ok(false) => {
-                        let _ = config
-                            .messenger
-                            .send_wire_to_pubkey(
-                                &message.sender_pubkey_hex,
-                                WireMessage::invite_rejected(InviteRejected {
-                                    reason: "Invite code is invalid, expired, or already used."
-                                        .to_string(),
-                                }),
-                            )
-                            .await;
-                    }
-                    Err(err) => {
-                        warn!("invite redemption failed: {err:#}");
-                        let _ = config
-                            .messenger
-                            .send_wire_to_pubkey(
-                                &message.sender_pubkey_hex,
-                                WireMessage::invite_rejected(InviteRejected {
-                                    reason: "Invite code could not be redeemed.".to_string(),
-                                }),
-                            )
-                            .await;
-                    }
-                }
-            }
             continue;
         }
 
@@ -1006,17 +1027,28 @@ fn invite_creation_request(message: &IncomingMessage) -> Option<CreateInvite> {
 }
 
 fn invite_redemption_code(message: &IncomingMessage) -> Option<String> {
-    let raw = if message.kind == "redeem_invite" {
-        &message.raw_json
-    } else {
-        &message.text
-    };
-    match parse_wire_message(raw).ok()? {
-        WireMessage::RedeemInvite {
-            redeem_invite: RedeemInvite { code },
-        } => Some(code),
-        _ => None,
+    redeem_invitation_from_json(&message.raw_json, 0)
+}
+
+fn redeem_invitation_from_json(raw: &str, depth: u8) -> Option<String> {
+    if depth > 2 {
+        return None;
     }
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let object = value.as_object()?;
+    if let Some(redeem) = object.get("redeem_invite") {
+        return serde_json::from_value::<RedeemInvite>(redeem.clone())
+            .ok()
+            .map(|redeem| redeem.code);
+    }
+    for field in ["query", "message"] {
+        if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+            if let Some(code) = redeem_invitation_from_json(value, depth + 1) {
+                return Some(code);
+            }
+        }
+    }
+    None
 }
 
 fn workspace_request(message: &IncomingMessage) -> Option<WorkspaceRequest> {
@@ -1088,31 +1120,7 @@ async fn process_workspace_request(
             }
             return Ok(());
         }
-        "list" => WorkspaceUpdate {
-            action: "snapshot".to_string(),
-            channels: workspace
-                .channels()?
-                .into_iter()
-                .map(channel_payload)
-                .collect(),
-            agents: workspace.agents()?.into_iter().map(agent_payload).collect(),
-            conversation_agents: workspace
-                .conversation_agents()?
-                .into_iter()
-                .map(conversation_agent_payload)
-                .collect(),
-            members: workspace
-                .members()?
-                .into_iter()
-                .map(member_payload)
-                .collect(),
-            messages: workspace
-                .snapshot_messages(sender)?
-                .into_iter()
-                .map(message_payload)
-                .collect(),
-            typing: None,
-        },
+        "list" => workspace_snapshot(workspace, sender)?,
         "create_channel" => {
             let channel = workspace
                 .create_channel(request.channel_name.as_deref().unwrap_or_default(), sender)?;
@@ -1481,6 +1489,34 @@ async fn process_workspace_request(
         .send_wire_to_pubkey(sender, WireMessage::workspace_update(update))
         .await?;
     Ok(())
+}
+
+fn workspace_snapshot(workspace: &WorkspaceStore, member: &str) -> Result<WorkspaceUpdate> {
+    Ok(WorkspaceUpdate {
+        action: "snapshot".to_string(),
+        channels: workspace
+            .channels()?
+            .into_iter()
+            .map(channel_payload)
+            .collect(),
+        agents: workspace.agents()?.into_iter().map(agent_payload).collect(),
+        conversation_agents: workspace
+            .conversation_agents()?
+            .into_iter()
+            .map(conversation_agent_payload)
+            .collect(),
+        members: workspace
+            .members()?
+            .into_iter()
+            .map(member_payload)
+            .collect(),
+        messages: workspace
+            .snapshot_messages(member)?
+            .into_iter()
+            .map(message_payload)
+            .collect(),
+        typing: None,
+    })
 }
 
 async fn broadcast_workspace_update(
@@ -6667,6 +6703,57 @@ mod tests {
             &None,
             &message,
         ));
+    }
+
+    #[test]
+    fn recognizes_query_wrapped_desktop_invite_redemption() {
+        let code = "a".repeat(43);
+        let message = IncomingMessage {
+            sender_pubkey: "desktop-npub".to_string(),
+            sender_pubkey_hex: "desktop-hex".to_string(),
+            kind: "query".to_string(),
+            text: String::new(),
+            raw_json: serde_json::json!({
+                "query": serde_json::json!({"redeem_invite": {"code": &code}}).to_string(),
+            })
+            .to_string(),
+            event_id: "event-1".to_string(),
+        };
+
+        assert_eq!(invite_redemption_code(&message), Some(code));
+    }
+
+    #[test]
+    fn redeemed_member_snapshot_includes_workspace_and_only_its_direct_messages() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceStore::open(&temp_dir.path().join("workspace.sqlite3")).unwrap();
+        workspace.add_member("owner").unwrap();
+        workspace.add_member("desktop").unwrap();
+        workspace.add_member("other").unwrap();
+        let channel = workspace.create_channel("general", "owner").unwrap();
+        workspace
+            .add_channel_message("owner", &channel.id, "team", &[], &[], None)
+            .unwrap();
+        workspace
+            .add_direct_message("owner", "desktop", "for desktop", &[], &[], None)
+            .unwrap();
+        workspace
+            .add_direct_message("owner", "other", "not for desktop", &[], &[], None)
+            .unwrap();
+
+        let snapshot = workspace_snapshot(&workspace, "desktop").unwrap();
+
+        assert_eq!(snapshot.action, "snapshot");
+        assert_eq!(snapshot.channels, vec![channel_payload(channel)]);
+        assert_eq!(snapshot.members.len(), 3);
+        assert_eq!(
+            snapshot
+                .messages
+                .into_iter()
+                .map(|message| message.body)
+                .collect::<Vec<_>>(),
+            vec!["team", "for desktop"],
+        );
     }
 
     #[test]
