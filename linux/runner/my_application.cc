@@ -7,11 +7,13 @@
 
 #include "flutter/generated_plugin_registrant.h"
 #include "realtime_audio.h"
+#include "realtime_video.h"
 
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
   RealtimeAudio* realtime_audio;
+  RealtimeVideo* realtime_video;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
@@ -78,6 +80,9 @@ static void my_application_activate(GApplication* application) {
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
   self->realtime_audio = new RealtimeAudio(
       fl_engine_get_binary_messenger(fl_view_get_engine(view)));
+  self->realtime_video = new RealtimeVideo(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      fl_engine_get_texture_registrar(fl_view_get_engine(view)));
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
@@ -117,6 +122,8 @@ static void my_application_shutdown(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
   delete self->realtime_audio;
   self->realtime_audio = nullptr;
+  delete self->realtime_video;
+  self->realtime_video = nullptr;
 
   G_APPLICATION_CLASS(my_application_parent_class)->shutdown(application);
 }
@@ -139,6 +146,7 @@ static void my_application_class_init(MyApplicationClass* klass) {
 
 static void my_application_init(MyApplication* self) {
   self->realtime_audio = nullptr;
+  self->realtime_video = nullptr;
 }
 
 MyApplication* my_application_new() {

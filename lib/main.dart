@@ -50,7 +50,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.91+291';
+const _appVersion = '0.2.92+292';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -7171,7 +7171,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         await _activateGroupCallAudio(call);
       } else {
         unawaited(_receiveGroupCallAudio(call, peer));
-        if (Platform.isAndroid && _callVideoStarted) {
+        if ((Platform.isAndroid || Platform.isLinux) && _callVideoStarted) {
           final texture = await _realtimeVideo.createRenderer();
           _videoTextures[peer] = texture;
           _showVideoOverlay();
@@ -7244,10 +7244,9 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _activateGroupCallVideo(_GroupCallState call) async {
-    if (!Platform.isAndroid || _groupCall != call || _callVideoStarted) {
-      if (Platform.isLinux && mounted) {
-        setState(() => _status = 'Video receive is unavailable on Linux');
-      }
+    if ((!Platform.isAndroid && !Platform.isLinux) ||
+        _groupCall != call ||
+        _callVideoStarted) {
       return;
     }
     try {
@@ -7523,12 +7522,9 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _activateCallVideo(String callId, String peer) async {
-    if (!Platform.isAndroid ||
+    if ((!Platform.isAndroid && !Platform.isLinux) ||
         _callId != callId ||
         _callPhase != _CallPhase.active) {
-      if (Platform.isLinux && mounted) {
-        setState(() => _status = 'Video receive is unavailable on Linux');
-      }
       return;
     }
     try {
