@@ -568,6 +568,7 @@ class _TeamWorkspace extends StatefulWidget {
     required this.memberStatus,
     required this.workspace,
     required this.ownPubkey,
+    required this.localSenderIds,
     required this.displayName,
     required this.memberAliases,
     required this.memberNames,
@@ -602,6 +603,7 @@ class _TeamWorkspace extends StatefulWidget {
   final String memberStatus;
   final WorkspaceState workspace;
   final String ownPubkey;
+  final Set<String> localSenderIds;
   final String displayName;
   final Map<String, String> memberAliases;
   final Map<String, String> memberNames;
@@ -971,6 +973,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           ? widget.workspace.channelHumanMemberCount(_active)
           : 0,
       ownPubkey: widget.ownPubkey,
+      localSenderIds: widget.localSenderIds,
       displayName: widget.displayName,
       memberAliases: widget.memberAliases,
       memberNames: widget.memberNames,
@@ -1419,6 +1422,7 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.members,
     required this.channelHumanMemberCount,
     required this.ownPubkey,
+    required this.localSenderIds,
     required this.displayName,
     required this.memberAliases,
     required this.memberNames,
@@ -1470,6 +1474,7 @@ class _WorkspaceConversation extends StatefulWidget {
   final List<String> members;
   final int channelHumanMemberCount;
   final String ownPubkey;
+  final Set<String> localSenderIds;
   final String displayName;
   final Map<String, String> memberAliases;
   final Map<String, String> memberNames;
@@ -1683,6 +1688,10 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                           child: _WorkspaceMessageRow(
                             message: m,
                             authorName: _memberLabel(m.senderPubkey),
+                            isLocalSender: isWorkspaceLocalSender(
+                              m.senderPubkey,
+                              widget.localSenderIds,
+                            ),
                             onThread: () => widget.onOpenThread(m),
                             threadReplyCount:
                                 widget.threadReplyCounts[m.id] ?? 0,
@@ -1850,6 +1859,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
   const _WorkspaceMessageRow({
     required this.message,
     required this.authorName,
+    required this.isLocalSender,
     required this.onThread,
     required this.onReact,
     required this.threadReplyCount,
@@ -1857,6 +1867,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
   });
   final WorkspaceMessage message;
   final String authorName;
+  final bool isLocalSender;
   final VoidCallback onThread;
   final ValueChanged<String> onReact;
   final int threadReplyCount;
@@ -1867,134 +1878,176 @@ class _WorkspaceMessageRow extends StatefulWidget {
 
 class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
   bool _hovered = false;
+
+  static const _avatarColors = [
+    (Color(0xffdbeafe), Color(0xff1e3a8a)),
+    (Color(0xfffce7f3), Color(0xff831843)),
+    (Color(0xffede9fe), Color(0xff4c1d95)),
+    (Color(0xffffedd5), Color(0xff7c2d12)),
+    (Color(0xffccfbf1), Color(0xff134e4a)),
+  ];
+
   @override
-  Widget build(BuildContext context) => MouseRegion(
-    onEnter: (_) => setState(() => _hovered = true),
-    onExit: (_) => setState(() => _hovered = false),
-    child: Stack(
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            CircleAvatar(
-              radius: 18,
-              backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-              foregroundColor: Theme.of(context).colorScheme.onPrimaryContainer,
-              child: const Icon(Icons.person, size: 19),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Text(
-                        widget.authorName,
-                        style: const TextStyle(fontWeight: FontWeight.w800),
-                      ),
-                      const SizedBox(width: 7),
-                      Text(
-                        DateTime.fromMillisecondsSinceEpoch(
-                          widget.message.createdAt * 1000,
-                        ).toLocal().toString().substring(11, 16),
-                        style: Theme.of(context).textTheme.labelSmall,
-                      ),
-                    ],
+  Widget build(BuildContext context) {
+    final isAgent = isWorkspaceAgentSender(widget.message.senderPubkey);
+    final color =
+        _avatarColors[workspaceAvatarColorIndex(
+          widget.message.senderPubkey,
+          widget.authorName,
+          _avatarColors.length,
+        )];
+    final avatar = Semantics(
+      label: isAgent ? '${widget.authorName}, agent' : widget.authorName,
+      child: CircleAvatar(
+        radius: 18,
+        backgroundColor: widget.isLocalSender
+            ? Theme.of(context).colorScheme.primaryContainer
+            : color.$1,
+        foregroundColor: widget.isLocalSender
+            ? Theme.of(context).colorScheme.onPrimaryContainer
+            : color.$2,
+        child: Icon(
+          isAgent
+              ? Icons.smart_toy_outlined
+              : widget.isLocalSender
+              ? Icons.account_circle_outlined
+              : Icons.person_outline,
+          size: 20,
+        ),
+      ),
+    );
+    final messageContent = Expanded(
+      child: Column(
+        crossAxisAlignment: widget.isLocalSender
+            ? CrossAxisAlignment.end
+            : CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                widget.authorName,
+                style: const TextStyle(fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(width: 7),
+              Text(
+                DateTime.fromMillisecondsSinceEpoch(
+                  widget.message.createdAt * 1000,
+                ).toLocal().toString().substring(11, 16),
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+            ],
+          ),
+          const SizedBox(height: 3),
+          if (widget.message.body.isNotEmpty)
+            _WorkspaceMessageBody(widget.message.body),
+          if (widget.message.reactions.isNotEmpty)
+            Wrap(
+              spacing: 4,
+              children: [
+                for (final emoji
+                    in widget.message.reactions
+                        .map((reaction) => reaction.emoji)
+                        .toSet())
+                  ActionChip(
+                    visualDensity: VisualDensity.compact,
+                    label: Text(
+                      '$emoji ${widget.message.reactions.where((reaction) => reaction.emoji == emoji).length}',
+                    ),
+                    onPressed: () => widget.onReact(emoji),
                   ),
-                  const SizedBox(height: 3),
-                  if (widget.message.body.isNotEmpty)
-                    _WorkspaceMessageBody(widget.message.body),
-                  if (widget.message.reactions.isNotEmpty)
-                    Wrap(
-                      spacing: 4,
-                      children: [
-                        for (final emoji
-                            in widget.message.reactions
-                                .map((reaction) => reaction.emoji)
-                                .toSet())
-                          ActionChip(
-                            visualDensity: VisualDensity.compact,
-                            label: Text(
-                              '$emoji ${widget.message.reactions.where((reaction) => reaction.emoji == emoji).length}',
-                            ),
-                            onPressed: () => widget.onReact(emoji),
-                          ),
+              ],
+            ),
+          if (widget.threadReplyCount > 0)
+            TextButton.icon(
+              onPressed: widget.onThread,
+              icon: const Icon(Icons.forum_outlined, size: 16),
+              label: Text(
+                '${widget.threadReplyCount} ${widget.threadReplyCount == 1 ? 'reply' : 'replies'}',
+              ),
+            ),
+          for (final attachment in widget.message.attachments)
+            TextButton.icon(
+              onPressed: () => unawaited(widget.onOpenAttachment(attachment)),
+              icon: const Icon(Icons.download_outlined, size: 18),
+              label: Text(attachment.name ?? 'Attachment'),
+            ),
+        ],
+      ),
+    );
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: Stack(
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (widget.isLocalSender) ...[
+                messageContent,
+                const SizedBox(width: 12),
+                avatar,
+              ] else ...[
+                avatar,
+                const SizedBox(width: 12),
+                messageContent,
+              ],
+            ],
+          ),
+          if (_hovered)
+            Positioned(
+              top: -8,
+              right: 0,
+              child: Material(
+                elevation: 3,
+                borderRadius: BorderRadius.circular(8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      tooltip: 'Copy',
+                      icon: const Icon(Icons.copy_outlined, size: 18),
+                      onPressed: () => Clipboard.setData(
+                        ClipboardData(text: widget.message.body),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Reply in thread',
+                      icon: const Icon(Icons.reply_outlined, size: 18),
+                      onPressed: widget.onThread,
+                    ),
+                    PopupMenuButton<String>(
+                      tooltip: 'React',
+                      icon: const Icon(Icons.add_reaction_outlined, size: 18),
+                      onSelected: widget.onReact,
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: '👍', child: Text('👍')),
+                        PopupMenuItem(value: '❤️', child: Text('❤️')),
+                        PopupMenuItem(value: '👀', child: Text('👀')),
                       ],
                     ),
-                  if (widget.threadReplyCount > 0)
-                    TextButton.icon(
-                      onPressed: widget.onThread,
-                      icon: const Icon(Icons.forum_outlined, size: 16),
-                      label: Text(
-                        '${widget.threadReplyCount} ${widget.threadReplyCount == 1 ? 'reply' : 'replies'}',
-                      ),
+                    PopupMenuButton<String>(
+                      tooltip: 'More',
+                      icon: const Icon(Icons.more_horiz, size: 18),
+                      onSelected: (value) {
+                        if (value == 'copy') {
+                          Clipboard.setData(
+                            ClipboardData(text: widget.message.body),
+                          );
+                        }
+                      },
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'copy', child: Text('Copy text')),
+                      ],
                     ),
-                  for (final attachment in widget.message.attachments)
-                    TextButton.icon(
-                      onPressed: () =>
-                          unawaited(widget.onOpenAttachment(attachment)),
-                      icon: const Icon(Icons.download_outlined, size: 18),
-                      label: Text(attachment.name ?? 'Attachment'),
-                    ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ],
-        ),
-        if (_hovered)
-          Positioned(
-            top: -8,
-            right: 0,
-            child: Material(
-              elevation: 3,
-              borderRadius: BorderRadius.circular(8),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    tooltip: 'Copy',
-                    icon: const Icon(Icons.copy_outlined, size: 18),
-                    onPressed: () => Clipboard.setData(
-                      ClipboardData(text: widget.message.body),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'Reply in thread',
-                    icon: const Icon(Icons.reply_outlined, size: 18),
-                    onPressed: widget.onThread,
-                  ),
-                  PopupMenuButton<String>(
-                    tooltip: 'React',
-                    icon: const Icon(Icons.add_reaction_outlined, size: 18),
-                    onSelected: widget.onReact,
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: '👍', child: Text('👍')),
-                      PopupMenuItem(value: '❤️', child: Text('❤️')),
-                      PopupMenuItem(value: '👀', child: Text('👀')),
-                    ],
-                  ),
-                  PopupMenuButton<String>(
-                    tooltip: 'More',
-                    icon: const Icon(Icons.more_horiz, size: 18),
-                    onSelected: (value) {
-                      if (value == 'copy') {
-                        Clipboard.setData(
-                          ClipboardData(text: widget.message.body),
-                        );
-                      }
-                    },
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'copy', child: Text('Copy text')),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-      ],
-    ),
-  );
+        ],
+      ),
+    );
+  }
 }
 
 class _WorkspaceMessageBody extends StatelessWidget {

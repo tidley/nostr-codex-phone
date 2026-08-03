@@ -2,6 +2,35 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr_codex_phone/src/workspace_models.dart';
 
 void main() {
+  test(
+    'classifies local and agent senders without depending on display names',
+    () {
+      expect(isWorkspaceAgentSender('agent:review-bot'), isTrue);
+      expect(isWorkspaceAgentSender('Agent:review-bot'), isTrue);
+      expect(isWorkspaceAgentSender('review-bot'), isFalse);
+      expect(
+        isWorkspaceLocalSender('ABC123', {'abc123', 'npub-local'}),
+        isTrue,
+      );
+      expect(
+        isWorkspaceLocalSender('other-member', {'abc123', 'npub-local'}),
+        isFalse,
+      );
+    },
+  );
+
+  test('avatar colors are stable by identity and use names as a fallback', () {
+    expect(
+      workspaceAvatarColorIndex('alice', 'Ada', 5),
+      workspaceAvatarColorIndex('alice', 'Renamed Ada', 5),
+    );
+    expect(
+      workspaceAvatarColorIndex('', 'Ada', 5),
+      workspaceAvatarColorIndex('', 'Ada', 5),
+    );
+    expect(workspaceAvatarColorIndex('alice', 'Ada', 0), 0);
+  });
+
   test('workspace state merges persisted updates without fake records', () {
     final state = WorkspaceState();
     state.apply({

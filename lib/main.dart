@@ -51,7 +51,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.97+297';
+const _appVersion = '0.2.98+298';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -6819,6 +6819,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         memberStatus: _workspaceMemberStatus,
         workspace: _workspace,
         ownPubkey: _ownPubkeyHex ?? '',
+        localSenderIds: {_ownPubkey ?? '', _ownPubkeyHex ?? ''},
         displayName: _workspaceDisplayName,
         memberAliases: _workspaceMemberAliases,
         memberNames: {

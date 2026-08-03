@@ -18,6 +18,30 @@ Map<String, String> decodeWorkspaceMemberAliases(String? raw) {
   }
 }
 
+bool isWorkspaceAgentSender(String senderPubkey) =>
+    senderPubkey.trim().toLowerCase().startsWith('agent:');
+
+bool isWorkspaceLocalSender(
+  String senderPubkey,
+  Iterable<String> localSenderIds,
+) {
+  final sender = senderPubkey.trim().toLowerCase();
+  return sender.isNotEmpty &&
+      localSenderIds.any((id) => id.trim().toLowerCase() == sender);
+}
+
+/// Produces a stable palette slot without persisting presentation data.
+int workspaceAvatarColorIndex(String identity, String name, int colorCount) {
+  if (colorCount <= 0) return 0;
+  final source = identity.trim().isNotEmpty ? identity : name.trim();
+  var hash = 0x811c9dc5;
+  for (final unit in source.toLowerCase().codeUnits) {
+    hash = (hash ^ unit) * 0x01000193;
+    hash &= 0x7fffffff;
+  }
+  return hash % colorCount;
+}
+
 class WorkspaceChannel {
   const WorkspaceChannel({required this.id, required this.name});
   final String id;
