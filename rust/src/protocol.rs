@@ -102,6 +102,8 @@ pub struct AudioReference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallControl {
     pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -505,25 +507,46 @@ impl WireMessage {
         }
     }
     pub fn call_invite(call_id: impl Into<String>) -> Self {
+        Self::call_invite_with_sender(call_id, None)
+    }
+    fn call_invite_with_sender(call_id: impl Into<String>, sender_pubkey: Option<String>) -> Self {
         Self::CallInvite {
             call_invite: CallControl {
                 call_id: call_id.into(),
+                sender_pubkey,
             },
         }
     }
+    pub fn call_invite_from(call_id: impl Into<String>, sender_pubkey: impl Into<String>) -> Self {
+        Self::call_invite_with_sender(call_id, Some(sender_pubkey.into()))
+    }
     pub fn call_answer(call_id: impl Into<String>) -> Self {
+        Self::call_answer_with_sender(call_id, None)
+    }
+    fn call_answer_with_sender(call_id: impl Into<String>, sender_pubkey: Option<String>) -> Self {
         Self::CallAnswer {
             call_answer: CallControl {
                 call_id: call_id.into(),
+                sender_pubkey,
             },
         }
     }
+    pub fn call_answer_from(call_id: impl Into<String>, sender_pubkey: impl Into<String>) -> Self {
+        Self::call_answer_with_sender(call_id, Some(sender_pubkey.into()))
+    }
     pub fn call_hangup(call_id: impl Into<String>) -> Self {
+        Self::call_hangup_with_sender(call_id, None)
+    }
+    fn call_hangup_with_sender(call_id: impl Into<String>, sender_pubkey: Option<String>) -> Self {
         Self::CallHangup {
             call_hangup: CallControl {
                 call_id: call_id.into(),
+                sender_pubkey,
             },
         }
+    }
+    pub fn call_hangup_from(call_id: impl Into<String>, sender_pubkey: impl Into<String>) -> Self {
+        Self::call_hangup_with_sender(call_id, Some(sender_pubkey.into()))
     }
 
     pub fn target_invite(target_invite: TargetInvite) -> Self {
@@ -779,22 +802,22 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     for (field, constructor) in [
         (
             "call_invite",
-            WireMessage::call_invite as fn(String) -> WireMessage,
+            WireMessage::call_invite_with_sender as fn(String, Option<String>) -> WireMessage,
         ),
         (
             "call_answer",
-            WireMessage::call_answer as fn(String) -> WireMessage,
+            WireMessage::call_answer_with_sender as fn(String, Option<String>) -> WireMessage,
         ),
         (
             "call_hangup",
-            WireMessage::call_hangup as fn(String) -> WireMessage,
+            WireMessage::call_hangup_with_sender as fn(String, Option<String>) -> WireMessage,
         ),
     ] {
         if let Some(value) = object.get(field) {
             let control: CallControl = serde_json::from_value(value.clone())
                 .map_err(|err| anyhow!("field `{field}` is invalid: {err}"))?;
             validate_call_id(&control.call_id)?;
-            return Ok(constructor(control.call_id));
+            return Ok(constructor(control.call_id, control.sender_pubkey));
         }
     }
 
@@ -1668,6 +1691,21 @@ mod tests {
             r#"{"workspace_request":{"action":"call_answer","recipient_pubkey":"peer","call_id":"invalid call"}}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn preserves_original_sender_in_worker_forwarded_call_controls() {
+        let forwarded = WireMessage::call_invite_from("call_123", "caller-pubkey");
+
+        assert_eq!(
+            forwarded.to_json().unwrap(),
+            r#"{"call_invite":{"call_id":"call_123","sender_pubkey":"caller-pubkey"}}"#
+        );
+        let parsed = parse_wire_message(&forwarded.to_json().unwrap()).unwrap();
+        let WireMessage::CallInvite { call_invite } = parsed else {
+            panic!("expected call invite");
+        };
+        assert_eq!(call_invite.sender_pubkey.as_deref(), Some("caller-pubkey"));
     }
 
     #[test]
