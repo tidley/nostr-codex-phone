@@ -556,7 +556,7 @@ class _WorkersPage extends StatelessWidget {
 
 enum _WorkerAction { test, remove }
 
-enum _WorkspaceSection { channel, direct, people, sessions }
+enum _WorkspaceSection { channel, direct, people, access, sessions }
 
 class _TeamWorkspace extends StatefulWidget {
   const _TeamWorkspace({
@@ -802,7 +802,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       case _WorkspaceSection.direct:
         return _memberLabel(_active);
       case _WorkspaceSection.people:
-        return 'People & agents';
+        return 'People';
+      case _WorkspaceSection.access:
+        return 'Access';
       case _WorkspaceSection.sessions:
         return 'Sessions';
     }
@@ -960,7 +962,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       alsoSendToMain: _alsoSendToMain,
       onAlsoSendToMainChanged: (value) =>
           setState(() => _alsoSendToMain = value),
-      onOpenSessions: widget.onOpenSessions,
       onOpenSettings: widget.onOpenSettings,
       inviteCode: widget.inviteCode,
       memberStatus: widget.memberStatus,
@@ -1072,13 +1073,14 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       bottomNavigationBar: wide
           ? null
           : NavigationBar(
-              selectedIndex: _section.index.clamp(0, 2),
+              selectedIndex: _section.index.clamp(0, 3),
               onDestinationSelected: (index) {
                 if (index == 0) {
                   _select(_WorkspaceSection.channel, 'workspace');
                 }
                 if (index == 1) _select(_WorkspaceSection.direct, 'messages');
                 if (index == 2) _select(_WorkspaceSection.people, 'people');
+                if (index == 3) _select(_WorkspaceSection.access, 'access');
               },
               destinations: const [
                 NavigationDestination(
@@ -1095,6 +1097,11 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                   icon: Icon(Icons.groups_outlined),
                   selectedIcon: Icon(Icons.groups),
                   label: 'People',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.admin_panel_settings_outlined),
+                  selectedIcon: Icon(Icons.admin_panel_settings),
+                  label: 'Access',
                 ),
               ],
             ),
@@ -1351,8 +1358,13 @@ class _WorkspaceSidebar extends StatelessWidget {
             ),
           item(
             Icons.people_outline,
-            'People & agents',
+            'People',
             onTap: () => onSelect(_WorkspaceSection.people, 'people'),
+          ),
+          item(
+            Icons.admin_panel_settings_outlined,
+            'Access',
+            onTap: () => onSelect(_WorkspaceSection.access, 'access'),
           ),
           item(Icons.smart_toy_outlined, 'Agents', onTap: onOpenAgents),
           const SizedBox(height: 18),
@@ -1400,7 +1412,6 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.thread,
     required this.alsoSendToMain,
     required this.onAlsoSendToMainChanged,
-    required this.onOpenSessions,
     required this.onOpenSettings,
     required this.inviteCode,
     required this.memberStatus,
@@ -1452,7 +1463,6 @@ class _WorkspaceConversation extends StatefulWidget {
   final WorkspaceMessage? thread;
   final bool alsoSendToMain;
   final ValueChanged<bool> onAlsoSendToMainChanged;
-  final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
   final String? inviteCode;
   final String memberStatus;
@@ -1569,10 +1579,6 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
   Widget build(BuildContext context) {
     if (widget.section == _WorkspaceSection.people) {
       return _PeopleDirectory(
-        onOpenSessions: widget.onOpenSessions,
-        onOpenSettings: widget.onOpenSettings,
-        inviteCode: widget.inviteCode,
-        memberStatus: widget.memberStatus,
         members: widget.members,
         ownPubkey: widget.ownPubkey,
         displayName: widget.displayName,
@@ -1581,7 +1587,14 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         onOpenDirect: widget.onOpenDirect,
         onDisplayNameChanged: widget.onDisplayNameChanged,
         onMemberAliasChanged: widget.onMemberAliasChanged,
+      );
+    }
+    if (widget.section == _WorkspaceSection.access) {
+      return _WorkspaceAccessPage(
+        inviteCode: widget.inviteCode,
+        memberStatus: widget.memberStatus,
         onCreateInvite: widget.onCreateInvite,
+        onOpenSettings: widget.onOpenSettings,
       );
     }
     return Column(
@@ -2831,11 +2844,6 @@ class _OpenCodeProfileFieldsState extends State<_OpenCodeProfileFields> {
 
 class _PeopleDirectory extends StatefulWidget {
   const _PeopleDirectory({
-    required this.onOpenSessions,
-    required this.onOpenSettings,
-    required this.inviteCode,
-    required this.memberStatus,
-    required this.onCreateInvite,
     required this.members,
     required this.ownPubkey,
     required this.displayName,
@@ -2845,11 +2853,6 @@ class _PeopleDirectory extends StatefulWidget {
     required this.onDisplayNameChanged,
     required this.onMemberAliasChanged,
   });
-  final VoidCallback onOpenSessions;
-  final VoidCallback onOpenSettings;
-  final String? inviteCode;
-  final String memberStatus;
-  final Future<void> Function() onCreateInvite;
   final List<String> members;
   final String ownPubkey;
   final String displayName;
@@ -2922,14 +2925,14 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
       padding: const EdgeInsets.all(24),
       children: [
         Text(
-          'People & access',
+          'People',
           style: Theme.of(
             context,
           ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
         ),
         const SizedBox(height: 6),
-        Text('Workspace status: ${widget.memberStatus}'),
-        const SizedBox(height: 18),
+        Text('Manage your profile and workspace members.'),
+        const SizedBox(height: 24),
         Text('Your profile', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
         TextField(
@@ -2960,11 +2963,7 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
             contentPadding: EdgeInsets.zero,
             leading: CircleAvatar(child: Icon(Icons.person_outline)),
             title: Text(_memberLabel(person)),
-            subtitle: Text(
-              person == widget.ownPubkey
-                  ? '${widget.memberStatus} (you)'
-                  : 'Member',
-            ),
+            subtitle: Text(person == widget.ownPubkey ? 'You' : 'Member'),
             trailing: person == widget.ownPubkey
                 ? null
                 : IconButton(
@@ -2976,46 +2975,89 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
                 ? null
                 : () => widget.onOpenDirect(person),
           ),
-        const Divider(height: 36),
-        Text('Invite member', style: Theme.of(context).textTheme.titleMedium),
+      ],
+    );
+  }
+}
+
+class _WorkspaceAccessPage extends StatelessWidget {
+  const _WorkspaceAccessPage({
+    required this.inviteCode,
+    required this.memberStatus,
+    required this.onCreateInvite,
+    required this.onOpenSettings,
+  });
+
+  final String? inviteCode;
+  final String memberStatus;
+  final Future<void> Function() onCreateInvite;
+  final VoidCallback onOpenSettings;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final palette = theme.extension<_WorkspacePalette>()!;
+    return ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        Text(
+          'Access',
+          style: theme.textTheme.headlineSmall?.copyWith(
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 6),
+        const Text('Confirm workspace access and manage invitations.'),
+        const SizedBox(height: 24),
+        Text('Workspace status', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 8),
+        ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          tileColor: palette.selected,
+          leading: const Icon(Icons.verified_user_outlined),
+          title: Text(memberStatus),
+          subtitle: const Text('Your current workspace confirmation status'),
+        ),
+        const SizedBox(height: 24),
+        Text('Invitations', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
         FilledButton.icon(
-          onPressed: () => widget.onCreateInvite(),
+          onPressed: () => onCreateInvite(),
           icon: const Icon(Icons.person_add_alt_1),
           label: const Text('Generate workspace invite code'),
         ),
-        if (widget.inviteCode != null)
+        if (inviteCode != null) ...[
+          const SizedBox(height: 12),
           ListTile(
             contentPadding: EdgeInsets.zero,
             title: SelectableText(
-              widget.inviteCode!,
+              inviteCode!,
               style: const TextStyle(
                 fontWeight: FontWeight.bold,
                 letterSpacing: 2,
               ),
             ),
+            subtitle: const Text('Share this code with a workspace member.'),
             trailing: IconButton(
               icon: const Icon(Icons.copy),
               onPressed: () =>
-                  Clipboard.setData(ClipboardData(text: widget.inviteCode!)),
+                  Clipboard.setData(ClipboardData(text: inviteCode!)),
               tooltip: 'Copy code',
             ),
           ),
-        const Divider(height: 36),
-        Text('Join workspace', style: Theme.of(context).textTheme.titleMedium),
+        ],
+        const Divider(height: 40),
+        Text('Join workspace', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
-        Text('Status: ${widget.memberStatus}'),
-        const SizedBox(height: 8),
+        const Text(
+          'Use an invite code to confirm access to another workspace.',
+        ),
+        const SizedBox(height: 12),
         OutlinedButton.icon(
-          onPressed: widget.onOpenSettings,
+          onPressed: onOpenSettings,
           icon: const Icon(Icons.settings_outlined),
           label: const Text('Join with invite code'),
-        ),
-        ListTile(
-          contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.workspaces_outline),
-          title: const Text('Open focused sessions'),
-          onTap: widget.onOpenSessions,
         ),
       ],
     );
