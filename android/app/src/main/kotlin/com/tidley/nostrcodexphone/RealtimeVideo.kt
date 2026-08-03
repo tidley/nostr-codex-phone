@@ -112,8 +112,10 @@ class RealtimeVideo(
             return true
         }
         val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projection = manager.getMediaProjection(resultCode, data)
+        // Android 14+ requires the media-projection foreground service before
+        // obtaining the projection token.
         ContextCompat.startForegroundService(context, Intent(context, ScreenShareService::class.java))
+        projection = manager.getMediaProjection(resultCode, data)
         beginCapture("screen", result)
         return true
     }
@@ -294,7 +296,9 @@ class RealtimeVideo(
         private const val bitRate = 500_000
         private const val videoVersion = 2
         private const val headerBytes = 10
-        private const val maxFragmentBytes = 1190
+        // Leave room below QUIC's 1200-byte minimum datagram size for transport
+        // overhead negotiated by FIPS peers.
+        private const val maxFragmentBytes = 1000
         private const val keyFrameFlag = 1
         private const val endOfFrameFlag = 2
         const val screenCaptureRequestCode = 4817

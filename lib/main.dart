@@ -51,7 +51,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.94+294';
+const _appVersion = '0.2.95+295';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -656,7 +656,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   bool _callAudioStarted = false;
   bool _callVideoStarted = false;
   _CallMediaSource _callMediaSource = _CallMediaSource.audioOnly;
-  bool _sendingVideo = false;
+  int _videoSendEpoch = 0;
+  Future<void> _videoSendChain = Future.value();
   final Map<String, int> _videoTextures = {};
   OverlayEntry? _videoOverlay;
   OverlayEntry? _incomingCallOverlay;
@@ -7318,12 +7319,14 @@ Return a concise catch-up summary of what happened after that point: completed w
       return;
     }
     try {
+      final videoSendEpoch = ++_videoSendEpoch;
       for (final peer in call.connectedPeers) {
         _videoTextures[peer] = await _realtimeVideo.createRenderer();
       }
       _showVideoOverlay();
       _callVideoCaptureSubscription = _realtimeVideo.frames.listen(
-        (fragment) => _sendGroupCallVideoFragment(call, fragment),
+        (fragment) =>
+            _sendGroupCallVideoFragment(call, fragment, videoSendEpoch),
         onError: (Object error) => _showError('Call camera failed: $error'),
       );
       await _realtimeVideo.startCapture(source);
@@ -7339,14 +7342,19 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
   }
 
-  void _sendGroupCallVideoFragment(_GroupCallState call, Uint8List fragment) {
-    if (_sendingVideo ||
-        _groupCall != call ||
-        call.phase != _CallPhase.active) {
-      return;
-    }
-    _sendingVideo = true;
-    unawaited(() async {
+  void _sendGroupCallVideoFragment(
+    _GroupCallState call,
+    Uint8List fragment,
+    int videoSendEpoch,
+  ) {
+    // A H.264 access unit spans multiple fragments. Preserve every fragment in
+    // order; dropping one prevents the receiver from ever completing a frame.
+    _videoSendChain = _videoSendChain.then((_) async {
+      if (videoSendEpoch != _videoSendEpoch ||
+          _groupCall != call ||
+          call.phase != _CallPhase.active) {
+        return;
+      }
       try {
         for (final peer in call.connectedPeers) {
           await fipsGroupCallSendRealtimeVideo(
@@ -7355,12 +7363,10 @@ Return a concise catch-up summary of what happened after that point: completed w
             fragment: fragment,
           );
         }
-      } catch (_) {
-        // Keep the audio call alive when a video datagram is dropped.
-      } finally {
-        _sendingVideo = false;
+      } catch (error) {
+        debugPrint('Channel call video send failed: $error');
       }
-    }());
+    });
   }
 
   Future<void> _receiveGroupCallVideo(
@@ -7634,6 +7640,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       return;
     }
     try {
+      final videoSendEpoch = ++_videoSendEpoch;
       final texture = await _realtimeVideo.createRenderer();
       if (!mounted || _callId != callId) {
         await _realtimeVideo.releaseRenderer(texture);
@@ -7642,7 +7649,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       _videoTextures[peer] = texture;
       _showVideoOverlay();
       _callVideoCaptureSubscription = _realtimeVideo.frames.listen(
-        (fragment) => _sendCallVideoFragment(fragment),
+        (fragment) => _sendCallVideoFragment(fragment, callId, videoSendEpoch),
         onError: (Object error) => _showError('Call camera failed: $error'),
       );
       await _realtimeVideo.startCapture(source);
@@ -7654,18 +7661,25 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
   }
 
-  void _sendCallVideoFragment(Uint8List fragment) {
-    if (_sendingVideo || _callPhase != _CallPhase.active) return;
-    _sendingVideo = true;
-    unawaited(() async {
+  void _sendCallVideoFragment(
+    Uint8List fragment,
+    String callId,
+    int videoSendEpoch,
+  ) {
+    // A H.264 access unit spans multiple fragments. Preserve every fragment in
+    // order; dropping one prevents the receiver from ever completing a frame.
+    _videoSendChain = _videoSendChain.then((_) async {
+      if (videoSendEpoch != _videoSendEpoch ||
+          _callId != callId ||
+          _callPhase != _CallPhase.active) {
+        return;
+      }
       try {
         await fipsCallSendRealtimeVideo(fragment: fragment);
-      } catch (_) {
-        // Audio receive reports transport failure; video drops late frames.
-      } finally {
-        _sendingVideo = false;
+      } catch (error) {
+        debugPrint('Call video send failed: $error');
       }
-    }());
+    });
   }
 
   Future<void> _receiveCallVideo(
@@ -7769,6 +7783,9 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _stopCallVideo() async {
+    // Make queued fragments from this capture generation inert before a later
+    // call can reuse the shared transport.
+    _videoSendEpoch++;
     await _callVideoCaptureSubscription?.cancel();
     _callVideoCaptureSubscription = null;
     _videoOverlay?.remove();

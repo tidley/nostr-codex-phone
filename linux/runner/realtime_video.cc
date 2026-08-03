@@ -20,7 +20,9 @@ constexpr uint32_t kWidth = 640;
 constexpr uint32_t kHeight = 360;
 constexpr size_t kPixelBytes = kWidth * kHeight * 4;
 constexpr size_t kHeaderBytes = 10;
-constexpr size_t kMaxFragmentBytes = 1190;
+// Leave room below QUIC's 1200-byte minimum datagram size for transport
+// overhead negotiated by FIPS peers.
+constexpr size_t kMaxFragmentBytes = 1000;
 constexpr uint8_t kVideoVersion = 2;
 constexpr uint8_t kKeyFrameFlag = 1;
 constexpr uint8_t kEndOfFrameFlag = 2;
