@@ -9,6 +9,8 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.os.Handler
+import android.os.Looper
 import android.os.Process
 import androidx.core.content.ContextCompat
 import io.flutter.plugin.common.BinaryMessenger
@@ -24,6 +26,7 @@ class RealtimeAudio(
 ) : MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
     private val methodChannel = MethodChannel(messenger, methodChannelName)
     private val frameChannel = EventChannel(messenger, frameChannelName)
+    private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile private var frameSink: EventChannel.EventSink? = null
     @Volatile private var recorder: AudioRecord? = null
     private var captureThread: Thread? = null
@@ -142,11 +145,14 @@ class RealtimeAudio(
             if (count > 0) {
                 offset += count
                 if (offset == frame.size) {
-                    frameSink?.success(frame.copyOf())
+                    val pcm = frame.copyOf()
+                    mainHandler.post { frameSink?.success(pcm) }
                     offset = 0
                 }
             } else if (count != AudioRecord.ERROR_INVALID_OPERATION && capturing) {
-                frameSink?.error("capture_read_failed", "AudioRecord read failed: $count", null)
+                mainHandler.post {
+                    frameSink?.error("capture_read_failed", "AudioRecord read failed: $count", null)
+                }
                 stopCapture()
                 break
             }
