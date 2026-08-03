@@ -51,7 +51,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.98+298';
+const _appVersion = '0.2.99+299';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -157,6 +157,8 @@ class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
   const _WorkspacePalette({
     required this.background,
     required this.sidebar,
+    required this.content,
+    required this.composer,
     required this.selected,
     required this.label,
     required this.brand,
@@ -165,6 +167,8 @@ class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
 
   final Color background;
   final Color sidebar;
+  final Color content;
+  final Color composer;
   final Color selected;
   final Color label;
   final Color brand;
@@ -174,6 +178,8 @@ class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
   _WorkspacePalette copyWith({
     Color? background,
     Color? sidebar,
+    Color? content,
+    Color? composer,
     Color? selected,
     Color? label,
     Color? brand,
@@ -181,6 +187,8 @@ class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
   }) => _WorkspacePalette(
     background: background ?? this.background,
     sidebar: sidebar ?? this.sidebar,
+    content: content ?? this.content,
+    composer: composer ?? this.composer,
     selected: selected ?? this.selected,
     label: label ?? this.label,
     brand: brand ?? this.brand,
@@ -193,6 +201,8 @@ class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
     return _WorkspacePalette(
       background: Color.lerp(background, other.background, t)!,
       sidebar: Color.lerp(sidebar, other.sidebar, t)!,
+      content: Color.lerp(content, other.content, t)!,
+      composer: Color.lerp(composer, other.composer, t)!,
       selected: Color.lerp(selected, other.selected, t)!,
       label: Color.lerp(label, other.label, t)!,
       brand: Color.lerp(brand, other.brand, t)!,
@@ -413,7 +423,9 @@ ThemeData _appTheme(AppTheme theme) {
       ? const _WorkspacePalette(
           background: Color(0xff101010),
           sidebar: Color(0xff161615),
-          selected: Color(0xff332816),
+          content: Color(0xff1b1a19),
+          composer: Color(0xff211f1d),
+          selected: Color(0xff4a3718),
           label: Color(0xff71ded9),
           brand: Color(0xffffb74d),
           brandForeground: Color(0xff281900),
@@ -421,7 +433,9 @@ ThemeData _appTheme(AppTheme theme) {
       : const _WorkspacePalette(
           background: Color(0xff101a19),
           sidebar: Color(0xff142321),
-          selected: Color(0xff1d403b),
+          content: Color(0xff182522),
+          composer: Color(0xff1e2d29),
+          selected: Color(0xff24554b),
           label: Color(0xff9cc6bb),
           brand: Color(0xff65d8b1),
           brandForeground: Color(0xff082019),

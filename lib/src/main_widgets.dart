@@ -1602,135 +1602,148 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         onOpenSettings: widget.onOpenSettings,
       );
     }
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(24, 18, 20, 14),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      widget.title,
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.w800,
+    final palette = Theme.of(context).extension<_WorkspacePalette>()!;
+    return ColoredBox(
+      color: palette.content,
+      child: Column(
+        children: [
+          Container(
+            color: palette.sidebar.withValues(alpha: 0.48),
+            padding: const EdgeInsets.fromLTRB(24, 18, 20, 14),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.title,
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '${widget.section == _WorkspaceSection.channel ? '${widget.channelHumanMemberCount} member${widget.channelHumanMemberCount == 1 ? '' : 's'}' : 'Direct message'}${widget.agents.isEmpty ? '' : ' · ${widget.agents.map((agent) => agent.name).join(', ')}'}',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ),
-              ),
-              if (widget.onManageAgents != null)
-                IconButton(
-                  onPressed: widget.onManageAgents,
-                  icon: const Icon(Icons.person_add_alt_1_outlined),
-                  tooltip: 'Manage agents',
-                ),
-              if (widget.section == _WorkspaceSection.direct)
-                _CallControl(
-                  phase:
-                      widget.callPeerPubkey == null ||
-                          widget.callPeerPubkey == widget.directPeer
-                      ? widget.callPhase
-                      : _CallPhase.idle,
-                  onStart: () => widget.onStartCall(widget.directPeer!),
-                  onAccept: widget.onAcceptCall,
-                  onReject: widget.onRejectCall,
-                  onHangup: widget.onHangupCall,
-                  mediaSource: widget.mediaSource,
-                  onMediaSourceChanged: widget.onMediaSourceChanged,
-                ),
-              if (widget.section == _WorkspaceSection.channel)
-                _CallControl(
-                  phase:
-                      widget.groupCallChannelId == null ||
-                          widget.groupCallChannelId == widget.channelId
-                      ? widget.groupCallPhase
-                      : _CallPhase.idle,
-                  onStart: () =>
-                      unawaited(widget.onStartChannelCall(widget.channelId!)),
-                  onAccept: widget.onAcceptGroupCall,
-                  onReject: widget.onRejectGroupCall,
-                  onHangup: widget.onHangupGroupCall,
-                  mediaSource: widget.mediaSource,
-                  onMediaSourceChanged: widget.onMediaSourceChanged,
-                ),
-            ],
-          ),
-        ),
-        const Divider(height: 1),
-        Expanded(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              if (_lastViewportHeight != constraints.maxHeight) {
-                _lastViewportHeight = constraints.maxHeight;
-                _queueScrollToLatest();
-              }
-              return widget.messages.isEmpty
-                  ? const Center(child: Text('Start the conversation.'))
-                  : ListView.separated(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
-                      itemCount: widget.messages.length,
-                      separatorBuilder: (_, _) => const SizedBox(height: 18),
-                      itemBuilder: (context, index) {
-                        final m = widget.messages[index];
-                        return KeyedSubtree(
-                          key: index == widget.messages.length - 1
-                              ? _latestMessageKey
-                              : ValueKey(m.id),
-                          child: _WorkspaceMessageRow(
-                            message: m,
-                            authorName: _memberLabel(m.senderPubkey),
-                            isLocalSender: isWorkspaceLocalSender(
-                              m.senderPubkey,
-                              widget.localSenderIds,
-                            ),
-                            onThread: () => widget.onOpenThread(m),
-                            threadReplyCount:
-                                widget.threadReplyCounts[m.id] ?? 0,
-                            onReact: (emoji) =>
-                                unawaited(widget.onToggleReaction(m, emoji)),
-                            onOpenAttachment: widget.onOpenAttachment,
-                          ),
-                        );
-                      },
-                    );
-            },
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 18),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (widget.typingLabels.isNotEmpty)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    '${widget.typingLabels.join(', ')} ${widget.typingLabels.length == 1 ? 'is' : 'are'} typing...',
-                    style: Theme.of(context).textTheme.bodySmall,
+                      const SizedBox(height: 2),
+                      Text(
+                        '${widget.section == _WorkspaceSection.channel ? 'Channel · ${widget.channelHumanMemberCount} member${widget.channelHumanMemberCount == 1 ? '' : 's'}' : 'Direct message'}${widget.agents.isEmpty ? '' : ' · ${widget.agents.length} agent${widget.agents.length == 1 ? '' : 's'}'}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
                   ),
                 ),
-              WorkspaceComposer(
-                composer: widget.composer,
-                composerFocus: widget.composerFocus,
-                hintText: 'Message ${widget.title}',
-                mentionOptions: widget.mentionOptions,
-                onMentionSelected: widget.onMentionSelected,
-                onSend: widget.onSend,
-                onAttach: widget.onAttach,
-              ),
-            ],
+                if (widget.onManageAgents != null)
+                  IconButton(
+                    onPressed: widget.onManageAgents,
+                    icon: const Icon(Icons.person_add_alt_1_outlined),
+                    tooltip: 'Manage agents',
+                  ),
+                if (widget.section == _WorkspaceSection.direct)
+                  _CallControl(
+                    phase:
+                        widget.callPeerPubkey == null ||
+                            widget.callPeerPubkey == widget.directPeer
+                        ? widget.callPhase
+                        : _CallPhase.idle,
+                    onStart: () => widget.onStartCall(widget.directPeer!),
+                    onAccept: widget.onAcceptCall,
+                    onReject: widget.onRejectCall,
+                    onHangup: widget.onHangupCall,
+                    mediaSource: widget.mediaSource,
+                    onMediaSourceChanged: widget.onMediaSourceChanged,
+                  ),
+                if (widget.section == _WorkspaceSection.channel)
+                  _CallControl(
+                    phase:
+                        widget.groupCallChannelId == null ||
+                            widget.groupCallChannelId == widget.channelId
+                        ? widget.groupCallPhase
+                        : _CallPhase.idle,
+                    onStart: () =>
+                        unawaited(widget.onStartChannelCall(widget.channelId!)),
+                    onAccept: widget.onAcceptGroupCall,
+                    onReject: widget.onRejectGroupCall,
+                    onHangup: widget.onHangupGroupCall,
+                    mediaSource: widget.mediaSource,
+                    onMediaSourceChanged: widget.onMediaSourceChanged,
+                  ),
+              ],
+            ),
           ),
-        ),
-      ],
+          const Divider(height: 1),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                if (_lastViewportHeight != constraints.maxHeight) {
+                  _lastViewportHeight = constraints.maxHeight;
+                  _queueScrollToLatest();
+                }
+                return widget.messages.isEmpty
+                    ? const Center(child: Text('Start the conversation.'))
+                    : ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
+                        itemCount: widget.messages.length,
+                        itemBuilder: (context, index) {
+                          final m = widget.messages[index];
+                          final grouped = isWorkspaceMessageGroupedWithPrevious(
+                            m,
+                            index == 0 ? null : widget.messages[index - 1],
+                          );
+                          return Padding(
+                            padding: EdgeInsets.only(bottom: grouped ? 6 : 18),
+                            child: KeyedSubtree(
+                              key: index == widget.messages.length - 1
+                                  ? _latestMessageKey
+                                  : ValueKey(m.id),
+                              child: _WorkspaceMessageRow(
+                                message: m,
+                                authorName: _memberLabel(m.senderPubkey),
+                                groupedWithPrevious: grouped,
+                                isLocalSender: isWorkspaceLocalSender(
+                                  m.senderPubkey,
+                                  widget.localSenderIds,
+                                ),
+                                onThread: () => widget.onOpenThread(m),
+                                threadReplyCount:
+                                    widget.threadReplyCounts[m.id] ?? 0,
+                                onReact: (emoji) => unawaited(
+                                  widget.onToggleReaction(m, emoji),
+                                ),
+                                onOpenAttachment: widget.onOpenAttachment,
+                              ),
+                            ),
+                          );
+                        },
+                      );
+              },
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.typingLabels.isNotEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '${widget.typingLabels.join(', ')} ${widget.typingLabels.length == 1 ? 'is' : 'are'} typing...',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                WorkspaceComposer(
+                  composer: widget.composer,
+                  composerFocus: widget.composerFocus,
+                  hintText: 'Message ${widget.title}',
+                  mentionOptions: widget.mentionOptions,
+                  onMentionSelected: widget.onMentionSelected,
+                  onSend: widget.onSend,
+                  onAttach: widget.onAttach,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1859,6 +1872,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
   const _WorkspaceMessageRow({
     required this.message,
     required this.authorName,
+    required this.groupedWithPrevious,
     required this.isLocalSender,
     required this.onThread,
     required this.onReact,
@@ -1867,6 +1881,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
   });
   final WorkspaceMessage message;
   final String authorName;
+  final bool groupedWithPrevious;
   final bool isLocalSender;
   final VoidCallback onThread;
   final ValueChanged<String> onReact;
@@ -1922,23 +1937,53 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
             ? CrossAxisAlignment.end
             : CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                widget.authorName,
-                style: const TextStyle(fontWeight: FontWeight.w800),
+          if (!widget.groupedWithPrevious)
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  widget.authorName,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                if (isAgent) ...[
+                  const SizedBox(width: 6),
+                  Text(
+                    'AGENT',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.6,
+                      color: Theme.of(context).colorScheme.secondary,
+                    ),
+                  ),
+                ],
+                const SizedBox(width: 7),
+                Text(
+                  DateTime.fromMillisecondsSinceEpoch(
+                    widget.message.createdAt * 1000,
+                  ).toLocal().toString().substring(11, 16),
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    fontSize: 10,
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.onSurface.withValues(alpha: 0.52),
+                  ),
+                ),
+              ],
+            ),
+          if (!widget.groupedWithPrevious) const SizedBox(height: 3),
+          if (widget.groupedWithPrevious)
+            Text(
+              DateTime.fromMillisecondsSinceEpoch(
+                widget.message.createdAt * 1000,
+              ).toLocal().toString().substring(11, 16),
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                fontSize: 10,
+                color: Theme.of(
+                  context,
+                ).colorScheme.onSurface.withValues(alpha: 0.42),
               ),
-              const SizedBox(width: 7),
-              Text(
-                DateTime.fromMillisecondsSinceEpoch(
-                  widget.message.createdAt * 1000,
-                ).toLocal().toString().substring(11, 16),
-                style: Theme.of(context).textTheme.labelSmall,
-              ),
-            ],
-          ),
-          const SizedBox(height: 3),
+            ),
           if (widget.message.body.isNotEmpty)
             _WorkspaceMessageBody(widget.message.body),
           if (widget.message.reactions.isNotEmpty)
@@ -1975,25 +2020,38 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
         ],
       ),
     );
+    final row = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (widget.isLocalSender) ...[
+          messageContent,
+          const SizedBox(width: 12),
+          widget.groupedWithPrevious ? const SizedBox(width: 36) : avatar,
+        ] else ...[
+          widget.groupedWithPrevious ? const SizedBox(width: 36) : avatar,
+          const SizedBox(width: 12),
+          messageContent,
+        ],
+      ],
+    );
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
       child: Stack(
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (widget.isLocalSender) ...[
-                messageContent,
-                const SizedBox(width: 12),
-                avatar,
-              ] else ...[
-                avatar,
-                const SizedBox(width: 12),
-                messageContent,
-              ],
-            ],
-          ),
+          if (isAgent)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(
+                color: Theme.of(
+                  context,
+                ).colorScheme.secondary.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: row,
+            )
+          else
+            row,
           if (_hovered)
             Positioned(
               top: -8,
@@ -2057,7 +2115,7 @@ class _WorkspaceMessageBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final matches = RegExp(
-      r'@\[([^\]\r\n]+)\]\((?:member|agent):[^\)\s]+\)',
+      r'@\[([^\]\r\n]+)\]\((?:member|agent):[^\)\s]+\)|`[^`\r\n]+`|(?<!\w)(?:[~\w.-]+/)+[~\w.-]+',
     ).allMatches(text);
     if (matches.isEmpty) return SelectionArea(child: Text(text));
     final style = DefaultTextStyle.of(context).style;
@@ -2067,15 +2125,35 @@ class _WorkspaceMessageBody extends StatelessWidget {
       if (match.start > offset) {
         spans.add(TextSpan(text: text.substring(offset, match.start)));
       }
-      spans.add(
-        TextSpan(
-          text: '@${match.group(1)}',
-          style: style.copyWith(
-            color: Theme.of(context).extension<_WorkspacePalette>()!.label,
-            fontWeight: FontWeight.w700,
+      final mention = match.group(1);
+      if (mention != null) {
+        spans.add(
+          TextSpan(
+            text: '@$mention',
+            style: style.copyWith(
+              color: Theme.of(context).extension<_WorkspacePalette>()!.label,
+              fontWeight: FontWeight.w700,
+            ),
           ),
-        ),
-      );
+        );
+      } else {
+        final token = match.group(0)!;
+        spans.add(
+          TextSpan(
+            text: token.startsWith('`')
+                ? token.substring(1, token.length - 1)
+                : token,
+            style: style.copyWith(
+              fontFamily: 'monospace',
+              fontSize: (style.fontSize ?? 14) - 1,
+              color: Theme.of(context).colorScheme.secondary,
+              backgroundColor: Theme.of(
+                context,
+              ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.7),
+            ),
+          ),
+        );
+      }
       offset = match.end;
     }
     if (offset < text.length) spans.add(TextSpan(text: text.substring(offset)));
@@ -2228,64 +2306,90 @@ class WorkspaceComposer extends StatelessWidget {
   final Future<void> Function() onAttach;
 
   @override
-  Widget build(BuildContext context) => Column(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      if (mentionOptions.isNotEmpty)
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Material(
-            elevation: 4,
-            borderRadius: BorderRadius.circular(10),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 176),
-              child: ListView(
-                shrinkWrap: true,
-                children: [
-                  for (final mention in mentionOptions)
-                    ListTile(
-                      dense: true,
-                      leading: Icon(
-                        mention.kind == 'agent'
-                            ? Icons.smart_toy_outlined
-                            : Icons.person_outline,
+  Widget build(BuildContext context) =>
+      ValueListenableBuilder<TextEditingValue>(
+        valueListenable: composer,
+        builder: (context, value, _) {
+          final canSend = value.text.trim().isNotEmpty;
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (mentionOptions.isNotEmpty)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Material(
+                    elevation: 4,
+                    borderRadius: BorderRadius.circular(10),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 176),
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          for (final mention in mentionOptions)
+                            ListTile(
+                              dense: true,
+                              leading: Icon(
+                                mention.kind == 'agent'
+                                    ? Icons.smart_toy_outlined
+                                    : Icons.person_outline,
+                              ),
+                              title: Text('@${mention.label}'),
+                              subtitle: Text(
+                                mention.kind == 'agent' ? 'Agent' : 'Member',
+                              ),
+                              onTap: () => onMentionSelected(mention),
+                            ),
+                        ],
                       ),
-                      title: Text('@${mention.label}'),
-                      subtitle: Text(
-                        mention.kind == 'agent' ? 'Agent' : 'Member',
-                      ),
-                      onTap: () => onMentionSelected(mention),
                     ),
-                ],
+                  ),
+                ),
+              CallbackShortcuts(
+                bindings: {
+                  const SingleActivator(
+                    LogicalKeyboardKey.enter,
+                    control: true,
+                  ): () {
+                    if (canSend) onSend();
+                  },
+                },
+                child: TextField(
+                  controller: composer,
+                  focusNode: composerFocus,
+                  minLines: 1,
+                  maxLines: 6,
+                  textInputAction: TextInputAction.newline,
+                  decoration: InputDecoration(
+                    hintText: hintText,
+                    helperText: 'Ctrl+Enter to send',
+                    filled: true,
+                    fillColor:
+                        Theme.of(
+                          context,
+                        ).extension<_WorkspacePalette>()?.composer ??
+                        Theme.of(context).colorScheme.surfaceContainerHighest,
+                    prefixIcon: IconButton(
+                      tooltip: 'Attach file',
+                      onPressed: () => unawaited(onAttach()),
+                      icon: const Icon(Icons.attach_file),
+                    ),
+                    suffixIcon: IconButton(
+                      tooltip: canSend
+                          ? 'Send message (Ctrl+Enter)'
+                          : 'Write a message to send',
+                      onPressed: canSend ? onSend : null,
+                      icon: const Icon(Icons.send),
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                ),
               ),
-            ),
-          ),
-        ),
-      CallbackShortcuts(
-        bindings: {const SingleActivator(LogicalKeyboardKey.enter): onSend},
-        child: TextField(
-          controller: composer,
-          focusNode: composerFocus,
-          minLines: 1,
-          maxLines: 5,
-          textInputAction: TextInputAction.newline,
-          decoration: InputDecoration(
-            hintText: hintText,
-            prefixIcon: IconButton(
-              tooltip: 'Attach file',
-              onPressed: () => unawaited(onAttach()),
-              icon: const Icon(Icons.attach_file),
-            ),
-            suffixIcon: IconButton(
-              onPressed: onSend,
-              icon: const Icon(Icons.send),
-            ),
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-          ),
-        ),
-      ),
-    ],
-  );
+            ],
+          );
+        },
+      );
 }
 
 class _ContextLine extends StatelessWidget {

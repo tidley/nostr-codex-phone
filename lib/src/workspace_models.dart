@@ -30,6 +30,17 @@ bool isWorkspaceLocalSender(
       localSenderIds.any((id) => id.trim().toLowerCase() == sender);
 }
 
+/// Consecutive messages from one identity share their visual message group.
+bool isWorkspaceMessageGroupedWithPrevious(
+  WorkspaceMessage message,
+  WorkspaceMessage? previous,
+) {
+  return previous != null &&
+      previous.senderPubkey.trim().toLowerCase() ==
+          message.senderPubkey.trim().toLowerCase() &&
+      previous.parentId == message.parentId;
+}
+
 /// Produces a stable palette slot without persisting presentation data.
 int workspaceAvatarColorIndex(String identity, String name, int colorCount) {
   if (colorCount <= 0) return 0;

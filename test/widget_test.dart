@@ -112,6 +112,7 @@ void main() {
     );
 
     await tester.enterText(find.byType(TextField).at(1), 'Thread reply');
+    await tester.pump();
     await tester.tap(find.byIcon(Icons.send).at(1));
 
     expect(mainController.text, isEmpty);
@@ -156,6 +157,49 @@ void main() {
     expect(deltas, isNotEmpty);
     expect(deltas.reduce((sum, delta) => sum + delta), greaterThan(0));
   });
+
+  testWidgets(
+    'composer disables send until text exists and supports multiline',
+    (tester) async {
+      final controller = TextEditingController();
+      final focus = FocusNode();
+      var sends = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Material(
+            child: WorkspaceComposer(
+              composer: controller,
+              composerFocus: focus,
+              hintText: 'Message # workspace',
+              mentionOptions: const [],
+              onMentionSelected: (_) {},
+              onSend: () => sends++,
+              onAttach: () async {},
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('Ctrl+Enter to send'), findsOneWidget);
+      final sendButton = find.ancestor(
+        of: find.byIcon(Icons.send),
+        matching: find.byType(IconButton),
+      );
+      expect(tester.widget<IconButton>(sendButton).onPressed, isNull);
+
+      await tester.enterText(find.byType(TextField), 'First line\nSecond line');
+      await tester.pump();
+
+      expect(controller.text, 'First line\nSecond line');
+      expect(tester.widget<IconButton>(sendButton).onPressed, isNotNull);
+      await tester.tap(find.byIcon(Icons.send));
+      expect(sends, 1);
+
+      controller.dispose();
+      focus.dispose();
+    },
+  );
 
   test('cleans markdown before text to speech', () {
     final spoken = cleanTextForSpeech('''
