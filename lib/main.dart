@@ -51,7 +51,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.93+293';
+const _appVersion = '0.2.94+294';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -67,13 +67,67 @@ class _GroupCallState {
     required this.channelId,
     required this.participants,
     required this.phase,
+    this.callerPubkey = '',
   });
 
   final String callId;
   final String channelId;
   final List<String> participants;
+  final String callerPubkey;
   _CallPhase phase;
   final Set<String> connectedPeers = {};
+}
+
+class IncomingCallPrompt extends StatelessWidget {
+  const IncomingCallPrompt({
+    super.key,
+    required this.isGroupCall,
+    required this.caller,
+    this.channel,
+    required this.onAnswer,
+    required this.onReject,
+  });
+
+  final bool isGroupCall;
+  final String caller;
+  final String? channel;
+  final VoidCallback onAnswer;
+  final VoidCallback onReject;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 480),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              isGroupCall ? 'Incoming channel call' : 'Incoming call',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              isGroupCall
+                  ? '$caller invited you to $channel'
+                  : '$caller is calling you',
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(onPressed: onReject, child: const Text('Reject')),
+                const SizedBox(width: 8),
+                FilledButton(onPressed: onAnswer, child: const Text('Answer')),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 enum _RelayProbeStrength { strong, fair, weak, offline }
@@ -605,6 +659,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   bool _sendingVideo = false;
   final Map<String, int> _videoTextures = {};
   OverlayEntry? _videoOverlay;
+  OverlayEntry? _incomingCallOverlay;
   Future<void> _callSendChain = Future.value();
   final WorkspaceState _workspace = WorkspaceState();
   final ValueNotifier<int> _workspaceRevision = ValueNotifier(0);
@@ -827,6 +882,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _inactiveReplyNoticeTimer?.cancel();
     _inactiveReplyNotice?.remove();
     _inactiveReplyNoticeController?.dispose();
+    _incomingCallOverlay?.remove();
     _tts.stop();
     _chatScrollController.dispose();
     _secretKeyController.dispose();
@@ -4298,6 +4354,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             _callPeerPubkey = sender;
             _callAnswerSent = false;
           });
+          _showIncomingCallOverlay();
         } else {
           unawaited(_sendCallControl('call_hangup', sender, callId));
         }
@@ -4337,8 +4394,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               channelId: groupCall.channelId,
               participants: groupCall.participantPubkeys,
               phase: _CallPhase.incoming,
+              callerPubkey: groupCall.senderPubkey,
             ),
           );
+          _showIncomingCallOverlay();
         } else {
           final busy = _GroupCallState(
             callId: groupCall.callId,
@@ -7135,6 +7194,7 @@ Return a concise catch-up summary of what happened after that point: completed w
   Future<void> _acceptGroupCall() async {
     final call = _groupCall;
     if (call == null || call.phase != _CallPhase.incoming) return;
+    _dismissIncomingCallOverlay();
     try {
       setState(() => call.phase = _CallPhase.connecting);
       // Publish every responder advert before peers can receive our answer.
@@ -7325,6 +7385,7 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _hangupGroupCall() async {
+    _dismissIncomingCallOverlay();
     final call = _groupCall;
     if (call != null) {
       try {
@@ -7338,6 +7399,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     final call = _groupCall;
     if (call == null) return;
     _groupCall = null;
+    _dismissIncomingCallOverlay();
     await _stopCallAudio();
     try {
       await fipsGroupCallStop(callId: call.callId);
@@ -7389,6 +7451,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         peerPubkey == null) {
       return;
     }
+    _dismissIncomingCallOverlay();
     try {
       setState(() {
         _callPhase = _CallPhase.connecting;
@@ -7418,6 +7481,7 @@ Return a concise catch-up summary of what happened after that point: completed w
   Future<void> _rejectWorkspaceCall() => _hangupWorkspaceCall();
 
   Future<void> _hangupWorkspaceCall() async {
+    _dismissIncomingCallOverlay();
     final callId = _callId;
     final peerPubkey = _callPeerPubkey;
     if (callId != null && peerPubkey != null) {
@@ -7431,6 +7495,7 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _clearCall() async {
+    _dismissIncomingCallOverlay();
     await _stopCallAudio();
     try {
       await fipsCallStop();
@@ -7620,6 +7685,65 @@ Return a concise catch-up summary of what happened after that point: completed w
         return;
       }
     }
+  }
+
+  String _callParticipantName(String pubkey) {
+    final alias = _workspaceMemberAliases[pubkey]?.trim();
+    if (alias != null && alias.isNotEmpty) return alias;
+    final name = _workspace.memberNames[pubkey]?.trim();
+    if (name != null && name.isNotEmpty) return name;
+    return compactIdentifier(pubkey);
+  }
+
+  void _showIncomingCallOverlay() {
+    _dismissIncomingCallOverlay();
+    final groupCall = _groupCall;
+    final isGroupCall = groupCall?.phase == _CallPhase.incoming;
+    final directCaller = _callPeerPubkey;
+    if (!mounted || (!isGroupCall && _callPhase != _CallPhase.incoming)) {
+      return;
+    }
+
+    final caller = isGroupCall
+        ? _callParticipantName(groupCall!.callerPubkey)
+        : _callParticipantName(directCaller ?? 'Unknown caller');
+    final channel = isGroupCall
+        ? _workspace.channels
+                  .where((item) => item.id == groupCall!.channelId)
+                  .map((item) => item.name)
+                  .firstOrNull ??
+              'Channel ${compactIdentifier(groupCall!.channelId)}'
+        : null;
+    _incomingCallOverlay = OverlayEntry(
+      builder: (context) => Material(
+        color: Colors.black54,
+        child: SafeArea(
+          child: Align(
+            alignment: Alignment.topCenter,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: IncomingCallPrompt(
+                isGroupCall: isGroupCall,
+                caller: caller,
+                channel: channel,
+                onReject: () => unawaited(
+                  isGroupCall ? _hangupGroupCall() : _rejectWorkspaceCall(),
+                ),
+                onAnswer: () => unawaited(
+                  isGroupCall ? _acceptGroupCall() : _acceptWorkspaceCall(),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    Overlay.of(context, rootOverlay: true).insert(_incomingCallOverlay!);
+  }
+
+  void _dismissIncomingCallOverlay() {
+    _incomingCallOverlay?.remove();
+    _incomingCallOverlay = null;
   }
 
   void _showVideoOverlay() {
