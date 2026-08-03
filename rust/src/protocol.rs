@@ -267,6 +267,10 @@ pub struct WorkspaceRequest {
     pub call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub participant_pubkeys: Vec<String>,
+    /// Canonical worker folders an agent may use for this conversation.
+    /// A selected folder includes every repository below it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_scope: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,6 +368,8 @@ pub struct WorkspaceConversationAgentPayload {
     pub member_pubkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_scope: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1421,6 +1427,19 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
         {
             Ok(())
         }
+        "transcribe_workspace_voice"
+            if !request.attachments.is_empty()
+                && (request
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || request
+                        .recipient_pubkey
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty())) =>
+        {
+            Ok(())
+        }
         "call_invite" | "call_answer" | "call_hangup"
             if request
                 .recipient_pubkey
@@ -2011,10 +2030,19 @@ mod tests {
 
     #[test]
     fn parses_conversation_agent_membership_requests_and_updates() {
-        let request = parse_wire_message(r#"{"workspace_request":{"action":"add_conversation_agent","channel_id":"channel-1","agent_id":"agent-1"}}"#).unwrap();
-        assert_eq!(request.kind(), "workspace_request");
-        let update = parse_wire_message(r#"{"workspace_update":{"action":"conversation_agents_updated","conversation_agents":[{"agent_id":"agent-1","channel_id":"channel-1"}]}}"#).unwrap();
-        assert_eq!(update.kind(), "workspace_update");
+        let request = parse_wire_message(r#"{"workspace_request":{"action":"add_conversation_agent","channel_id":"channel-1","agent_id":"agent-1","folder_scope":["/work/apps"]}}"#).unwrap();
+        let WireMessage::WorkspaceRequest { workspace_request } = request else {
+            panic!("expected workspace request");
+        };
+        assert_eq!(workspace_request.folder_scope, ["/work/apps"]);
+        let update = parse_wire_message(r#"{"workspace_update":{"action":"conversation_agents_updated","conversation_agents":[{"agent_id":"agent-1","channel_id":"channel-1","folder_scope":["/work/apps"]}]}}"#).unwrap();
+        let WireMessage::WorkspaceUpdate { workspace_update } = update else {
+            panic!("expected workspace update");
+        };
+        assert_eq!(
+            workspace_update.conversation_agents[0].folder_scope,
+            ["/work/apps"]
+        );
     }
 
     #[test]

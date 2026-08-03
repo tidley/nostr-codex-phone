@@ -572,11 +572,16 @@ class _TeamWorkspace extends StatefulWidget {
     required this.displayName,
     required this.memberAliases,
     required this.memberNames,
+    required this.unreadCounts,
     required this.onDisplayNameChanged,
     required this.onMemberAliasChanged,
+    required this.onFocusConversation,
     required this.onRequest,
+    required this.onLoadFolderChoices,
     required this.onTyping,
     required this.onAttach,
+    required this.voiceResult,
+    required this.onVoiceTranscribe,
     required this.onOpenAttachment,
     required this.onCreateInvite,
     required this.callPhase,
@@ -607,11 +612,17 @@ class _TeamWorkspace extends StatefulWidget {
   final String displayName;
   final Map<String, String> memberAliases;
   final Map<String, String> memberNames;
+  final Map<String, int> unreadCounts;
   final ValueChanged<String> onDisplayNameChanged;
   final void Function(String pubkey, String alias) onMemberAliasChanged;
+  final ValueChanged<String> onFocusConversation;
   final Future<void> Function(Map<String, Object?> request) onRequest;
+  final Future<List<RepoChoice>> Function() onLoadFolderChoices;
   final Future<void> Function(Map<String, Object?> request) onTyping;
   final Future<bool> Function(Map<String, Object?> request) onAttach;
+  final ValueNotifier<_WorkspaceVoiceResult?> voiceResult;
+  final Future<void> Function(String path, Map<String, Object?> request)
+  onVoiceTranscribe;
   final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
   final Future<void> Function() onCreateInvite;
   final _CallPhase callPhase;
@@ -634,6 +645,8 @@ class _TeamWorkspace extends StatefulWidget {
 }
 
 class _TeamWorkspaceState extends State<_TeamWorkspace> {
+  static const _sidebarMinWidth = 220.0;
+  static const _sidebarMaxWidth = 360.0;
   static const _threadPaneMinWidth = 280.0;
   static const _threadPaneMaxWidth = 520.0;
   final _composer = TextEditingController();
@@ -642,12 +655,20 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   final _threadComposer = TextEditingController();
   final _threadComposerFocus = FocusNode();
   final _selectedThreadMentions = <WorkspaceMention>[];
+  final _voiceRecorder = AudioRecorder();
+  bool _voiceRecording = false;
+  bool _voiceTranscribing = false;
+  String? _voicePath;
+  DateTime? _voiceStartedAt;
+  TextEditingController? _voiceComposer;
+  String? _voiceError;
   Timer? _typingRefreshTimer;
   Timer? _typingExpiryTimer;
   _WorkspaceSection _section = _WorkspaceSection.channel;
   String _active = 'workspace';
   WorkspaceMessage? _thread;
   bool _alsoSendToMain = false;
+  double _sidebarWidth = 280;
   double _threadPaneWidth = 340;
 
   @override
@@ -657,6 +678,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     _composerFocus.addListener(_onComposerChanged);
     _threadComposer.addListener(_onComposerChanged);
     _threadComposerFocus.addListener(_onComposerChanged);
+    widget.voiceResult.addListener(_onVoiceResult);
     unawaited(widget.onRequest({'action': 'list'}));
   }
 
@@ -670,6 +692,10 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     _threadComposer.dispose();
     _threadComposerFocus.removeListener(_onComposerChanged);
     _threadComposerFocus.dispose();
+    widget.voiceResult.removeListener(_onVoiceResult);
+    unawaited(_voiceRecorder.dispose());
+    final path = _voicePath;
+    if (path != null) unawaited(_deleteVoiceFile(path));
     _typingRefreshTimer?.cancel();
     _typingExpiryTimer?.cancel();
     super.dispose();
@@ -678,6 +704,152 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   void _onComposerChanged() {
     setState(() {});
     _syncTypingLease();
+  }
+
+  void _onVoiceResult() {
+    final result = widget.voiceResult.value;
+    if (result == null || !_voiceTranscribing) return;
+    final composer = _voiceComposer;
+    setState(() {
+      _voiceTranscribing = false;
+      _voiceError = result.error;
+      if (result.transcript != null && composer != null) {
+        _insertVoiceTranscript(composer, result.transcript!);
+      }
+    });
+    if (result.transcript != null && composer != null) {
+      composer == _threadComposer
+          ? _threadComposerFocus.requestFocus()
+          : _composerFocus.requestFocus();
+    }
+  }
+
+  void _insertVoiceTranscript(
+    TextEditingController composer,
+    String transcript,
+  ) {
+    final text = transcript.trim();
+    if (text.isEmpty) return;
+    final selection = composer.selection;
+    final start = selection.isValid ? selection.start : composer.text.length;
+    final end = selection.isValid ? selection.end : composer.text.length;
+    final insert =
+        composer.text.isNotEmpty &&
+            start > 0 &&
+            !RegExp(r'\s$').hasMatch(composer.text.substring(0, start))
+        ? ' $text'
+        : text;
+    composer.value = composer.value.copyWith(
+      text: composer.text.replaceRange(start, end, insert),
+      selection: TextSelection.collapsed(offset: start + insert.length),
+      composing: TextRange.empty,
+    );
+  }
+
+  Future<void> _toggleVoiceRecording({WorkspaceMessage? thread}) async {
+    if (_voiceTranscribing) return;
+    if (_voiceRecording) {
+      final path = _voicePath;
+      final startedAt = _voiceStartedAt;
+      try {
+        final stopped = await _voiceRecorder.stop();
+        final audioPath = _usableVoiceAudioPath(stopped, path);
+        if (audioPath == null ||
+            startedAt == null ||
+            DateTime.now().difference(startedAt) <
+                minimumVoiceRecordingDuration) {
+          if (audioPath != null) unawaited(_deleteVoiceFile(audioPath));
+          if (mounted) {
+            setState(() {
+              _voiceRecording = false;
+              _voicePath = null;
+              _voiceError = 'Record at least one second of audio.';
+            });
+          }
+          return;
+        }
+        if (!mounted) return;
+        setState(() {
+          _voiceRecording = false;
+          _voiceTranscribing = true;
+          _voiceError = null;
+          _voicePath = null;
+        });
+        await widget.onVoiceTranscribe(audioPath, {
+          'action': _section == _WorkspaceSection.channel
+              ? 'send_channel_message'
+              : 'send_direct_message',
+          if (_section == _WorkspaceSection.channel) 'channel_id': _active,
+          if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
+          if (thread != null) 'parent_id': thread.id,
+          if (thread != null) 'also_send_to_main': _alsoSendToMain,
+        });
+        unawaited(_deleteVoiceFile(audioPath));
+      } catch (error) {
+        if (path != null) unawaited(_deleteVoiceFile(path));
+        if (mounted) {
+          setState(() {
+            _voiceRecording = false;
+            _voiceTranscribing = false;
+            _voicePath = null;
+            _voiceError = 'Voice transcription failed: $error';
+          });
+        }
+      }
+      return;
+    }
+
+    try {
+      if (!await _voiceRecorder.hasPermission()) {
+        if (mounted) {
+          setState(() => _voiceError = 'Microphone permission denied.');
+        }
+        return;
+      }
+      final directory = await getTemporaryDirectory();
+      final path =
+          '${directory.path}${Platform.pathSeparator}workspace_voice_${DateTime.now().millisecondsSinceEpoch}.ogg';
+      await _voiceRecorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.opus,
+          bitRate: 32000,
+          sampleRate: 16000,
+          numChannels: 1,
+          autoGain: true,
+          noiseSuppress: true,
+        ),
+        path: path,
+      );
+      if (mounted) {
+        setState(() {
+          _voiceRecording = true;
+          _voicePath = path;
+          _voiceStartedAt = DateTime.now();
+          _voiceComposer = thread == null ? _composer : _threadComposer;
+          _voiceError = null;
+          widget.voiceResult.value = null;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _voiceError = 'Could not start recording: $error');
+      }
+    }
+  }
+
+  String? _usableVoiceAudioPath(String? primary, String? fallback) {
+    final value = primary?.trim();
+    if (value != null && value.isNotEmpty) return value;
+    final fallbackValue = fallback?.trim();
+    return fallbackValue != null && fallbackValue.isNotEmpty
+        ? fallbackValue
+        : null;
+  }
+
+  Future<void> _deleteVoiceFile(String path) async {
+    try {
+      await File(path).delete();
+    } catch (_) {}
   }
 
   bool get _canSendTyping =>
@@ -882,6 +1054,13 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _threadComposer.clear();
       _selectedThreadMentions.clear();
     });
+    if (section == _WorkspaceSection.channel) {
+      widget.onFocusConversation(id);
+    } else if (section == _WorkspaceSection.direct) {
+      widget.onFocusConversation(
+        WorkspaceState.directKey(widget.ownPubkey, id),
+      );
+    }
     _syncTypingLease();
     if (section == _WorkspaceSection.channel) {
       unawaited(
@@ -914,6 +1093,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       displayName: widget.displayName,
       memberAliases: widget.memberAliases,
       memberNames: widget.memberNames,
+      unreadCounts: widget.unreadCounts,
       onSelect: _select,
       onSessions: widget.onOpenSessions,
       onSettings: widget.onOpenSettings,
@@ -942,6 +1122,10 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       composerFocus: _composerFocus,
       onSend: _send,
       onAttach: _attach,
+      voiceRecording: _voiceRecording,
+      voiceTranscribing: _voiceTranscribing,
+      voiceError: _voiceError,
+      onVoicePressed: () => unawaited(_toggleVoiceRecording()),
       onOpenAttachment: widget.onOpenAttachment,
       onOpenThread: (message) => setState(() {
         if (_thread?.id != message.id) {
@@ -1020,6 +1204,11 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           _insertMention(_threadComposer, _selectedThreadMentions, mention),
       onSend: () => _send(thread: _thread),
       onAttach: () => _attach(thread: _thread),
+      voiceRecording: _voiceRecording && _voiceComposer == _threadComposer,
+      voiceTranscribing:
+          _voiceTranscribing && _voiceComposer == _threadComposer,
+      voiceError: _voiceComposer == _threadComposer ? _voiceError : null,
+      onVoicePressed: () => unawaited(_toggleVoiceRecording(thread: _thread)),
       alsoSendToMain: _alsoSendToMain,
       onAlsoSendToMainChanged: (value) =>
           setState(() => _alsoSendToMain = value),
@@ -1027,6 +1216,18 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         _thread = null;
         _alsoSendToMain = false;
       }),
+      onToggleReaction: (message, emoji) => widget.onRequest({
+        'action': 'toggle_reaction',
+        'parent_id': message.id,
+        'reaction': emoji,
+      }),
+      onOpenAttachment: widget.onOpenAttachment,
+      ownPubkey: widget.ownPubkey,
+      localSenderIds: widget.localSenderIds,
+      displayName: widget.displayName,
+      memberAliases: widget.memberAliases,
+      memberNames: widget.memberNames,
+      agents: _activeAgents,
     );
 
     return Scaffold(
@@ -1048,7 +1249,16 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       body: SafeArea(
         child: Row(
           children: [
-            if (wide) SizedBox(width: 280, child: sidebar),
+            if (wide) SizedBox(width: _sidebarWidth, child: sidebar),
+            if (wide)
+              SidebarPaneResizeHandle(
+                onResize: (delta) => setState(() {
+                  _sidebarWidth = (_sidebarWidth + delta).clamp(
+                    _sidebarMinWidth,
+                    _sidebarMaxWidth,
+                  );
+                }),
+              ),
             if (wide) const VerticalDivider(width: 1),
             Expanded(
               child: medium || _thread == null ? conversation : contextPane,
@@ -1182,21 +1392,36 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                       ? 'No OpenCode session attached'
                       : agent.role,
                 ),
-                onChanged: (_) {
+                onChanged: (_) async {
+                  final navigator = Navigator.of(context);
                   final action = attached.contains(agent.id)
                       ? 'remove_conversation_agent'
                       : 'add_conversation_agent';
+                  final folderScope = action == 'add_conversation_agent'
+                      ? await showDialog<List<String>>(
+                          context: context,
+                          builder: (_) => _FolderScopeDialog(
+                            onLoadChoices: widget.onLoadFolderChoices,
+                          ),
+                        )
+                      : null;
+                  if (action == 'add_conversation_agent' &&
+                      folderScope == null) {
+                    return;
+                  }
+                  if (!mounted) return;
                   unawaited(
                     widget.onRequest({
                       'action': action,
                       'agent_id': agent.id,
+                      'folder_scope': ?folderScope,
                       if (_section == _WorkspaceSection.channel)
                         'channel_id': _active,
                       if (_section == _WorkspaceSection.direct)
                         'recipient_pubkey': _active,
                     }),
                   );
-                  Navigator.pop(context);
+                  navigator.pop();
                 },
               ),
           ],
@@ -1204,6 +1429,108 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       ),
     );
   }
+}
+
+class _FolderScopeDialog extends StatefulWidget {
+  const _FolderScopeDialog({required this.onLoadChoices});
+
+  final Future<List<RepoChoice>> Function() onLoadChoices;
+
+  @override
+  State<_FolderScopeDialog> createState() => _FolderScopeDialogState();
+}
+
+class _FolderScopeDialogState extends State<_FolderScopeDialog> {
+  late final Future<List<RepoChoice>> _choices = widget.onLoadChoices();
+  final _selected = <String>{};
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Folder access'),
+    content: SizedBox(
+      width: 460,
+      child: FutureBuilder<List<RepoChoice>>(
+        future: _choices,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const SizedBox(
+              height: 160,
+              child: Center(child: CircularProgressIndicator()),
+            );
+          }
+          if (snapshot.hasError) {
+            return const Text('Could not load folders from the worker.');
+          }
+          final folders = snapshot.data ?? const <RepoChoice>[];
+          if (folders.isEmpty) return const Text('No folders are available.');
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Select folders. Each folder includes all repositories in its subfolders.',
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 300,
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    for (final folder in folders)
+                      CheckboxListTile(
+                        value: _selected.contains(folder.path),
+                        title: Text(folder.displayName),
+                        subtitle: Text(
+                          folder.isGitRepo ? 'Repository folder' : 'Folder',
+                        ),
+                        onChanged: (selected) => setState(() {
+                          if (selected == true) {
+                            _selected.add(folder.path);
+                          } else {
+                            _selected.remove(folder.path);
+                          }
+                        }),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: _selected.isEmpty
+            ? null
+            : () => Navigator.pop(context, _selected.toList()..sort()),
+        child: const Text('Grant access'),
+      ),
+    ],
+  );
+}
+
+class SidebarPaneResizeHandle extends StatelessWidget {
+  const SidebarPaneResizeHandle({super.key, required this.onResize});
+
+  final ValueChanged<double> onResize;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: 'Resize sidebar',
+    child: MouseRegion(
+      cursor: SystemMouseCursors.resizeLeftRight,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: (details) => onResize(details.delta.dx),
+        child: const SizedBox(width: 6, height: double.infinity),
+      ),
+    ),
+  );
 }
 
 class ThreadPaneResizeHandle extends StatelessWidget {
@@ -1233,6 +1560,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.displayName,
     required this.memberAliases,
     required this.memberNames,
+    required this.unreadCounts,
     required this.onSelect,
     required this.onSessions,
     required this.onSettings,
@@ -1248,6 +1576,7 @@ class _WorkspaceSidebar extends StatelessWidget {
   final String displayName;
   final Map<String, String> memberAliases;
   final Map<String, String> memberNames;
+  final Map<String, int> unreadCounts;
   final void Function(_WorkspaceSection, String) onSelect;
   final VoidCallback onSessions;
   final VoidCallback onSettings;
@@ -1267,7 +1596,8 @@ class _WorkspaceSidebar extends StatelessWidget {
       String label, {
       bool selected = false,
       VoidCallback? onTap,
-      String? badge,
+      int unreadCount = 0,
+      String? count,
     }) => ListTile(
       dense: true,
       selected: selected,
@@ -1275,9 +1605,16 @@ class _WorkspaceSidebar extends StatelessWidget {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       leading: Icon(icon, size: 19),
       title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
-      trailing: badge == null
+      trailing: unreadCount > 0
+          ? Semantics(
+              label: '$unreadCount unread messages',
+              child: ExcludeSemantics(
+                child: Badge(label: Text('$unreadCount')),
+              ),
+            )
+          : count == null
           ? null
-          : Text(badge, style: Theme.of(context).textTheme.labelSmall),
+          : Text(count, style: Theme.of(context).textTheme.labelSmall),
       onTap: onTap,
     );
     return ColoredBox(
@@ -1335,6 +1672,7 @@ class _WorkspaceSidebar extends StatelessWidget {
               Icons.tag,
               channel.name,
               selected: selected == channel.id,
+              unreadCount: unreadCounts[channel.id] ?? 0,
               onTap: () => onSelect(_WorkspaceSection.channel, channel.id),
             ),
           item(
@@ -1357,6 +1695,9 @@ class _WorkspaceSidebar extends StatelessWidget {
               Icons.chat_bubble_outline,
               memberLabel(member),
               selected: direct == member,
+              unreadCount:
+                  unreadCounts[WorkspaceState.directKey(ownPubkey, member)] ??
+                  0,
               onTap: () => onSelect(_WorkspaceSection.direct, member),
             ),
           item(
@@ -1381,7 +1722,7 @@ class _WorkspaceSidebar extends StatelessWidget {
           item(
             Icons.workspaces_outline,
             'Sessions',
-            badge: sessions.isEmpty ? null : '${sessions.length}',
+            count: sessions.isEmpty ? null : '${sessions.length}',
             onTap: onSessions,
           ),
           for (final session in sessions.take(3))
@@ -1408,6 +1749,10 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.composerFocus,
     required this.onSend,
     required this.onAttach,
+    required this.voiceRecording,
+    required this.voiceTranscribing,
+    required this.voiceError,
+    required this.onVoicePressed,
     required this.onOpenAttachment,
     required this.onOpenThread,
     required this.onCloseThread,
@@ -1459,6 +1804,10 @@ class _WorkspaceConversation extends StatefulWidget {
   final FocusNode composerFocus;
   final VoidCallback onSend;
   final Future<void> Function() onAttach;
+  final bool voiceRecording;
+  final bool voiceTranscribing;
+  final String? voiceError;
+  final VoidCallback onVoicePressed;
   final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
   final ValueChanged<WorkspaceMessage> onOpenThread;
   final VoidCallback onCloseThread;
@@ -1738,6 +2087,10 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                   onMentionSelected: widget.onMentionSelected,
                   onSend: widget.onSend,
                   onAttach: widget.onAttach,
+                  voiceRecording: widget.voiceRecording,
+                  voiceTranscribing: widget.voiceTranscribing,
+                  voiceError: widget.voiceError,
+                  onVoicePressed: widget.onVoicePressed,
                 ),
               ],
             ),
@@ -1878,6 +2231,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
     required this.onReact,
     required this.threadReplyCount,
     required this.onOpenAttachment,
+    this.showThreadAction = true,
   });
   final WorkspaceMessage message;
   final String authorName;
@@ -1887,6 +2241,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
   final ValueChanged<String> onReact;
   final int threadReplyCount;
   final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
+  final bool showThreadAction;
   @override
   State<_WorkspaceMessageRow> createState() => _WorkspaceMessageRowState();
 }
@@ -1941,6 +2296,10 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                if (widget.isLocalSender) ...[
+                  _timestamp(context),
+                  const SizedBox(width: 7),
+                ],
                 Text(
                   widget.authorName,
                   style: const TextStyle(fontWeight: FontWeight.w800),
@@ -1957,33 +2316,14 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
                     ),
                   ),
                 ],
-                const SizedBox(width: 7),
-                Text(
-                  DateTime.fromMillisecondsSinceEpoch(
-                    widget.message.createdAt * 1000,
-                  ).toLocal().toString().substring(11, 16),
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    fontSize: 10,
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.onSurface.withValues(alpha: 0.52),
-                  ),
-                ),
+                if (!widget.isLocalSender) ...[
+                  const SizedBox(width: 7),
+                  _timestamp(context),
+                ],
               ],
             ),
           if (!widget.groupedWithPrevious) const SizedBox(height: 3),
-          if (widget.groupedWithPrevious)
-            Text(
-              DateTime.fromMillisecondsSinceEpoch(
-                widget.message.createdAt * 1000,
-              ).toLocal().toString().substring(11, 16),
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                fontSize: 10,
-                color: Theme.of(
-                  context,
-                ).colorScheme.onSurface.withValues(alpha: 0.42),
-              ),
-            ),
+          if (widget.groupedWithPrevious) _timestamp(context, grouped: true),
           if (widget.message.body.isNotEmpty)
             _WorkspaceMessageBody(widget.message.body),
           if (widget.message.reactions.isNotEmpty)
@@ -2069,11 +2409,12 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
                         ClipboardData(text: widget.message.body),
                       ),
                     ),
-                    IconButton(
-                      tooltip: 'Reply in thread',
-                      icon: const Icon(Icons.reply_outlined, size: 18),
-                      onPressed: widget.onThread,
-                    ),
+                    if (widget.showThreadAction)
+                      IconButton(
+                        tooltip: 'Reply in thread',
+                        icon: const Icon(Icons.reply_outlined, size: 18),
+                        onPressed: widget.onThread,
+                      ),
                     PopupMenuButton<String>(
                       tooltip: 'React',
                       icon: const Icon(Icons.add_reaction_outlined, size: 18),
@@ -2106,6 +2447,18 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
       ),
     );
   }
+
+  Widget _timestamp(BuildContext context, {bool grouped = false}) => Text(
+    DateTime.fromMillisecondsSinceEpoch(
+      widget.message.createdAt * 1000,
+    ).toLocal().toString().substring(11, 16),
+    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+      fontSize: 10,
+      color: Theme.of(
+        context,
+      ).colorScheme.onSurface.withValues(alpha: grouped ? 0.42 : 0.52),
+    ),
+  );
 }
 
 class _WorkspaceMessageBody extends StatelessWidget {
@@ -2176,9 +2529,21 @@ class _WorkspaceContext extends StatelessWidget {
     required this.onMentionSelected,
     required this.onSend,
     required this.onAttach,
+    required this.voiceRecording,
+    required this.voiceTranscribing,
+    required this.voiceError,
+    required this.onVoicePressed,
     required this.alsoSendToMain,
     required this.onAlsoSendToMainChanged,
     required this.onClose,
+    required this.onToggleReaction,
+    required this.onOpenAttachment,
+    required this.ownPubkey,
+    required this.localSenderIds,
+    required this.displayName,
+    required this.memberAliases,
+    required this.memberNames,
+    required this.agents,
   });
   final WorkspaceMessage? message;
   final List<WorkspaceMessage> replies;
@@ -2189,9 +2554,54 @@ class _WorkspaceContext extends StatelessWidget {
   final ValueChanged<WorkspaceMention> onMentionSelected;
   final VoidCallback onSend;
   final Future<void> Function() onAttach;
+  final bool voiceRecording;
+  final bool voiceTranscribing;
+  final String? voiceError;
+  final VoidCallback onVoicePressed;
   final bool alsoSendToMain;
   final ValueChanged<bool> onAlsoSendToMainChanged;
   final VoidCallback onClose;
+  final Future<void> Function(WorkspaceMessage message, String emoji)
+  onToggleReaction;
+  final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
+  final String ownPubkey;
+  final Set<String> localSenderIds;
+  final String displayName;
+  final Map<String, String> memberAliases;
+  final Map<String, String> memberNames;
+  final List<WorkspaceAgent> agents;
+
+  String _memberLabel(String pubkey) {
+    if (pubkey.startsWith('agent:')) {
+      final id = pubkey.substring('agent:'.length);
+      for (final agent in agents) {
+        if (agent.id == id) return agent.name;
+      }
+      return 'Agent';
+    }
+    if (pubkey == ownPubkey) {
+      return memberNames[pubkey] ?? (displayName.isEmpty ? 'You' : displayName);
+    }
+    return memberAliases[pubkey] ??
+        memberNames[pubkey] ??
+        compactIdentifier(pubkey);
+  }
+
+  Widget _messageRow(
+    WorkspaceMessage message, {
+    required bool groupedWithPrevious,
+  }) => _WorkspaceMessageRow(
+    message: message,
+    authorName: _memberLabel(message.senderPubkey),
+    groupedWithPrevious: groupedWithPrevious,
+    isLocalSender: isWorkspaceLocalSender(message.senderPubkey, localSenderIds),
+    onThread: () {},
+    onReact: (emoji) => unawaited(onToggleReaction(message, emoji)),
+    threadReplyCount: 0,
+    onOpenAttachment: onOpenAttachment,
+    showThreadAction: false,
+  );
+
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.all(20),
@@ -2244,22 +2654,25 @@ class _WorkspaceContext extends StatelessWidget {
                 child: ListView(
                   padding: EdgeInsets.zero,
                   children: [
-                    SelectionArea(
-                      child: Text(
-                        message!.body,
-                        style: Theme.of(context).textTheme.bodyLarge,
-                      ),
-                    ),
+                    _messageRow(message!, groupedWithPrevious: false),
                     const SizedBox(height: 16),
                     Text(
                       '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
                       style: Theme.of(context).textTheme.labelLarge,
                     ),
                     const SizedBox(height: 8),
-                    for (final reply in replies)
+                    for (var index = 0; index < replies.length; index++)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 10),
-                        child: SelectionArea(child: Text(reply.body)),
+                        child: _messageRow(
+                          replies[index],
+                          groupedWithPrevious:
+                              index > 0 &&
+                              isWorkspaceMessageGroupedWithPrevious(
+                                replies[index],
+                                replies[index - 1],
+                              ),
+                        ),
                       ),
                   ],
                 ),
@@ -2279,6 +2692,10 @@ class _WorkspaceContext extends StatelessWidget {
                 onMentionSelected: onMentionSelected,
                 onSend: onSend,
                 onAttach: onAttach,
+                voiceRecording: voiceRecording,
+                voiceTranscribing: voiceTranscribing,
+                voiceError: voiceError,
+                onVoicePressed: onVoicePressed,
               ),
             ],
           ),
@@ -2295,6 +2712,10 @@ class WorkspaceComposer extends StatelessWidget {
     required this.onMentionSelected,
     required this.onSend,
     required this.onAttach,
+    this.voiceRecording = false,
+    this.voiceTranscribing = false,
+    this.voiceError,
+    this.onVoicePressed,
   });
 
   final TextEditingController composer;
@@ -2304,92 +2725,141 @@ class WorkspaceComposer extends StatelessWidget {
   final ValueChanged<WorkspaceMention> onMentionSelected;
   final VoidCallback onSend;
   final Future<void> Function() onAttach;
+  final bool voiceRecording;
+  final bool voiceTranscribing;
+  final String? voiceError;
+  final VoidCallback? onVoicePressed;
+
+  bool _isDesktop(TargetPlatform platform) => switch (platform) {
+    TargetPlatform.linux ||
+    TargetPlatform.macOS ||
+    TargetPlatform.windows => true,
+    _ => false,
+  };
+
+  void _sendOnSubmit(bool canSend) {
+    if (composer.value.composing.isValid &&
+        !composer.value.composing.isCollapsed) {
+      return;
+    }
+    if (canSend) {
+      onSend();
+    }
+  }
 
   @override
-  Widget build(BuildContext context) =>
-      ValueListenableBuilder<TextEditingValue>(
-        valueListenable: composer,
-        builder: (context, value, _) {
-          final canSend = value.text.trim().isNotEmpty;
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (mentionOptions.isNotEmpty)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Material(
-                    elevation: 4,
-                    borderRadius: BorderRadius.circular(10),
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 176),
-                      child: ListView(
-                        shrinkWrap: true,
-                        children: [
-                          for (final mention in mentionOptions)
-                            ListTile(
-                              dense: true,
-                              leading: Icon(
-                                mention.kind == 'agent'
-                                    ? Icons.smart_toy_outlined
-                                    : Icons.person_outline,
-                              ),
-                              title: Text('@${mention.label}'),
-                              subtitle: Text(
-                                mention.kind == 'agent' ? 'Agent' : 'Member',
-                              ),
-                              onTap: () => onMentionSelected(mention),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              CallbackShortcuts(
-                bindings: {
-                  const SingleActivator(
-                    LogicalKeyboardKey.enter,
-                    control: true,
-                  ): () {
-                    if (canSend) onSend();
-                  },
-                },
-                child: TextField(
-                  controller: composer,
-                  focusNode: composerFocus,
-                  minLines: 1,
-                  maxLines: 6,
-                  textInputAction: TextInputAction.newline,
-                  decoration: InputDecoration(
-                    hintText: hintText,
-                    helperText: 'Ctrl+Enter to send',
-                    filled: true,
-                    fillColor:
-                        Theme.of(
-                          context,
-                        ).extension<_WorkspacePalette>()?.composer ??
-                        Theme.of(context).colorScheme.surfaceContainerHighest,
-                    prefixIcon: IconButton(
-                      tooltip: 'Attach file',
-                      onPressed: () => unawaited(onAttach()),
-                      icon: const Icon(Icons.attach_file),
-                    ),
-                    suffixIcon: IconButton(
-                      tooltip: canSend
-                          ? 'Send message (Ctrl+Enter)'
-                          : 'Write a message to send',
-                      onPressed: canSend ? onSend : null,
-                      icon: const Icon(Icons.send),
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
+  Widget build(
+    BuildContext context,
+  ) => ValueListenableBuilder<TextEditingValue>(
+    valueListenable: composer,
+    builder: (context, value, _) {
+      final canSend = value.text.trim().isNotEmpty;
+      final desktop = _isDesktop(Theme.of(context).platform);
+      final voiceStatus =
+          voiceError ??
+          (voiceRecording
+              ? 'Recording voice. Tap the microphone to stop.'
+              : voiceTranscribing
+              ? 'Transcribing voice...'
+              : null);
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (mentionOptions.isNotEmpty)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Material(
+                elevation: 4,
+                borderRadius: BorderRadius.circular(10),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 176),
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      for (final mention in mentionOptions)
+                        ListTile(
+                          dense: true,
+                          leading: Icon(
+                            mention.kind == 'agent'
+                                ? Icons.smart_toy_outlined
+                                : Icons.person_outline,
+                          ),
+                          title: Text('@${mention.label}'),
+                          subtitle: Text(
+                            mention.kind == 'agent' ? 'Agent' : 'Member',
+                          ),
+                          onTap: () => onMentionSelected(mention),
+                        ),
+                    ],
                   ),
                 ),
               ),
-            ],
-          );
-        },
+            ),
+          TextField(
+            controller: composer,
+            focusNode: composerFocus,
+            minLines: 1,
+            maxLines: 6,
+            textInputAction: desktop
+                ? TextInputAction.send
+                : TextInputAction.newline,
+            onSubmitted: desktop ? (_) => _sendOnSubmit(canSend) : null,
+            decoration: InputDecoration(
+              hintText: hintText,
+              helperText: desktop
+                  ? voiceStatus ?? 'Enter to send. Ctrl+Enter for new line.'
+                  : voiceStatus ?? 'Enter for new line',
+              filled: true,
+              fillColor:
+                  Theme.of(context).extension<_WorkspacePalette>()?.composer ??
+                  Theme.of(context).colorScheme.surfaceContainerHighest,
+              prefixIcon: IconButton(
+                tooltip: 'Attach file',
+                onPressed: () => unawaited(onAttach()),
+                icon: const Icon(Icons.attach_file),
+              ),
+              suffixIcon: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (onVoicePressed != null)
+                    IconButton(
+                      tooltip: voiceTranscribing
+                          ? 'Transcribing voice'
+                          : voiceRecording
+                          ? 'Stop recording and transcribe'
+                          : 'Record voice to text',
+                      onPressed: voiceTranscribing ? null : onVoicePressed,
+                      icon: voiceTranscribing
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : Icon(
+                              voiceRecording
+                                  ? Icons.stop_circle_outlined
+                                  : Icons.mic_none_outlined,
+                            ),
+                    ),
+                  IconButton(
+                    tooltip: canSend
+                        ? desktop
+                              ? 'Send message (Enter)'
+                              : 'Send message'
+                        : 'Write a message to send',
+                    onPressed: canSend ? onSend : null,
+                    icon: const Icon(Icons.send),
+                  ),
+                ],
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+        ],
       );
+    },
+  );
 }
 
 class _ContextLine extends StatelessWidget {

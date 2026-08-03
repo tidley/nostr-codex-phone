@@ -84,6 +84,7 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
+        theme: ThemeData(platform: TargetPlatform.windows),
         home: Material(
           child: Column(
             children: [
@@ -111,19 +112,81 @@ void main() {
       ),
     );
 
+    expect(
+      find.text('Enter to send. Ctrl+Enter for new line.'),
+      findsNWidgets(2),
+    );
+    await tester.enterText(find.byType(TextField).at(0), 'Main message');
+    await tester.pump();
+    expect(mainFocus.hasFocus, isTrue);
+    final mainField = tester.widget<TextField>(find.byType(TextField).at(0));
+    expect(mainField.textInputAction, TextInputAction.send);
+    mainField.onSubmitted!('Main message');
+    await tester.pump();
+
+    expect(mainSends, 1);
+    expect(mainController.text, 'Main message');
+
     await tester.enterText(find.byType(TextField).at(1), 'Thread reply');
     await tester.pump();
-    await tester.tap(find.byIcon(Icons.send).at(1));
+    final threadField = tester.widget<TextField>(find.byType(TextField).at(1));
+    expect(threadField.textInputAction, TextInputAction.send);
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'Thread reply\n',
+        selection: TextSelection.collapsed(offset: 13),
+      ),
+    );
+    await tester.testTextInput.receiveAction(TextInputAction.newline);
+    await tester.pump();
 
-    expect(mainController.text, isEmpty);
-    expect(threadController.text, 'Thread reply');
-    expect(mainSends, 0);
+    expect(threadController.text, 'Thread reply\n');
+    expect(threadSends, 0);
+    threadField.onSubmitted!('Thread reply\n');
+
+    expect(mainController.text, 'Main message');
+    expect(threadController.text, 'Thread reply\n');
+    expect(mainSends, 1);
     expect(threadSends, 1);
 
     mainController.dispose();
     threadController.dispose();
     mainFocus.dispose();
     threadFocus.dispose();
+  });
+
+  testWidgets('composer exposes voice transcription state without sending', (
+    tester,
+  ) async {
+    final controller = TextEditingController(text: 'Draft stays here');
+    final focus = FocusNode();
+    var sends = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Material(
+          child: WorkspaceComposer(
+            composer: controller,
+            composerFocus: focus,
+            hintText: 'Message',
+            mentionOptions: const <WorkspaceMention>[],
+            onMentionSelected: (_) {},
+            onSend: () => sends++,
+            onAttach: () async {},
+            voiceTranscribing: true,
+            onVoicePressed: () {},
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byTooltip('Transcribing voice'), findsOneWidget);
+    expect(find.text('Transcribing voice...'), findsOneWidget);
+    expect(controller.text, 'Draft stays here');
+    expect(sends, 0);
+
+    controller.dispose();
+    focus.dispose();
   });
 
   testWidgets('thread pane resize handle reports inverse horizontal drag', (
@@ -158,6 +221,47 @@ void main() {
     expect(deltas.reduce((sum, delta) => sum + delta), greaterThan(0));
   });
 
+  testWidgets('sidebar pane resize handle reports horizontal drag', (
+    tester,
+  ) async {
+    final deltas = <double>[];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.center,
+            child: SidebarPaneResizeHandle(onResize: deltas.add),
+          ),
+        ),
+      ),
+    );
+
+    final handle = find.byType(SidebarPaneResizeHandle);
+    expect(
+      tester
+          .widget<MouseRegion>(
+            find.descendant(of: handle, matching: find.byType(MouseRegion)),
+          )
+          .cursor,
+      SystemMouseCursors.resizeLeftRight,
+    );
+    expect(
+      tester
+          .widget<Semantics>(
+            find.descendant(of: handle, matching: find.byType(Semantics)),
+          )
+          .properties
+          .label,
+      'Resize sidebar',
+    );
+
+    await tester.drag(handle, const Offset(24, 0));
+
+    expect(deltas, isNotEmpty);
+    expect(deltas.reduce((sum, delta) => sum + delta), greaterThan(0));
+  });
+
   testWidgets(
     'composer disables send until text exists and supports multiline',
     (tester) async {
@@ -167,6 +271,7 @@ void main() {
 
       await tester.pumpWidget(
         MaterialApp(
+          theme: ThemeData(platform: TargetPlatform.android),
           home: Material(
             child: WorkspaceComposer(
               composer: controller,
@@ -181,7 +286,7 @@ void main() {
         ),
       );
 
-      expect(find.text('Ctrl+Enter to send'), findsOneWidget);
+      expect(find.text('Enter for new line'), findsOneWidget);
       final sendButton = find.ancestor(
         of: find.byIcon(Icons.send),
         matching: find.byType(IconButton),
@@ -195,6 +300,45 @@ void main() {
       expect(tester.widget<IconButton>(sendButton).onPressed, isNotNull);
       await tester.tap(find.byIcon(Icons.send));
       expect(sends, 1);
+
+      controller.dispose();
+      focus.dispose();
+    },
+  );
+
+  testWidgets(
+    'desktop composer does not send while an IME composition is active',
+    (tester) async {
+      final controller = TextEditingController();
+      final focus = FocusNode();
+      var sends = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(platform: TargetPlatform.windows),
+          home: Material(
+            child: WorkspaceComposer(
+              composer: controller,
+              composerFocus: focus,
+              hintText: 'Message # workspace',
+              mentionOptions: const [],
+              onMentionSelected: (_) {},
+              onSend: () => sends++,
+              onAttach: () async {},
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byType(TextField));
+      controller.value = const TextEditingValue(
+        text: 'Draft',
+        selection: TextSelection.collapsed(offset: 5),
+        composing: TextRange(start: 0, end: 5),
+      );
+      tester.widget<TextField>(find.byType(TextField)).onSubmitted!('Draft');
+
+      expect(sends, 0);
 
       controller.dispose();
       focus.dispose();
