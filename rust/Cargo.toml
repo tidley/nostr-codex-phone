@@ -11,7 +11,7 @@ anyhow = "1"
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 flutter_rust_bridge = "=2.11.1"
-fips-mobile = { git = "https://github.com/tidley/fips.git", rev = "2a77dc8e91e11d26f1183eca958a475f00512291", default-features = false, features = ["nostr-discovery"] }
+fips-mobile = { git = "https://github.com/tidley/fips.git", rev = "d9139ca853b16efc33f3ff3d2559314e2dea73d6", default-features = false, features = ["nostr-discovery"] }
 futures-util = "0.3"
 hound = "3.5"
 nostr = { version = "0.45.0-alpha.1", features = ["std", "os-rng", "nip59"] }
