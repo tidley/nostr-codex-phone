@@ -17,6 +17,61 @@ void main() {
     expect(const NostrCodexApp(), isA<StatefulWidget>());
   });
 
+  testWidgets('incoming group call prompt shows context and actions', (
+    tester,
+  ) async {
+    var answered = false;
+    var rejected = false;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: IncomingCallPrompt(
+            isGroupCall: true,
+            caller: 'Ada',
+            channel: 'Mobile team',
+            onAnswer: () => answered = true,
+            onReject: () => rejected = true,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Incoming channel call'), findsOneWidget);
+    expect(find.text('Ada invited you to Mobile team'), findsOneWidget);
+    await tester.tap(find.text('Answer'));
+    await tester.tap(find.text('Reject'));
+    expect(answered, isTrue);
+    expect(rejected, isTrue);
+  });
+
+  testWidgets('incoming direct call prompt shows caller and actions', (
+    tester,
+  ) async {
+    var answered = false;
+    var rejected = false;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: IncomingCallPrompt(
+            isGroupCall: false,
+            caller: 'Lin',
+            onAnswer: () => answered = true,
+            onReject: () => rejected = true,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Incoming call'), findsOneWidget);
+    expect(find.text('Lin is calling you'), findsOneWidget);
+    await tester.tap(find.text('Answer'));
+    await tester.tap(find.text('Reject'));
+    expect(answered, isTrue);
+    expect(rejected, isTrue);
+  });
+
   testWidgets('main and thread composers keep separate drafts and sends', (
     tester,
   ) async {

@@ -17,6 +17,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.Surface
 import androidx.core.content.ContextCompat
@@ -38,7 +39,8 @@ class RealtimeVideo(
     private val frames = EventChannel(messenger, "nostr_codex_phone/realtime_video_frames")
     private val thread = HandlerThread("RealtimeVideo").apply { start() }
     private val handler = Handler(thread.looper)
-    private var sink: EventChannel.EventSink? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    @Volatile private var sink: EventChannel.EventSink? = null
     private var encoder: MediaCodec? = null
     private var camera: CameraDevice? = null
     private var cameraSession: CameraCaptureSession? = null
@@ -63,32 +65,32 @@ class RealtimeVideo(
             "startCapture" -> startCapture(call.argument<String>("source") ?: "camera", result)
             "switchCapture" -> {
                 val source = call.argument<String>("source")
-                if (source != "camera" && source != "screen") result.error("invalid_source", "source must be camera or screen.", null)
+                if (source != "camera" && source != "screen") error(result, "invalid_source", "source must be camera or screen.")
                 else { stopCapture(); handler.post { startCapture(source, result) } }
             }
-            "stopCapture" -> { stopCapture(); result.success(null) }
-            "createRenderer" -> result.success(createRenderer())
+            "stopCapture" -> { stopCapture(); success(result) }
+            "createRenderer" -> success(result, createRenderer())
             "releaseRenderer" -> {
                 call.argument<Number>("textureId")?.toLong()?.let { releaseRenderer(it) }
-                result.success(null)
+                success(result)
             }
             "pushFragment" -> {
                 val id = call.argument<Number>("textureId")?.toLong()
                 val fragment = call.argument<ByteArray>("fragment")
-                if (id == null || fragment == null) result.error("invalid_fragment", "textureId and fragment are required.", null)
-                else { renderers[id]?.push(fragment); result.success(null) }
+                if (id == null || fragment == null) error(result, "invalid_fragment", "textureId and fragment are required.")
+                else { renderers[id]?.push(fragment); success(result) }
             }
-            "dispose" -> { dispose(); result.success(null) }
-            else -> result.notImplemented()
+            "dispose" -> { dispose(); success(result) }
+            else -> main { result.notImplemented() }
         }
     }
 
     @SuppressLint("MissingPermission")
     private fun startCapture(source: String, result: MethodChannel.Result) {
-        if (encoder != null) { result.success(null); return }
-        if (sink == null) { result.error("no_frame_listener", "Listen for video fragments before starting capture.", null); return }
+        if (encoder != null) { success(result); return }
+        if (sink == null) { error(result, "no_frame_listener", "Listen for video fragments before starting capture."); return }
         if (source == "camera" && ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            result.error("camera_denied", "CAMERA permission is not granted.", null); return
+            error(result, "camera_denied", "CAMERA permission is not granted."); return
         }
         if (source == "screen") {
             pendingScreenResult = result
@@ -106,7 +108,7 @@ class RealtimeVideo(
         val result = pendingScreenResult ?: return true
         pendingScreenResult = null
         if (resultCode != android.app.Activity.RESULT_OK || data == null) {
-            result.error("screen_denied", "Screen capture permission was not granted.", null)
+            error(result, "screen_denied", "Screen capture permission was not granted.")
             return true
         }
         val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -132,13 +134,13 @@ class RealtimeVideo(
                 encoder = codec
                 if (source == "screen") openScreen() else openCamera()
                 drainEncoder()
-                sink?.success(null)
+                emitSuccess()
             } catch (error: Exception) {
                 stopCapture()
-                sink?.error("video_capture_failed", error.message, null)
+                emitError("video_capture_failed", error.message)
             }
         }
-        result.success(null)
+        success(result)
     }
 
     private fun openScreen() {
@@ -148,7 +150,7 @@ class RealtimeVideo(
             "CodeCallScreen", width, height, metrics.densityDpi,
             android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             surface, null, handler,
-        ) ?: run { sink?.error("screen_capture_failed", "Could not create screen capture.", null); null }
+        ) ?: run { emitError("screen_capture_failed", "Could not create screen capture."); null }
     }
 
     @SuppressLint("MissingPermission")
@@ -170,11 +172,11 @@ class RealtimeVideo(
                             set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                         }.build(), null, handler)
                     }
-                    override fun onConfigureFailed(session: CameraCaptureSession) { sink?.error("camera_config_failed", "Camera video session failed.", null) }
+                    override fun onConfigureFailed(session: CameraCaptureSession) { emitError("camera_config_failed", "Camera video session failed.") }
                 }, handler)
             }
             override fun onDisconnected(device: CameraDevice) { device.close() }
-            override fun onError(device: CameraDevice, error: Int) { device.close(); sink?.error("camera_open_failed", "Camera error $error", null) }
+            override fun onError(device: CameraDevice, error: Int) { device.close(); emitError("camera_open_failed", "Camera error $error") }
         }, handler)
     }
 
@@ -204,7 +206,7 @@ class RealtimeVideo(
             val data = ByteBuffer.allocate(headerBytes + count).apply {
                 put(videoVersion.toByte()); put(flags.toByte()); putShort(frame.toShort()); putShort(fragment.toShort()); putInt(timestampUs.toInt()); put(h264, offset, count)
             }.array()
-            sink?.success(data)
+            emitSuccess(data)
             offset += count
             fragment++
         }
@@ -231,6 +233,19 @@ class RealtimeVideo(
     }
 
     private fun releaseRenderer(id: Long) { renderers.remove(id)?.release() }
+
+    private fun main(callback: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) callback() else mainHandler.post(callback)
+    }
+
+    private fun success(result: MethodChannel.Result, value: Any? = null) = main { result.success(value) }
+
+    private fun error(result: MethodChannel.Result, code: String, message: String?) =
+        main { result.error(code, message, null) }
+
+    private fun emitSuccess(value: Any? = null) = main { sink?.success(value) }
+
+    private fun emitError(code: String, message: String?) = main { sink?.error(code, message, null) }
 
     fun dispose() {
         stopCapture()
