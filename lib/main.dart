@@ -7,7 +7,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
@@ -24,6 +23,7 @@ import 'package:nostr_codex_phone/src/repo_target_merge.dart';
 import 'package:nostr_codex_phone/src/repo_choice.dart';
 import 'package:nostr_codex_phone/src/repo_target.dart';
 import 'package:nostr_codex_phone/src/realtime_audio.dart';
+import 'package:nostr_codex_phone/src/settings_storage.dart';
 import 'package:nostr_codex_phone/src/media_models.dart';
 import 'package:nostr_codex_phone/src/text_utils.dart';
 import 'package:nostr_codex_phone/src/tool_result_models.dart';
@@ -43,6 +43,7 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
+const _callStunServers = ['stun:stun.l.google.com:19302'];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
 const _appVersion = '0.2.78+278';
 
@@ -278,7 +279,7 @@ class NostrCodexApp extends StatefulWidget {
 }
 
 class _NostrCodexAppState extends State<NostrCodexApp> {
-  static const _storage = FlutterSecureStorage();
+  static final _storage = SettingsStorage();
   static const _themeStorageKey = 'app_theme';
   AppTheme _selectedTheme = AppTheme.mint;
 
@@ -384,7 +385,7 @@ class NostrCodexHome extends StatefulWidget {
 
 class _NostrCodexHomeState extends State<NostrCodexHome>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  static const _storage = FlutterSecureStorage();
+  static final _storage = SettingsStorage();
   static const _secretKeyStorageKey = 'nostr_secret_key';
   static const _peerPubkeyStorageKey = 'nostr_peer_pubkey';
   static const _relaysStorageKey = 'nostr_relays';
@@ -566,10 +567,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   String? _pendingMediaFileName;
   bool _showTeamWorkspace = true;
   String? _workspaceInviteCode;
-  String _workspaceMemberStatus = 'Owner';
+  String _workspaceMemberStatus = 'Not yet confirmed';
   _CallPhase _callPhase = _CallPhase.idle;
   String? _callId;
   String? _callPeerPubkey;
+  bool _incomingCallAcceptStarted = false;
+  bool _callAnswerSent = false;
   StreamSubscription<Uint8List>? _callCaptureSubscription;
   bool _callAudioStarted = false;
   Future<void> _callSendChain = Future.value();
@@ -4223,11 +4226,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           _workspaceInviteCode = invite?['code']?.toString();
           _workspaceMemberStatus = 'Invite ready';
         } else if (message.kind == 'invite_accepted') {
-          _workspaceMemberStatus = 'Joined workspace';
+          _workspaceMemberStatus = 'Accepted';
         } else {
           final rejected = decoded['invite_rejected'] as Map<String, dynamic>?;
-          _workspaceMemberStatus =
-              rejected?['reason']?.toString() ?? 'Invite rejected';
+          final reason = rejected?['reason']?.toString();
+          _workspaceMemberStatus = reason == null || reason.isEmpty
+              ? 'Rejected'
+              : 'Rejected: $reason';
         }
       });
       return true;
@@ -4260,7 +4265,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             _callPhase = _CallPhase.incoming;
             _callId = callId;
             _callPeerPubkey = sender;
+            _incomingCallAcceptStarted = false;
+            _callAnswerSent = false;
           });
+          unawaited(_prepareIncomingWorkspaceCall(callId));
         } else {
           unawaited(_sendCallControl('call_hangup', sender, callId));
         }
@@ -4268,6 +4276,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         if (message.kind == 'call_answer' &&
             _callPhase == _CallPhase.outgoing) {
           setState(() => _callPhase = _CallPhase.connecting);
+          unawaited(_connectOutgoingWorkspaceCall(callId, sender));
         } else if (message.kind == 'call_hangup') {
           unawaited(_clearCall());
         }
@@ -6686,9 +6695,9 @@ Return a concise catch-up summary of what happened after that point: completed w
         onAttach: _sendWorkspaceAttachment,
         onOpenAttachment: _downloadAndOpenWorkspaceAttachment,
         onCreateInvite: _createWorkspaceInvite,
-        onRedeemInvite: _redeemWorkspaceInvite,
         callPhase: _callPhase,
         callPeerPubkey: _callPeerPubkey,
+        incomingCallReady: _incomingCallAcceptStarted,
         onStartCall: _startWorkspaceCall,
         onAcceptCall: _acceptWorkspaceCall,
         onRejectCall: _rejectWorkspaceCall,
@@ -6907,7 +6916,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     return BridgeFipsCallConfig(
       secretKey: secret,
       relays: relays,
-      stunServers: const [],
+      stunServers: _callStunServers,
     );
   }
 
@@ -6945,8 +6954,19 @@ Return a concise catch-up summary of what happened after that point: completed w
         _callPeerPubkey = peerPubkey;
       });
       await _sendCallControl('call_invite', peerPubkey, callId);
-      if (!mounted || _callId != callId) return;
-      setState(() => _callPhase = _CallPhase.connecting);
+    } catch (error) {
+      if (mounted && _callId == callId) {
+        _showError('Call failed: $error');
+        await _clearCall();
+      }
+    }
+  }
+
+  Future<void> _connectOutgoingWorkspaceCall(
+    String callId,
+    String peerPubkey,
+  ) async {
+    try {
       final status = await fipsCallConnect(
         config: _callConfig(),
         peerNpub: peerPubkey,
@@ -6962,21 +6982,47 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
   }
 
+  Future<void> _prepareIncomingWorkspaceCall(String callId) async {
+    try {
+      // FIPS publishes this client's NAT advert before Answer is enabled.
+      final accepting = fipsCallAccept(config: _callConfig());
+      if (!mounted || _callId != callId || _callPhase != _CallPhase.incoming) {
+        await fipsCallStop();
+        try {
+          await accepting;
+        } catch (_) {}
+        return;
+      }
+      setState(() => _incomingCallAcceptStarted = true);
+      final status = await accepting;
+      if (mounted && _callId == callId && _callAnswerSent) {
+        await _activateCallAudio(callId, status);
+      } else {
+        await fipsCallStop();
+      }
+    } catch (error) {
+      if (mounted && _callId == callId) {
+        _showError('Could not prepare incoming call: $error');
+        await _clearCall();
+      }
+    }
+  }
+
   Future<void> _acceptWorkspaceCall() async {
     final callId = _callId;
     final peerPubkey = _callPeerPubkey;
     if (_callPhase != _CallPhase.incoming ||
         callId == null ||
-        peerPubkey == null) {
+        peerPubkey == null ||
+        !_incomingCallAcceptStarted) {
       return;
     }
     try {
-      setState(() => _callPhase = _CallPhase.connecting);
+      setState(() {
+        _callPhase = _CallPhase.connecting;
+        _callAnswerSent = true;
+      });
       await _sendCallControl('call_answer', peerPubkey, callId);
-      final status = await fipsCallAccept(config: _callConfig());
-      if (mounted && _callId == callId) {
-        await _activateCallAudio(callId, status);
-      }
     } catch (error) {
       if (mounted && _callId == callId) {
         _showError('Could not answer call: $error');
@@ -7010,6 +7056,8 @@ Return a concise catch-up summary of what happened after that point: completed w
         _callPhase = _CallPhase.idle;
         _callId = null;
         _callPeerPubkey = null;
+        _incomingCallAcceptStarted = false;
+        _callAnswerSent = false;
       });
     }
   }
@@ -7265,7 +7313,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         'redeem_invite': {'code': invite.secret},
       }),
     );
-    if (mounted) setState(() => _workspaceMemberStatus = 'Redeeming invite...');
+    if (mounted) setState(() => _workspaceMemberStatus = 'Joining...');
   }
 
   Future<void> _enterWorkspaceInviteCode() async {
