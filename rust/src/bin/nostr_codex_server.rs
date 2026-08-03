@@ -35,8 +35,8 @@ use rust_lib_nostr_codex_phone::protocol::{
     InviteCreated, InviteRejected, MediaBundle, MediaReference, OpenCodeSessionList,
     OpenCodeSessionListEntry, RedeemInvite, RepoList, RepoListEntry, RepoListRoot, TargetInvite,
     TargetParent, ToolResult, WireMessage, WorkspaceAgentPayload, WorkspaceChannelPayload,
-    WorkspaceConversationAgentPayload, WorkspaceMemberPayload, WorkspaceMessagePayload,
-    WorkspaceRequest, WorkspaceTypingPayload, WorkspaceUpdate,
+    WorkspaceConversationAgentPayload, WorkspaceMemberPayload, WorkspaceMentionPayload,
+    WorkspaceMessagePayload, WorkspaceRequest, WorkspaceTypingPayload, WorkspaceUpdate,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
@@ -1228,6 +1228,7 @@ async fn process_workspace_request(
                 None,
                 None,
                 &request.body.unwrap_or_default(),
+                &request.mentions,
             )
             .await?;
             return Ok(());
@@ -1268,6 +1269,7 @@ async fn process_workspace_request(
                 Some(sender),
                 request.recipient_pubkey.as_deref(),
                 &request.body.unwrap_or_default(),
+                &request.mentions,
             )
             .await?;
             return Ok(());
@@ -1927,8 +1929,12 @@ async fn route_conversation_agents(
     member: Option<&str>,
     peer: Option<&str>,
     body: &str,
+    mentions: &[WorkspaceMentionPayload],
 ) -> Result<()> {
     for agent in workspace.agents_for_conversation(channel_id, member, peer)? {
+        if !conversation_agent_is_targeted(&agent.id, mentions) {
+            continue;
+        }
         let Some(session_id) = (agent.session_status == "ready")
             .then_some(agent.opencode_session_id.as_deref())
             .flatten()
@@ -2069,6 +2075,13 @@ async fn route_conversation_agents(
         }
     }
     Ok(())
+}
+
+fn conversation_agent_is_targeted(agent_id: &str, mentions: &[WorkspaceMentionPayload]) -> bool {
+    !mentions.iter().any(|mention| mention.kind == "agent")
+        || mentions
+            .iter()
+            .any(|mention| mention.kind == "agent" && mention.id == agent_id)
 }
 
 fn session_worker_key(message: &IncomingMessage) -> String {
@@ -6181,6 +6194,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["desktop", "owner", "phone"],
         );
+    }
+
+    #[test]
+    fn routes_only_explicitly_mentioned_workspace_agents() {
+        let mentions = vec![WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: "scout".to_string(),
+            label: "Scout".to_string(),
+        }];
+
+        assert!(conversation_agent_is_targeted("scout", &mentions));
+        assert!(!conversation_agent_is_targeted("writer", &mentions));
+    }
+
+    #[test]
+    fn broadcasts_to_conversation_agents_without_agent_mentions() {
+        let member_mentions = vec![WorkspaceMentionPayload {
+            kind: "member".to_string(),
+            id: "member".to_string(),
+            label: "Member".to_string(),
+        }];
+
+        assert!(conversation_agent_is_targeted("scout", &[]));
+        assert!(conversation_agent_is_targeted("writer", &member_mentions));
     }
 
     #[test]
