@@ -29,7 +29,7 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         ensureHardStopTts()
         realtimeAudio = RealtimeAudio(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
-        realtimeVideo = RealtimeVideo(applicationContext, flutterEngine.dartExecutor.binaryMessenger, flutterEngine.renderer)
+        realtimeVideo = RealtimeVideo(applicationContext, this, flutterEngine.dartExecutor.binaryMessenger, flutterEngine.renderer)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
             when (call.method) {
                 "hardStop" -> {
@@ -201,5 +201,12 @@ class MainActivity : FlutterActivity() {
         hardStopTts?.shutdown()
         hardStopTts = null
         super.onDestroy()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (realtimeVideo?.onActivityResult(requestCode, resultCode, data) != true) {
+            super.onActivityResult(requestCode, resultCode, data)
+        }
     }
 }

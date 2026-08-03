@@ -590,6 +590,8 @@ class _TeamWorkspace extends StatefulWidget {
     required this.onAcceptGroupCall,
     required this.onRejectGroupCall,
     required this.onHangupGroupCall,
+    required this.mediaSource,
+    required this.onMediaSourceChanged,
   });
 
   final List<RepoTarget> sessions;
@@ -622,6 +624,8 @@ class _TeamWorkspace extends StatefulWidget {
   final VoidCallback onAcceptGroupCall;
   final VoidCallback onRejectGroupCall;
   final VoidCallback onHangupGroupCall;
+  final _CallMediaSource mediaSource;
+  final ValueChanged<_CallMediaSource> onMediaSourceChanged;
 
   @override
   State<_TeamWorkspace> createState() => _TeamWorkspaceState();
@@ -994,6 +998,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onAcceptGroupCall: widget.onAcceptGroupCall,
       onRejectGroupCall: widget.onRejectGroupCall,
       onHangupGroupCall: widget.onHangupGroupCall,
+      mediaSource: widget.mediaSource,
+      onMediaSourceChanged: widget.onMediaSourceChanged,
     );
     final contextPane = _WorkspaceContext(
       message: _thread,
@@ -1392,6 +1398,8 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.onAcceptGroupCall,
     required this.onRejectGroupCall,
     required this.onHangupGroupCall,
+    required this.mediaSource,
+    required this.onMediaSourceChanged,
   });
   final String title;
   final _WorkspaceSection section;
@@ -1442,6 +1450,8 @@ class _WorkspaceConversation extends StatefulWidget {
   final VoidCallback onAcceptGroupCall;
   final VoidCallback onRejectGroupCall;
   final VoidCallback onHangupGroupCall;
+  final _CallMediaSource mediaSource;
+  final ValueChanged<_CallMediaSource> onMediaSourceChanged;
 
   @override
   State<_WorkspaceConversation> createState() => _WorkspaceConversationState();
@@ -1582,6 +1592,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                   onAccept: widget.onAcceptCall,
                   onReject: widget.onRejectCall,
                   onHangup: widget.onHangupCall,
+                  mediaSource: widget.mediaSource,
+                  onMediaSourceChanged: widget.onMediaSourceChanged,
                 ),
               if (widget.section == _WorkspaceSection.channel)
                 _CallControl(
@@ -1595,6 +1607,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                   onAccept: widget.onAcceptGroupCall,
                   onReject: widget.onRejectGroupCall,
                   onHangup: widget.onHangupGroupCall,
+                  mediaSource: widget.mediaSource,
+                  onMediaSourceChanged: widget.onMediaSourceChanged,
                 ),
             ],
           ),
@@ -1673,6 +1687,8 @@ class _CallControl extends StatelessWidget {
     required this.onAccept,
     required this.onReject,
     required this.onHangup,
+    required this.mediaSource,
+    required this.onMediaSourceChanged,
   });
 
   final _CallPhase phase;
@@ -1680,6 +1696,8 @@ class _CallControl extends StatelessWidget {
   final VoidCallback onAccept;
   final VoidCallback onReject;
   final VoidCallback onHangup;
+  final _CallMediaSource mediaSource;
+  final ValueChanged<_CallMediaSource> onMediaSourceChanged;
 
   @override
   Widget build(BuildContext context) => switch (phase) {
@@ -1717,12 +1735,69 @@ class _CallControl extends StatelessWidget {
       icon: const Icon(Icons.call_end_outlined),
       label: const Text('Establishing FIPS connection...'),
     ),
-    _CallPhase.active => TextButton.icon(
-      onPressed: onHangup,
-      icon: const Icon(Icons.call_end),
-      label: const Text('FIPS call active'),
+    _CallPhase.active => Wrap(
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: 4,
+      children: [
+        _MediaSourceButton(
+          source: _CallMediaSource.audioOnly,
+          active: mediaSource == _CallMediaSource.audioOnly,
+          onPressed: onMediaSourceChanged,
+          icon: Icons.volume_up_outlined,
+          label: 'Audio only',
+        ),
+        _MediaSourceButton(
+          source: _CallMediaSource.camera,
+          active: mediaSource == _CallMediaSource.camera,
+          onPressed: onMediaSourceChanged,
+          icon: Icons.videocam_outlined,
+          label: 'Camera',
+        ),
+        _MediaSourceButton(
+          source: _CallMediaSource.screen,
+          active: mediaSource == _CallMediaSource.screen,
+          onPressed: onMediaSourceChanged,
+          icon: Icons.screen_share_outlined,
+          label: 'Share screen',
+        ),
+        IconButton(
+          tooltip: 'Hang up',
+          onPressed: onHangup,
+          icon: const Icon(Icons.call_end),
+        ),
+      ],
     ),
   };
+}
+
+class _MediaSourceButton extends StatelessWidget {
+  const _MediaSourceButton({
+    required this.source,
+    required this.active,
+    required this.onPressed,
+    required this.icon,
+    required this.label,
+  });
+  final _CallMediaSource source;
+  final bool active;
+  final ValueChanged<_CallMediaSource> onPressed;
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Tooltip(
+    message: label,
+    child: IconButton(
+      onPressed: () => onPressed(source),
+      style: IconButton.styleFrom(
+        foregroundColor: active
+            ? Theme.of(context).colorScheme.onPrimary
+            : null,
+        backgroundColor: active ? Theme.of(context).colorScheme.primary : null,
+      ),
+      icon: Icon(icon),
+    ),
+  );
 }
 
 class _WorkspaceMessageRow extends StatefulWidget {

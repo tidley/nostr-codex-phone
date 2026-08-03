@@ -2,7 +2,9 @@ package com.tidley.nostrcodexphone
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraDevice
@@ -11,8 +13,11 @@ import android.hardware.camera2.CaptureRequest
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.HandlerThread
+import android.util.DisplayMetrics
 import android.view.Surface
 import androidx.core.content.ContextCompat
 import io.flutter.plugin.common.BinaryMessenger
@@ -25,6 +30,7 @@ import java.nio.ByteBuffer
 /** Small Camera2/MediaCodec H.264 bridge. Fragments are bounded for FIPS QUIC datagrams. */
 class RealtimeVideo(
     private val context: Context,
+    private val activity: Activity,
     messenger: BinaryMessenger,
     private val textures: TextureRegistry,
 ) : MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
@@ -37,6 +43,9 @@ class RealtimeVideo(
     private var camera: CameraDevice? = null
     private var cameraSession: CameraCaptureSession? = null
     private var encoderSurface: Surface? = null
+    private var projection: MediaProjection? = null
+    private var virtualDisplay: android.hardware.display.VirtualDisplay? = null
+    private var pendingScreenResult: MethodChannel.Result? = null
     private var codecConfig = ByteArray(0)
     private var frameSequence = 0
     private val renderers = mutableMapOf<Long, Renderer>()
@@ -51,7 +60,12 @@ class RealtimeVideo(
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            "startCapture" -> startCapture(result)
+            "startCapture" -> startCapture(call.argument<String>("source") ?: "camera", result)
+            "switchCapture" -> {
+                val source = call.argument<String>("source")
+                if (source != "camera" && source != "screen") result.error("invalid_source", "source must be camera or screen.", null)
+                else { stopCapture(); handler.post { startCapture(source, result) } }
+            }
             "stopCapture" -> { stopCapture(); result.success(null) }
             "createRenderer" -> result.success(createRenderer())
             "releaseRenderer" -> {
@@ -70,12 +84,39 @@ class RealtimeVideo(
     }
 
     @SuppressLint("MissingPermission")
-    private fun startCapture(result: MethodChannel.Result) {
+    private fun startCapture(source: String, result: MethodChannel.Result) {
         if (encoder != null) { result.success(null); return }
         if (sink == null) { result.error("no_frame_listener", "Listen for video fragments before starting capture.", null); return }
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+        if (source == "camera" && ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             result.error("camera_denied", "CAMERA permission is not granted.", null); return
         }
+        if (source == "screen") {
+            pendingScreenResult = result
+            val manager = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            activity.runOnUiThread {
+                activity.startActivityForResult(manager.createScreenCaptureIntent(), screenCaptureRequestCode)
+            }
+            return
+        }
+        beginCapture(source, result)
+    }
+
+    fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (requestCode != screenCaptureRequestCode) return false
+        val result = pendingScreenResult ?: return true
+        pendingScreenResult = null
+        if (resultCode != android.app.Activity.RESULT_OK || data == null) {
+            result.error("screen_denied", "Screen capture permission was not granted.", null)
+            return true
+        }
+        val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        projection = manager.getMediaProjection(resultCode, data)
+        ContextCompat.startForegroundService(context, Intent(context, ScreenShareService::class.java))
+        beginCapture("screen", result)
+        return true
+    }
+
+    private fun beginCapture(source: String, result: MethodChannel.Result) {
         handler.post {
             try {
                 val codec = MediaCodec.createEncoderByType(mime).also {
@@ -89,7 +130,7 @@ class RealtimeVideo(
                     it.start()
                 }
                 encoder = codec
-                openCamera()
+                if (source == "screen") openScreen() else openCamera()
                 drainEncoder()
                 sink?.success(null)
             } catch (error: Exception) {
@@ -98,6 +139,16 @@ class RealtimeVideo(
             }
         }
         result.success(null)
+    }
+
+    private fun openScreen() {
+        val surface = encoderSurface ?: return
+        val metrics = context.resources.displayMetrics
+        virtualDisplay = projection?.createVirtualDisplay(
+            "CodeCallScreen", width, height, metrics.densityDpi,
+            android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            surface, null, handler,
+        ) ?: run { sink?.error("screen_capture_failed", "Could not create screen capture.", null); null }
     }
 
     @SuppressLint("MissingPermission")
@@ -163,6 +214,9 @@ class RealtimeVideo(
         handler.post {
             cameraSession?.close(); cameraSession = null
             camera?.close(); camera = null
+            virtualDisplay?.release(); virtualDisplay = null
+            projection?.stop(); projection = null
+            context.stopService(Intent(context, ScreenShareService::class.java))
             encoder?.stop(); encoder?.release(); encoder = null
             encoderSurface?.release(); encoderSurface = null
             codecConfig = ByteArray(0)
@@ -228,5 +282,6 @@ class RealtimeVideo(
         private const val maxFragmentBytes = 1190
         private const val keyFrameFlag = 1
         private const val endOfFrameFlag = 2
+        const val screenCaptureRequestCode = 4817
     }
 }
