@@ -308,19 +308,35 @@ pub async fn fips_call_accept_start(config: BridgeFipsCallConfig) -> Result<Brid
 /// Wait for the caller's traversal after [`fips_call_accept_start`] has made
 /// the responder advert available.
 pub async fn fips_call_accept_complete() -> Result<BridgeFipsCallStatus> {
-    let mut session = CALL_SESSION.lock().await;
-    let session = session
-        .as_mut()
-        .ok_or_else(|| anyhow!("FIPS call acceptance is not started"))?;
+    // `accept` can wait for the full traversal timeout. Keep the global slot
+    // available so hangup can cancel that wait instead of blocking on it.
     let (cancel, cancelled) = oneshot::channel();
     *CALL_ACCEPT_CANCEL.lock().await = Some(cancel);
+    let session = CALL_SESSION
+        .lock()
+        .await
+        .take()
+        .ok_or_else(|| anyhow!("FIPS call acceptance is not started"));
+    let mut session = match session {
+        Ok(session) => session,
+        Err(error) => {
+            CALL_ACCEPT_CANCEL.lock().await.take();
+            return Err(error);
+        }
+    };
     let result = tokio::select! {
         result = session.accept() => result.map_err(anyhow::Error::from),
         _ = cancelled => Err(anyhow!("FIPS call acceptance cancelled")),
     };
-    CALL_ACCEPT_CANCEL.lock().await.take();
-    result?;
-    Ok(fips_call_status(session))
+    let was_cancelled = CALL_ACCEPT_CANCEL.lock().await.take().is_none();
+    if was_cancelled {
+        let _ = session.stop().await;
+        return Err(anyhow!("FIPS call acceptance cancelled"));
+    }
+
+    let status = result.map(|()| fips_call_status(&session));
+    *CALL_SESSION.lock().await = Some(session);
+    status
 }
 
 pub async fn fips_call_send_datagram(payload: Vec<u8>) -> Result<()> {
@@ -463,12 +479,17 @@ mod tests {
 
     #[tokio::test]
     async fn stopping_a_call_cancels_pending_acceptance() {
+        *CALL_SESSION.lock().await = Some(FipsMobileQuicSession::new(
+            Identity::generate(),
+            FipsMobileQuicSessionConfig::default(),
+        ));
         let (cancel, cancelled) = oneshot::channel();
         *CALL_ACCEPT_CANCEL.lock().await = Some(cancel);
 
         fips_call_stop().await.unwrap();
 
         assert!(cancelled.await.is_ok());
+        assert!(CALL_SESSION.lock().await.is_none());
     }
 
     #[tokio::test]
