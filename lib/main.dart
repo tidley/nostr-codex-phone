@@ -23,6 +23,7 @@ import 'package:nostr_codex_phone/src/incoming_route.dart';
 import 'package:nostr_codex_phone/src/repo_target_merge.dart';
 import 'package:nostr_codex_phone/src/repo_choice.dart';
 import 'package:nostr_codex_phone/src/repo_target.dart';
+import 'package:nostr_codex_phone/src/realtime_audio.dart';
 import 'package:nostr_codex_phone/src/media_models.dart';
 import 'package:nostr_codex_phone/src/text_utils.dart';
 import 'package:nostr_codex_phone/src/tool_result_models.dart';
@@ -48,6 +49,8 @@ const _appVersion = '0.2.78+278';
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
 enum _PendingMessageCompletion { transcript, response }
+
+enum _CallPhase { idle, outgoing, incoming, connecting, active }
 
 enum _RelayProbeStrength { strong, fair, weak, offline }
 
@@ -472,6 +475,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _queryController = TextEditingController();
   final _queryFocusNode = FocusNode();
   final _recorder = AudioRecorder();
+  final _callRecorder = AudioRecorder();
+  final _realtimeAudio = RealtimeAudio.instance;
   final _tts = FlutterTts();
   final _messagesByTarget = <String, List<ConversationMessage>>{};
   final _seenIncomingEventIds = <String>{};
@@ -562,6 +567,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   bool _showTeamWorkspace = true;
   String? _workspaceInviteCode;
   String _workspaceMemberStatus = 'Owner';
+  _CallPhase _callPhase = _CallPhase.idle;
+  String? _callId;
+  String? _callPeerPubkey;
+  StreamSubscription<Uint8List>? _callCaptureSubscription;
+  bool _callAudioStarted = false;
+  Future<void> _callSendChain = Future.value();
   final WorkspaceState _workspace = WorkspaceState();
   final ValueNotifier<int> _workspaceRevision = ValueNotifier(0);
   String _workspaceDisplayName = '';
@@ -768,6 +779,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _polling = false;
     final recordingPath = _recordingPath;
     unawaited(_recorder.dispose());
+    unawaited(_stopCallAudio());
+    unawaited(_callRecorder.dispose());
+    unawaited(_realtimeAudio.dispose());
     if (recordingPath != null) {
       unawaited(_deleteTempAudio(recordingPath));
     }
@@ -791,6 +805,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _queryController.dispose();
     _queryFocusNode.dispose();
     _menuNotificationPulseController.dispose();
+    unawaited(fipsCallStop());
     unawaited(nostrStop());
     super.dispose();
   }
@@ -4232,6 +4247,34 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return true;
     }
 
+    if (message.kind == 'call_invite' ||
+        message.kind == 'call_answer' ||
+        message.kind == 'call_hangup') {
+      final callId = _callIdFromMessage(message);
+      if (callId == null) return true;
+      final sender = message.senderPubkeyHex.trim();
+      if (sender.isEmpty) return true;
+      if (message.kind == 'call_invite') {
+        if (_callPhase == _CallPhase.idle) {
+          setState(() {
+            _callPhase = _CallPhase.incoming;
+            _callId = callId;
+            _callPeerPubkey = sender;
+          });
+        } else {
+          unawaited(_sendCallControl('call_hangup', sender, callId));
+        }
+      } else if (_callId == callId && _callPeerPubkey == sender) {
+        if (message.kind == 'call_answer' &&
+            _callPhase == _CallPhase.outgoing) {
+          setState(() => _callPhase = _CallPhase.connecting);
+        } else if (message.kind == 'call_hangup') {
+          unawaited(_clearCall());
+        }
+      }
+      return true;
+    }
+
     if (message.kind == 'target_invite') {
       if (!_incomingFromActivePeer(message)) return false;
       final parsedTarget = _repoTargetFromInvitePayload(message.rawJson);
@@ -6644,6 +6687,12 @@ Return a concise catch-up summary of what happened after that point: completed w
         onOpenAttachment: _downloadAndOpenWorkspaceAttachment,
         onCreateInvite: _createWorkspaceInvite,
         onRedeemInvite: _redeemWorkspaceInvite,
+        callPhase: _callPhase,
+        callPeerPubkey: _callPeerPubkey,
+        onStartCall: _startWorkspaceCall,
+        onAcceptCall: _acceptWorkspaceCall,
+        onRejectCall: _rejectWorkspaceCall,
+        onHangupCall: _hangupWorkspaceCall,
       );
     }
 
@@ -6847,6 +6896,204 @@ Return a concise catch-up summary of what happened after that point: completed w
   Future<void> _sendWorkspaceRequest(Map<String, Object?> request) async {
     if (!await _ensureConnectedToParentService()) return;
     await nostrSendQuery(query: jsonEncode({'workspace_request': request}));
+  }
+
+  BridgeFipsCallConfig _callConfig() {
+    final secret = _secretKeyController.text.trim();
+    final relays = _inboxRelays(_relayLines());
+    if (secret.isEmpty || relays.isEmpty) {
+      throw StateError('Secret key and relays are required for calls');
+    }
+    return BridgeFipsCallConfig(
+      secretKey: secret,
+      relays: relays,
+      stunServers: const [],
+    );
+  }
+
+  String _newCallId() =>
+      DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+
+  String? _callIdFromMessage(BridgeIncomingMessage message) {
+    try {
+      final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
+      final value = decoded[message.kind] as Map<String, dynamic>?;
+      final callId = value?['call_id']?.toString().trim();
+      return callId == null || callId.isEmpty ? null : callId;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _sendCallControl(
+    String action,
+    String peerPubkey,
+    String callId,
+  ) => _sendWorkspaceRequest({
+    'action': action,
+    'recipient_pubkey': peerPubkey,
+    'call_id': callId,
+  });
+
+  Future<void> _startWorkspaceCall(String peerPubkey) async {
+    if (_callPhase != _CallPhase.idle || peerPubkey.trim().isEmpty) return;
+    final callId = _newCallId();
+    try {
+      setState(() {
+        _callPhase = _CallPhase.outgoing;
+        _callId = callId;
+        _callPeerPubkey = peerPubkey;
+      });
+      await _sendCallControl('call_invite', peerPubkey, callId);
+      if (!mounted || _callId != callId) return;
+      setState(() => _callPhase = _CallPhase.connecting);
+      final status = await fipsCallConnect(
+        config: _callConfig(),
+        peerNpub: peerPubkey,
+      );
+      if (mounted && _callId == callId) {
+        await _activateCallAudio(callId, status);
+      }
+    } catch (error) {
+      if (mounted && _callId == callId) {
+        _showError('Call failed: $error');
+        await _clearCall();
+      }
+    }
+  }
+
+  Future<void> _acceptWorkspaceCall() async {
+    final callId = _callId;
+    final peerPubkey = _callPeerPubkey;
+    if (_callPhase != _CallPhase.incoming ||
+        callId == null ||
+        peerPubkey == null) {
+      return;
+    }
+    try {
+      setState(() => _callPhase = _CallPhase.connecting);
+      await _sendCallControl('call_answer', peerPubkey, callId);
+      final status = await fipsCallAccept(config: _callConfig());
+      if (mounted && _callId == callId) {
+        await _activateCallAudio(callId, status);
+      }
+    } catch (error) {
+      if (mounted && _callId == callId) {
+        _showError('Could not answer call: $error');
+        await _clearCall();
+      }
+    }
+  }
+
+  Future<void> _rejectWorkspaceCall() => _hangupWorkspaceCall();
+
+  Future<void> _hangupWorkspaceCall() async {
+    final callId = _callId;
+    final peerPubkey = _callPeerPubkey;
+    if (callId != null && peerPubkey != null) {
+      try {
+        await _sendCallControl('call_hangup', peerPubkey, callId);
+      } catch (_) {
+        // Always end the local call even if relay delivery fails.
+      }
+    }
+    await _clearCall();
+  }
+
+  Future<void> _clearCall() async {
+    await _stopCallAudio();
+    try {
+      await fipsCallStop();
+    } catch (_) {}
+    if (mounted) {
+      setState(() {
+        _callPhase = _CallPhase.idle;
+        _callId = null;
+        _callPeerPubkey = null;
+      });
+    }
+  }
+
+  Future<void> _activateCallAudio(
+    String callId,
+    BridgeFipsCallStatus status,
+  ) async {
+    if (!Platform.isAndroid && !Platform.isLinux) {
+      throw UnsupportedError('Live call audio requires Android or Linux');
+    }
+    final maxDatagramBytes = status.maxDatagramBytes;
+    if (maxDatagramBytes == null || maxDatagramBytes < 9) {
+      throw StateError('Call peer does not support audio datagrams');
+    }
+    if (Platform.isAndroid && !await _callRecorder.hasPermission()) {
+      throw StateError('Microphone permission is required for calls');
+    }
+    _callCaptureSubscription = _realtimeAudio.frames.listen(
+      _sendCallAudioFrames,
+      onError: (Object error) => _showError('Call microphone failed: $error'),
+    );
+    try {
+      await _realtimeAudio.startCapture();
+    } catch (_) {
+      await _callCaptureSubscription?.cancel();
+      _callCaptureSubscription = null;
+      rethrow;
+    }
+    if (!mounted || _callId != callId) {
+      await _realtimeAudio.stopCapture();
+      await _callCaptureSubscription?.cancel();
+      _callCaptureSubscription = null;
+      return;
+    }
+    setState(() {
+      _callPhase = _CallPhase.active;
+      _callAudioStarted = true;
+    });
+    unawaited(_receiveCallAudio(callId));
+  }
+
+  void _sendCallAudioFrames(Uint8List pcm) {
+    if (_callPhase != _CallPhase.active) return;
+    _callSendChain = _callSendChain.then((_) => _sendCallFrame(pcm));
+  }
+
+  Future<void> _sendCallFrame(Uint8List pcm) async {
+    try {
+      await fipsCallSendRealtimePcm(pcm: pcm);
+    } catch (_) {
+      // The receive loop reports connection failure and clears the call.
+    }
+  }
+
+  Future<void> _receiveCallAudio(String callId) async {
+    while (mounted && _callPhase == _CallPhase.active && _callId == callId) {
+      try {
+        final pcm = await fipsCallReceiveRealtimePcm(
+          timeoutMs: BigInt.from(10),
+        );
+        if (pcm != null && pcm.isNotEmpty && _callId == callId) {
+          unawaited(_realtimeAudio.playPcm(pcm));
+        }
+      } catch (error) {
+        if (mounted && _callId == callId) {
+          _showError('Call audio receive failed: $error');
+          await _clearCall();
+        }
+        return;
+      }
+    }
+  }
+
+  Future<void> _stopCallAudio() async {
+    await _callCaptureSubscription?.cancel();
+    _callCaptureSubscription = null;
+    await _callSendChain;
+    _callSendChain = Future.value();
+    if (_callAudioStarted) {
+      _callAudioStarted = false;
+      await _realtimeAudio.stopCapture();
+      await _realtimeAudio.stopPlayback();
+    }
   }
 
   Future<List<_OpenCodeModelChoice>> _loadOpenCodeModels() async {

@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1634567451;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -294836103;
 
 // Section: executor
 
@@ -116,6 +116,342 @@ fn wire__crate__api__nostr__blossom_upload_audio_impl(
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
                         let output_ok = crate::api::nostr::blossom_upload_audio(api_config).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__nostr__fips_call_accept_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fips_call_accept",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_config =
+                <crate::api::nostr::BridgeFipsCallConfig>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::nostr::fips_call_accept(api_config).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__nostr__fips_call_connect_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fips_call_connect",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_config =
+                <crate::api::nostr::BridgeFipsCallConfig>::sse_decode(&mut deserializer);
+            let api_peer_npub = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::nostr::fips_call_connect(api_config, api_peer_npub).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__nostr__fips_call_receive_datagram_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fips_call_receive_datagram",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_timeout_ms = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::nostr::fips_call_receive_datagram(api_timeout_ms).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__nostr__fips_call_receive_realtime_audio_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fips_call_receive_realtime_audio",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_timeout_ms = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::nostr::fips_call_receive_realtime_audio(api_timeout_ms)
+                                .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__nostr__fips_call_receive_realtime_pcm_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fips_call_receive_realtime_pcm",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_timeout_ms = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::nostr::fips_call_receive_realtime_pcm(api_timeout_ms)
+                                .await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__nostr__fips_call_send_datagram_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fips_call_send_datagram",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_payload = <Vec<u8>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::nostr::fips_call_send_datagram(api_payload).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__nostr__fips_call_send_realtime_audio_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fips_call_send_realtime_audio",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_packet =
+                <crate::api::nostr::BridgeRealtimeAudioPacket>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::nostr::fips_call_send_realtime_audio(api_packet).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__nostr__fips_call_send_realtime_pcm_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fips_call_send_realtime_pcm",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_pcm = <Vec<u8>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::nostr::fips_call_send_realtime_pcm(api_pcm).await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__nostr__fips_call_stop_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fips_call_stop",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::nostr::fips_call_stop().await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -717,6 +1053,32 @@ impl SseDecode for crate::api::nostr::BridgeDownloadedAttachment {
     }
 }
 
+impl SseDecode for crate::api::nostr::BridgeFipsCallConfig {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_secretKey = <String>::sse_decode(deserializer);
+        let mut var_relays = <Vec<String>>::sse_decode(deserializer);
+        let mut var_stunServers = <Vec<String>>::sse_decode(deserializer);
+        return crate::api::nostr::BridgeFipsCallConfig {
+            secret_key: var_secretKey,
+            relays: var_relays,
+            stun_servers: var_stunServers,
+        };
+    }
+}
+
+impl SseDecode for crate::api::nostr::BridgeFipsCallStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_state = <String>::sse_decode(deserializer);
+        let mut var_maxDatagramBytes = <Option<u32>>::sse_decode(deserializer);
+        return crate::api::nostr::BridgeFipsCallStatus {
+            state: var_state,
+            max_datagram_bytes: var_maxDatagramBytes,
+        };
+    }
+}
+
 impl SseDecode for crate::api::nostr::BridgeIncomingMessage {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -763,6 +1125,22 @@ impl SseDecode for crate::api::nostr::BridgeNostrConfig {
             peer_pubkey: var_peerPubkey,
             receive_pubkeys: var_receivePubkeys,
             relays: var_relays,
+        };
+    }
+}
+
+impl SseDecode for crate::api::nostr::BridgeRealtimeAudioPacket {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_sequence = <u16>::sse_decode(deserializer);
+        let mut var_timestamp48Khz = <u32>::sse_decode(deserializer);
+        let mut var_flags = <u8>::sse_decode(deserializer);
+        let mut var_opusPayload = <Vec<u8>>::sse_decode(deserializer);
+        return crate::api::nostr::BridgeRealtimeAudioPacket {
+            sequence: var_sequence,
+            timestamp_48khz: var_timestamp48Khz,
+            flags: var_flags,
+            opus_payload: var_opusPayload,
         };
     }
 }
@@ -858,6 +1236,48 @@ impl SseDecode for Option<crate::api::nostr::BridgeIncomingMessage> {
     }
 }
 
+impl SseDecode for Option<crate::api::nostr::BridgeRealtimeAudioPacket> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::nostr::BridgeRealtimeAudioPacket>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<u32>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<Vec<u8>>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for u16 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_u16::<NativeEndian>().unwrap()
+    }
+}
+
 impl SseDecode for u32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -907,27 +1327,63 @@ fn pde_ffi_dispatcher_primary_impl(
             data_len,
         ),
         2 => wire__crate__api__nostr__blossom_upload_audio_impl(port, ptr, rust_vec_len, data_len),
-        3 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__nostr__nostr_fetch_recent_messages_impl(
+        3 => wire__crate__api__nostr__fips_call_accept_impl(port, ptr, rust_vec_len, data_len),
+        4 => wire__crate__api__nostr__fips_call_connect_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__nostr__fips_call_receive_datagram_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        7 => wire__crate__api__nostr__nostr_is_started_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__nostr__nostr_next_message_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__nostr__nostr_send_audio_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__nostr__nostr_send_ephemeral_query_impl(
+        6 => wire__crate__api__nostr__fips_call_receive_realtime_audio_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        12 => wire__crate__api__nostr__nostr_send_error_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__nostr__nostr_send_query_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__nostr__nostr_send_response_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__nostr__nostr_start_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__nostr__nostr_stop_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__nostr__fips_call_receive_realtime_pcm_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        8 => {
+            wire__crate__api__nostr__fips_call_send_datagram_impl(port, ptr, rust_vec_len, data_len)
+        }
+        9 => wire__crate__api__nostr__fips_call_send_realtime_audio_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        10 => wire__crate__api__nostr__fips_call_send_realtime_pcm_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        11 => wire__crate__api__nostr__fips_call_stop_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__nostr__nostr_fetch_recent_messages_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        16 => wire__crate__api__nostr__nostr_is_started_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__nostr__nostr_next_message_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__nostr__nostr_send_audio_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__nostr__nostr_send_ephemeral_query_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        21 => wire__crate__api__nostr__nostr_send_error_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__nostr__nostr_send_query_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__nostr__nostr_send_response_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__nostr__nostr_start_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__nostr__nostr_stop_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -940,9 +1396,9 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        4 => wire__crate__api__nostr__nostr_default_relays_impl(ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__nostr__nostr_generate_secret_key_impl(ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__nostr__nostr_public_key_impl(ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__nostr__nostr_default_relays_impl(ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__nostr__nostr_generate_secret_key_impl(ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__nostr__nostr_public_key_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1046,6 +1502,49 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::nostr::BridgeDownloadedAttach
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::nostr::BridgeFipsCallConfig {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.secret_key.into_into_dart().into_dart(),
+            self.relays.into_into_dart().into_dart(),
+            self.stun_servers.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::nostr::BridgeFipsCallConfig
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::nostr::BridgeFipsCallConfig>
+    for crate::api::nostr::BridgeFipsCallConfig
+{
+    fn into_into_dart(self) -> crate::api::nostr::BridgeFipsCallConfig {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::nostr::BridgeFipsCallStatus {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.state.into_into_dart().into_dart(),
+            self.max_datagram_bytes.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::nostr::BridgeFipsCallStatus
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::nostr::BridgeFipsCallStatus>
+    for crate::api::nostr::BridgeFipsCallStatus
+{
+    fn into_into_dart(self) -> crate::api::nostr::BridgeFipsCallStatus {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::nostr::BridgeIncomingMessage {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -1112,6 +1611,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::nostr::BridgeNostrConfig>
     for crate::api::nostr::BridgeNostrConfig
 {
     fn into_into_dart(self) -> crate::api::nostr::BridgeNostrConfig {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::nostr::BridgeRealtimeAudioPacket {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.sequence.into_into_dart().into_dart(),
+            self.timestamp_48khz.into_into_dart().into_dart(),
+            self.flags.into_into_dart().into_dart(),
+            self.opus_payload.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::nostr::BridgeRealtimeAudioPacket
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::nostr::BridgeRealtimeAudioPacket>
+    for crate::api::nostr::BridgeRealtimeAudioPacket
+{
+    fn into_into_dart(self) -> crate::api::nostr::BridgeRealtimeAudioPacket {
         self
     }
 }
@@ -1204,6 +1726,23 @@ impl SseEncode for crate::api::nostr::BridgeDownloadedAttachment {
     }
 }
 
+impl SseEncode for crate::api::nostr::BridgeFipsCallConfig {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.secret_key, serializer);
+        <Vec<String>>::sse_encode(self.relays, serializer);
+        <Vec<String>>::sse_encode(self.stun_servers, serializer);
+    }
+}
+
+impl SseEncode for crate::api::nostr::BridgeFipsCallStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.state, serializer);
+        <Option<u32>>::sse_encode(self.max_datagram_bytes, serializer);
+    }
+}
+
 impl SseEncode for crate::api::nostr::BridgeIncomingMessage {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1232,6 +1771,16 @@ impl SseEncode for crate::api::nostr::BridgeNostrConfig {
         <String>::sse_encode(self.peer_pubkey, serializer);
         <Vec<String>>::sse_encode(self.receive_pubkeys, serializer);
         <Vec<String>>::sse_encode(self.relays, serializer);
+    }
+}
+
+impl SseEncode for crate::api::nostr::BridgeRealtimeAudioPacket {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u16>::sse_encode(self.sequence, serializer);
+        <u32>::sse_encode(self.timestamp_48khz, serializer);
+        <u8>::sse_encode(self.flags, serializer);
+        <Vec<u8>>::sse_encode(self.opus_payload, serializer);
     }
 }
 
@@ -1302,6 +1851,43 @@ impl SseEncode for Option<crate::api::nostr::BridgeIncomingMessage> {
         if let Some(value) = self {
             <crate::api::nostr::BridgeIncomingMessage>::sse_encode(value, serializer);
         }
+    }
+}
+
+impl SseEncode for Option<crate::api::nostr::BridgeRealtimeAudioPacket> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::nostr::BridgeRealtimeAudioPacket>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <u32>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <Vec<u8>>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for u16 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_u16::<NativeEndian>(self).unwrap();
     }
 }
 

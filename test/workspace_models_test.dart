@@ -419,4 +419,136 @@ void main() {
       );
     },
   );
+
+  test(
+    'agent typing has an identity, matches both DM participants, and clears',
+    () {
+      final state = WorkspaceState()
+        ..apply({
+          'workspace_update': {
+            'action': 'typing',
+            'typing': {
+              'sender_pubkey': 'agent:rev',
+              'agent_id': 'rev',
+              'agent_name': 'Rev',
+              'member_pubkey': 'alice',
+              'peer_pubkey': 'bob',
+              'expires_at': 200,
+            },
+          },
+        });
+
+      for (final participants in [('alice', 'bob'), ('bob', 'alice')]) {
+        final active = state.activeTyping(
+          channelId: null,
+          ownPubkey: participants.$1,
+          peerPubkey: participants.$2,
+          nowSeconds: 199,
+        );
+        expect(active.single.agentId, 'rev');
+        expect(active.single.agentName, 'Rev');
+      }
+
+      state.apply({
+        'workspace_update': {
+          'action': 'typing',
+          'typing': {
+            'sender_pubkey': 'agent:rev',
+            'agent_id': 'rev',
+            'agent_name': 'Rev',
+            'member_pubkey': 'alice',
+            'peer_pubkey': 'bob',
+            'expires_at': 0,
+          },
+        },
+      });
+      expect(
+        state.activeTyping(
+          channelId: null,
+          ownPubkey: 'alice',
+          peerPubkey: 'bob',
+          nowSeconds: 199,
+        ),
+        isEmpty,
+      );
+    },
+  );
+
+  test('a new message immediately clears matching human typing', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'typing',
+          'typing': {
+            'sender_pubkey': 'alice',
+            'channel_id': 'engineering',
+            'expires_at': 200,
+          },
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'message_created',
+          'messages': [
+            {
+              'id': 'message-1',
+              'sender_pubkey': 'alice',
+              'channel_id': 'engineering',
+              'body': 'sent',
+              'created_at': 100,
+            },
+          ],
+        },
+      });
+
+    expect(
+      state.activeTyping(
+        channelId: 'engineering',
+        ownPubkey: 'you',
+        peerPubkey: null,
+        nowSeconds: 100,
+      ),
+      isEmpty,
+    );
+  });
+
+  test('an agent response immediately clears its typing indicator', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'typing',
+          'typing': {
+            'sender_pubkey': 'agent:rev',
+            'agent_id': 'rev',
+            'member_pubkey': 'alice',
+            'peer_pubkey': 'bob',
+            'expires_at': 200,
+          },
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'message_created',
+          'messages': [
+            {
+              'id': 'message-1',
+              'sender_pubkey': 'agent:rev',
+              'recipient_pubkey': 'bob',
+              'body': 'response',
+              'created_at': 100,
+            },
+          ],
+        },
+      });
+
+    expect(
+      state.activeTyping(
+        channelId: null,
+        ownPubkey: 'alice',
+        peerPubkey: 'bob',
+        nowSeconds: 100,
+      ),
+      isEmpty,
+    );
+  });
 }

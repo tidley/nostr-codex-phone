@@ -76,6 +76,8 @@ abstract class CargoKitBuildTask extends DefaultTask {
             environment "CARGOKIT_OUTPUT_DIR", outputDir
             environment "CARGOKIT_NDK_VERSION", ndkVersion
             environment "CARGOKIT_SDK_DIR", sdkDirectory
+            environment "CMAKE_TOOLCHAIN_FILE", manifestDir.resolve("android-cmake").resolve("android.toolchain.cmake")
+            environment "CARGOKIT_NDK_TOOLCHAIN_FILE", "${sdkDirectory}/ndk/${ndkVersion}/build/cmake/android.toolchain.cmake"
             environment "CARGOKIT_COMPILE_SDK_VERSION", compileSdkVersion
             environment "CARGOKIT_MIN_SDK_VERSION", minSdkVersion
             environment "CARGOKIT_TARGET_PLATFORMS", targetPlatforms.join(",")

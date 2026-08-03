@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1634567451;
+  int get rustContentHash => -294836103;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -85,6 +85,37 @@ abstract class RustLibApi extends BaseApi {
   Future<BridgeAudioReference> crateApiNostrBlossomUploadAudio({
     required BridgeBlossomUploadConfig config,
   });
+
+  Future<BridgeFipsCallStatus> crateApiNostrFipsCallAccept({
+    required BridgeFipsCallConfig config,
+  });
+
+  Future<BridgeFipsCallStatus> crateApiNostrFipsCallConnect({
+    required BridgeFipsCallConfig config,
+    required String peerNpub,
+  });
+
+  Future<Uint8List?> crateApiNostrFipsCallReceiveDatagram({
+    required BigInt timeoutMs,
+  });
+
+  Future<BridgeRealtimeAudioPacket?> crateApiNostrFipsCallReceiveRealtimeAudio({
+    required BigInt timeoutMs,
+  });
+
+  Future<Uint8List?> crateApiNostrFipsCallReceiveRealtimePcm({
+    required BigInt timeoutMs,
+  });
+
+  Future<void> crateApiNostrFipsCallSendDatagram({required List<int> payload});
+
+  Future<void> crateApiNostrFipsCallSendRealtimeAudio({
+    required BridgeRealtimeAudioPacket packet,
+  });
+
+  Future<void> crateApiNostrFipsCallSendRealtimePcm({required List<int> pcm});
+
+  Future<void> crateApiNostrFipsCallStop();
 
   Future<void> crateApiSimpleInitApp();
 
@@ -206,6 +237,296 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<BridgeFipsCallStatus> crateApiNostrFipsCallAccept({
+    required BridgeFipsCallConfig config,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_fips_call_config(config, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 3,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_fips_call_status,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsCallAcceptConstMeta,
+        argValues: [config],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsCallAcceptConstMeta =>
+      const TaskConstMeta(debugName: "fips_call_accept", argNames: ["config"]);
+
+  @override
+  Future<BridgeFipsCallStatus> crateApiNostrFipsCallConnect({
+    required BridgeFipsCallConfig config,
+    required String peerNpub,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_fips_call_config(config, serializer);
+          sse_encode_String(peerNpub, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_fips_call_status,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsCallConnectConstMeta,
+        argValues: [config, peerNpub],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsCallConnectConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_call_connect",
+        argNames: ["config", "peerNpub"],
+      );
+
+  @override
+  Future<Uint8List?> crateApiNostrFipsCallReceiveDatagram({
+    required BigInt timeoutMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_64(timeoutMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 5,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsCallReceiveDatagramConstMeta,
+        argValues: [timeoutMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsCallReceiveDatagramConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_call_receive_datagram",
+        argNames: ["timeoutMs"],
+      );
+
+  @override
+  Future<BridgeRealtimeAudioPacket?> crateApiNostrFipsCallReceiveRealtimeAudio({
+    required BigInt timeoutMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_64(timeoutMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 6,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_opt_box_autoadd_bridge_realtime_audio_packet,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsCallReceiveRealtimeAudioConstMeta,
+        argValues: [timeoutMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsCallReceiveRealtimeAudioConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_call_receive_realtime_audio",
+        argNames: ["timeoutMs"],
+      );
+
+  @override
+  Future<Uint8List?> crateApiNostrFipsCallReceiveRealtimePcm({
+    required BigInt timeoutMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_64(timeoutMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 7,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsCallReceiveRealtimePcmConstMeta,
+        argValues: [timeoutMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsCallReceiveRealtimePcmConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_call_receive_realtime_pcm",
+        argNames: ["timeoutMs"],
+      );
+
+  @override
+  Future<void> crateApiNostrFipsCallSendDatagram({required List<int> payload}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_prim_u_8_loose(payload, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsCallSendDatagramConstMeta,
+        argValues: [payload],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsCallSendDatagramConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_call_send_datagram",
+        argNames: ["payload"],
+      );
+
+  @override
+  Future<void> crateApiNostrFipsCallSendRealtimeAudio({
+    required BridgeRealtimeAudioPacket packet,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_realtime_audio_packet(
+            packet,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 9,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsCallSendRealtimeAudioConstMeta,
+        argValues: [packet],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsCallSendRealtimeAudioConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_call_send_realtime_audio",
+        argNames: ["packet"],
+      );
+
+  @override
+  Future<void> crateApiNostrFipsCallSendRealtimePcm({required List<int> pcm}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_prim_u_8_loose(pcm, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 10,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsCallSendRealtimePcmConstMeta,
+        argValues: [pcm],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsCallSendRealtimePcmConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_call_send_realtime_pcm",
+        argNames: ["pcm"],
+      );
+
+  @override
+  Future<void> crateApiNostrFipsCallStop() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 11,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsCallStopConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsCallStopConstMeta =>
+      const TaskConstMeta(debugName: "fips_call_stop", argNames: []);
+
+  @override
   Future<void> crateApiSimpleInitApp() {
     return handler.executeNormal(
       NormalTask(
@@ -214,7 +535,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 12,
             port: port_,
           );
         },
@@ -238,7 +559,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_String,
@@ -266,7 +587,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 14,
             port: port_,
           );
         },
@@ -293,7 +614,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 15)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bridge_key_pair,
@@ -318,7 +639,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 16,
             port: port_,
           );
         },
@@ -348,7 +669,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 17,
             port: port_,
           );
         },
@@ -376,7 +697,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(secretKey, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bridge_key_pair,
@@ -407,7 +728,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 19,
             port: port_,
           );
         },
@@ -439,7 +760,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 20,
             port: port_,
           );
         },
@@ -470,7 +791,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 21,
             port: port_,
           );
         },
@@ -498,7 +819,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 22,
             port: port_,
           );
         },
@@ -526,7 +847,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 23,
             port: port_,
           );
         },
@@ -559,7 +880,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 24,
             port: port_,
           );
         },
@@ -586,7 +907,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 25,
             port: port_,
           );
         },
@@ -647,6 +968,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeFipsCallConfig dco_decode_box_autoadd_bridge_fips_call_config(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_bridge_fips_call_config(raw);
+  }
+
+  @protected
   BridgeIncomingMessage dco_decode_box_autoadd_bridge_incoming_message(
     dynamic raw,
   ) {
@@ -658,6 +987,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   BridgeNostrConfig dco_decode_box_autoadd_bridge_nostr_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_bridge_nostr_config(raw);
+  }
+
+  @protected
+  BridgeRealtimeAudioPacket dco_decode_box_autoadd_bridge_realtime_audio_packet(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_bridge_realtime_audio_packet(raw);
+  }
+
+  @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
   }
 
   @protected
@@ -725,6 +1068,31 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeFipsCallConfig dco_decode_bridge_fips_call_config(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return BridgeFipsCallConfig(
+      secretKey: dco_decode_String(arr[0]),
+      relays: dco_decode_list_String(arr[1]),
+      stunServers: dco_decode_list_String(arr[2]),
+    );
+  }
+
+  @protected
+  BridgeFipsCallStatus dco_decode_bridge_fips_call_status(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return BridgeFipsCallStatus(
+      state: dco_decode_String(arr[0]),
+      maxDatagramBytes: dco_decode_opt_box_autoadd_u_32(arr[1]),
+    );
+  }
+
+  @protected
   BridgeIncomingMessage dco_decode_bridge_incoming_message(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -768,6 +1136,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeRealtimeAudioPacket dco_decode_bridge_realtime_audio_packet(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return BridgeRealtimeAudioPacket(
+      sequence: dco_decode_u_16(arr[0]),
+      timestamp48Khz: dco_decode_u_32(arr[1]),
+      flags: dco_decode_u_8(arr[2]),
+      opusPayload: dco_decode_list_prim_u_8_strict(arr[3]),
+    );
+  }
+
+  @protected
   BridgeSessionStatus dco_decode_bridge_session_status(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -795,6 +1179,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return (raw as List<dynamic>)
         .map(dco_decode_bridge_incoming_message)
         .toList();
+  }
+
+  @protected
+  List<int> dco_decode_list_prim_u_8_loose(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as List<int>;
   }
 
   @protected
@@ -827,6 +1217,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return raw == null
         ? null
         : dco_decode_box_autoadd_bridge_incoming_message(raw);
+  }
+
+  @protected
+  BridgeRealtimeAudioPacket?
+  dco_decode_opt_box_autoadd_bridge_realtime_audio_packet(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_bridge_realtime_audio_packet(raw);
+  }
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_u_32(raw);
+  }
+
+  @protected
+  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_list_prim_u_8_strict(raw);
+  }
+
+  @protected
+  int dco_decode_u_16(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
   }
 
   @protected
@@ -898,6 +1315,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeFipsCallConfig sse_decode_box_autoadd_bridge_fips_call_config(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_bridge_fips_call_config(deserializer));
+  }
+
+  @protected
   BridgeIncomingMessage sse_decode_box_autoadd_bridge_incoming_message(
     SseDeserializer deserializer,
   ) {
@@ -911,6 +1336,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_bridge_nostr_config(deserializer));
+  }
+
+  @protected
+  BridgeRealtimeAudioPacket sse_decode_box_autoadd_bridge_realtime_audio_packet(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_bridge_realtime_audio_packet(deserializer));
+  }
+
+  @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_u_32(deserializer));
   }
 
   @protected
@@ -992,6 +1431,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeFipsCallConfig sse_decode_bridge_fips_call_config(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_secretKey = sse_decode_String(deserializer);
+    var var_relays = sse_decode_list_String(deserializer);
+    var var_stunServers = sse_decode_list_String(deserializer);
+    return BridgeFipsCallConfig(
+      secretKey: var_secretKey,
+      relays: var_relays,
+      stunServers: var_stunServers,
+    );
+  }
+
+  @protected
+  BridgeFipsCallStatus sse_decode_bridge_fips_call_status(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_state = sse_decode_String(deserializer);
+    var var_maxDatagramBytes = sse_decode_opt_box_autoadd_u_32(deserializer);
+    return BridgeFipsCallStatus(
+      state: var_state,
+      maxDatagramBytes: var_maxDatagramBytes,
+    );
+  }
+
+  @protected
   BridgeIncomingMessage sse_decode_bridge_incoming_message(
     SseDeserializer deserializer,
   ) {
@@ -1043,6 +1510,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  BridgeRealtimeAudioPacket sse_decode_bridge_realtime_audio_packet(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_sequence = sse_decode_u_16(deserializer);
+    var var_timestamp48Khz = sse_decode_u_32(deserializer);
+    var var_flags = sse_decode_u_8(deserializer);
+    var var_opusPayload = sse_decode_list_prim_u_8_strict(deserializer);
+    return BridgeRealtimeAudioPacket(
+      sequence: var_sequence,
+      timestamp48Khz: var_timestamp48Khz,
+      flags: var_flags,
+      opusPayload: var_opusPayload,
+    );
+  }
+
+  @protected
   BridgeSessionStatus sse_decode_bridge_session_status(
     SseDeserializer deserializer,
   ) {
@@ -1083,6 +1567,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ans_.add(sse_decode_bridge_incoming_message(deserializer));
     }
     return ans_;
+  }
+
+  @protected
+  List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var len_ = sse_decode_i_32(deserializer);
+    return deserializer.buffer.getUint8List(len_);
   }
 
   @protected
@@ -1127,6 +1618,50 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     } else {
       return null;
     }
+  }
+
+  @protected
+  BridgeRealtimeAudioPacket?
+  sse_decode_opt_box_autoadd_bridge_realtime_audio_packet(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_bridge_realtime_audio_packet(
+        deserializer,
+      ));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_u_32(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_list_prim_u_8_strict(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  int sse_decode_u_16(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint16();
   }
 
   @protected
@@ -1207,6 +1742,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_bridge_fips_call_config(
+    BridgeFipsCallConfig self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bridge_fips_call_config(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_bridge_incoming_message(
     BridgeIncomingMessage self,
     SseSerializer serializer,
@@ -1222,6 +1766,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_bridge_nostr_config(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_bridge_realtime_audio_packet(
+    BridgeRealtimeAudioPacket self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bridge_realtime_audio_packet(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_32(self, serializer);
   }
 
   @protected
@@ -1280,6 +1839,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_bridge_fips_call_config(
+    BridgeFipsCallConfig self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.secretKey, serializer);
+    sse_encode_list_String(self.relays, serializer);
+    sse_encode_list_String(self.stunServers, serializer);
+  }
+
+  @protected
+  void sse_encode_bridge_fips_call_status(
+    BridgeFipsCallStatus self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.state, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.maxDatagramBytes, serializer);
+  }
+
+  @protected
   void sse_encode_bridge_incoming_message(
     BridgeIncomingMessage self,
     SseSerializer serializer,
@@ -1317,6 +1897,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_bridge_realtime_audio_packet(
+    BridgeRealtimeAudioPacket self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_16(self.sequence, serializer);
+    sse_encode_u_32(self.timestamp48Khz, serializer);
+    sse_encode_u_8(self.flags, serializer);
+    sse_encode_list_prim_u_8_strict(self.opusPayload, serializer);
+  }
+
+  @protected
   void sse_encode_bridge_session_status(
     BridgeSessionStatus self,
     SseSerializer serializer,
@@ -1347,6 +1939,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     for (final item in self) {
       sse_encode_bridge_incoming_message(item, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_list_prim_u_8_loose(
+    List<int> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    serializer.buffer.putUint8List(
+      self is Uint8List ? self : Uint8List.fromList(self),
+    );
   }
 
   @protected
@@ -1393,6 +1997,48 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     if (self != null) {
       sse_encode_box_autoadd_bridge_incoming_message(self, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_bridge_realtime_audio_packet(
+    BridgeRealtimeAudioPacket? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_bridge_realtime_audio_packet(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_u_32(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_list_prim_u_8_strict(
+    Uint8List? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_list_prim_u_8_strict(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_u_16(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint16(self);
   }
 
   @protected

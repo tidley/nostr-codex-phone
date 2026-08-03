@@ -1013,9 +1013,25 @@ fn find_opencode_text(value: &Value) -> Option<String> {
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
+                .filter(|text| !is_opencode_workspace_tool_payload(text))
                 .map(ToOwned::to_owned)
         })
         .flatten()
+}
+
+// OpenCode emits some tool results as text events. Do not present its raw
+// workspace-discovery result as the assistant's reply.
+fn is_opencode_workspace_tool_payload(text: &str) -> bool {
+    let Ok(Value::Object(payload)) = serde_json::from_str(text) else {
+        return false;
+    };
+    if payload.len() != 1 {
+        return false;
+    }
+    payload
+        .get("workspaces")
+        .and_then(Value::as_array)
+        .is_some_and(|workspaces| workspaces.iter().all(Value::is_string))
 }
 
 // OpenCode's `run --format json` emits one JSON object per line. Forwarding these
@@ -1526,6 +1542,17 @@ mod tests {
 
         assert_eq!(parsed.session_id.as_deref(), Some("ses_Abc123"));
         assert_eq!(parsed.response, "Done.");
+    }
+
+    #[test]
+    fn ignores_workspace_tool_payloads_in_opencode_text_events() {
+        let parsed = parse_opencode_json_output(
+            r#"{"type":"text","text":"{\"workspaces\":[\"phone\",\"fips\"]}"}
+{"type":"text","text":"I found the FIPS workspace."}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.response, "I found the FIPS workspace.");
     }
 
     #[test]

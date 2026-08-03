@@ -48,6 +48,7 @@ use rust_lib_nostr_codex_phone::workspace::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
+use tokio::time::{interval, MissedTickBehavior};
 use tracing::{error, info, warn};
 
 const WORKER_STATE_DIR: &str = ".nostr-codex";
@@ -1039,7 +1040,7 @@ async fn process_workspace_request(
 ) -> Result<()> {
     let update = match request.action.as_str() {
         "typing" => {
-            let expires_in = request.expires_in_seconds.unwrap_or(6).clamp(1, 30);
+            let expires_in = request.expires_in_seconds.unwrap_or(4).clamp(1, 30);
             let expires_at = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1054,8 +1055,12 @@ async fn process_workspace_request(
                 conversation_agents: vec![],
                 typing: Some(WorkspaceTypingPayload {
                     sender_pubkey: sender.to_string(),
+                    agent_id: None,
+                    agent_name: None,
                     channel_id: request.channel_id.clone(),
                     recipient_pubkey: request.recipient_pubkey.clone(),
+                    member_pubkey: None,
+                    peer_pubkey: None,
                     expires_at,
                 }),
             };
@@ -1257,6 +1262,21 @@ async fn process_workspace_request(
                 &request.body.unwrap_or_default(),
             )
             .await?;
+            return Ok(());
+        }
+        "call_invite" | "call_answer" | "call_hangup" => {
+            let call_id = request.call_id.as_deref().unwrap_or_default();
+            let wire = match request.action.as_str() {
+                "call_invite" => WireMessage::call_invite(call_id),
+                "call_answer" => WireMessage::call_answer(call_id),
+                _ => WireMessage::call_hangup(call_id),
+            };
+            messenger
+                .send_wire_to_pubkey(
+                    request.recipient_pubkey.as_deref().unwrap_or_default(),
+                    wire,
+                )
+                .await?;
             return Ok(());
         }
         "toggle_reaction" => {
@@ -1477,6 +1497,121 @@ async fn broadcast_workspace_update(
             .await?;
     }
     Ok(())
+}
+
+async fn send_agent_typing(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+    agent: &WorkspaceAgent,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+    expires_in: Option<Duration>,
+) -> Result<()> {
+    let expires_at = expires_in
+        .map(|duration| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+                + duration.as_secs() as i64
+        })
+        .unwrap_or(0);
+    let update = WorkspaceUpdate {
+        action: "typing".to_string(),
+        channels: vec![],
+        members: vec![],
+        messages: vec![],
+        agents: vec![],
+        conversation_agents: vec![],
+        typing: Some(WorkspaceTypingPayload {
+            sender_pubkey: format!("agent:{}", agent.id),
+            agent_id: Some(agent.id.clone()),
+            agent_name: Some(agent.name.clone()),
+            channel_id: channel_id.map(str::to_string),
+            recipient_pubkey: None,
+            member_pubkey: member.map(str::to_string),
+            peer_pubkey: peer.map(str::to_string),
+            expires_at,
+        }),
+    };
+    let recipients: Vec<String> = if channel_id.is_some() {
+        workspace
+            .members()?
+            .into_iter()
+            .map(|member| member.pubkey)
+            .collect()
+    } else {
+        [member, peer]
+            .into_iter()
+            .flatten()
+            .map(str::to_string)
+            .collect()
+    };
+    let duration = expires_in.unwrap_or(Duration::from_secs(1));
+    for recipient in recipients {
+        messenger
+            .send_ephemeral_wire_to(
+                PublicKey::parse(&recipient)?,
+                WireMessage::workspace_update(update.clone()),
+                duration,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn run_workspace_agent_with_typing(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+    agent: &WorkspaceAgent,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+    body: &str,
+    config: &CodexConfig,
+    session_id: &str,
+) -> Result<CodexRunResult> {
+    const TYPING_LEASE: Duration = Duration::from_secs(6);
+    if let Err(err) = send_agent_typing(
+        workspace,
+        messenger,
+        agent,
+        channel_id,
+        member,
+        peer,
+        Some(TYPING_LEASE),
+    )
+    .await
+    {
+        warn!(agent = %agent.id, "failed to send agent typing state: {err:#}");
+    }
+    let mut renew = interval(Duration::from_secs(3));
+    renew.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    renew.tick().await;
+    let mut run = Box::pin(run_codex_session_with_cancel_and_events(
+        body,
+        config,
+        Some(session_id),
+        None,
+        None,
+    ));
+    let result = loop {
+        tokio::select! {
+            result = &mut run => break result,
+            _ = renew.tick() => {
+                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, Some(TYPING_LEASE)).await {
+                    warn!(agent = %agent.id, "failed to refresh agent typing state: {err:#}");
+                }
+            }
+        }
+    };
+    if let Err(err) =
+        send_agent_typing(workspace, messenger, agent, channel_id, member, peer, None).await
+    {
+        warn!(agent = %agent.id, "failed to clear agent typing state: {err:#}");
+    }
+    result
 }
 
 fn initialize_workspace_members(
@@ -1730,12 +1865,16 @@ async fn route_conversation_agents(
                 continue;
             }
         };
-        let response = match run_codex_session_with_cancel_and_events(
+        let response = match run_workspace_agent_with_typing(
+            workspace,
+            messenger,
+            &agent,
+            channel_id,
+            member,
+            peer,
             body,
             &agent_config,
-            Some(session_id),
-            None,
-            None,
+            session_id,
         )
         .await
         {
@@ -1788,12 +1927,16 @@ async fn route_conversation_agents(
                     },
                 )
                 .await?;
-                match run_codex_session_with_cancel_and_events(
+                match run_workspace_agent_with_typing(
+                    workspace,
+                    messenger,
+                    &agent,
+                    channel_id,
+                    member,
+                    peer,
                     body,
                     &agent_config,
-                    Some(&new_session_id),
-                    None,
-                    None,
+                    &new_session_id,
                 )
                 .await
                 {

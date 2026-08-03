@@ -43,12 +43,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  BridgeFipsCallConfig dco_decode_box_autoadd_bridge_fips_call_config(
+    dynamic raw,
+  );
+
+  @protected
   BridgeIncomingMessage dco_decode_box_autoadd_bridge_incoming_message(
     dynamic raw,
   );
 
   @protected
   BridgeNostrConfig dco_decode_box_autoadd_bridge_nostr_config(dynamic raw);
+
+  @protected
+  BridgeRealtimeAudioPacket dco_decode_box_autoadd_bridge_realtime_audio_packet(
+    dynamic raw,
+  );
+
+  @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
   BridgeAudioEncryption dco_decode_bridge_audio_encryption(dynamic raw);
@@ -67,6 +80,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  BridgeFipsCallConfig dco_decode_bridge_fips_call_config(dynamic raw);
+
+  @protected
+  BridgeFipsCallStatus dco_decode_bridge_fips_call_status(dynamic raw);
+
+  @protected
   BridgeIncomingMessage dco_decode_bridge_incoming_message(dynamic raw);
 
   @protected
@@ -74,6 +93,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BridgeNostrConfig dco_decode_bridge_nostr_config(dynamic raw);
+
+  @protected
+  BridgeRealtimeAudioPacket dco_decode_bridge_realtime_audio_packet(
+    dynamic raw,
+  );
 
   @protected
   BridgeSessionStatus dco_decode_bridge_session_status(dynamic raw);
@@ -85,6 +109,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<BridgeIncomingMessage> dco_decode_list_bridge_incoming_message(
     dynamic raw,
   );
+
+  @protected
+  List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
@@ -101,6 +128,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BridgeIncomingMessage? dco_decode_opt_box_autoadd_bridge_incoming_message(
     dynamic raw,
   );
+
+  @protected
+  BridgeRealtimeAudioPacket?
+  dco_decode_opt_box_autoadd_bridge_realtime_audio_packet(dynamic raw);
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  int dco_decode_u_16(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -139,6 +179,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  BridgeFipsCallConfig sse_decode_box_autoadd_bridge_fips_call_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BridgeIncomingMessage sse_decode_box_autoadd_bridge_incoming_message(
     SseDeserializer deserializer,
   );
@@ -147,6 +192,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BridgeNostrConfig sse_decode_box_autoadd_bridge_nostr_config(
     SseDeserializer deserializer,
   );
+
+  @protected
+  BridgeRealtimeAudioPacket sse_decode_box_autoadd_bridge_realtime_audio_packet(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
   BridgeAudioEncryption sse_decode_bridge_audio_encryption(
@@ -169,6 +222,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  BridgeFipsCallConfig sse_decode_bridge_fips_call_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BridgeFipsCallStatus sse_decode_bridge_fips_call_status(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   BridgeIncomingMessage sse_decode_bridge_incoming_message(
     SseDeserializer deserializer,
   );
@@ -178,6 +241,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BridgeNostrConfig sse_decode_bridge_nostr_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BridgeRealtimeAudioPacket sse_decode_bridge_realtime_audio_packet(
     SseDeserializer deserializer,
   );
 
@@ -195,6 +263,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
@@ -209,6 +280,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BridgeIncomingMessage? sse_decode_opt_box_autoadd_bridge_incoming_message(
     SseDeserializer deserializer,
   );
+
+  @protected
+  BridgeRealtimeAudioPacket?
+  sse_decode_opt_box_autoadd_bridge_realtime_audio_packet(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_u_16(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -256,6 +342,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_bridge_fips_call_config(
+    BridgeFipsCallConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_bridge_incoming_message(
     BridgeIncomingMessage self,
     SseSerializer serializer,
@@ -266,6 +358,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     BridgeNostrConfig self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_box_autoadd_bridge_realtime_audio_packet(
+    BridgeRealtimeAudioPacket self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_bridge_audio_encryption(
@@ -292,6 +393,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_bridge_fips_call_config(
+    BridgeFipsCallConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bridge_fips_call_status(
+    BridgeFipsCallStatus self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_bridge_incoming_message(
     BridgeIncomingMessage self,
     SseSerializer serializer,
@@ -303,6 +416,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_bridge_nostr_config(
     BridgeNostrConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bridge_realtime_audio_packet(
+    BridgeRealtimeAudioPacket self,
     SseSerializer serializer,
   );
 
@@ -320,6 +439,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     List<BridgeIncomingMessage> self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_prim_u_8_strict(
@@ -341,6 +463,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     BridgeIncomingMessage? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_opt_box_autoadd_bridge_realtime_audio_packet(
+    BridgeRealtimeAudioPacket? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_list_prim_u_8_strict(
+    Uint8List? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_u_16(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);

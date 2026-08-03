@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use fips_mobile::{FipsMobileQuicSession, FipsMobileQuicSessionConfig, Identity};
 use nostr_sdk::prelude::*;
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
@@ -9,8 +10,28 @@ use tokio::sync::Mutex;
 use crate::blossom::{download_attachment, upload_audio, BlossomUploadConfig};
 use crate::nostr_client::{default_relays, IncomingMessage, NostrConfig, NostrMessenger};
 use crate::protocol::{AudioEncryption, AudioReference, MediaReference};
+use crate::realtime_audio::{
+    RealtimeAudioDecoder, RealtimeAudioEncoder, RealtimeAudioPacket,
+    REALTIME_AUDIO_HARNESS_ECHO_FLAG,
+};
 
 static SESSION: Lazy<Mutex<Option<Arc<NostrMessenger>>>> = Lazy::new(|| Mutex::new(None));
+static CALL_SESSION: Lazy<Mutex<Option<FipsMobileQuicSession>>> = Lazy::new(|| Mutex::new(None));
+static REALTIME_AUDIO: Lazy<Mutex<Option<RealtimeAudioPipeline>>> = Lazy::new(|| Mutex::new(None));
+
+struct RealtimeAudioPipeline {
+    encoder: RealtimeAudioEncoder,
+    decoder: RealtimeAudioDecoder,
+}
+
+impl RealtimeAudioPipeline {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            encoder: RealtimeAudioEncoder::new()?,
+            decoder: RealtimeAudioDecoder::new()?,
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct BridgeNostrConfig {
@@ -18,6 +39,27 @@ pub struct BridgeNostrConfig {
     pub peer_pubkey: String,
     pub receive_pubkeys: Vec<String>,
     pub relays: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeFipsCallConfig {
+    pub secret_key: String,
+    pub relays: Vec<String>,
+    pub stun_servers: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeFipsCallStatus {
+    pub state: String,
+    pub max_datagram_bytes: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeRealtimeAudioPacket {
+    pub sequence: u16,
+    pub timestamp_48khz: u32,
+    pub flags: u8,
+    pub opus_payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +277,137 @@ pub async fn nostr_is_started() -> Result<bool> {
     Ok(SESSION.lock().await.is_some())
 }
 
+pub async fn fips_call_connect(
+    config: BridgeFipsCallConfig,
+    peer_npub: String,
+) -> Result<BridgeFipsCallStatus> {
+    let audio = RealtimeAudioPipeline::new()?;
+    let mut session = build_fips_call_session(config)?;
+    let peer_npub = PublicKey::parse(peer_npub.trim())?.to_bech32()?;
+    session.connect(&peer_npub).await?;
+    let status = fips_call_status(&session);
+    *CALL_SESSION.lock().await = Some(session);
+    *REALTIME_AUDIO.lock().await = Some(audio);
+    Ok(status)
+}
+
+pub async fn fips_call_accept(config: BridgeFipsCallConfig) -> Result<BridgeFipsCallStatus> {
+    let audio = RealtimeAudioPipeline::new()?;
+    let mut session = build_fips_call_session(config)?;
+    session.accept().await?;
+    let status = fips_call_status(&session);
+    *CALL_SESSION.lock().await = Some(session);
+    *REALTIME_AUDIO.lock().await = Some(audio);
+    Ok(status)
+}
+
+pub async fn fips_call_send_datagram(payload: Vec<u8>) -> Result<()> {
+    let session = CALL_SESSION.lock().await;
+    session
+        .as_ref()
+        .ok_or_else(|| anyhow!("FIPS call is not active"))?
+        .send_datagram(&payload)?;
+    Ok(())
+}
+
+pub async fn fips_call_receive_datagram(timeout_ms: u64) -> Result<Option<Vec<u8>>> {
+    // Keep the session lock for only a short receive window so microphone sends
+    // and hangup can interleave with the receive loop.
+    let session = CALL_SESSION.lock().await;
+    let session = session
+        .as_ref()
+        .ok_or_else(|| anyhow!("FIPS call is not active"))?;
+    match tokio::time::timeout(
+        Duration::from_millis(timeout_ms.clamp(1, 50)),
+        session.receive_datagram(),
+    )
+    .await
+    {
+        Ok(result) => result.map(Some).map_err(Into::into),
+        Err(_) => Ok(None),
+    }
+}
+
+pub async fn fips_call_send_realtime_audio(packet: BridgeRealtimeAudioPacket) -> Result<()> {
+    fips_call_send_datagram(RealtimeAudioPacket::from(packet).encode()?).await
+}
+
+pub async fn fips_call_receive_realtime_audio(
+    timeout_ms: u64,
+) -> Result<Option<BridgeRealtimeAudioPacket>> {
+    fips_call_receive_datagram(timeout_ms)
+        .await?
+        .map(|datagram| RealtimeAudioPacket::decode(&datagram).map(BridgeRealtimeAudioPacket::from))
+        .transpose()
+}
+
+/// Encodes one 20 ms, 48 kHz mono signed-16-bit PCM frame and sends it as an
+/// Opus realtime datagram.
+pub async fn fips_call_send_realtime_pcm(pcm: Vec<u8>) -> Result<()> {
+    let datagram = {
+        let mut audio = REALTIME_AUDIO.lock().await;
+        let audio = audio
+            .as_mut()
+            .ok_or_else(|| anyhow!("FIPS realtime audio is not active"))?;
+        audio.encoder.encode_pcm(&pcm)?.encode()?
+    };
+    fips_call_send_datagram(datagram).await
+}
+
+/// Receives an Opus realtime datagram and returns PCM only when the small
+/// reorder buffer has a frame ready for playout.
+pub async fn fips_call_receive_realtime_pcm(timeout_ms: u64) -> Result<Option<Vec<u8>>> {
+    let Some(datagram) = fips_call_receive_datagram(timeout_ms).await? else {
+        return Ok(None);
+    };
+    let packet = RealtimeAudioPacket::decode(&datagram)?;
+    if packet.flags & REALTIME_AUDIO_HARNESS_ECHO_FLAG != 0 {
+        // A harness peer proves the mobile FIPS datagram path by echoing its
+        // encoded frame. This never reaches capture or speaker playback.
+        fips_call_send_datagram(datagram).await?;
+        return Ok(None);
+    }
+    let mut audio = REALTIME_AUDIO.lock().await;
+    let audio = audio
+        .as_mut()
+        .ok_or_else(|| anyhow!("FIPS realtime audio is not active"))?;
+    audio.decoder.push(packet)
+}
+
+pub async fn fips_call_stop() -> Result<()> {
+    let session = CALL_SESSION.lock().await.take();
+    if let Some(mut session) = session {
+        session.stop().await?;
+    }
+    *REALTIME_AUDIO.lock().await = None;
+    Ok(())
+}
+
+fn build_fips_call_session(config: BridgeFipsCallConfig) -> Result<FipsMobileQuicSession> {
+    let identity = Identity::from_secret_str(config.secret_key.trim())?;
+    let mut session_config = FipsMobileQuicSessionConfig::default();
+    let relays = clean_relays(config.relays);
+    if !relays.is_empty() {
+        session_config.discovery.advert_relays = relays.clone();
+        session_config.discovery.dm_relays = relays;
+    }
+    let stun_servers = clean_relays(config.stun_servers);
+    if !stun_servers.is_empty() {
+        session_config.discovery.stun_servers = stun_servers;
+    }
+    Ok(FipsMobileQuicSession::new(identity, session_config))
+}
+
+fn fips_call_status(session: &FipsMobileQuicSession) -> BridgeFipsCallStatus {
+    BridgeFipsCallStatus {
+        state: format!("{:?}", session.status()).to_lowercase(),
+        max_datagram_bytes: session
+            .max_datagram_size()
+            .ok()
+            .and_then(|size| u32::try_from(size).ok()),
+    }
+}
+
 async fn active_session() -> Result<Arc<NostrMessenger>> {
     SESSION
         .lock()
@@ -320,6 +493,28 @@ impl From<BridgeAudioEncryption> for AudioEncryption {
             plaintext_sha256: value.plaintext_sha256,
             plaintext_size: value.plaintext_size,
             plaintext_media_type: value.plaintext_media_type,
+        }
+    }
+}
+
+impl From<BridgeRealtimeAudioPacket> for RealtimeAudioPacket {
+    fn from(value: BridgeRealtimeAudioPacket) -> Self {
+        Self {
+            sequence: value.sequence,
+            timestamp_48khz: value.timestamp_48khz,
+            flags: value.flags,
+            opus_payload: value.opus_payload,
+        }
+    }
+}
+
+impl From<RealtimeAudioPacket> for BridgeRealtimeAudioPacket {
+    fn from(value: RealtimeAudioPacket) -> Self {
+        Self {
+            sequence: value.sequence,
+            timestamp_48khz: value.timestamp_48khz,
+            flags: value.flags,
+            opus_payload: value.opus_payload,
         }
     }
 }

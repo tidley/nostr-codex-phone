@@ -149,6 +149,28 @@ Run the worker:
 cargo run --manifest-path rust/Cargo.toml --bin nostr-codex-server
 ```
 
+### Direct Pixel FIPS Call Test
+
+Run the real desktop-to-Pixel FIPS/Opus harness with the instructions in
+[`docs/fips-call-harness.md`](docs/fips-call-harness.md). It emits one
+pass/fail JSON result and never substitutes an Android simulator.
+
+### Deploy A Local Worker Build
+
+`cargo build --release` writes the worker to `rust/target/release`; it does
+not update an installed systemd worker. After worker source changes, build and
+deploy with:
+
+```bash
+cargo build --release --manifest-path rust/Cargo.toml --bin nostr-codex-server
+./scripts/deploy-local-worker.sh
+```
+
+The deploy script confirms that the systemd user service executes the target
+path, installs the release binary there, verifies matching SHA-256 checksums,
+and restarts the service. Set `CODEX_WORKDIR` or `NOSTR_CODEX_WORKER` when the
+worker state is outside the repository's parent directory.
+
 Verify:
 
 ```bash
