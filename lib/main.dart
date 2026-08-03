@@ -51,7 +51,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.1+301';
+const _appVersion = '0.3.2+302';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -6874,7 +6874,11 @@ Return a concise catch-up summary of what happened after that point: completed w
         sessions: _repoTargets,
         onOpenSessions: () => setState(() => _showTeamWorkspace = false),
         onOpenSettings: () => unawaited(_openSettings()),
-        onOpenAgents: () => unawaited(_openWorkspaceAgents()),
+        workspaceRevision: _workspaceRevision,
+        onLoadOpenCodeModels: _loadOpenCodeModels,
+        initialFolderChoices: _cachedRepoChoices,
+        onLoadFolders: (path) => _requestRepoChoices(path: path),
+        onOpenAgentConversation: _openAgentConversation,
         inviteCode: _workspaceInviteCode,
         memberStatus: _workspaceMemberStatus,
         workspace: _workspace,
@@ -8012,51 +8016,35 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
   }
 
-  Future<void> _openWorkspaceAgents() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => _AgentsPage(
-          workspace: _workspace,
-          workspaceRevision: _workspaceRevision,
-          onRequest: _sendWorkspaceRequest,
-          onLoadOpenCodeModels: _loadOpenCodeModels,
-          initialFolderChoices: _cachedRepoChoices,
-          onLoadFolders: (path) => _requestRepoChoices(path: path),
-          onOpenConversation: (agent) async {
-            final sessionId = agent.openCodeSessionId;
-            if (agent.sessionStatus != 'ready' ||
-                sessionId == null ||
-                sessionId.isEmpty) {
-              _showStatus(
-                agent.sessionError ??
-                    '${agent.name} is not ready because OpenCode session provisioning failed.',
-              );
-              return;
-            }
-            final target = _targetById(_repoTargets, _selectedRepoTargetId);
-            if (target == null) {
-              _showError(
-                'Select a repo session before opening an agent conversation',
-              );
-              return;
-            }
-            final updated = target.copyWith(
-              opencodeSessionId: sessionId,
-              opencodeSessionTitle: agent.name,
-            );
-            setState(() {
-              _repoTargets = [
-                for (final item in _repoTargets)
-                  if (item.id == updated.id) updated else item,
-              ];
-              _showTeamWorkspace = false;
-            });
-            await _saveSettings();
-            await _loadConversationHistoryForActiveSession();
-          },
-        ),
-      ),
+  Future<void> _openAgentConversation(WorkspaceAgent agent) async {
+    final sessionId = agent.openCodeSessionId;
+    if (agent.sessionStatus != 'ready' ||
+        sessionId == null ||
+        sessionId.isEmpty) {
+      _showStatus(
+        agent.sessionError ??
+            '${agent.name} is not ready because OpenCode session provisioning failed.',
+      );
+      return;
+    }
+    final target = _targetById(_repoTargets, _selectedRepoTargetId);
+    if (target == null) {
+      _showError('Select a repo session before opening an agent conversation');
+      return;
+    }
+    final updated = target.copyWith(
+      opencodeSessionId: sessionId,
+      opencodeSessionTitle: agent.name,
     );
+    setState(() {
+      _repoTargets = [
+        for (final item in _repoTargets)
+          if (item.id == updated.id) updated else item,
+      ];
+      _showTeamWorkspace = false;
+    });
+    await _saveSettings();
+    await _loadConversationHistoryForActiveSession();
   }
 
   Future<void> _redeemWorkspaceInvite(String code) async {
