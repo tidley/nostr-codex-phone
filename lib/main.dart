@@ -49,7 +49,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.85+285';
+const _appVersion = '0.2.86+286';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -4260,9 +4260,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         message.kind == 'call_hangup') {
       final callId = _callIdFromMessage(message);
       if (callId == null) return true;
-      final sender = message.senderPubkey.trim().isNotEmpty
-          ? message.senderPubkey.trim()
-          : message.senderPubkeyHex.trim();
+      final sender = _callPeerFromMessage(message);
       if (sender.isEmpty) return true;
       if (message.kind == 'call_invite') {
         if (_callPhase == _CallPhase.idle) {
@@ -4666,9 +4664,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   bool _callPeerMatchesMessage(BridgeIncomingMessage message) {
     final peer = _callPeerPubkey?.trim();
-    return peer != null &&
-        peer.isNotEmpty &&
-        (peer == message.senderPubkey || peer == message.senderPubkeyHex);
+    return peer != null && peer.isNotEmpty && peer == _callPeerFromMessage(message);
   }
 
   void _cacheRepoChoices(List<RepoChoice> choices) {
@@ -6941,6 +6937,20 @@ Return a concise catch-up summary of what happened after that point: completed w
     } catch (_) {
       return null;
     }
+  }
+
+  String _callPeerFromMessage(BridgeIncomingMessage message) {
+    try {
+      final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
+      final value = decoded[message.kind] as Map<String, dynamic>?;
+      final sender = value?['sender_pubkey']?.toString().trim();
+      if (sender != null && sender.isNotEmpty) return sender;
+    } catch (_) {
+      // Direct call controls do not have a worker-provided sender.
+    }
+    return message.senderPubkey.trim().isNotEmpty
+        ? message.senderPubkey.trim()
+        : message.senderPubkeyHex.trim();
   }
 
   Future<void> _sendCallControl(

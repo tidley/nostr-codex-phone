@@ -1275,9 +1275,9 @@ async fn process_workspace_request(
         "call_invite" | "call_answer" | "call_hangup" => {
             let call_id = request.call_id.as_deref().unwrap_or_default();
             let wire = match request.action.as_str() {
-                "call_invite" => WireMessage::call_invite(call_id),
-                "call_answer" => WireMessage::call_answer(call_id),
-                _ => WireMessage::call_hangup(call_id),
+                "call_invite" => WireMessage::call_invite_from(call_id, sender),
+                "call_answer" => WireMessage::call_answer_from(call_id, sender),
+                _ => WireMessage::call_hangup_from(call_id, sender),
             };
             messenger
                 .send_wire_to_pubkey(
