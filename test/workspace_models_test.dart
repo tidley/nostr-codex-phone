@@ -31,6 +31,34 @@ void main() {
     expect(workspaceAvatarColorIndex('alice', 'Ada', 0), 0);
   });
 
+  test('message grouping only joins consecutive messages from one sender', () {
+    const first = WorkspaceMessage(
+      id: 'first',
+      senderPubkey: 'agent:scout',
+      body: 'First',
+      createdAt: 1,
+      channelId: 'workspace',
+    );
+    const second = WorkspaceMessage(
+      id: 'second',
+      senderPubkey: 'AGENT:SCOUT',
+      body: 'Second',
+      createdAt: 2,
+      channelId: 'workspace',
+    );
+    const threaded = WorkspaceMessage(
+      id: 'threaded',
+      senderPubkey: 'agent:scout',
+      body: 'Thread reply',
+      createdAt: 3,
+      channelId: 'workspace',
+      parentId: 'first',
+    );
+
+    expect(isWorkspaceMessageGroupedWithPrevious(second, first), isTrue);
+    expect(isWorkspaceMessageGroupedWithPrevious(threaded, second), isFalse);
+  });
+
   test('workspace state merges persisted updates without fake records', () {
     final state = WorkspaceState();
     state.apply({
