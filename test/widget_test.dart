@@ -125,6 +125,38 @@ void main() {
     threadFocus.dispose();
   });
 
+  testWidgets('thread pane resize handle reports inverse horizontal drag', (
+    tester,
+  ) async {
+    final deltas = <double>[];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.center,
+            child: ThreadPaneResizeHandle(onResize: deltas.add),
+          ),
+        ),
+      ),
+    );
+
+    final handle = find.byType(ThreadPaneResizeHandle);
+    expect(
+      tester
+          .widget<MouseRegion>(
+            find.descendant(of: handle, matching: find.byType(MouseRegion)),
+          )
+          .cursor,
+      SystemMouseCursors.resizeLeftRight,
+    );
+
+    await tester.drag(handle, const Offset(-24, 0));
+
+    expect(deltas, isNotEmpty);
+    expect(deltas.reduce((sum, delta) => sum + delta), greaterThan(0));
+  });
+
   test('cleans markdown before text to speech', () {
     final spoken = cleanTextForSpeech('''
 # Result

@@ -632,6 +632,8 @@ class _TeamWorkspace extends StatefulWidget {
 }
 
 class _TeamWorkspaceState extends State<_TeamWorkspace> {
+  static const _threadPaneMinWidth = 280.0;
+  static const _threadPaneMaxWidth = 520.0;
   final _composer = TextEditingController();
   final _composerFocus = FocusNode();
   final _selectedComposerMentions = <WorkspaceMention>[];
@@ -644,6 +646,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   String _active = 'workspace';
   WorkspaceMessage? _thread;
   bool _alsoSendToMain = false;
+  double _threadPaneWidth = 340;
 
   @override
   void initState() {
@@ -896,6 +899,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     _scheduleTypingExpiry(typing);
     final wide = MediaQuery.sizeOf(context).width >= 1080;
     final medium = MediaQuery.sizeOf(context).width >= 720;
+    final showThreadPane = medium && _thread != null;
     final sidebar = _WorkspaceSidebar(
       selected: _section == _WorkspaceSection.channel ? _active : null,
       direct: _section == _WorkspaceSection.direct ? _active : null,
@@ -1045,9 +1049,22 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             Expanded(
               child: medium || _thread == null ? conversation : contextPane,
             ),
-            if (medium) ...[
-              const VerticalDivider(width: 1),
-              SizedBox(width: wide ? 340 : 300, child: contextPane),
+            if (showThreadPane) ...[
+              if (wide)
+                ThreadPaneResizeHandle(
+                  onResize: (delta) => setState(() {
+                    _threadPaneWidth = (_threadPaneWidth + delta).clamp(
+                      _threadPaneMinWidth,
+                      _threadPaneMaxWidth,
+                    );
+                  }),
+                )
+              else
+                const VerticalDivider(width: 1),
+              SizedBox(
+                width: wide ? _threadPaneWidth : 300,
+                child: contextPane,
+              ),
             ],
           ],
         ),
@@ -1177,6 +1194,22 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       ),
     );
   }
+}
+
+class ThreadPaneResizeHandle extends StatelessWidget {
+  const ThreadPaneResizeHandle({super.key, required this.onResize});
+
+  final ValueChanged<double> onResize;
+
+  @override
+  Widget build(BuildContext context) => MouseRegion(
+    cursor: SystemMouseCursors.resizeLeftRight,
+    child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onHorizontalDragUpdate: (details) => onResize(-details.delta.dx),
+      child: const SizedBox(width: 6, height: double.infinity),
+    ),
+  );
 }
 
 class _WorkspaceSidebar extends StatelessWidget {
