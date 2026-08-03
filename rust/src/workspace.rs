@@ -276,6 +276,14 @@ impl WorkspaceStore {
         channels
     }
 
+    pub fn has_channel(&self, channel_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_channels WHERE id = ?1)",
+            [channel_id.trim()],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn create_agent(
         &self,
         name: &str,

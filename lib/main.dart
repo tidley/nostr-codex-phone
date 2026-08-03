@@ -23,6 +23,7 @@ import 'package:nostr_codex_phone/src/repo_target_merge.dart';
 import 'package:nostr_codex_phone/src/repo_choice.dart';
 import 'package:nostr_codex_phone/src/repo_target.dart';
 import 'package:nostr_codex_phone/src/realtime_audio.dart';
+import 'package:nostr_codex_phone/src/realtime_video.dart';
 import 'package:nostr_codex_phone/src/settings_storage.dart';
 import 'package:nostr_codex_phone/src/media_models.dart';
 import 'package:nostr_codex_phone/src/text_utils.dart';
@@ -49,13 +50,28 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.89+289';
+const _appVersion = '0.2.90+290';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
 enum _PendingMessageCompletion { transcript, response }
 
 enum _CallPhase { idle, outgoing, incoming, connecting, active }
+
+class _GroupCallState {
+  _GroupCallState({
+    required this.callId,
+    required this.channelId,
+    required this.participants,
+    required this.phase,
+  });
+
+  final String callId;
+  final String channelId;
+  final List<String> participants;
+  _CallPhase phase;
+  final Set<String> connectedPeers = {};
+}
 
 enum _RelayProbeStrength { strong, fair, weak, offline }
 
@@ -482,6 +498,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _recorder = AudioRecorder();
   final _callRecorder = AudioRecorder();
   final _realtimeAudio = RealtimeAudio.instance;
+  final _realtimeVideo = RealtimeVideo.instance;
   final _tts = FlutterTts();
   final _messagesByTarget = <String, List<ConversationMessage>>{};
   final _seenIncomingEventIds = <String>{};
@@ -576,8 +593,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   String? _callId;
   String? _callPeerPubkey;
   bool _callAnswerSent = false;
+  _GroupCallState? _groupCall;
   StreamSubscription<Uint8List>? _callCaptureSubscription;
+  StreamSubscription<Uint8List>? _callVideoCaptureSubscription;
   bool _callAudioStarted = false;
+  bool _callVideoStarted = false;
+  bool _sendingVideo = false;
+  final Map<String, int> _videoTextures = {};
+  OverlayEntry? _videoOverlay;
   Future<void> _callSendChain = Future.value();
   final WorkspaceState _workspace = WorkspaceState();
   final ValueNotifier<int> _workspaceRevision = ValueNotifier(0);
@@ -788,6 +811,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     unawaited(_stopCallAudio());
     unawaited(_callRecorder.dispose());
     unawaited(_realtimeAudio.dispose());
+    unawaited(_realtimeVideo.dispose());
     if (recordingPath != null) {
       unawaited(_deleteTempAudio(recordingPath));
     }
@@ -4285,6 +4309,54 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return true;
     }
 
+    if (message.kind == 'group_call_invite' ||
+        message.kind == 'group_call_answer' ||
+        message.kind == 'group_call_hangup') {
+      WorkspaceGroupCall? groupCall;
+      try {
+        final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
+        groupCall = WorkspaceGroupCall.fromJson(
+          decoded[message.kind] as Map<String, dynamic>,
+        );
+      } catch (_) {}
+      if (groupCall == null ||
+          !groupCall.isValid ||
+          !groupCall.participantPubkeys.contains(_groupOwnPubkey)) {
+        return true;
+      }
+      final current = _groupCall;
+      if (message.kind == 'group_call_invite') {
+        if (_callPhase == _CallPhase.idle && current == null) {
+          setState(
+            () => _groupCall = _GroupCallState(
+              callId: groupCall!.callId,
+              channelId: groupCall.channelId,
+              participants: groupCall.participantPubkeys,
+              phase: _CallPhase.incoming,
+            ),
+          );
+        } else {
+          final busy = _GroupCallState(
+            callId: groupCall.callId,
+            channelId: groupCall.channelId,
+            participants: groupCall.participantPubkeys,
+            phase: _CallPhase.idle,
+          );
+          unawaited(_sendGroupCallControl('group_call_hangup', busy));
+        }
+      } else if (current != null && current.callId == groupCall.callId) {
+        if (message.kind == 'group_call_answer') {
+          final peer = groupCall.senderPubkey;
+          if (peer.isNotEmpty && peer != _groupOwnPubkey) {
+            unawaited(_connectGroupPeer(current, peer));
+          }
+        } else {
+          unawaited(_clearGroupCall());
+        }
+      }
+      return true;
+    }
+
     if (message.kind == 'target_invite') {
       if (!_incomingFromActivePeer(message)) return false;
       final parsedTarget = _repoTargetFromInvitePayload(message.rawJson);
@@ -4664,7 +4736,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   bool _callPeerMatchesMessage(BridgeIncomingMessage message) {
     final peer = _callPeerPubkey?.trim();
-    return peer != null && peer.isNotEmpty && peer == _callPeerFromMessage(message);
+    return peer != null &&
+        peer.isNotEmpty &&
+        peer == _callPeerFromMessage(message);
   }
 
   void _cacheRepoChoices(List<RepoChoice> choices) {
@@ -6703,10 +6777,16 @@ Return a concise catch-up summary of what happened after that point: completed w
         onCreateInvite: _createWorkspaceInvite,
         callPhase: _callPhase,
         callPeerPubkey: _callPeerPubkey,
+        groupCallPhase: _groupCall?.phase ?? _CallPhase.idle,
+        groupCallChannelId: _groupCall?.channelId,
         onStartCall: _startWorkspaceCall,
+        onStartChannelCall: _startChannelCall,
         onAcceptCall: _acceptWorkspaceCall,
         onRejectCall: _rejectWorkspaceCall,
         onHangupCall: _hangupWorkspaceCall,
+        onAcceptGroupCall: _acceptGroupCall,
+        onRejectGroupCall: _hangupGroupCall,
+        onHangupGroupCall: _hangupGroupCall,
       );
     }
 
@@ -6964,7 +7044,11 @@ Return a concise catch-up summary of what happened after that point: completed w
   });
 
   Future<void> _startWorkspaceCall(String peerPubkey) async {
-    if (_callPhase != _CallPhase.idle || peerPubkey.trim().isEmpty) return;
+    if (_callPhase != _CallPhase.idle ||
+        _groupCall != null ||
+        peerPubkey.trim().isEmpty) {
+      return;
+    }
     final callId = _newCallId();
     try {
       setState(() {
@@ -6979,6 +7063,279 @@ Return a concise catch-up summary of what happened after that point: completed w
         await _clearCall();
       }
     }
+  }
+
+  Future<void> _startChannelCall(String channelId) async {
+    if (_callPhase != _CallPhase.idle || _groupCall != null) return;
+    final participants = [
+      ..._workspace.members.where((member) => member.isNotEmpty),
+      if (_ownPubkeyHex != null && !_workspace.members.contains(_ownPubkeyHex))
+        _ownPubkeyHex!,
+    ];
+    if (participants.length < 2 || participants.length > 4) {
+      _showError('Channel calls require two to four workspace members');
+      return;
+    }
+    final callId = _newCallId();
+    try {
+      final call = _GroupCallState(
+        callId: callId,
+        channelId: channelId,
+        participants: participants,
+        phase: _CallPhase.connecting,
+      );
+      setState(() => _groupCall = call);
+      await _publishGroupCallAdverts(call);
+      await _sendWorkspaceRequest({
+        'action': 'group_call_invite',
+        'channel_id': channelId,
+        'call_id': callId,
+        'participant_pubkeys': participants,
+      });
+      if (mounted) {
+        setState(
+          () => _status =
+              'Invited ${participants.length - 1} people to an audio call',
+        );
+      }
+    } catch (error) {
+      await _clearGroupCall();
+      if (mounted) _showError('Channel call failed: $error');
+    }
+  }
+
+  String get _groupOwnPubkey => (_ownPubkey ?? _ownPubkeyHex ?? '').trim();
+
+  Future<void> _sendGroupCallControl(String action, _GroupCallState call) =>
+      _sendWorkspaceRequest({
+        'action': action,
+        'channel_id': call.channelId,
+        'call_id': call.callId,
+        'participant_pubkeys': call.participants,
+      });
+
+  Future<void> _publishGroupCallAdverts(_GroupCallState call) async {
+    for (final peer in call.participants.where(
+      (peer) => peer != _groupOwnPubkey,
+    )) {
+      await fipsGroupCallAcceptStart(
+        config: _callConfig(),
+        callId: call.callId,
+        peerNpub: peer,
+      );
+    }
+  }
+
+  Future<void> _acceptGroupCall() async {
+    final call = _groupCall;
+    if (call == null || call.phase != _CallPhase.incoming) return;
+    try {
+      setState(() => call.phase = _CallPhase.connecting);
+      // Publish every responder advert before peers can receive our answer.
+      await _publishGroupCallAdverts(call);
+      if (!mounted ||
+          _groupCall != call ||
+          call.phase != _CallPhase.connecting) {
+        await fipsGroupCallStop(callId: call.callId);
+        return;
+      }
+      await _sendGroupCallControl('group_call_answer', call);
+    } catch (error) {
+      if (mounted && _groupCall == call) {
+        _showError('Could not answer channel call: $error');
+        await _clearGroupCall();
+      }
+    }
+  }
+
+  Future<void> _connectGroupPeer(_GroupCallState call, String peer) async {
+    if (call.connectedPeers.contains(peer) || _groupOwnPubkey.isEmpty) return;
+    try {
+      final status = _groupOwnPubkey.compareTo(peer) < 0
+          ? await fipsGroupCallConnect(
+              config: _callConfig(),
+              callId: call.callId,
+              peerNpub: peer,
+            )
+          : await fipsGroupCallAcceptComplete(
+              callId: call.callId,
+              peerNpub: peer,
+            );
+      if (!mounted || _groupCall != call) return;
+      final maxDatagramBytes = status.maxDatagramBytes;
+      if (maxDatagramBytes == null || maxDatagramBytes < 9) {
+        throw StateError('Channel call peer does not support audio datagrams');
+      }
+      call.connectedPeers.add(peer);
+      if (call.phase != _CallPhase.active) {
+        await _activateGroupCallAudio(call);
+      } else {
+        unawaited(_receiveGroupCallAudio(call, peer));
+        if (Platform.isAndroid && _callVideoStarted) {
+          final texture = await _realtimeVideo.createRenderer();
+          _videoTextures[peer] = texture;
+          _showVideoOverlay();
+          unawaited(_receiveGroupCallVideo(call, peer, texture));
+        }
+      }
+    } catch (error) {
+      if (mounted && _groupCall == call) {
+        _showError('Channel call connection failed: $error');
+        await _clearGroupCall();
+      }
+    }
+  }
+
+  Future<void> _activateGroupCallAudio(_GroupCallState call) async {
+    if (!Platform.isAndroid && !Platform.isLinux) {
+      throw UnsupportedError('Live call audio requires Android or Linux');
+    }
+    if (Platform.isAndroid && !await _callRecorder.hasPermission()) {
+      throw StateError('Microphone permission is required for calls');
+    }
+    _callCaptureSubscription = _realtimeAudio.frames.listen(
+      (pcm) => _sendGroupCallAudioFrames(call, pcm),
+      onError: (Object error) => _showError('Call microphone failed: $error'),
+    );
+    await _realtimeAudio.startCapture();
+    if (!mounted || _groupCall != call) return;
+    setState(() {
+      call.phase = _CallPhase.active;
+      _callAudioStarted = true;
+    });
+    for (final peer in call.connectedPeers) {
+      unawaited(_receiveGroupCallAudio(call, peer));
+    }
+    unawaited(_activateGroupCallVideo(call));
+  }
+
+  void _sendGroupCallAudioFrames(_GroupCallState call, Uint8List pcm) {
+    if (_groupCall != call || call.phase != _CallPhase.active) return;
+    _callSendChain = _callSendChain.then((_) async {
+      for (final peer in call.connectedPeers) {
+        await fipsGroupCallSendRealtimePcm(
+          callId: call.callId,
+          peerNpub: peer,
+          pcm: pcm,
+        );
+      }
+    });
+  }
+
+  Future<void> _receiveGroupCallAudio(_GroupCallState call, String peer) async {
+    while (mounted && _groupCall == call && call.phase == _CallPhase.active) {
+      try {
+        final pcm = await fipsGroupCallReceiveRealtimePcm(
+          callId: call.callId,
+          peerNpub: peer,
+          timeoutMs: BigInt.from(10),
+        );
+        if (pcm != null && pcm.isNotEmpty && _groupCall == call) {
+          unawaited(_realtimeAudio.playPcm(pcm));
+        }
+      } catch (error) {
+        if (mounted && _groupCall == call) {
+          _showError('Channel call audio receive failed: $error');
+          await _clearGroupCall();
+        }
+        return;
+      }
+    }
+  }
+
+  Future<void> _activateGroupCallVideo(_GroupCallState call) async {
+    if (!Platform.isAndroid || _groupCall != call || _callVideoStarted) {
+      if (Platform.isLinux && mounted) {
+        setState(() => _status = 'Video receive is unavailable on Linux');
+      }
+      return;
+    }
+    try {
+      for (final peer in call.connectedPeers) {
+        _videoTextures[peer] = await _realtimeVideo.createRenderer();
+      }
+      _showVideoOverlay();
+      _callVideoCaptureSubscription = _realtimeVideo.frames.listen(
+        (fragment) => _sendGroupCallVideoFragment(call, fragment),
+        onError: (Object error) => _showError('Call camera failed: $error'),
+      );
+      await _realtimeVideo.startCapture();
+      _callVideoStarted = true;
+      for (final entry in _videoTextures.entries) {
+        unawaited(_receiveGroupCallVideo(call, entry.key, entry.value));
+      }
+    } catch (error) {
+      if (mounted && _groupCall == call) {
+        _showError('Video unavailable: $error');
+      }
+      await _stopCallVideo();
+    }
+  }
+
+  void _sendGroupCallVideoFragment(_GroupCallState call, Uint8List fragment) {
+    if (_sendingVideo ||
+        _groupCall != call ||
+        call.phase != _CallPhase.active) {
+      return;
+    }
+    _sendingVideo = true;
+    unawaited(() async {
+      try {
+        for (final peer in call.connectedPeers) {
+          await fipsGroupCallSendRealtimeVideo(
+            callId: call.callId,
+            peerNpub: peer,
+            fragment: fragment,
+          );
+        }
+      } catch (_) {
+        // Keep the audio call alive when a video datagram is dropped.
+      } finally {
+        _sendingVideo = false;
+      }
+    }());
+  }
+
+  Future<void> _receiveGroupCallVideo(
+    _GroupCallState call,
+    String peer,
+    int texture,
+  ) async {
+    while (mounted && _groupCall == call && call.phase == _CallPhase.active) {
+      try {
+        final fragment = await fipsGroupCallReceiveRealtimeVideo(
+          callId: call.callId,
+          peerNpub: peer,
+          timeoutMs: BigInt.from(10),
+        );
+        if (fragment != null && _videoTextures[peer] == texture) {
+          await _realtimeVideo.pushFragment(texture, fragment);
+        }
+      } catch (_) {
+        return;
+      }
+    }
+  }
+
+  Future<void> _hangupGroupCall() async {
+    final call = _groupCall;
+    if (call != null) {
+      try {
+        await _sendGroupCallControl('group_call_hangup', call);
+      } catch (_) {}
+    }
+    await _clearGroupCall();
+  }
+
+  Future<void> _clearGroupCall() async {
+    final call = _groupCall;
+    if (call == null) return;
+    _groupCall = null;
+    await _stopCallAudio();
+    try {
+      await fipsGroupCallStop(callId: call.callId);
+    } catch (_) {}
+    if (mounted) setState(() {});
   }
 
   Future<void> _connectOutgoingWorkspaceCall(
@@ -7032,7 +7389,9 @@ Return a concise catch-up summary of what happened after that point: completed w
       // Do not make an endpoint visible until the user has answered, but do
       // not signal the caller until its advert publication has completed.
       await fipsCallAcceptStart(config: _callConfig());
-      if (!mounted || _callId != callId || _callPhase != _CallPhase.connecting) {
+      if (!mounted ||
+          _callId != callId ||
+          _callPhase != _CallPhase.connecting) {
         await fipsCallStop();
         return;
       }
@@ -7115,6 +7474,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       _callAudioStarted = true;
     });
     unawaited(_receiveCallAudio(callId));
+    unawaited(_activateCallVideo(callId, _callPeerPubkey!));
   }
 
   void _sendCallAudioFrames(Uint8List pcm) {
@@ -7158,6 +7518,108 @@ Return a concise catch-up summary of what happened after that point: completed w
       _callAudioStarted = false;
       await _realtimeAudio.stopCapture();
       await _realtimeAudio.stopPlayback();
+    }
+    await _stopCallVideo();
+  }
+
+  Future<void> _activateCallVideo(String callId, String peer) async {
+    if (!Platform.isAndroid ||
+        _callId != callId ||
+        _callPhase != _CallPhase.active) {
+      if (Platform.isLinux && mounted) {
+        setState(() => _status = 'Video receive is unavailable on Linux');
+      }
+      return;
+    }
+    try {
+      final texture = await _realtimeVideo.createRenderer();
+      if (!mounted || _callId != callId) {
+        await _realtimeVideo.releaseRenderer(texture);
+        return;
+      }
+      _videoTextures[peer] = texture;
+      _showVideoOverlay();
+      _callVideoCaptureSubscription = _realtimeVideo.frames.listen(
+        (fragment) => _sendCallVideoFragment(fragment),
+        onError: (Object error) => _showError('Call camera failed: $error'),
+      );
+      await _realtimeVideo.startCapture();
+      _callVideoStarted = true;
+      unawaited(_receiveCallVideo(callId, peer, texture));
+    } catch (error) {
+      if (mounted && _callId == callId) _showError('Video unavailable: $error');
+      await _stopCallVideo();
+    }
+  }
+
+  void _sendCallVideoFragment(Uint8List fragment) {
+    if (_sendingVideo || _callPhase != _CallPhase.active) return;
+    _sendingVideo = true;
+    unawaited(() async {
+      try {
+        await fipsCallSendRealtimeVideo(fragment: fragment);
+      } catch (_) {
+        // Audio receive reports transport failure; video drops late frames.
+      } finally {
+        _sendingVideo = false;
+      }
+    }());
+  }
+
+  Future<void> _receiveCallVideo(
+    String callId,
+    String peer,
+    int texture,
+  ) async {
+    while (mounted && _callId == callId && _callPhase == _CallPhase.active) {
+      try {
+        final fragment = await fipsCallReceiveRealtimeVideo(
+          timeoutMs: BigInt.from(10),
+        );
+        if (fragment != null && _videoTextures[peer] == texture) {
+          await _realtimeVideo.pushFragment(texture, fragment);
+        }
+      } catch (_) {
+        return;
+      }
+    }
+  }
+
+  void _showVideoOverlay() {
+    _videoOverlay?.remove();
+    if (_videoTextures.isEmpty || !mounted) return;
+    _videoOverlay = OverlayEntry(
+      builder: (_) => Positioned(
+        top: 76,
+        right: 12,
+        child: Material(
+          elevation: 6,
+          borderRadius: BorderRadius.circular(8),
+          clipBehavior: Clip.antiAlias,
+          child: SizedBox(
+            width: 180,
+            height: 101,
+            child: Texture(textureId: _videoTextures.values.first),
+          ),
+        ),
+      ),
+    );
+    Overlay.of(context, rootOverlay: true).insert(_videoOverlay!);
+  }
+
+  Future<void> _stopCallVideo() async {
+    await _callVideoCaptureSubscription?.cancel();
+    _callVideoCaptureSubscription = null;
+    _videoOverlay?.remove();
+    _videoOverlay = null;
+    final textures = _videoTextures.values.toList();
+    _videoTextures.clear();
+    for (final texture in textures) {
+      await _realtimeVideo.releaseRenderer(texture);
+    }
+    if (_callVideoStarted) {
+      _callVideoStarted = false;
+      await _realtimeVideo.stopCapture();
     }
   }
 

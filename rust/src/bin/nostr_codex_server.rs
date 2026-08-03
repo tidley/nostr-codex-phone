@@ -1287,6 +1287,48 @@ async fn process_workspace_request(
                 .await?;
             return Ok(());
         }
+        "group_call_invite" | "group_call_answer" | "group_call_hangup" => {
+            let channel_id = request.channel_id.as_deref().unwrap_or_default();
+            let call_id = request.call_id.as_deref().unwrap_or_default();
+            let participants = &request.participant_pubkeys;
+            if !workspace.has_channel(channel_id)? {
+                bail!("channel does not exist");
+            }
+            if !participants.iter().any(|participant| participant == sender)
+                || participants
+                    .iter()
+                    .any(|participant| !workspace.is_member(participant).unwrap_or(false))
+            {
+                bail!("group call participants must be workspace members and include the sender");
+            }
+            for recipient in participants
+                .iter()
+                .filter(|participant| participant.as_str() != sender)
+            {
+                let wire = match request.action.as_str() {
+                    "group_call_invite" => WireMessage::group_call_invite_from(
+                        call_id,
+                        channel_id,
+                        participants.clone(),
+                        sender,
+                    ),
+                    "group_call_answer" => WireMessage::group_call_answer_from(
+                        call_id,
+                        channel_id,
+                        participants.clone(),
+                        sender,
+                    ),
+                    _ => WireMessage::group_call_hangup_from(
+                        call_id,
+                        channel_id,
+                        participants.clone(),
+                        sender,
+                    ),
+                };
+                messenger.send_wire_to_pubkey(recipient, wire).await?;
+            }
+            return Ok(());
+        }
         "toggle_reaction" => {
             let message = workspace.toggle_reaction(
                 sender,

@@ -35,6 +35,15 @@ pub enum WireMessage {
     CallHangup {
         call_hangup: CallControl,
     },
+    GroupCallInvite {
+        group_call_invite: GroupCallControl,
+    },
+    GroupCallAnswer {
+        group_call_answer: GroupCallControl,
+    },
+    GroupCallHangup {
+        group_call_hangup: GroupCallControl,
+    },
     TargetInvite {
         target_invite: TargetInvite,
     },
@@ -102,6 +111,17 @@ pub struct AudioReference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallControl {
     pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_pubkey: Option<String>,
+}
+
+/// Channel-call signaling. Media remains a direct FIPS connection between each
+/// pair in `participant_pubkeys`; the worker only validates and forwards this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupCallControl {
+    pub call_id: String,
+    pub channel_id: String,
+    pub participant_pubkeys: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_pubkey: Option<String>,
 }
@@ -245,6 +265,8 @@ pub struct WorkspaceRequest {
     pub expires_in_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participant_pubkeys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -548,6 +570,51 @@ impl WireMessage {
     pub fn call_hangup_from(call_id: impl Into<String>, sender_pubkey: impl Into<String>) -> Self {
         Self::call_hangup_with_sender(call_id, Some(sender_pubkey.into()))
     }
+    pub fn group_call_invite_from(
+        call_id: impl Into<String>,
+        channel_id: impl Into<String>,
+        participants: Vec<String>,
+        sender: impl Into<String>,
+    ) -> Self {
+        Self::GroupCallInvite {
+            group_call_invite: GroupCallControl {
+                call_id: call_id.into(),
+                channel_id: channel_id.into(),
+                participant_pubkeys: participants,
+                sender_pubkey: Some(sender.into()),
+            },
+        }
+    }
+    pub fn group_call_answer_from(
+        call_id: impl Into<String>,
+        channel_id: impl Into<String>,
+        participants: Vec<String>,
+        sender: impl Into<String>,
+    ) -> Self {
+        Self::GroupCallAnswer {
+            group_call_answer: GroupCallControl {
+                call_id: call_id.into(),
+                channel_id: channel_id.into(),
+                participant_pubkeys: participants,
+                sender_pubkey: Some(sender.into()),
+            },
+        }
+    }
+    pub fn group_call_hangup_from(
+        call_id: impl Into<String>,
+        channel_id: impl Into<String>,
+        participants: Vec<String>,
+        sender: impl Into<String>,
+    ) -> Self {
+        Self::GroupCallHangup {
+            group_call_hangup: GroupCallControl {
+                call_id: call_id.into(),
+                channel_id: channel_id.into(),
+                participant_pubkeys: participants,
+                sender_pubkey: Some(sender.into()),
+            },
+        }
+    }
 
     pub fn target_invite(target_invite: TargetInvite) -> Self {
         Self::TargetInvite { target_invite }
@@ -627,6 +694,9 @@ impl WireMessage {
             Self::CallInvite { .. } => "call_invite",
             Self::CallAnswer { .. } => "call_answer",
             Self::CallHangup { .. } => "call_hangup",
+            Self::GroupCallInvite { .. } => "group_call_invite",
+            Self::GroupCallAnswer { .. } => "group_call_answer",
+            Self::GroupCallHangup { .. } => "group_call_hangup",
             Self::TargetInvite { .. } => "target_invite",
             Self::CreateInvite { .. } => "create_invite",
             Self::InviteCreated { .. } => "invite_created",
@@ -661,6 +731,13 @@ impl WireMessage {
             | Self::CallHangup {
                 call_hangup: call_invite,
             } => &call_invite.call_id,
+            Self::GroupCallInvite { group_call_invite }
+            | Self::GroupCallAnswer {
+                group_call_answer: group_call_invite,
+            }
+            | Self::GroupCallHangup {
+                group_call_hangup: group_call_invite,
+            } => &group_call_invite.call_id,
             Self::TargetInvite { target_invite } => &target_invite.name,
             Self::CreateInvite { .. } => "create invite",
             Self::InviteCreated { invite_created } => &invite_created.code,
@@ -705,6 +782,15 @@ impl WireMessage {
             Self::CallInvite { call_invite } => json!({ "call_invite": call_invite }),
             Self::CallAnswer { call_answer } => json!({ "call_answer": call_answer }),
             Self::CallHangup { call_hangup } => json!({ "call_hangup": call_hangup }),
+            Self::GroupCallInvite { group_call_invite } => {
+                json!({ "group_call_invite": group_call_invite })
+            }
+            Self::GroupCallAnswer { group_call_answer } => {
+                json!({ "group_call_answer": group_call_answer })
+            }
+            Self::GroupCallHangup { group_call_hangup } => {
+                json!({ "group_call_hangup": group_call_hangup })
+            }
             Self::TargetInvite { target_invite } => json!({ "target_invite": target_invite }),
             Self::CreateInvite { create_invite } => json!({ "create_invite": create_invite }),
             Self::InviteCreated { invite_created } => json!({ "invite_created": invite_created }),
@@ -818,6 +904,28 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
                 .map_err(|err| anyhow!("field `{field}` is invalid: {err}"))?;
             validate_call_id(&control.call_id)?;
             return Ok(constructor(control.call_id, control.sender_pubkey));
+        }
+    }
+    for field in [
+        "group_call_invite",
+        "group_call_answer",
+        "group_call_hangup",
+    ] {
+        if let Some(value) = object.get(field) {
+            let control: GroupCallControl = serde_json::from_value(value.clone())
+                .map_err(|err| anyhow!("field `{field}` is invalid: {err}"))?;
+            validate_group_call_control(&control)?;
+            return Ok(match field {
+                "group_call_invite" => WireMessage::GroupCallInvite {
+                    group_call_invite: control,
+                },
+                "group_call_answer" => WireMessage::GroupCallAnswer {
+                    group_call_answer: control,
+                },
+                _ => WireMessage::GroupCallHangup {
+                    group_call_hangup: control,
+                },
+            });
         }
     }
 
@@ -1325,6 +1433,19 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
         {
             Ok(())
         }
+        "group_call_invite" | "group_call_answer" | "group_call_hangup"
+            if request
+                .channel_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && request
+                    .call_id
+                    .as_deref()
+                    .is_some_and(|id| validate_call_id(id).is_ok())
+                && validate_group_call_participants(&request.participant_pubkeys).is_ok() =>
+        {
+            Ok(())
+        }
         _ => Err(anyhow!(
             "workspace request is incomplete or has an unsupported action"
         )),
@@ -1342,6 +1463,31 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
         })
     {
         return Err(anyhow!("workspace mentions are invalid"));
+    }
+    Ok(())
+}
+
+fn validate_group_call_control(control: &GroupCallControl) -> Result<()> {
+    validate_call_id(&control.call_id)?;
+    if control.channel_id.trim().is_empty() {
+        return Err(anyhow!("group call channel id must be non-empty"));
+    }
+    validate_group_call_participants(&control.participant_pubkeys)
+}
+
+fn validate_group_call_participants(participants: &[String]) -> Result<()> {
+    if !(2..=4).contains(&participants.len())
+        || participants
+            .iter()
+            .any(|participant| participant.trim().is_empty())
+    {
+        return Err(anyhow!("group calls require two to four participants"));
+    }
+    let unique = participants
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    if unique.len() != participants.len() {
+        return Err(anyhow!("group call participants must be unique"));
     }
     Ok(())
 }
@@ -1706,6 +1852,32 @@ mod tests {
             panic!("expected call invite");
         };
         assert_eq!(call_invite.sender_pubkey.as_deref(), Some("caller-pubkey"));
+    }
+
+    #[test]
+    fn parses_capped_channel_group_call_controls() {
+        let parsed = parse_wire_message(
+            r#"{"workspace_request":{"action":"group_call_invite","channel_id":"channel-1","call_id":"call_123","participant_pubkeys":["caller","peer"]}}"#,
+        )
+        .unwrap();
+        let WireMessage::WorkspaceRequest { workspace_request } = parsed else {
+            panic!("expected workspace request");
+        };
+        assert_eq!(workspace_request.participant_pubkeys, ["caller", "peer"]);
+
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"group_call_invite","channel_id":"channel-1","call_id":"call_123","participant_pubkeys":["a","b","c","d","e"]}}"#,
+        )
+        .is_err());
+
+        let forwarded = WireMessage::group_call_invite_from(
+            "call_123",
+            "channel-1",
+            vec!["caller".to_string(), "peer".to_string()],
+            "caller",
+        );
+        assert_eq!(forwarded.kind(), "group_call_invite");
+        assert!(forwarded.to_json().unwrap().contains("channel-1"));
     }
 
     #[test]

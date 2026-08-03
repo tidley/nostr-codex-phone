@@ -23,11 +23,13 @@ class MainActivity : FlutterActivity() {
     private var pendingHardStop = false
     private var callAudioTrack: AudioTrack? = null
     private var realtimeAudio: RealtimeAudio? = null
+    private var realtimeVideo: RealtimeVideo? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         ensureHardStopTts()
         realtimeAudio = RealtimeAudio(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
+        realtimeVideo = RealtimeVideo(applicationContext, flutterEngine.dartExecutor.binaryMessenger, flutterEngine.renderer)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
             when (call.method) {
                 "hardStop" -> {
@@ -192,6 +194,8 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         realtimeAudio?.dispose()
         realtimeAudio = null
+        realtimeVideo?.dispose()
+        realtimeVideo = null
         stopCallAudio()
         hardStopTts?.stop()
         hardStopTts?.shutdown()

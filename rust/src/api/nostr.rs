@@ -1,3 +1,4 @@
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,16 +15,25 @@ use crate::realtime_audio::{
     RealtimeAudioDecoder, RealtimeAudioEncoder, RealtimeAudioPacket,
     REALTIME_AUDIO_HARNESS_ECHO_FLAG,
 };
+use crate::realtime_video::RealtimeVideoFragment;
 
 static SESSION: Lazy<Mutex<Option<Arc<NostrMessenger>>>> = Lazy::new(|| Mutex::new(None));
 static CALL_SESSION: Lazy<Mutex<Option<FipsMobileQuicSession>>> = Lazy::new(|| Mutex::new(None));
 static CALL_ACCEPT_CANCEL: Lazy<Mutex<Option<oneshot::Sender<()>>>> =
     Lazy::new(|| Mutex::new(None));
 static REALTIME_AUDIO: Lazy<Mutex<Option<RealtimeAudioPipeline>>> = Lazy::new(|| Mutex::new(None));
+static GROUP_CALL_SESSIONS: Lazy<Mutex<HashMap<String, FipsMobileQuicSession>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static GROUP_CALL_AUDIO: Lazy<Mutex<HashMap<String, RealtimeAudioPipeline>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static GROUP_CALL_ACCEPT_CANCEL: Lazy<Mutex<HashMap<String, oneshot::Sender<()>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 struct RealtimeAudioPipeline {
     encoder: RealtimeAudioEncoder,
     decoder: RealtimeAudioDecoder,
+    queued_audio: VecDeque<Vec<u8>>,
+    queued_video: VecDeque<Vec<u8>>,
 }
 
 impl RealtimeAudioPipeline {
@@ -31,7 +41,33 @@ impl RealtimeAudioPipeline {
         Ok(Self {
             encoder: RealtimeAudioEncoder::new()?,
             decoder: RealtimeAudioDecoder::new()?,
+            queued_audio: VecDeque::with_capacity(8),
+            queued_video: VecDeque::with_capacity(32),
         })
+    }
+
+    fn queue(&mut self, datagram: Vec<u8>) -> Result<()> {
+        let queue = match datagram.first() {
+            Some(&1) => &mut self.queued_audio,
+            Some(&2) => &mut self.queued_video,
+            Some(version) => {
+                return Err(anyhow!("unsupported realtime datagram version {version}"))
+            }
+            None => return Err(anyhow!("empty realtime datagram")),
+        };
+        if queue.len() == queue.capacity() {
+            queue.pop_front();
+        }
+        queue.push_back(datagram);
+        Ok(())
+    }
+
+    fn take(&mut self, video: bool) -> Option<Vec<u8>> {
+        if video {
+            self.queued_video.pop_front()
+        } else {
+            self.queued_audio.pop_front()
+        }
     }
 }
 
@@ -373,7 +409,7 @@ pub async fn fips_call_send_realtime_audio(packet: BridgeRealtimeAudioPacket) ->
 pub async fn fips_call_receive_realtime_audio(
     timeout_ms: u64,
 ) -> Result<Option<BridgeRealtimeAudioPacket>> {
-    fips_call_receive_datagram(timeout_ms)
+    fips_call_receive_media(timeout_ms, false)
         .await?
         .map(|datagram| RealtimeAudioPacket::decode(&datagram).map(BridgeRealtimeAudioPacket::from))
         .transpose()
@@ -395,7 +431,7 @@ pub async fn fips_call_send_realtime_pcm(pcm: Vec<u8>) -> Result<()> {
 /// Receives an Opus realtime datagram and returns PCM only when the small
 /// reorder buffer has a frame ready for playout.
 pub async fn fips_call_receive_realtime_pcm(timeout_ms: u64) -> Result<Option<Vec<u8>>> {
-    let Some(datagram) = fips_call_receive_datagram(timeout_ms).await? else {
+    let Some(datagram) = fips_call_receive_media(timeout_ms, false).await? else {
         return Ok(None);
     };
     let packet = RealtimeAudioPacket::decode(&datagram)?;
@@ -412,6 +448,39 @@ pub async fn fips_call_receive_realtime_pcm(timeout_ms: u64) -> Result<Option<Ve
     audio.decoder.push(packet)
 }
 
+/// Sends one already-bounded H.264 fragment from the native MediaCodec bridge.
+pub async fn fips_call_send_realtime_video(fragment: Vec<u8>) -> Result<()> {
+    RealtimeVideoFragment::decode(&fragment)?;
+    fips_call_send_datagram(fragment).await
+}
+
+/// Returns only H.264 video fragments. Audio is queued for its decoder rather
+/// than discarded, so audio and video never compete for the QUIC receiver.
+pub async fn fips_call_receive_realtime_video(timeout_ms: u64) -> Result<Option<Vec<u8>>> {
+    fips_call_receive_media(timeout_ms, true).await
+}
+
+async fn fips_call_receive_media(timeout_ms: u64, video: bool) -> Result<Option<Vec<u8>>> {
+    if let Some(datagram) = REALTIME_AUDIO
+        .lock()
+        .await
+        .as_mut()
+        .and_then(|media| media.take(video))
+    {
+        return Ok(Some(datagram));
+    }
+    let datagram = fips_call_receive_datagram(timeout_ms).await?;
+    let Some(datagram) = datagram else {
+        return Ok(None);
+    };
+    let mut media = REALTIME_AUDIO.lock().await;
+    let media = media
+        .as_mut()
+        .ok_or_else(|| anyhow!("FIPS realtime media is not active"))?;
+    media.queue(datagram)?;
+    Ok(media.take(video))
+}
+
 pub async fn fips_call_stop() -> Result<()> {
     if let Some(cancel) = CALL_ACCEPT_CANCEL.lock().await.take() {
         let _ = cancel.send(());
@@ -422,6 +491,213 @@ pub async fn fips_call_stop() -> Result<()> {
     }
     *REALTIME_AUDIO.lock().await = None;
     Ok(())
+}
+
+/// Starts one direct FIPS edge of a channel-call mesh. These keyed sessions do
+/// not share the legacy direct-call slot, so direct calls retain their protocol.
+pub async fn fips_group_call_connect(
+    config: BridgeFipsCallConfig,
+    call_id: String,
+    peer_npub: String,
+) -> Result<BridgeFipsCallStatus> {
+    let key = group_call_key(&call_id, &peer_npub)?;
+    let mut session = build_fips_call_session(config)?;
+    let peer_npub = PublicKey::parse(peer_npub.trim())?.to_bech32()?;
+    session.connect(&peer_npub).await?;
+    let status = fips_call_status(&session);
+    GROUP_CALL_SESSIONS
+        .lock()
+        .await
+        .insert(key.clone(), session);
+    GROUP_CALL_AUDIO
+        .lock()
+        .await
+        .insert(key, RealtimeAudioPipeline::new()?);
+    Ok(status)
+}
+
+pub async fn fips_group_call_accept_start(
+    config: BridgeFipsCallConfig,
+    call_id: String,
+    peer_npub: String,
+) -> Result<BridgeFipsCallStatus> {
+    let key = group_call_key(&call_id, &peer_npub)?;
+    let mut session = build_fips_call_session(config)?;
+    session.start_accept().await?;
+    let status = fips_call_status(&session);
+    GROUP_CALL_SESSIONS
+        .lock()
+        .await
+        .insert(key.clone(), session);
+    GROUP_CALL_AUDIO
+        .lock()
+        .await
+        .insert(key, RealtimeAudioPipeline::new()?);
+    Ok(status)
+}
+
+pub async fn fips_group_call_accept_complete(
+    call_id: String,
+    peer_npub: String,
+) -> Result<BridgeFipsCallStatus> {
+    let key = group_call_key(&call_id, &peer_npub)?;
+    let (cancel, cancelled) = oneshot::channel();
+    GROUP_CALL_ACCEPT_CANCEL
+        .lock()
+        .await
+        .insert(key.clone(), cancel);
+    let mut session = GROUP_CALL_SESSIONS
+        .lock()
+        .await
+        .remove(&key)
+        .ok_or_else(|| anyhow!("FIPS group call acceptance is not started"))?;
+    let result = tokio::select! {
+        result = session.accept() => result.map_err(anyhow::Error::from),
+        _ = cancelled => Err(anyhow!("FIPS group call acceptance cancelled")),
+    };
+    let was_cancelled = GROUP_CALL_ACCEPT_CANCEL.lock().await.remove(&key).is_none();
+    if was_cancelled {
+        let _ = session.stop().await;
+        return Err(anyhow!("FIPS group call acceptance cancelled"));
+    }
+    let status = result.map(|()| fips_call_status(&session));
+    GROUP_CALL_SESSIONS.lock().await.insert(key, session);
+    status
+}
+
+pub async fn fips_group_call_send_realtime_pcm(
+    call_id: String,
+    peer_npub: String,
+    pcm: Vec<u8>,
+) -> Result<()> {
+    let key = group_call_key(&call_id, &peer_npub)?;
+    let datagram = GROUP_CALL_AUDIO
+        .lock()
+        .await
+        .get_mut(&key)
+        .ok_or_else(|| anyhow!("FIPS group realtime audio is not active"))?
+        .encoder
+        .encode_pcm(&pcm)?
+        .encode()?;
+    GROUP_CALL_SESSIONS
+        .lock()
+        .await
+        .get(&key)
+        .ok_or_else(|| anyhow!("FIPS group call is not active"))?
+        .send_datagram(&datagram)?;
+    Ok(())
+}
+
+pub async fn fips_group_call_receive_realtime_pcm(
+    call_id: String,
+    peer_npub: String,
+    timeout_ms: u64,
+) -> Result<Option<Vec<u8>>> {
+    let key = group_call_key(&call_id, &peer_npub)?;
+    let Some(datagram) = fips_group_call_receive_media(&key, timeout_ms, false).await? else {
+        return Ok(None);
+    };
+    let packet = RealtimeAudioPacket::decode(&datagram)?;
+    GROUP_CALL_AUDIO
+        .lock()
+        .await
+        .get_mut(&key)
+        .ok_or_else(|| anyhow!("FIPS group realtime audio is not active"))?
+        .decoder
+        .push(packet)
+}
+
+pub async fn fips_group_call_send_realtime_video(
+    call_id: String,
+    peer_npub: String,
+    fragment: Vec<u8>,
+) -> Result<()> {
+    RealtimeVideoFragment::decode(&fragment)?;
+    let key = group_call_key(&call_id, &peer_npub)?;
+    GROUP_CALL_SESSIONS
+        .lock()
+        .await
+        .get(&key)
+        .ok_or_else(|| anyhow!("FIPS group call is not active"))?
+        .send_datagram(&fragment)?;
+    Ok(())
+}
+
+pub async fn fips_group_call_receive_realtime_video(
+    call_id: String,
+    peer_npub: String,
+    timeout_ms: u64,
+) -> Result<Option<Vec<u8>>> {
+    let key = group_call_key(&call_id, &peer_npub)?;
+    fips_group_call_receive_media(&key, timeout_ms, true).await
+}
+
+async fn fips_group_call_receive_media(
+    key: &str,
+    timeout_ms: u64,
+    video: bool,
+) -> Result<Option<Vec<u8>>> {
+    if let Some(datagram) = GROUP_CALL_AUDIO
+        .lock()
+        .await
+        .get_mut(key)
+        .and_then(|media| media.take(video))
+    {
+        return Ok(Some(datagram));
+    }
+    let datagram = {
+        let sessions = GROUP_CALL_SESSIONS.lock().await;
+        let session = sessions
+            .get(key)
+            .ok_or_else(|| anyhow!("FIPS group call is not active"))?;
+        match tokio::time::timeout(
+            Duration::from_millis(timeout_ms.clamp(1, 50)),
+            session.receive_datagram(),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(anyhow::Error::from)?,
+            Err(_) => return Ok(None),
+        }
+    };
+    let mut media = GROUP_CALL_AUDIO.lock().await;
+    let media = media
+        .get_mut(key)
+        .ok_or_else(|| anyhow!("FIPS group realtime media is not active"))?;
+    media.queue(datagram)?;
+    Ok(media.take(video))
+}
+
+pub async fn fips_group_call_stop(call_id: String) -> Result<()> {
+    let prefix = format!("{call_id}\u{1f}");
+    let keys = GROUP_CALL_SESSIONS
+        .lock()
+        .await
+        .keys()
+        .filter(|key| key.starts_with(&prefix))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in &keys {
+        if let Some(cancel) = GROUP_CALL_ACCEPT_CANCEL.lock().await.remove(key) {
+            let _ = cancel.send(());
+        }
+        if let Some(mut session) = GROUP_CALL_SESSIONS.lock().await.remove(key) {
+            session.stop().await?;
+        }
+        GROUP_CALL_AUDIO.lock().await.remove(key);
+    }
+    Ok(())
+}
+
+fn group_call_key(call_id: &str, peer_npub: &str) -> Result<String> {
+    if call_id.trim().is_empty() {
+        return Err(anyhow!("group call id is required"));
+    }
+    Ok(format!(
+        "{}\u{1f}{}",
+        call_id.trim(),
+        PublicKey::parse(peer_npub.trim())?.to_bech32()?
+    ))
 }
 
 fn build_fips_call_session(config: BridgeFipsCallConfig) -> Result<FipsMobileQuicSession> {

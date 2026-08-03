@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 919982125;
+  int get rustContentHash => -2007054973;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -109,6 +109,10 @@ abstract class RustLibApi extends BaseApi {
     required BigInt timeoutMs,
   });
 
+  Future<Uint8List?> crateApiNostrFipsCallReceiveRealtimeVideo({
+    required BigInt timeoutMs,
+  });
+
   Future<void> crateApiNostrFipsCallSendDatagram({required List<int> payload});
 
   Future<void> crateApiNostrFipsCallSendRealtimeAudio({
@@ -117,7 +121,54 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiNostrFipsCallSendRealtimePcm({required List<int> pcm});
 
+  Future<void> crateApiNostrFipsCallSendRealtimeVideo({
+    required List<int> fragment,
+  });
+
   Future<void> crateApiNostrFipsCallStop();
+
+  Future<BridgeFipsCallStatus> crateApiNostrFipsGroupCallAcceptComplete({
+    required String callId,
+    required String peerNpub,
+  });
+
+  Future<BridgeFipsCallStatus> crateApiNostrFipsGroupCallAcceptStart({
+    required BridgeFipsCallConfig config,
+    required String callId,
+    required String peerNpub,
+  });
+
+  Future<BridgeFipsCallStatus> crateApiNostrFipsGroupCallConnect({
+    required BridgeFipsCallConfig config,
+    required String callId,
+    required String peerNpub,
+  });
+
+  Future<Uint8List?> crateApiNostrFipsGroupCallReceiveRealtimePcm({
+    required String callId,
+    required String peerNpub,
+    required BigInt timeoutMs,
+  });
+
+  Future<Uint8List?> crateApiNostrFipsGroupCallReceiveRealtimeVideo({
+    required String callId,
+    required String peerNpub,
+    required BigInt timeoutMs,
+  });
+
+  Future<void> crateApiNostrFipsGroupCallSendRealtimePcm({
+    required String callId,
+    required String peerNpub,
+    required List<int> pcm,
+  });
+
+  Future<void> crateApiNostrFipsGroupCallSendRealtimeVideo({
+    required String callId,
+    required String peerNpub,
+    required List<int> fragment,
+  });
+
+  Future<void> crateApiNostrFipsGroupCallStop({required String callId});
 
   Future<void> crateApiSimpleInitApp();
 
@@ -434,6 +485,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<Uint8List?> crateApiNostrFipsCallReceiveRealtimeVideo({
+    required BigInt timeoutMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_64(timeoutMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 9,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsCallReceiveRealtimeVideoConstMeta,
+        argValues: [timeoutMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsCallReceiveRealtimeVideoConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_call_receive_realtime_video",
+        argNames: ["timeoutMs"],
+      );
+
+  @override
   Future<void> crateApiNostrFipsCallSendDatagram({required List<int> payload}) {
     return handler.executeNormal(
       NormalTask(
@@ -443,7 +527,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 10,
             port: port_,
           );
         },
@@ -479,7 +563,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 11,
             port: port_,
           );
         },
@@ -510,7 +594,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 12,
             port: port_,
           );
         },
@@ -532,6 +616,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiNostrFipsCallSendRealtimeVideo({
+    required List<int> fragment,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_prim_u_8_loose(fragment, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 13,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsCallSendRealtimeVideoConstMeta,
+        argValues: [fragment],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsCallSendRealtimeVideoConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_call_send_realtime_video",
+        argNames: ["fragment"],
+      );
+
+  @override
   Future<void> crateApiNostrFipsCallStop() {
     return handler.executeNormal(
       NormalTask(
@@ -540,7 +657,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 14,
             port: port_,
           );
         },
@@ -559,6 +676,294 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "fips_call_stop", argNames: []);
 
   @override
+  Future<BridgeFipsCallStatus> crateApiNostrFipsGroupCallAcceptComplete({
+    required String callId,
+    required String peerNpub,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(callId, serializer);
+          sse_encode_String(peerNpub, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 15,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_fips_call_status,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsGroupCallAcceptCompleteConstMeta,
+        argValues: [callId, peerNpub],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsGroupCallAcceptCompleteConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_group_call_accept_complete",
+        argNames: ["callId", "peerNpub"],
+      );
+
+  @override
+  Future<BridgeFipsCallStatus> crateApiNostrFipsGroupCallAcceptStart({
+    required BridgeFipsCallConfig config,
+    required String callId,
+    required String peerNpub,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_fips_call_config(config, serializer);
+          sse_encode_String(callId, serializer);
+          sse_encode_String(peerNpub, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 16,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_fips_call_status,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsGroupCallAcceptStartConstMeta,
+        argValues: [config, callId, peerNpub],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsGroupCallAcceptStartConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_group_call_accept_start",
+        argNames: ["config", "callId", "peerNpub"],
+      );
+
+  @override
+  Future<BridgeFipsCallStatus> crateApiNostrFipsGroupCallConnect({
+    required BridgeFipsCallConfig config,
+    required String callId,
+    required String peerNpub,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_fips_call_config(config, serializer);
+          sse_encode_String(callId, serializer);
+          sse_encode_String(peerNpub, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 17,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_fips_call_status,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsGroupCallConnectConstMeta,
+        argValues: [config, callId, peerNpub],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsGroupCallConnectConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_group_call_connect",
+        argNames: ["config", "callId", "peerNpub"],
+      );
+
+  @override
+  Future<Uint8List?> crateApiNostrFipsGroupCallReceiveRealtimePcm({
+    required String callId,
+    required String peerNpub,
+    required BigInt timeoutMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(callId, serializer);
+          sse_encode_String(peerNpub, serializer);
+          sse_encode_u_64(timeoutMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 18,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsGroupCallReceiveRealtimePcmConstMeta,
+        argValues: [callId, peerNpub, timeoutMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsGroupCallReceiveRealtimePcmConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_group_call_receive_realtime_pcm",
+        argNames: ["callId", "peerNpub", "timeoutMs"],
+      );
+
+  @override
+  Future<Uint8List?> crateApiNostrFipsGroupCallReceiveRealtimeVideo({
+    required String callId,
+    required String peerNpub,
+    required BigInt timeoutMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(callId, serializer);
+          sse_encode_String(peerNpub, serializer);
+          sse_encode_u_64(timeoutMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 19,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsGroupCallReceiveRealtimeVideoConstMeta,
+        argValues: [callId, peerNpub, timeoutMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsGroupCallReceiveRealtimeVideoConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_group_call_receive_realtime_video",
+        argNames: ["callId", "peerNpub", "timeoutMs"],
+      );
+
+  @override
+  Future<void> crateApiNostrFipsGroupCallSendRealtimePcm({
+    required String callId,
+    required String peerNpub,
+    required List<int> pcm,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(callId, serializer);
+          sse_encode_String(peerNpub, serializer);
+          sse_encode_list_prim_u_8_loose(pcm, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 20,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsGroupCallSendRealtimePcmConstMeta,
+        argValues: [callId, peerNpub, pcm],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsGroupCallSendRealtimePcmConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_group_call_send_realtime_pcm",
+        argNames: ["callId", "peerNpub", "pcm"],
+      );
+
+  @override
+  Future<void> crateApiNostrFipsGroupCallSendRealtimeVideo({
+    required String callId,
+    required String peerNpub,
+    required List<int> fragment,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(callId, serializer);
+          sse_encode_String(peerNpub, serializer);
+          sse_encode_list_prim_u_8_loose(fragment, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 21,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsGroupCallSendRealtimeVideoConstMeta,
+        argValues: [callId, peerNpub, fragment],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsGroupCallSendRealtimeVideoConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_group_call_send_realtime_video",
+        argNames: ["callId", "peerNpub", "fragment"],
+      );
+
+  @override
+  Future<void> crateApiNostrFipsGroupCallStop({required String callId}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(callId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 22,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsGroupCallStopConstMeta,
+        argValues: [callId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsGroupCallStopConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_group_call_stop",
+        argNames: ["callId"],
+      );
+
+  @override
   Future<void> crateApiSimpleInitApp() {
     return handler.executeNormal(
       NormalTask(
@@ -567,7 +972,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 23,
             port: port_,
           );
         },
@@ -591,7 +996,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 14)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 24)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_String,
@@ -619,7 +1024,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 25,
             port: port_,
           );
         },
@@ -646,7 +1051,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 16)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 26)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bridge_key_pair,
@@ -671,7 +1076,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 17,
+            funcId: 27,
             port: port_,
           );
         },
@@ -701,7 +1106,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 18,
+            funcId: 28,
             port: port_,
           );
         },
@@ -729,7 +1134,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(secretKey, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 29)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bridge_key_pair,
@@ -760,7 +1165,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 30,
             port: port_,
           );
         },
@@ -792,7 +1197,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 31,
             port: port_,
           );
         },
@@ -823,7 +1228,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 32,
             port: port_,
           );
         },
@@ -851,7 +1256,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 33,
             port: port_,
           );
         },
@@ -879,7 +1284,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 34,
             port: port_,
           );
         },
@@ -912,7 +1317,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 25,
+            funcId: 35,
             port: port_,
           );
         },
@@ -939,7 +1344,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 26,
+            funcId: 36,
             port: port_,
           );
         },
