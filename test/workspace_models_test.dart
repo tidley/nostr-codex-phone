@@ -41,6 +41,26 @@ void main() {
     expect(state.messages['channel-1']![1].parentId, 'message-1');
   });
 
+  test('group call metadata accepts only a unique two-to-four member mesh', () {
+    final call = WorkspaceGroupCall.fromJson({
+      'call_id': 'call-1',
+      'channel_id': 'channel-1',
+      'participant_pubkeys': ['alice', 'bob', 'carol'],
+      'sender_pubkey': 'alice',
+    });
+
+    expect(call.isValid, isTrue);
+    expect(
+      WorkspaceGroupCall.fromJson({
+        'call_id': 'call-1',
+        'channel_id': 'channel-1',
+        'participant_pubkeys': ['alice', 'alice'],
+        'sender_pubkey': 'alice',
+      }).isValid,
+      isFalse,
+    );
+  });
+
   test(
     'workspace rehydrates broadcast reactions and main-thread visibility',
     () {

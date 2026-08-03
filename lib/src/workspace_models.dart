@@ -30,6 +30,41 @@ class WorkspaceChannel {
       );
 }
 
+/// Ephemeral channel-call metadata carried by group call control messages.
+/// FIPS media sessions are intentionally not persisted in workspace snapshots.
+class WorkspaceGroupCall {
+  const WorkspaceGroupCall({
+    required this.callId,
+    required this.channelId,
+    required this.participantPubkeys,
+    required this.senderPubkey,
+  });
+
+  final String callId;
+  final String channelId;
+  final List<String> participantPubkeys;
+  final String senderPubkey;
+
+  factory WorkspaceGroupCall.fromJson(Map<String, dynamic> json) =>
+      WorkspaceGroupCall(
+        callId: json['call_id']?.toString().trim() ?? '',
+        channelId: json['channel_id']?.toString().trim() ?? '',
+        participantPubkeys: (json['participant_pubkeys'] as List? ?? const [])
+            .map((value) => value.toString().trim())
+            .where((value) => value.isNotEmpty)
+            .toList(growable: false),
+        senderPubkey: json['sender_pubkey']?.toString().trim() ?? '',
+      );
+
+  bool get isValid =>
+      callId.isNotEmpty &&
+      channelId.isNotEmpty &&
+      participantPubkeys.length >= 2 &&
+      participantPubkeys.length <= 4 &&
+      participantPubkeys.toSet().length == participantPubkeys.length &&
+      senderPubkey.isNotEmpty;
+}
+
 class WorkspaceMessage {
   const WorkspaceMessage({
     required this.id,

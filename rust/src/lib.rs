@@ -8,5 +8,6 @@ pub mod invite;
 pub mod nostr_client;
 pub mod protocol;
 pub mod realtime_audio;
+pub mod realtime_video;
 pub mod transcribe;
 pub mod workspace;

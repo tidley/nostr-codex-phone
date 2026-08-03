@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `active_session`, `build_fips_call_session`, `clean_relays`, `fips_call_status`, `key_pair_from_keys`, `new`
+// These functions are ignored because they are not marked as `pub`: `active_session`, `build_fips_call_session`, `clean_relays`, `fips_call_receive_media`, `fips_call_status`, `fips_group_call_receive_media`, `group_call_key`, `key_pair_from_keys`, `new`, `queue`, `take`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RealtimeAudioPipeline`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
@@ -118,7 +118,93 @@ Future<Uint8List?> fipsCallReceiveRealtimePcm({required BigInt timeoutMs}) =>
       timeoutMs: timeoutMs,
     );
 
+/// Sends one already-bounded H.264 fragment from the native MediaCodec bridge.
+Future<void> fipsCallSendRealtimeVideo({required List<int> fragment}) => RustLib
+    .instance
+    .api
+    .crateApiNostrFipsCallSendRealtimeVideo(fragment: fragment);
+
+/// Returns only H.264 video fragments. Audio is queued for its decoder rather
+/// than discarded, so audio and video never compete for the QUIC receiver.
+Future<Uint8List?> fipsCallReceiveRealtimeVideo({required BigInt timeoutMs}) =>
+    RustLib.instance.api.crateApiNostrFipsCallReceiveRealtimeVideo(
+      timeoutMs: timeoutMs,
+    );
+
 Future<void> fipsCallStop() => RustLib.instance.api.crateApiNostrFipsCallStop();
+
+/// Starts one direct FIPS edge of a channel-call mesh. These keyed sessions do
+/// not share the legacy direct-call slot, so direct calls retain their protocol.
+Future<BridgeFipsCallStatus> fipsGroupCallConnect({
+  required BridgeFipsCallConfig config,
+  required String callId,
+  required String peerNpub,
+}) => RustLib.instance.api.crateApiNostrFipsGroupCallConnect(
+  config: config,
+  callId: callId,
+  peerNpub: peerNpub,
+);
+
+Future<BridgeFipsCallStatus> fipsGroupCallAcceptStart({
+  required BridgeFipsCallConfig config,
+  required String callId,
+  required String peerNpub,
+}) => RustLib.instance.api.crateApiNostrFipsGroupCallAcceptStart(
+  config: config,
+  callId: callId,
+  peerNpub: peerNpub,
+);
+
+Future<BridgeFipsCallStatus> fipsGroupCallAcceptComplete({
+  required String callId,
+  required String peerNpub,
+}) => RustLib.instance.api.crateApiNostrFipsGroupCallAcceptComplete(
+  callId: callId,
+  peerNpub: peerNpub,
+);
+
+Future<void> fipsGroupCallSendRealtimePcm({
+  required String callId,
+  required String peerNpub,
+  required List<int> pcm,
+}) => RustLib.instance.api.crateApiNostrFipsGroupCallSendRealtimePcm(
+  callId: callId,
+  peerNpub: peerNpub,
+  pcm: pcm,
+);
+
+Future<Uint8List?> fipsGroupCallReceiveRealtimePcm({
+  required String callId,
+  required String peerNpub,
+  required BigInt timeoutMs,
+}) => RustLib.instance.api.crateApiNostrFipsGroupCallReceiveRealtimePcm(
+  callId: callId,
+  peerNpub: peerNpub,
+  timeoutMs: timeoutMs,
+);
+
+Future<void> fipsGroupCallSendRealtimeVideo({
+  required String callId,
+  required String peerNpub,
+  required List<int> fragment,
+}) => RustLib.instance.api.crateApiNostrFipsGroupCallSendRealtimeVideo(
+  callId: callId,
+  peerNpub: peerNpub,
+  fragment: fragment,
+);
+
+Future<Uint8List?> fipsGroupCallReceiveRealtimeVideo({
+  required String callId,
+  required String peerNpub,
+  required BigInt timeoutMs,
+}) => RustLib.instance.api.crateApiNostrFipsGroupCallReceiveRealtimeVideo(
+  callId: callId,
+  peerNpub: peerNpub,
+  timeoutMs: timeoutMs,
+);
+
+Future<void> fipsGroupCallStop({required String callId}) =>
+    RustLib.instance.api.crateApiNostrFipsGroupCallStop(callId: callId);
 
 class BridgeAudioEncryption {
   final String algorithm;

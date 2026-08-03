@@ -580,10 +580,16 @@ class _TeamWorkspace extends StatefulWidget {
     required this.onCreateInvite,
     required this.callPhase,
     required this.callPeerPubkey,
+    required this.groupCallPhase,
+    required this.groupCallChannelId,
     required this.onStartCall,
+    required this.onStartChannelCall,
     required this.onAcceptCall,
     required this.onRejectCall,
     required this.onHangupCall,
+    required this.onAcceptGroupCall,
+    required this.onRejectGroupCall,
+    required this.onHangupGroupCall,
   });
 
   final List<RepoTarget> sessions;
@@ -606,10 +612,16 @@ class _TeamWorkspace extends StatefulWidget {
   final Future<void> Function() onCreateInvite;
   final _CallPhase callPhase;
   final String? callPeerPubkey;
+  final _CallPhase groupCallPhase;
+  final String? groupCallChannelId;
   final ValueChanged<String> onStartCall;
+  final Future<void> Function(String channelId) onStartChannelCall;
   final VoidCallback onAcceptCall;
   final VoidCallback onRejectCall;
   final VoidCallback onHangupCall;
+  final VoidCallback onAcceptGroupCall;
+  final VoidCallback onRejectGroupCall;
+  final VoidCallback onHangupGroupCall;
 
   @override
   State<_TeamWorkspace> createState() => _TeamWorkspaceState();
@@ -863,6 +875,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final conversation = _WorkspaceConversation(
       title: _title,
       section: _section,
+      channelId: _section == _WorkspaceSection.channel ? _active : null,
       directPeer: _section == _WorkspaceSection.direct ? _active : null,
       messages: _activeMessages
           .where(
@@ -927,10 +940,16 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           .toList(),
       callPhase: widget.callPhase,
       callPeerPubkey: widget.callPeerPubkey,
+      groupCallPhase: widget.groupCallPhase,
+      groupCallChannelId: widget.groupCallChannelId,
       onStartCall: widget.onStartCall,
+      onStartChannelCall: widget.onStartChannelCall,
       onAcceptCall: widget.onAcceptCall,
       onRejectCall: widget.onRejectCall,
       onHangupCall: widget.onHangupCall,
+      onAcceptGroupCall: widget.onAcceptGroupCall,
+      onRejectGroupCall: widget.onRejectGroupCall,
+      onHangupGroupCall: widget.onHangupGroupCall,
     );
     final contextPane = _WorkspaceContext(
       message: _thread,
@@ -1271,6 +1290,7 @@ class _WorkspaceConversation extends StatefulWidget {
   const _WorkspaceConversation({
     required this.title,
     required this.section,
+    required this.channelId,
     required this.directPeer,
     required this.messages,
     required this.threadReplyCounts,
@@ -1305,13 +1325,20 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.typingLabels,
     required this.callPhase,
     required this.callPeerPubkey,
+    required this.groupCallPhase,
+    required this.groupCallChannelId,
     required this.onStartCall,
+    required this.onStartChannelCall,
     required this.onAcceptCall,
     required this.onRejectCall,
     required this.onHangupCall,
+    required this.onAcceptGroupCall,
+    required this.onRejectGroupCall,
+    required this.onHangupGroupCall,
   });
   final String title;
   final _WorkspaceSection section;
+  final String? channelId;
   final String? directPeer;
   final List<WorkspaceMessage> messages;
   final Map<String, int> threadReplyCounts;
@@ -1347,10 +1374,16 @@ class _WorkspaceConversation extends StatefulWidget {
   final List<String> typingLabels;
   final _CallPhase callPhase;
   final String? callPeerPubkey;
+  final _CallPhase groupCallPhase;
+  final String? groupCallChannelId;
   final ValueChanged<String> onStartCall;
+  final Future<void> Function(String channelId) onStartChannelCall;
   final VoidCallback onAcceptCall;
   final VoidCallback onRejectCall;
   final VoidCallback onHangupCall;
+  final VoidCallback onAcceptGroupCall;
+  final VoidCallback onRejectGroupCall;
+  final VoidCallback onHangupGroupCall;
 
   @override
   State<_WorkspaceConversation> createState() => _WorkspaceConversationState();
@@ -1491,6 +1524,19 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                   onAccept: widget.onAcceptCall,
                   onReject: widget.onRejectCall,
                   onHangup: widget.onHangupCall,
+                ),
+              if (widget.section == _WorkspaceSection.channel)
+                _CallControl(
+                  phase:
+                      widget.groupCallChannelId == null ||
+                          widget.groupCallChannelId == widget.channelId
+                      ? widget.groupCallPhase
+                      : _CallPhase.idle,
+                  onStart: () =>
+                      unawaited(widget.onStartChannelCall(widget.channelId!)),
+                  onAccept: widget.onAcceptGroupCall,
+                  onReject: widget.onRejectGroupCall,
+                  onHangup: widget.onHangupGroupCall,
                 ),
             ],
           ),
