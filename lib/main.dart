@@ -51,7 +51,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.0+300';
+const _appVersion = '0.3.1+301';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -431,7 +431,7 @@ ThemeData _appTheme(AppTheme theme) {
       ? const _WorkspacePalette(
           background: Color(0xff101010),
           sidebar: Color(0xff161615),
-          content: Color(0xff1b1a19),
+          content: Color(0xff101010),
           composer: Color(0xff211f1d),
           selected: Color(0xff4a3718),
           label: Color(0xff71ded9),
@@ -441,7 +441,7 @@ ThemeData _appTheme(AppTheme theme) {
       : const _WorkspacePalette(
           background: Color(0xff101a19),
           sidebar: Color(0xff142321),
-          content: Color(0xff182522),
+          content: Color(0xff101a19),
           composer: Color(0xff1e2d29),
           selected: Color(0xff24554b),
           label: Color(0xff9cc6bb),
@@ -8020,6 +8020,8 @@ Return a concise catch-up summary of what happened after that point: completed w
           workspaceRevision: _workspaceRevision,
           onRequest: _sendWorkspaceRequest,
           onLoadOpenCodeModels: _loadOpenCodeModels,
+          initialFolderChoices: _cachedRepoChoices,
+          onLoadFolders: (path) => _requestRepoChoices(path: path),
           onOpenConversation: (agent) async {
             final sessionId = agent.openCodeSessionId;
             if (agent.sessionStatus != 'ready' ||

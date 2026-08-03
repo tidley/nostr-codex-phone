@@ -2885,12 +2885,16 @@ class _AgentsPage extends StatefulWidget {
     required this.workspaceRevision,
     required this.onRequest,
     required this.onLoadOpenCodeModels,
+    required this.initialFolderChoices,
+    required this.onLoadFolders,
     required this.onOpenConversation,
   });
   final WorkspaceState workspace;
   final ValueListenable<int> workspaceRevision;
   final Future<void> Function(Map<String, Object?> request) onRequest;
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
+  final List<RepoChoice> initialFolderChoices;
+  final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
   final Future<void> Function(WorkspaceAgent agent) onOpenConversation;
   @override
   State<_AgentsPage> createState() => _AgentsPageState();
@@ -2936,8 +2940,11 @@ class _AgentsPageState extends State<_AgentsPage> {
   Future<void> _createCustom() async {
     final result = await showDialog<Map<String, Object?>>(
       context: context,
-      builder: (_) =>
-          _AgentEditorDialog(onLoadOpenCodeModels: widget.onLoadOpenCodeModels),
+      builder: (_) => _AgentEditorDialog(
+        onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
+        initialFolderChoices: widget.initialFolderChoices,
+        onLoadFolders: widget.onLoadFolders,
+      ),
     );
     if (result != null) {
       await widget.onRequest({'action': 'create_agent', ...result});
@@ -2985,6 +2992,8 @@ class _AgentsPageState extends State<_AgentsPage> {
       builder: (_) => _AgentOpenCodeProfileDialog(
         agent: agent,
         onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
+        initialFolderChoices: widget.initialFolderChoices,
+        onLoadFolders: widget.onLoadFolders,
       ),
     );
     if (result != null) {
@@ -3146,8 +3155,14 @@ class _AgentsPageState extends State<_AgentsPage> {
 }
 
 class _AgentEditorDialog extends StatefulWidget {
-  const _AgentEditorDialog({required this.onLoadOpenCodeModels});
+  const _AgentEditorDialog({
+    required this.onLoadOpenCodeModels,
+    required this.initialFolderChoices,
+    required this.onLoadFolders,
+  });
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
+  final List<RepoChoice> initialFolderChoices;
+  final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
   @override
   State<_AgentEditorDialog> createState() => _AgentEditorDialogState();
 }
@@ -3234,6 +3249,8 @@ class _AgentEditorDialogState extends State<_AgentEditorDialog> {
           _OpenCodeProfileFields(
             key: _profileFieldsKey,
             onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
+            initialFolderChoices: widget.initialFolderChoices,
+            onLoadFolders: widget.onLoadFolders,
             openCodeAgent: _openCodeAgent,
             workdir: _workdir,
             restartOnFailure: _restartOnFailure,
@@ -3281,9 +3298,13 @@ class _AgentOpenCodeProfileDialog extends StatefulWidget {
   const _AgentOpenCodeProfileDialog({
     required this.agent,
     required this.onLoadOpenCodeModels,
+    required this.initialFolderChoices,
+    required this.onLoadFolders,
   });
   final WorkspaceAgent agent;
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
+  final List<RepoChoice> initialFolderChoices;
+  final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
 
   @override
   State<_AgentOpenCodeProfileDialog> createState() =>
@@ -3327,6 +3348,8 @@ class _AgentOpenCodeProfileDialogState
                     widget.agent.openCodeModelId!,
               ),
         onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
+        initialFolderChoices: widget.initialFolderChoices,
+        onLoadFolders: widget.onLoadFolders,
         openCodeAgent: _openCodeAgent,
         workdir: _workdir,
         restartOnFailure: _restartOnFailure,
@@ -3365,6 +3388,8 @@ class _OpenCodeProfileFields extends StatefulWidget {
     super.key,
     this.initialModel,
     required this.onLoadOpenCodeModels,
+    required this.initialFolderChoices,
+    required this.onLoadFolders,
     required this.openCodeAgent,
     required this.workdir,
     required this.restartOnFailure,
@@ -3373,6 +3398,8 @@ class _OpenCodeProfileFields extends StatefulWidget {
 
   final _OpenCodeModelChoice? initialModel;
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
+  final List<RepoChoice> initialFolderChoices;
+  final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
   final TextEditingController openCodeAgent;
   final TextEditingController workdir;
   final bool restartOnFailure;
@@ -3384,6 +3411,19 @@ class _OpenCodeProfileFields extends StatefulWidget {
 
 class _OpenCodeProfileFieldsState extends State<_OpenCodeProfileFields> {
   late _OpenCodeModelChoice? selectedModel = widget.initialModel;
+  String? _selectedFolderLabel;
+
+  @override
+  void initState() {
+    super.initState();
+    final workdir = widget.workdir.text.trim();
+    for (final choice in widget.initialFolderChoices) {
+      if (choice.path == workdir) {
+        _selectedFolderLabel = choice.displayName;
+        break;
+      }
+    }
+  }
 
   Future<void> _chooseModel() async {
     try {
@@ -3425,6 +3465,23 @@ class _OpenCodeProfileFieldsState extends State<_OpenCodeProfileFields> {
     }
   }
 
+  Future<void> _chooseWorkingFolder() async {
+    final selection = await Navigator.of(context).push<_WorkingFolderSelection>(
+      MaterialPageRoute(
+        builder: (_) => _WorkingFolderPickerPage(
+          initialChoices: widget.initialFolderChoices,
+          selectedPath: widget.workdir.text.trim(),
+          onLoadFolders: widget.onLoadFolders,
+        ),
+      ),
+    );
+    if (selection == null || !mounted) return;
+    setState(() {
+      widget.workdir.text = selection.path ?? '';
+      _selectedFolderLabel = selection.label;
+    });
+  }
+
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
@@ -3451,13 +3508,23 @@ class _OpenCodeProfileFieldsState extends State<_OpenCodeProfileFields> {
         maxLength: 100,
         decoration: const InputDecoration(labelText: 'OpenCode agent'),
       ),
-      TextField(
-        controller: widget.workdir,
-        maxLength: 1000,
-        decoration: const InputDecoration(
-          labelText: 'Working folder',
-          helperText: 'Must be inside a worker allowed folder.',
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: const Icon(Icons.folder_outlined),
+        title: Text(
+          widget.workdir.text.trim().isEmpty
+              ? 'Worker default'
+              : _selectedFolderLabel ?? widget.workdir.text.trim(),
         ),
+        subtitle: Text(
+          widget.workdir.text.trim().isEmpty
+              ? 'Use the worker default working folder'
+              : widget.workdir.text.trim(),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: _chooseWorkingFolder,
       ),
       SwitchListTile.adaptive(
         contentPadding: EdgeInsets.zero,
@@ -4870,6 +4937,232 @@ class _FileViewerPageState extends State<_FileViewerPage> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _WorkingFolderSelection {
+  const _WorkingFolderSelection({this.path, this.label});
+
+  final String? path;
+  final String? label;
+}
+
+class _WorkingFolderPickerPage extends StatefulWidget {
+  const _WorkingFolderPickerPage({
+    required this.initialChoices,
+    required this.selectedPath,
+    required this.onLoadFolders,
+  });
+
+  final List<RepoChoice> initialChoices;
+  final String selectedPath;
+  final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
+
+  @override
+  State<_WorkingFolderPickerPage> createState() =>
+      _WorkingFolderPickerPageState();
+}
+
+class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
+  final _searchController = TextEditingController();
+  bool _loadingFolders = false;
+  String _searchQuery = '';
+  String _currentPath = '';
+  String? _selectedPath;
+  List<RepoChoice> _choices = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _choices = widget.initialChoices;
+    _selectedPath = widget.selectedPath.isEmpty ? null : widget.selectedPath;
+    unawaited(_loadFolders());
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadFolders([String? path]) async {
+    setState(() => _loadingFolders = true);
+    try {
+      final choices = await widget.onLoadFolders(path);
+      if (!mounted) return;
+      setState(() {
+        _choices = choices;
+        _currentPath = path ?? '';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not load folders: $error')));
+    } finally {
+      if (mounted) setState(() => _loadingFolders = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final query = _searchQuery.trim().toLowerCase();
+    final visibleChoices = query.isEmpty
+        ? _choices
+        : _choices.where((choice) {
+            return choice.displayName.toLowerCase().contains(query) ||
+                choice.relativePath.toLowerCase().contains(query);
+          }).toList();
+    final selectedChoice = _choices.where(
+      (choice) => choice.path == _selectedPath,
+    );
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Working folder'),
+        actions: [
+          TextButton(
+            onPressed: () =>
+                Navigator.pop(context, const _WorkingFolderSelection()),
+            child: const Text('Worker default'),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          ListTile(
+            leading: const Icon(Icons.settings_backup_restore_outlined),
+            title: const Text('Worker default'),
+            subtitle: const Text('No folder override for this agent'),
+            selected: _selectedPath == null,
+            onTap: () =>
+                Navigator.pop(context, const _WorkingFolderSelection()),
+          ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _searchController,
+                    onChanged: (value) => setState(() => _searchQuery = value),
+                    decoration: const InputDecoration(
+                      prefixIcon: Icon(Icons.search),
+                      hintText: 'Search folders',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Refresh folders',
+                  onPressed: _loadingFolders
+                      ? null
+                      : () => _loadFolders(
+                          _currentPath.isEmpty ? null : _currentPath,
+                        ),
+                  icon: _loadingFolders
+                      ? const SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Row(
+              children: [
+                IconButton(
+                  tooltip: 'Up one folder',
+                  onPressed: _currentPath.isEmpty || _loadingFolders
+                      ? null
+                      : () {
+                          final parts = _currentPath.split('/');
+                          parts.removeLast();
+                          _loadFolders(parts.isEmpty ? null : parts.join('/'));
+                        },
+                  icon: const Icon(Icons.arrow_upward),
+                ),
+                Expanded(
+                  child: Text(
+                    _currentPath.isEmpty ? 'Worker root' : _currentPath,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: _loadingFolders && _choices.isEmpty
+                ? const Center(child: CircularProgressIndicator())
+                : visibleChoices.isEmpty
+                ? const Center(child: Text('No matching folders'))
+                : RadioGroup<String>(
+                    groupValue: _selectedPath,
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setState(() => _selectedPath = value);
+                    },
+                    child: ListView.separated(
+                      itemCount: visibleChoices.length,
+                      separatorBuilder: (_, _) =>
+                          const Divider(height: 1, indent: 64),
+                      itemBuilder: (context, index) {
+                        final choice = visibleChoices[index];
+                        return ListTile(
+                          selected: _selectedPath == choice.path,
+                          leading: Icon(
+                            choice.isGitRepo
+                                ? Icons.account_tree_outlined
+                                : Icons.folder_outlined,
+                          ),
+                          title: Text(
+                            choice.displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            choice.path,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontFamily: 'monospace'),
+                          ),
+                          trailing: Radio<String>(value: choice.path),
+                          onTap: () => _loadFolders(choice.relativePath),
+                        );
+                      },
+                    ),
+                  ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: FilledButton.icon(
+            onPressed: selectedChoice.isEmpty
+                ? null
+                : () {
+                    final choice = selectedChoice.first;
+                    Navigator.pop(
+                      context,
+                      _WorkingFolderSelection(
+                        path: choice.path,
+                        label: choice.displayName,
+                      ),
+                    );
+                  },
+            icon: const Icon(Icons.folder_open),
+            label: const Text('Use folder'),
+          ),
+        ),
       ),
     );
   }

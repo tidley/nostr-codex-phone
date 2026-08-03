@@ -2,6 +2,23 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr_codex_phone/src/workspace_models.dart';
 
 void main() {
+  test('agent profiles retain an optional saved working folder', () {
+    final scoped = WorkspaceAgent.fromJson({
+      'id': 'builder',
+      'name': 'Builder',
+      'role': 'Build changes',
+      'workdir': '/home/tom/code/phone',
+    });
+    final defaultFolder = WorkspaceAgent.fromJson({
+      'id': 'reviewer',
+      'name': 'Reviewer',
+      'role': 'Review changes',
+    });
+
+    expect(scoped.workdir, '/home/tom/code/phone');
+    expect(defaultFolder.workdir, isNull);
+  });
+
   test(
     'classifies local and agent senders without depending on display names',
     () {
