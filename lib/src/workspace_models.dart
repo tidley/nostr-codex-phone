@@ -326,11 +326,13 @@ class WorkspaceConversationAgent {
     this.channelId,
     this.memberPubkey,
     this.peerPubkey,
+    this.folderScope = const [],
   });
   final String agentId;
   final String? channelId;
   final String? memberPubkey;
   final String? peerPubkey;
+  final List<String> folderScope;
 
   factory WorkspaceConversationAgent.fromJson(Map<String, dynamic> json) =>
       WorkspaceConversationAgent(
@@ -338,6 +340,10 @@ class WorkspaceConversationAgent {
         channelId: json['channel_id']?.toString(),
         memberPubkey: json['member_pubkey']?.toString(),
         peerPubkey: json['peer_pubkey']?.toString(),
+        folderScope: (json['folder_scope'] as List? ?? const [])
+            .map((path) => path.toString().trim())
+            .where((path) => path.isNotEmpty)
+            .toList(growable: false),
       );
 }
 
@@ -384,10 +390,11 @@ class WorkspaceState {
   List<WorkspaceConversationAgent> conversationAgents = [];
   final Map<String, WorkspaceTyping> typing = {};
 
-  void apply(Map<String, dynamic> raw) {
+  List<WorkspaceMessage> apply(Map<String, dynamic> raw) {
     final update = raw['workspace_update'];
-    if (update is! Map) return;
+    if (update is! Map) return const [];
     final data = Map<String, dynamic>.from(update);
+    final addedMessages = <WorkspaceMessage>[];
     final isSnapshot = data['action'] == 'snapshot';
     if (isSnapshot) {
       channels = [];
@@ -463,13 +470,17 @@ class WorkspaceState {
     for (final message in incomingMessages) {
       final key = message.channelId ?? _messageDirectKey(message);
       final current = {for (final item in messages[key] ?? []) item.id: item};
+      if (!current.containsKey(message.id)) addedMessages.add(message);
       current[message.id] = message;
       messages[key] = current.values.cast<WorkspaceMessage>().toList()
         ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
     }
+    return addedMessages;
   }
 
   static String directKey(String one, String? two) => _directKey(one, two);
+  String conversationKeyForMessage(WorkspaceMessage message) =>
+      message.channelId ?? _messageDirectKey(message);
   static String _typingKey(WorkspaceTyping status) => [
     status.senderPubkey,
     status.channelId ?? '',

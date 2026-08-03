@@ -75,6 +75,7 @@ pub struct WorkspaceConversationAgent {
     pub channel_id: Option<String>,
     pub member_pubkey: Option<String>,
     pub peer_pubkey: Option<String>,
+    pub folder_scope: Vec<String>,
 }
 
 pub struct WorkspaceStore {
@@ -97,8 +98,9 @@ impl WorkspaceStore {
                CREATE TABLE IF NOT EXISTS workspace_message_reactions (message_id TEXT NOT NULL REFERENCES workspace_messages(id), emoji TEXT NOT NULL, sender_pubkey TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (message_id, emoji, sender_pubkey));
                CREATE TABLE IF NOT EXISTS workspace_agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, traits TEXT NOT NULL DEFAULT '', skills_json TEXT NOT NULL DEFAULT '[]', preset TEXT, opencode_provider_id TEXT, opencode_provider_name TEXT, opencode_model_id TEXT, opencode_model_name TEXT, opencode_agent TEXT, workdir TEXT, restart_on_failure INTEGER NOT NULL DEFAULT 1, opencode_session_id TEXT, session_status TEXT NOT NULL DEFAULT 'failed', session_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
               CREATE TABLE IF NOT EXISTS workspace_agent_instances (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES workspace_agents(id), opencode_session_id TEXT, created_at INTEGER NOT NULL);
-              CREATE TABLE IF NOT EXISTS workspace_conversation_agents (agent_id TEXT NOT NULL REFERENCES workspace_agents(id), channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT,
-                 PRIMARY KEY (agent_id, channel_id, member_pubkey, peer_pubkey),
+               CREATE TABLE IF NOT EXISTS workspace_conversation_agents (agent_id TEXT NOT NULL REFERENCES workspace_agents(id), channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT,
+                  folder_scope_json TEXT NOT NULL DEFAULT '[]',
+                  PRIMARY KEY (agent_id, channel_id, member_pubkey, peer_pubkey),
                  CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
               CREATE INDEX IF NOT EXISTS workspace_messages_channel ON workspace_messages(channel_id, created_at);
               CREATE INDEX IF NOT EXISTS workspace_messages_direct ON workspace_messages(recipient_pubkey, sender_pubkey, created_at);",
@@ -189,6 +191,19 @@ impl WorkspaceStore {
                     [],
                 )?;
             }
+        }
+        let conversation_agent_columns = conn
+            .prepare("PRAGMA table_info(workspace_conversation_agents)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !conversation_agent_columns
+            .iter()
+            .any(|column| column == "folder_scope_json")
+        {
+            conn.execute(
+                "ALTER TABLE workspace_conversation_agents ADD COLUMN folder_scope_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
         }
         Ok(Self { conn })
     }
@@ -491,7 +506,7 @@ impl WorkspaceStore {
     }
 
     pub fn conversation_agents(&self) -> Result<Vec<WorkspaceConversationAgent>> {
-        let mut statement = self.conn.prepare("SELECT agent_id, channel_id, member_pubkey, peer_pubkey FROM workspace_conversation_agents ORDER BY agent_id")?;
+        let mut statement = self.conn.prepare("SELECT agent_id, channel_id, member_pubkey, peer_pubkey, folder_scope_json FROM workspace_conversation_agents ORDER BY agent_id")?;
         let memberships = statement
             .query_map([], conversation_agent_from_row)?
             .collect::<rusqlite::Result<_>>()?;
@@ -504,6 +519,7 @@ impl WorkspaceStore {
         channel_id: Option<&str>,
         member: Option<&str>,
         peer: Option<&str>,
+        folder_scope: &[String],
     ) -> Result<()> {
         let agent_id = required("agent id", agent_id)?;
         if !self.conn.query_row(
@@ -527,7 +543,7 @@ impl WorkspaceStore {
             }
             _ => bail!("conversation must be a channel or a direct message"),
         };
-        self.conn.execute("INSERT OR IGNORE INTO workspace_conversation_agents (agent_id, channel_id, member_pubkey, peer_pubkey) VALUES (?1, ?2, ?3, ?4)", params![agent_id, channel_id, member, peer])?;
+        self.conn.execute("INSERT INTO workspace_conversation_agents (agent_id, channel_id, member_pubkey, peer_pubkey, folder_scope_json) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(agent_id, channel_id, member_pubkey, peer_pubkey) DO UPDATE SET folder_scope_json = excluded.folder_scope_json", params![agent_id, channel_id, member, peer, serde_json::to_string(folder_scope)?])?;
         Ok(())
     }
 
@@ -880,6 +896,7 @@ fn conversation_agent_from_row(
         channel_id: row.get(1)?,
         member_pubkey: row.get(2)?,
         peer_pubkey: row.get(3)?,
+        folder_scope: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
     })
 }
 fn direct_participants(member: &str, peer: &str) -> Result<(String, String)> {
@@ -1177,10 +1194,10 @@ mod tests {
             )
             .unwrap();
         store
-            .add_conversation_agent(&agent.id, Some(&channel.id), None, None)
+            .add_conversation_agent(&agent.id, Some(&channel.id), None, None, &[])
             .unwrap();
         store
-            .add_conversation_agent(&agent.id, None, Some("member"), Some("owner"))
+            .add_conversation_agent(&agent.id, None, Some("member"), Some("owner"), &[])
             .unwrap();
         drop(store);
         let store = WorkspaceStore::open(path.path()).unwrap();
@@ -1191,6 +1208,38 @@ mod tests {
                 .unwrap(),
             vec![agent]
         );
+    }
+
+    #[test]
+    fn persists_folder_scope_per_conversation_agent() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let agent = store
+            .create_agent(
+                "Scout",
+                "Researcher",
+                "",
+                &[],
+                None,
+                Some("ses_1"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        let scope = vec!["/work/monorepo".to_string(), "/work/tools".to_string()];
+        store
+            .add_conversation_agent(&agent.id, Some(&channel.id), None, None, &scope)
+            .unwrap();
+        drop(store);
+
+        let memberships = WorkspaceStore::open(path.path())
+            .unwrap()
+            .conversation_agents()
+            .unwrap();
+        assert_eq!(memberships[0].folder_scope, scope);
     }
 
     #[test]
@@ -1213,10 +1262,10 @@ mod tests {
             )
             .unwrap();
         store
-            .add_conversation_agent(&agent.id, Some(&channel.id), None, None)
+            .add_conversation_agent(&agent.id, Some(&channel.id), None, None, &[])
             .unwrap();
         store
-            .add_conversation_agent(&agent.id, None, Some("owner"), Some("member"))
+            .add_conversation_agent(&agent.id, None, Some("owner"), Some("member"), &[])
             .unwrap();
 
         store.delete_agent(&agent.id).unwrap();
@@ -1249,7 +1298,7 @@ mod tests {
             )
             .unwrap();
         store
-            .add_conversation_agent(&agent.id, None, Some("owner"), Some("member"))
+            .add_conversation_agent(&agent.id, None, Some("owner"), Some("member"), &[])
             .unwrap();
         let reply = store
             .add_direct_message(

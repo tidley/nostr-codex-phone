@@ -51,7 +51,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.99+299';
+const _appVersion = '0.3.0+300';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -350,6 +350,14 @@ class _PendingToolView {
 
   final String tool;
   final String conversationKey;
+}
+
+class _WorkspaceVoiceResult {
+  const _WorkspaceVoiceResult({this.transcript, this.error})
+    : assert(transcript != null || error != null);
+
+  final String? transcript;
+  final String? error;
 }
 
 Future<void> main() async {
@@ -677,7 +685,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   OverlayEntry? _incomingCallOverlay;
   Future<void> _callSendChain = Future.value();
   final WorkspaceState _workspace = WorkspaceState();
+  final Map<String, int> _workspaceUnreadCounts = {};
   final ValueNotifier<int> _workspaceRevision = ValueNotifier(0);
+  final _workspaceVoiceResult = ValueNotifier<_WorkspaceVoiceResult?>(null);
+  bool _workspaceVoicePending = false;
+  String _workspaceFocusedConversationKey = 'workspace';
   String _workspaceDisplayName = '';
   Map<String, String> _workspaceMemberAliases = {};
 
@@ -907,6 +919,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _blossomServerController.dispose();
     _workspaceDisplayNameController.dispose();
     _workspaceRevision.dispose();
+    _workspaceVoiceResult.dispose();
     _queryController.dispose();
     _queryFocusNode.dispose();
     _menuNotificationPulseController.dispose();
@@ -4344,13 +4357,46 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       if (!_incomingFromActivePeer(message)) return false;
       try {
         final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
+        final update = decoded['workspace_update'];
+        final isMessageCreated =
+            update is Map && update['action'] == 'message_created';
         setState(() {
-          _workspace.apply(decoded);
+          final addedMessages = _workspace.apply(decoded);
+          if (isMessageCreated) {
+            for (final workspaceMessage in addedMessages) {
+              if (isWorkspaceLocalSender(workspaceMessage.senderPubkey, {
+                _ownPubkey ?? '',
+                _ownPubkeyHex ?? '',
+              })) {
+                continue;
+              }
+              final conversationKey = _workspace.conversationKeyForMessage(
+                workspaceMessage,
+              );
+              final focused =
+                  _showTeamWorkspace &&
+                  conversationKey == _workspaceFocusedConversationKey;
+              if (!focused) {
+                _workspaceUnreadCounts[conversationKey] =
+                    (_workspaceUnreadCounts[conversationKey] ?? 0) + 1;
+              }
+            }
+          }
           _workspaceRevision.value++;
         });
       } catch (_) {
         _showError('Received malformed workspace update');
       }
+      return true;
+    }
+
+    if (_workspaceVoicePending &&
+        _incomingFromActivePeer(message) &&
+        (message.kind == 'transcript' || message.kind == 'error')) {
+      setState(() => _workspaceVoicePending = false);
+      _workspaceVoiceResult.value = message.kind == 'transcript'
+          ? _WorkspaceVoiceResult(transcript: message.text)
+          : _WorkspaceVoiceResult(error: message.text);
       return true;
     }
 
@@ -6832,6 +6878,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         inviteCode: _workspaceInviteCode,
         memberStatus: _workspaceMemberStatus,
         workspace: _workspace,
+        unreadCounts: _workspaceUnreadCounts,
         ownPubkey: _ownPubkeyHex ?? '',
         localSenderIds: {_ownPubkey ?? '', _ownPubkeyHex ?? ''},
         displayName: _workspaceDisplayName,
@@ -6849,9 +6896,16 @@ Return a concise catch-up summary of what happened after that point: completed w
         },
         onDisplayNameChanged: _setWorkspaceDisplayName,
         onMemberAliasChanged: _setWorkspaceMemberAlias,
+        onFocusConversation: (conversationKey) => setState(() {
+          _workspaceFocusedConversationKey = conversationKey;
+          _workspaceUnreadCounts.remove(conversationKey);
+        }),
         onRequest: _sendWorkspaceRequest,
+        onLoadFolderChoices: _requestRepoChoices,
         onTyping: _sendWorkspaceTyping,
         onAttach: _sendWorkspaceAttachment,
+        voiceResult: _workspaceVoiceResult,
+        onVoiceTranscribe: _sendWorkspaceVoiceTranscription,
         onOpenAttachment: _downloadAndOpenWorkspaceAttachment,
         onCreateInvite: _createWorkspaceInvite,
         callPhase: _callPhase,
@@ -7876,6 +7930,43 @@ Return a concise catch-up summary of what happened after that point: completed w
     } catch (error) {
       if (mounted) _showError('Workspace attachment failed: $error');
       return false;
+    } finally {
+      if (mounted) setState(() => _sendingMedia = false);
+    }
+  }
+
+  Future<void> _sendWorkspaceVoiceTranscription(
+    String path,
+    Map<String, Object?> request,
+  ) async {
+    if (_workspaceVoicePending) {
+      throw StateError('A workspace transcription is already in progress');
+    }
+    if (!await _ensureConnectedToParentService()) {
+      throw StateError('Not connected to the workspace service');
+    }
+    setState(() {
+      _sendingMedia = true;
+      _status = 'Uploading voice for transcription...';
+    });
+    try {
+      final attachment = await _uploadAudioToBlossom(
+        path,
+        path.split(Platform.pathSeparator).last,
+        opusVoiceFormat.contentType,
+      );
+      request['action'] = 'transcribe_workspace_voice';
+      request['attachments'] = [_workspaceAttachmentPayload(attachment)];
+      if (mounted) setState(() => _workspaceVoicePending = true);
+      await _sendWorkspaceRequest(request);
+      if (mounted) {
+        setState(() {
+          _status = 'Transcribing workspace voice...';
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _workspaceVoicePending = false);
+      rethrow;
     } finally {
       if (mounted) setState(() => _sendingMedia = false);
     }

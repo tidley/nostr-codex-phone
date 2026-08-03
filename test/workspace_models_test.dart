@@ -98,6 +98,37 @@ void main() {
     expect(state.messages['channel-1']![1].parentId, 'message-1');
   });
 
+  test('workspace state reports only newly inserted messages', () {
+    final state = WorkspaceState();
+    final update = {
+      'workspace_update': {
+        'action': 'message_created',
+        'messages': [
+          {
+            'id': 'message-1',
+            'channel_id': 'channel-1',
+            'sender_pubkey': 'member',
+            'body': 'Hello',
+            'created_at': 1,
+          },
+        ],
+      },
+    };
+
+    expect(state.apply(update).single.id, 'message-1');
+    expect(state.apply(update), isEmpty);
+  });
+
+  test('conversation agent retains its folder scope', () {
+    final agent = WorkspaceConversationAgent.fromJson({
+      'agent_id': 'agent-1',
+      'channel_id': 'channel-1',
+      'folder_scope': ['/work/apps', ' /work/tools '],
+    });
+
+    expect(agent.folderScope, ['/work/apps', '/work/tools']);
+  });
+
   test('group call metadata accepts only a unique two-to-four member mesh', () {
     final call = WorkspaceGroupCall.fromJson({
       'call_id': 'call-1',

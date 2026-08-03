@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use futures_util::FutureExt;
 use nostr_sdk::prelude::{Keys, PublicKey, ToBech32};
@@ -869,8 +869,11 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                 &config.workspace,
                 config.messenger.as_ref(),
                 &message.sender_pubkey_hex,
+                &message.event_id,
                 request,
                 &config.codex_config,
+                &config.audio_config,
+                &config.transcribe_config,
             )
             .await
             {
@@ -1067,8 +1070,11 @@ async fn process_workspace_request(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
     sender: &str,
+    event_id: &str,
     request: WorkspaceRequest,
     codex_config: &CodexConfig,
+    audio_config: &AudioConfig,
+    transcribe_config: &TranscribeConfig,
 ) -> Result<()> {
     let update = match request.action.as_str() {
         "typing" => {
@@ -1200,6 +1206,27 @@ async fn process_workspace_request(
                 .collect(),
             typing: None,
         },
+        "transcribe_workspace_voice" => {
+            let attachment = request
+                .attachments
+                .first()
+                .ok_or_else(|| anyhow!("voice transcription requires an audio attachment"))?;
+            if !attachment.media_type.starts_with("audio/") {
+                bail!("voice transcription requires an audio attachment");
+            }
+            let audio = media_reference_to_audio(attachment);
+            let downloaded = download_blossom_audio(&audio, audio_config).await?;
+            let transcript = transcribe_audio(&downloaded.path, transcribe_config).await?;
+            messenger
+                .send_transcript_for_event_to(
+                    sender,
+                    transcript,
+                    event_id.to_string(),
+                    codex_config.working_dir.to_string_lossy().to_string(),
+                )
+                .await?;
+            return Ok(());
+        }
         "send_channel_message" => {
             let message = workspace.add_channel_message_with_main(
                 sender,
@@ -1502,6 +1529,7 @@ async fn process_workspace_request(
                     channel_id,
                     channel_id.is_none().then_some(sender),
                     recipient,
+                    &canonical_conversation_folder_scope(&request.folder_scope, codex_config)?,
                 )?;
             } else {
                 workspace.remove_conversation_agent(
@@ -1777,7 +1805,34 @@ fn conversation_agent_payload(
         channel_id: agent.channel_id,
         member_pubkey: agent.member_pubkey,
         peer_pubkey: agent.peer_pubkey,
+        folder_scope: agent.folder_scope,
     }
+}
+
+fn canonical_conversation_folder_scope(
+    requested_scope: &[String],
+    codex_config: &CodexConfig,
+) -> Result<Vec<String>> {
+    if requested_scope.is_empty() || requested_scope.len() > 20 {
+        bail!("select between one and 20 folders for conversation access");
+    }
+    let allowed_roots = canonical_allowed_workdir_roots(&codex_config.working_dir)?;
+    let mut scope = Vec::with_capacity(requested_scope.len());
+    for requested in requested_scope {
+        let path = PathBuf::from(requested.trim());
+        let canonical = path
+            .canonicalize()
+            .with_context(|| format!("scope folder `{}` is not accessible", path.display()))?;
+        if !canonical.is_dir() {
+            bail!("scope folder `{}` is not a directory", canonical.display());
+        }
+        ensure_spawn_existing_allowed(&canonical, &allowed_roots)?;
+        let canonical = canonical.to_string_lossy().to_string();
+        if !scope.contains(&canonical) {
+            scope.push(canonical);
+        }
+    }
+    Ok(scope)
 }
 
 fn direct_membership_matches(
@@ -1931,6 +1986,7 @@ async fn route_conversation_agents(
     body: &str,
     mentions: &[WorkspaceMentionPayload],
 ) -> Result<()> {
+    let memberships = workspace.conversation_agents()?;
     for agent in workspace.agents_for_conversation(channel_id, member, peer)? {
         if !conversation_agent_is_targeted(&agent.id, mentions) {
             continue;
@@ -1949,6 +2005,28 @@ async fn route_conversation_agents(
                 continue;
             }
         };
+        let folder_scope = memberships
+            .iter()
+            .find(|membership| {
+                membership.agent_id == agent.id
+                    && match channel_id {
+                        Some(channel_id) => membership.channel_id.as_deref() == Some(channel_id),
+                        None => direct_membership_matches(
+                            membership,
+                            member.unwrap_or_default(),
+                            peer.unwrap_or_default(),
+                        ),
+                    }
+            })
+            .map(|membership| membership.folder_scope.as_slice())
+            .unwrap_or_default();
+        let scoped_body = match conversation_scope_prompt(folder_scope, &agent_config) {
+            Ok(scope) => format!("{scope}\n\nUser message:\n{body}"),
+            Err(err) => {
+                warn!(agent = %agent.id, "conversation folder scope is invalid: {err:#}");
+                continue;
+            }
+        };
         let response = match run_workspace_agent_with_typing(
             workspace,
             messenger,
@@ -1956,7 +2034,7 @@ async fn route_conversation_agents(
             channel_id,
             member,
             peer,
-            body,
+            &scoped_body,
             &agent_config,
             session_id,
         )
@@ -2018,7 +2096,7 @@ async fn route_conversation_agents(
                     channel_id,
                     member,
                     peer,
-                    body,
+                    &scoped_body,
                     &agent_config,
                     &new_session_id,
                 )
@@ -2072,6 +2150,57 @@ async fn route_conversation_agents(
                     .send_wire_to_pubkey(recipient, WireMessage::workspace_update(update.clone()))
                     .await?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn conversation_scope_prompt(scope: &[String], config: &CodexConfig) -> Result<String> {
+    // Empty scopes only occur in workspace data written before folder scopes existed.
+    let folders = if scope.is_empty() {
+        vec![config.working_dir.to_string_lossy().to_string()]
+    } else {
+        canonical_conversation_folder_scope(scope, config)?
+    };
+    let repositories = repositories_in_folder_scope(&folders)?;
+    let repository_list = if repositories.is_empty() {
+        "No Git repositories were found in the selected folders.".to_string()
+    } else {
+        repositories.join("\n")
+    };
+    Ok(format!(
+        "Conversation folder access: work only in these folders (their nested repositories are included):\n{}\n\nRepositories in scope:\n{}",
+        folders.join("\n"),
+        repository_list,
+    ))
+}
+
+fn repositories_in_folder_scope(folders: &[String]) -> Result<Vec<String>> {
+    let mut repositories = Vec::new();
+    for folder in folders {
+        collect_repositories(Path::new(folder), &mut repositories)?;
+    }
+    repositories.sort();
+    repositories.dedup();
+    Ok(repositories)
+}
+
+fn collect_repositories(folder: &Path, repositories: &mut Vec<String>) -> Result<()> {
+    if folder.join(".git").is_dir() {
+        repositories.push(folder.to_string_lossy().to_string());
+    }
+    for entry in fs::read_dir(folder)
+        .with_context(|| format!("failed to read scope folder `{}`", folder.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        let hidden = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('.'));
+        if file_type.is_dir() && !hidden {
+            collect_repositories(&path, repositories)?;
         }
     }
     Ok(())
@@ -6174,6 +6303,19 @@ mod tests {
                 model: None,
             },
         }
+    }
+
+    #[test]
+    fn finds_repositories_recursively_in_selected_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let nested_repo = root.path().join("apps").join("phone");
+        fs::create_dir_all(nested_repo.join(".git")).unwrap();
+        fs::create_dir_all(root.path().join("tools").join("script")).unwrap();
+
+        assert_eq!(
+            repositories_in_folder_scope(&[root.path().to_string_lossy().to_string()]).unwrap(),
+            vec![nested_repo.to_string_lossy().to_string()],
+        );
     }
 
     #[test]
