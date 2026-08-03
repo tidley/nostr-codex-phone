@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -34,7 +35,7 @@ class RealtimeVideo {
                                         FlValue* args,
                                         gpointer user_data);
 
-  bool StartCapture(const char** error_message);
+  bool StartCapture(const char* source, const char** error_message);
   void StopCapture();
   void CaptureLoop(int output_fd);
   void EmitAccessUnit(const std::vector<uint8_t>& access_unit);
@@ -50,6 +51,7 @@ class RealtimeVideo {
   std::atomic<bool> capturing_{false};
   int capture_pid_ = -1;
   int capture_output_fd_ = -1;
+  std::string screen_display_;
   std::thread capture_thread_;
   uint16_t frame_sequence_ = 0;
   std::mutex renderers_mutex_;

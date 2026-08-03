@@ -17,7 +17,12 @@ class RealtimeVideo {
       .where((event) => event != null)
       .map((event) => Uint8List.fromList(event as Uint8List));
 
-  Future<void> startCapture() => _methods.invokeMethod<void>('startCapture');
+  Future<void> startCapture([String source = 'camera']) =>
+      _methods.invokeMethod<void>('startCapture', {'source': source});
+
+  /// Replaces the encoder input without changing the FIPS call or audio stream.
+  Future<void> switchCapture(String source) =>
+      _methods.invokeMethod<void>('switchCapture', {'source': source});
   Future<void> stopCapture() => _methods.invokeMethod<void>('stopCapture');
   Future<int> createRenderer() async =>
       (await _methods.invokeMethod<num>('createRenderer'))!.toInt();

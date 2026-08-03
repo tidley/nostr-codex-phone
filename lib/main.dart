@@ -45,18 +45,21 @@ const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _callStunServers = [
+  'stun:45.77.228.152:3478',
   'stun:stun.l.google.com:19302',
   'stun:stun.cloudflare.com:3478',
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.92+292';
+const _appVersion = '0.2.93+293';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
 enum _PendingMessageCompletion { transcript, response }
 
 enum _CallPhase { idle, outgoing, incoming, connecting, active }
+
+enum _CallMediaSource { audioOnly, camera, screen }
 
 class _GroupCallState {
   _GroupCallState({
@@ -598,6 +601,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   StreamSubscription<Uint8List>? _callVideoCaptureSubscription;
   bool _callAudioStarted = false;
   bool _callVideoStarted = false;
+  _CallMediaSource _callMediaSource = _CallMediaSource.audioOnly;
   bool _sendingVideo = false;
   final Map<String, int> _videoTextures = {};
   OverlayEntry? _videoOverlay;
@@ -6787,6 +6791,8 @@ Return a concise catch-up summary of what happened after that point: completed w
         onAcceptGroupCall: _acceptGroupCall,
         onRejectGroupCall: _hangupGroupCall,
         onHangupGroupCall: _hangupGroupCall,
+        mediaSource: _callMediaSource,
+        onMediaSourceChanged: _setCallMediaSource,
       );
     }
 
@@ -7206,7 +7212,6 @@ Return a concise catch-up summary of what happened after that point: completed w
     for (final peer in call.connectedPeers) {
       unawaited(_receiveGroupCallAudio(call, peer));
     }
-    unawaited(_activateGroupCallVideo(call));
   }
 
   void _sendGroupCallAudioFrames(_GroupCallState call, Uint8List pcm) {
@@ -7243,7 +7248,10 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
   }
 
-  Future<void> _activateGroupCallVideo(_GroupCallState call) async {
+  Future<void> _activateGroupCallVideo(
+    _GroupCallState call, {
+    String source = 'camera',
+  }) async {
     if ((!Platform.isAndroid && !Platform.isLinux) ||
         _groupCall != call ||
         _callVideoStarted) {
@@ -7258,7 +7266,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         (fragment) => _sendGroupCallVideoFragment(call, fragment),
         onError: (Object error) => _showError('Call camera failed: $error'),
       );
-      await _realtimeVideo.startCapture();
+      await _realtimeVideo.startCapture(source);
       _callVideoStarted = true;
       for (final entry in _videoTextures.entries) {
         unawaited(_receiveGroupCallVideo(call, entry.key, entry.value));
@@ -7473,7 +7481,6 @@ Return a concise catch-up summary of what happened after that point: completed w
       _callAudioStarted = true;
     });
     unawaited(_receiveCallAudio(callId));
-    unawaited(_activateCallVideo(callId, _callPeerPubkey!));
   }
 
   void _sendCallAudioFrames(Uint8List pcm) {
@@ -7521,7 +7528,41 @@ Return a concise catch-up summary of what happened after that point: completed w
     await _stopCallVideo();
   }
 
-  Future<void> _activateCallVideo(String callId, String peer) async {
+  Future<void> _setCallMediaSource(_CallMediaSource source) async {
+    final active =
+        _callPhase == _CallPhase.active ||
+        _groupCall?.phase == _CallPhase.active;
+    if (!active || !mounted) return;
+    if (source == _CallMediaSource.audioOnly) {
+      await _stopCallVideo();
+      if (mounted) setState(() => _callMediaSource = source);
+      return;
+    }
+    try {
+      if (_callVideoStarted) {
+        await _realtimeVideo.switchCapture(source.name);
+      } else if (_groupCall?.phase == _CallPhase.active) {
+        await _activateGroupCallVideo(_groupCall!, source: source.name);
+      } else if (_callId != null && _callPeerPubkey != null) {
+        await _activateCallVideo(
+          _callId!,
+          _callPeerPubkey!,
+          source: source.name,
+        );
+      }
+      if (mounted && _callVideoStarted) {
+        setState(() => _callMediaSource = source);
+      }
+    } catch (error) {
+      if (mounted) _showError('Could not switch video source: $error');
+    }
+  }
+
+  Future<void> _activateCallVideo(
+    String callId,
+    String peer, {
+    String source = 'camera',
+  }) async {
     if ((!Platform.isAndroid && !Platform.isLinux) ||
         _callId != callId ||
         _callPhase != _CallPhase.active) {
@@ -7539,7 +7580,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         (fragment) => _sendCallVideoFragment(fragment),
         onError: (Object error) => _showError('Call camera failed: $error'),
       );
-      await _realtimeVideo.startCapture();
+      await _realtimeVideo.startCapture(source);
       _callVideoStarted = true;
       unawaited(_receiveCallVideo(callId, peer, texture));
     } catch (error) {
@@ -7617,6 +7658,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       _callVideoStarted = false;
       await _realtimeVideo.stopCapture();
     }
+    if (mounted) _callMediaSource = _CallMediaSource.audioOnly;
   }
 
   Future<List<_OpenCodeModelChoice>> _loadOpenCodeModels() async {

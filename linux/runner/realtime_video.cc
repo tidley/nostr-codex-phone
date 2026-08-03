@@ -303,7 +303,18 @@ void RealtimeVideo::MethodCall(FlMethodChannel*, FlMethodCall* call, gpointer us
   const gchar* method = fl_method_call_get_name(call);
   if (strcmp(method, "startCapture") == 0) {
     const char* error_message = nullptr;
-    if (!self->StartCapture(&error_message)) RespondError(call, "capture_init_failed", error_message);
+    FlValue* args = fl_method_call_get_args(call);
+    FlValue* source = args == nullptr ? nullptr : fl_value_lookup_string(args, "source");
+    const char* capture_source = source == nullptr ? "camera" : fl_value_get_string(source);
+    if (!self->StartCapture(capture_source, &error_message)) RespondError(call, "capture_init_failed", error_message);
+    else fl_method_call_respond_success(call, nullptr, nullptr);
+  } else if (strcmp(method, "switchCapture") == 0) {
+    FlValue* args = fl_method_call_get_args(call);
+    FlValue* source = args == nullptr ? nullptr : fl_value_lookup_string(args, "source");
+    const char* capture_source = source == nullptr ? nullptr : fl_value_get_string(source);
+    self->StopCapture();
+    const char* error_message = nullptr;
+    if (!self->StartCapture(capture_source, &error_message)) RespondError(call, "capture_init_failed", error_message);
     else fl_method_call_respond_success(call, nullptr, nullptr);
   } else if (strcmp(method, "stopCapture") == 0) {
     self->StopCapture();
@@ -354,27 +365,39 @@ FlMethodErrorResponse* RealtimeVideo::Cancel(FlEventChannel*, FlValue*, gpointer
   return nullptr;
 }
 
-bool RealtimeVideo::StartCapture(const char** error_message) {
+bool RealtimeVideo::StartCapture(const char* source, const char** error_message) {
   if (capturing_) return true;
   if (!listening_) {
     *error_message = "Listen for video fragments before starting capture.";
     return false;
   }
-  const char* camera = std::getenv("NOSTR_CODEX_CAMERA");
-  if (camera == nullptr || camera[0] == '\0') camera = "/dev/video0";
-  if (access(camera, R_OK) != 0) {
-    *error_message = "No readable V4L2 camera was found. Set NOSTR_CODEX_CAMERA to its device path.";
+  std::vector<const char*> arguments = {"ffmpeg", "-loglevel", "error"};
+  if (strcmp(source, "camera") == 0) {
+    const char* camera = std::getenv("NOSTR_CODEX_CAMERA");
+    if (camera == nullptr || camera[0] == '\0') camera = "/dev/video0";
+    if (access(camera, R_OK) != 0) {
+      *error_message = "No readable V4L2 camera was found. Set NOSTR_CODEX_CAMERA to its device path.";
+      return false;
+    }
+    arguments.insert(arguments.end(), {"-f", "v4l2", "-framerate", "10", "-i", camera});
+  } else if (strcmp(source, "screen") == 0) {
+    const char* display = std::getenv("DISPLAY");
+    if (display == nullptr || display[0] == '\0') {
+      *error_message = "Screen sharing requires an X11 DISPLAY. Wayland is not supported by this ffmpeg source.";
+      return false;
+    }
+    screen_display_ = std::string(display) + "+0,0";
+    arguments.insert(arguments.end(), {"-f", "x11grab", "-framerate", "10", "-i", screen_display_.c_str()});
+  } else {
+    *error_message = "Capture source must be camera or screen.";
     return false;
   }
-  capture_pid_ = SpawnFfmpeg({"ffmpeg", "-loglevel", "error", "-f", "v4l2", "-framerate",
-                              "10", "-i", camera, "-an", "-vf", "scale=640:360",
-                              "-c:v", "libx264", "-preset", "ultrafast", "-tune",
-                              "zerolatency", "-pix_fmt", "yuv420p", "-g", "10",
-                              "-keyint_min", "10", "-x264-params",
-                              "repeat-headers=1:annexb=1:aud=1", "-f", "h264", "pipe:1"},
-                             nullptr, &capture_output_fd_);
+  arguments.insert(arguments.end(), {"-an", "-vf", "scale=640:360", "-c:v", "libx264",
+      "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-g", "10",
+      "-keyint_min", "10", "-x264-params", "repeat-headers=1:annexb=1:aud=1", "-f", "h264", "pipe:1"});
+  capture_pid_ = SpawnFfmpeg(arguments, nullptr, &capture_output_fd_);
   if (capture_pid_ < 0) {
-    *error_message = "Could not start the installed ffmpeg V4L2 camera encoder.";
+    *error_message = "Could not start the installed ffmpeg capture encoder.";
     return false;
   }
   capturing_ = true;

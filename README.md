@@ -155,6 +155,18 @@ Run the real desktop-to-Pixel FIPS/Opus harness with the instructions in
 [`docs/fips-call-harness.md`](docs/fips-call-harness.md). It emits one
 pass/fail JSON result and never substitutes an Android simulator.
 
+### In-Call Video Sources
+
+Active FIPS calls start audio-only. The in-call controls can switch the shared
+H.264 fragment stream between camera video and screen share without ending the
+call or interrupting call audio. Android screen sharing uses the system
+MediaProjection permission prompt. Linux screen sharing uses `ffmpeg` with
+`x11grab` and requires an X11 `DISPLAY` plus an ffmpeg build with `x11grab` and
+`libx264`. Wayland is deliberately not supported: screen capture there requires
+a desktop portal/PipeWire permission flow, which cannot be replaced safely by
+an ffmpeg display source. Linux camera capture continues to use V4L2 and
+`NOSTR_CODEX_CAMERA` (default `/dev/video0`).
+
 ### Deploy A Local Worker Build
 
 `cargo build --release` writes the worker to `rust/target/release`; it does
