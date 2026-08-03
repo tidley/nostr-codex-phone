@@ -190,6 +190,28 @@ void main() {
     expect(state.channels.single.name, 'engineering');
   });
 
+  test('channel member count excludes workspace agents', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'channels': [
+            {'id': 'channel-1', 'name': 'engineering'},
+          ],
+          'members': ['owner', 'member', 'agent:review-bot'],
+          'agents': [
+            {'id': 'review-bot', 'name': 'ReviewBot', 'role': 'Reviewer'},
+          ],
+          'conversation_agents': [
+            {'agent_id': 'review-bot', 'channel_id': 'channel-1'},
+          ],
+        },
+      });
+
+    expect(state.channelHumanMemberCount('channel-1'), 2);
+    expect(state.channelHumanMemberCount('missing-channel'), 0);
+  });
+
   test('direct message keys are stable regardless of participant order', () {
     expect(
       WorkspaceState.directKey('alice', 'bob'),
@@ -275,16 +297,26 @@ void main() {
     expect(state.agents.single.restartOnFailure, isFalse);
   });
 
-  test('workspace mention syntax round-trips into stable metadata', () {
+  test('selected workspace mention keeps stable metadata with plain text', () {
     const mention = WorkspaceMention(
       kind: 'agent',
       id: 'agent-1',
       label: 'Scout',
     );
-    final syntax = workspaceMentionSyntax(mention);
 
-    expect(syntax, '@[Scout](agent:agent-1)');
-    expect(workspaceMentionsIn('Please ask $syntax').single.id, 'agent-1');
+    final mentions = workspaceSelectedMentionsIn('Please ask @Scout', [
+      mention,
+    ]);
+
+    expect(mentions.single.toJson(), {
+      'kind': 'agent',
+      'id': 'agent-1',
+      'label': 'Scout',
+    });
+    expect(
+      workspaceSelectedMentionsIn('Please ask @ScoutBot', [mention]),
+      isEmpty,
+    );
   });
 
   test('workspace state merges broadcast agent renames', () {
