@@ -556,14 +556,18 @@ class _WorkersPage extends StatelessWidget {
 
 enum _WorkerAction { test, remove }
 
-enum _WorkspaceSection { channel, direct, people, access, sessions }
+enum _WorkspaceSection { channel, direct, people, access, agents }
 
 class _TeamWorkspace extends StatefulWidget {
   const _TeamWorkspace({
     required this.sessions,
     required this.onOpenSessions,
     required this.onOpenSettings,
-    required this.onOpenAgents,
+    required this.workspaceRevision,
+    required this.onLoadOpenCodeModels,
+    required this.initialFolderChoices,
+    required this.onLoadFolders,
+    required this.onOpenAgentConversation,
     required this.inviteCode,
     required this.memberStatus,
     required this.workspace,
@@ -603,7 +607,11 @@ class _TeamWorkspace extends StatefulWidget {
   final List<RepoTarget> sessions;
   final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
-  final VoidCallback onOpenAgents;
+  final ValueListenable<int> workspaceRevision;
+  final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
+  final List<RepoChoice> initialFolderChoices;
+  final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
+  final Future<void> Function(WorkspaceAgent agent) onOpenAgentConversation;
   final String? inviteCode;
   final String memberStatus;
   final WorkspaceState workspace;
@@ -656,6 +664,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   final _threadComposerFocus = FocusNode();
   final _selectedThreadMentions = <WorkspaceMention>[];
   final _voiceRecorder = AudioRecorder();
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
   bool _voiceRecording = false;
   bool _voiceTranscribing = false;
   String? _voicePath;
@@ -979,8 +988,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         return 'People';
       case _WorkspaceSection.access:
         return 'Access';
-      case _WorkspaceSection.sessions:
-        return 'Sessions';
+      case _WorkspaceSection.agents:
+        return 'Agents';
     }
   }
 
@@ -1046,6 +1055,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   }
 
   void _select(_WorkspaceSection section, String id) {
+    _closeDrawer();
     setState(() {
       _section = section;
       _active = id;
@@ -1076,6 +1086,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     }
   }
 
+  void _closeDrawer() => _scaffoldKey.currentState?.closeDrawer();
+
   @override
   Widget build(BuildContext context) {
     final typing = _activeTyping;
@@ -1084,6 +1096,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final medium = MediaQuery.sizeOf(context).width >= 720;
     final showThreadPane = medium && _thread != null;
     final sidebar = _WorkspaceSidebar(
+      section: _section,
       selected: _section == _WorkspaceSection.channel ? _active : null,
       direct: _section == _WorkspaceSection.direct ? _active : null,
       sessions: widget.sessions,
@@ -1095,10 +1108,18 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       memberNames: widget.memberNames,
       unreadCounts: widget.unreadCounts,
       onSelect: _select,
-      onSessions: widget.onOpenSessions,
-      onSettings: widget.onOpenSettings,
-      onOpenAgents: widget.onOpenAgents,
-      onCreateChannel: () => _createChannel(context),
+      onSessions: () {
+        _closeDrawer();
+        widget.onOpenSessions();
+      },
+      onSettings: () {
+        _closeDrawer();
+        widget.onOpenSettings();
+      },
+      onCreateChannel: () {
+        _closeDrawer();
+        unawaited(_createChannel(context));
+      },
     );
     final conversation = _WorkspaceConversation(
       title: _title,
@@ -1164,6 +1185,13 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onOpenDirect: (pubkey) => _select(_WorkspaceSection.direct, pubkey),
       onDisplayNameChanged: widget.onDisplayNameChanged,
       onMemberAliasChanged: widget.onMemberAliasChanged,
+      workspace: widget.workspace,
+      workspaceRevision: widget.workspaceRevision,
+      onRequest: widget.onRequest,
+      onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
+      initialFolderChoices: widget.initialFolderChoices,
+      onLoadFolders: widget.onLoadFolders,
+      onOpenAgentConversation: widget.onOpenAgentConversation,
       agents: _activeAgents,
       onManageAgents:
           _section == _WorkspaceSection.channel ||
@@ -1231,6 +1259,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     );
 
     return Scaffold(
+      key: _scaffoldKey,
       backgroundColor: Theme.of(
         context,
       ).extension<_WorkspacePalette>()!.background,
@@ -1551,6 +1580,7 @@ class ThreadPaneResizeHandle extends StatelessWidget {
 
 class _WorkspaceSidebar extends StatelessWidget {
   const _WorkspaceSidebar({
+    required this.section,
     required this.selected,
     required this.direct,
     required this.sessions,
@@ -1564,9 +1594,9 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.onSelect,
     required this.onSessions,
     required this.onSettings,
-    required this.onOpenAgents,
     required this.onCreateChannel,
   });
+  final _WorkspaceSection section;
   final String? selected;
   final String? direct;
   final List<RepoTarget> sessions;
@@ -1580,7 +1610,6 @@ class _WorkspaceSidebar extends StatelessWidget {
   final void Function(_WorkspaceSection, String) onSelect;
   final VoidCallback onSessions;
   final VoidCallback onSettings;
-  final VoidCallback onOpenAgents;
   final VoidCallback onCreateChannel;
 
   @override
@@ -1703,14 +1732,21 @@ class _WorkspaceSidebar extends StatelessWidget {
           item(
             Icons.people_outline,
             'People',
+            selected: section == _WorkspaceSection.people,
             onTap: () => onSelect(_WorkspaceSection.people, 'people'),
           ),
           item(
             Icons.admin_panel_settings_outlined,
             'Access',
+            selected: section == _WorkspaceSection.access,
             onTap: () => onSelect(_WorkspaceSection.access, 'access'),
           ),
-          item(Icons.smart_toy_outlined, 'Agents', onTap: onOpenAgents),
+          item(
+            Icons.smart_toy_outlined,
+            'Agents',
+            selected: section == _WorkspaceSection.agents,
+            onTap: () => onSelect(_WorkspaceSection.agents, 'agents'),
+          ),
           const SizedBox(height: 18),
           Text(
             'Focused work',
@@ -1774,6 +1810,13 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.onOpenDirect,
     required this.onDisplayNameChanged,
     required this.onMemberAliasChanged,
+    required this.workspace,
+    required this.workspaceRevision,
+    required this.onRequest,
+    required this.onLoadOpenCodeModels,
+    required this.initialFolderChoices,
+    required this.onLoadFolders,
+    required this.onOpenAgentConversation,
     required this.agents,
     required this.onManageAgents,
     required this.mentionOptions,
@@ -1830,6 +1873,13 @@ class _WorkspaceConversation extends StatefulWidget {
   final ValueChanged<String> onOpenDirect;
   final ValueChanged<String> onDisplayNameChanged;
   final void Function(String pubkey, String alias) onMemberAliasChanged;
+  final WorkspaceState workspace;
+  final ValueListenable<int> workspaceRevision;
+  final Future<void> Function(Map<String, Object?> request) onRequest;
+  final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
+  final List<RepoChoice> initialFolderChoices;
+  final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
+  final Future<void> Function(WorkspaceAgent agent) onOpenAgentConversation;
   final List<WorkspaceAgent> agents;
   final VoidCallback? onManageAgents;
   final List<WorkspaceMention> mentionOptions;
@@ -1949,6 +1999,17 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         memberStatus: widget.memberStatus,
         onCreateInvite: widget.onCreateInvite,
         onOpenSettings: widget.onOpenSettings,
+      );
+    }
+    if (widget.section == _WorkspaceSection.agents) {
+      return _AgentsPage(
+        workspace: widget.workspace,
+        workspaceRevision: widget.workspaceRevision,
+        onRequest: widget.onRequest,
+        onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
+        initialFolderChoices: widget.initialFolderChoices,
+        onLoadFolders: widget.onLoadFolders,
+        onOpenConversation: widget.onOpenAgentConversation,
       );
     }
     final palette = Theme.of(context).extension<_WorkspacePalette>()!;
@@ -3035,108 +3096,103 @@ class _AgentsPageState extends State<_AgentsPage> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Agents')),
-    floatingActionButton: FloatingActionButton.extended(
-      onPressed: _createCustom,
-      icon: const Icon(Icons.add),
-      label: const Text('Custom agent'),
-    ),
-    body: ListView(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 100),
-      children: [
-        Text(
-          'START WITH A ROLE',
-          style: Theme.of(context).textTheme.labelLarge?.copyWith(
-            letterSpacing: 1.2,
-            color: Theme.of(context).extension<_WorkspacePalette>()!.label,
-          ),
+  Widget build(BuildContext context) => ListView(
+    padding: const EdgeInsets.all(24),
+    children: [
+      Text(
+        'Agents',
+        style: Theme.of(
+          context,
+        ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+      ),
+      const SizedBox(height: 6),
+      Text(
+        'Agents receive a dedicated OpenCode session in this workspace when created.',
+        style: Theme.of(context).textTheme.bodyMedium,
+      ),
+      const SizedBox(height: 24),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: FilledButton.icon(
+          onPressed: _createCustom,
+          icon: const Icon(Icons.add),
+          label: const Text('Custom agent'),
         ),
-        const SizedBox(height: 8),
-        Text(
-          'Agents receive a dedicated OpenCode session in this workspace when created.',
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
-        const SizedBox(height: 16),
-        Wrap(
-          spacing: 10,
-          runSpacing: 10,
-          children: [
-            for (final preset in _presets)
-              SizedBox(
-                width: 170,
-                child: OutlinedButton.icon(
-                  onPressed: () => _createPreset(preset),
-                  icon: Icon(preset.$3),
-                  label: Text(preset.$1),
-                ),
+      ),
+      const SizedBox(height: 24),
+      Text('Start with a role', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height: 8),
+      Wrap(
+        spacing: 10,
+        runSpacing: 10,
+        children: [
+          for (final preset in _presets)
+            SizedBox(
+              width: 170,
+              child: OutlinedButton.icon(
+                onPressed: () => _createPreset(preset),
+                icon: Icon(preset.$3),
+                label: Text(preset.$1),
               ),
-          ],
-        ),
-        const SizedBox(height: 28),
-        Text(
-          'YOUR AGENTS',
-          style: Theme.of(context).textTheme.labelLarge?.copyWith(
-            letterSpacing: 1.2,
-            color: Theme.of(context).extension<_WorkspacePalette>()!.label,
-          ),
-        ),
-        const SizedBox(height: 8),
-        ValueListenableBuilder<int>(
-          valueListenable: widget.workspaceRevision,
-          builder: (context, _, _) => Column(
-            children: [
-              if (widget.workspace.agents.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 32),
-                  child: Center(
-                    child: Text('Add a preset or create a custom agent.'),
-                  ),
-                ),
-              for (final agent in widget.workspace.agents) _agentCard(agent),
-            ],
-          ),
-        ),
-      ],
-    ),
-  );
-
-  Widget _agentCard(WorkspaceAgent agent) => Card(
-    child: ListTile(
-      leading: CircleAvatar(
-        child: Icon(
-          agent.preset == 'reviewer'
-              ? Icons.fact_check
-              : Icons.smart_toy_outlined,
-        ),
-      ),
-      title: Text(agent.name),
-      subtitle: Text(
-        '${agent.role}\n${agent.sessionStatus == 'ready' ? 'OpenCode ready' : agent.sessionError ?? 'OpenCode provisioning failed'}\n${_profileSummary(agent)}',
-        maxLines: 4,
-        overflow: TextOverflow.ellipsis,
-      ),
-      isThreeLine: true,
-      trailing: PopupMenuButton<String>(
-        onSelected: (action) => switch (action) {
-          'rename' => _renameAgent(agent),
-          'profile' => _editOpenCodeProfile(agent),
-          'restart' => widget.onRequest({
-            'action': 'restart_agent_session',
-            'agent_id': agent.id,
-          }),
-          'delete' => _deleteAgent(agent),
-          _ => null,
-        },
-        itemBuilder: (context) => const [
-          PopupMenuItem(value: 'rename', child: Text('Rename')),
-          PopupMenuItem(value: 'profile', child: Text('OpenCode profile')),
-          PopupMenuItem(value: 'restart', child: Text('Restart session')),
-          PopupMenuItem(value: 'delete', child: Text('Delete')),
+            ),
         ],
       ),
-      onTap: () => widget.onOpenConversation(agent),
+      const SizedBox(height: 28),
+      Text('Your agents', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height: 8),
+      ValueListenableBuilder<int>(
+        valueListenable: widget.workspaceRevision,
+        builder: (context, _, _) => Column(
+          children: [
+            if (widget.workspace.agents.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 32),
+                child: Center(
+                  child: Text('Add a preset or create a custom agent.'),
+                ),
+              ),
+            for (final agent in widget.workspace.agents) _agentCard(agent),
+          ],
+        ),
+      ),
+    ],
+  );
+
+  Widget _agentCard(WorkspaceAgent agent) => ListTile(
+    contentPadding: EdgeInsets.zero,
+    leading: CircleAvatar(
+      child: Icon(
+        agent.preset == 'reviewer'
+            ? Icons.fact_check
+            : Icons.smart_toy_outlined,
+      ),
     ),
+    title: Text(agent.name),
+    subtitle: Text(
+      '${agent.role}\n${agent.sessionStatus == 'ready' ? 'OpenCode ready' : agent.sessionError ?? 'OpenCode provisioning failed'}\n${_profileSummary(agent)}',
+      maxLines: 4,
+      overflow: TextOverflow.ellipsis,
+    ),
+    isThreeLine: true,
+    trailing: PopupMenuButton<String>(
+      onSelected: (action) => switch (action) {
+        'rename' => _renameAgent(agent),
+        'profile' => _editOpenCodeProfile(agent),
+        'restart' => widget.onRequest({
+          'action': 'restart_agent_session',
+          'agent_id': agent.id,
+        }),
+        'delete' => _deleteAgent(agent),
+        _ => null,
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem(value: 'rename', child: Text('Rename')),
+        PopupMenuItem(value: 'profile', child: Text('OpenCode profile')),
+        PopupMenuItem(value: 'restart', child: Text('Restart session')),
+        PopupMenuItem(value: 'delete', child: Text('Delete')),
+      ],
+    ),
+    onTap: () => widget.onOpenConversation(agent),
   );
 
   String _profileSummary(WorkspaceAgent agent) {
