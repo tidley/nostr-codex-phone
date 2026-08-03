@@ -45,7 +45,7 @@ const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
 const _callStunServers = ['stun:stun.l.google.com:19302'];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.78+278';
+const _appVersion = '0.2.82+282';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
