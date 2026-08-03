@@ -571,7 +571,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   _CallPhase _callPhase = _CallPhase.idle;
   String? _callId;
   String? _callPeerPubkey;
-  bool _incomingCallAcceptStarted = false;
   bool _callAnswerSent = false;
   StreamSubscription<Uint8List>? _callCaptureSubscription;
   bool _callAudioStarted = false;
@@ -4265,7 +4264,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             _callPhase = _CallPhase.incoming;
             _callId = callId;
             _callPeerPubkey = sender;
-            _incomingCallAcceptStarted = false;
             _callAnswerSent = false;
           });
           unawaited(_prepareIncomingWorkspaceCall(callId));
@@ -6697,7 +6695,6 @@ Return a concise catch-up summary of what happened after that point: completed w
         onCreateInvite: _createWorkspaceInvite,
         callPhase: _callPhase,
         callPeerPubkey: _callPeerPubkey,
-        incomingCallReady: _incomingCallAcceptStarted,
         onStartCall: _startWorkspaceCall,
         onAcceptCall: _acceptWorkspaceCall,
         onRejectCall: _rejectWorkspaceCall,
@@ -6993,7 +6990,6 @@ Return a concise catch-up summary of what happened after that point: completed w
         } catch (_) {}
         return;
       }
-      setState(() => _incomingCallAcceptStarted = true);
       final status = await accepting;
       if (mounted && _callId == callId && _callAnswerSent) {
         await _activateCallAudio(callId, status);
@@ -7013,8 +7009,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     final peerPubkey = _callPeerPubkey;
     if (_callPhase != _CallPhase.incoming ||
         callId == null ||
-        peerPubkey == null ||
-        !_incomingCallAcceptStarted) {
+        peerPubkey == null) {
       return;
     }
     try {
@@ -7056,7 +7051,6 @@ Return a concise catch-up summary of what happened after that point: completed w
         _callPhase = _CallPhase.idle;
         _callId = null;
         _callPeerPubkey = null;
-        _incomingCallAcceptStarted = false;
         _callAnswerSent = false;
       });
     }

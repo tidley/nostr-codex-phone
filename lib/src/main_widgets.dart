@@ -580,7 +580,6 @@ class _TeamWorkspace extends StatefulWidget {
     required this.onCreateInvite,
     required this.callPhase,
     required this.callPeerPubkey,
-    required this.incomingCallReady,
     required this.onStartCall,
     required this.onAcceptCall,
     required this.onRejectCall,
@@ -607,7 +606,6 @@ class _TeamWorkspace extends StatefulWidget {
   final Future<void> Function() onCreateInvite;
   final _CallPhase callPhase;
   final String? callPeerPubkey;
-  final bool incomingCallReady;
   final ValueChanged<String> onStartCall;
   final VoidCallback onAcceptCall;
   final VoidCallback onRejectCall;
@@ -929,7 +927,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           .toList(),
       callPhase: widget.callPhase,
       callPeerPubkey: widget.callPeerPubkey,
-      incomingCallReady: widget.incomingCallReady,
       onStartCall: widget.onStartCall,
       onAcceptCall: widget.onAcceptCall,
       onRejectCall: widget.onRejectCall,
@@ -1308,7 +1305,6 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.typingLabels,
     required this.callPhase,
     required this.callPeerPubkey,
-    required this.incomingCallReady,
     required this.onStartCall,
     required this.onAcceptCall,
     required this.onRejectCall,
@@ -1351,7 +1347,6 @@ class _WorkspaceConversation extends StatefulWidget {
   final List<String> typingLabels;
   final _CallPhase callPhase;
   final String? callPeerPubkey;
-  final bool incomingCallReady;
   final ValueChanged<String> onStartCall;
   final VoidCallback onAcceptCall;
   final VoidCallback onRejectCall;
@@ -1492,7 +1487,6 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                           widget.callPeerPubkey == widget.directPeer
                       ? widget.callPhase
                       : _CallPhase.idle,
-                  incomingCallReady: widget.incomingCallReady,
                   onStart: () => widget.onStartCall(widget.directPeer!),
                   onAccept: widget.onAcceptCall,
                   onReject: widget.onRejectCall,
@@ -1645,7 +1639,6 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
 class _CallControl extends StatelessWidget {
   const _CallControl({
     required this.phase,
-    required this.incomingCallReady,
     required this.onStart,
     required this.onAccept,
     required this.onReject,
@@ -1653,7 +1646,6 @@ class _CallControl extends StatelessWidget {
   });
 
   final _CallPhase phase;
-  final bool incomingCallReady;
   final VoidCallback onStart;
   final VoidCallback onAccept;
   final VoidCallback onReject;
@@ -1671,8 +1663,10 @@ class _CallControl extends StatelessWidget {
       children: [
         TextButton(onPressed: onReject, child: const Text('Reject')),
         FilledButton(
-          onPressed: incomingCallReady ? onAccept : null,
-          child: Text(incomingCallReady ? 'Answer' : 'Preparing...'),
+          // FIPS traversal runs after its responder advert is published. Do
+          // not make the Nostr answer signal wait for that network operation.
+          onPressed: onAccept,
+          child: const Text('Answer'),
         ),
       ],
     ),
