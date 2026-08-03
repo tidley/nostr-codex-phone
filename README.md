@@ -16,9 +16,9 @@ These screens were captured from a Pixel 5 connected to a temporary `code-call-d
 | --- | --- | --- |
 | ![Mobile OpenCode tools menu](screenshots/code-call-demo-tools.png) | ![Staged working and untracked Git changes](screenshots/code-call-demo-git-status.png) | ![Folder and file browser for the selected repository](screenshots/code-call-demo-file-browser.png) |
 
-| File viewer | OpenCode sessions | Settings |
-| --- | --- | --- |
-| ![Line-numbered repository file viewer with search](screenshots/code-call-demo-file-view.png) | ![OpenCode session picker for the selected repository](screenshots/code-call-demo-opencode-sessions.png) | ![Worker target relay and speech settings](screenshots/code-call-demo-settings.png) |
+| File viewer | Settings |
+| --- | --- |
+| ![Line-numbered repository file viewer with search](screenshots/code-call-demo-file-view.png) | ![Worker target relay and speech settings](screenshots/code-call-demo-settings.png) |
 
 | Voice recording |
 | --- |
@@ -29,7 +29,6 @@ These screens were captured from a Pixel 5 connected to a temporary `code-call-d
 - **Encrypted chat:** typed prompts and Markdown responses stay attached to the selected repository session, with resend, copy, read-aloud, and attachment actions.
 - **Session drawer:** search, select, pin, rename, restart, or remove saved worker targets; connected and loaded states are visible at a glance.
 - **Spawn session:** create a folder or search and open an existing repository through the computer service.
-- **OpenCode sessions:** use the latest session automatically or bind the repository target to a specific OpenCode session.
 - **Tools:** request status, stop work, inspect Git, read files, view history/configuration, prepare a commit, or start a release workflow.
 - **Git status and diff:** filter staged, working, and untracked files, then inspect changed files with patch navigation and line numbers.
 - **Repository browser:** navigate folders, search relative paths, and open readable files without typing a path.
@@ -44,7 +43,6 @@ These screens were captured from a Pixel 5 connected to a temporary `code-call-d
 - Supports encrypted file/media attachments through Blossom references.
 - Stores multiple repo targets and routes each request to the selected workdir.
 - Spawns or reopens repo workers from the phone through the session drawer.
-- Picks OpenCode sessions for the active repo.
 - Provides a mobile Tools menu for status, stop task, Git inspection, file reading, task history, model config, commit prep, and release workflow help.
 - Renders responses as Markdown and can speak replies with Android TTS.
 
@@ -59,7 +57,6 @@ The session drawer contains:
 - Recent-first session ordering.
 - Session search.
 - `Spawn on computer` opens a full-screen Create/Open selector with folder search and a large repository list.
-- `OpenCode sessions` for choosing the OpenCode session attached to the selected repo.
 - Settings for keys, relays, Blossom, speech, haptics, and profile import/export.
 
 The Tools button in the top bar is enabled once connected. It sends optional worker requests instead of dumping details inline by default:
