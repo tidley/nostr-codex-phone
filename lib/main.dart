@@ -43,9 +43,13 @@ const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _relayProbeTimeout = Duration(seconds: 4);
-const _callStunServers = ['stun:stun.l.google.com:19302'];
+const _callStunServers = [
+  'stun:stun.l.google.com:19302',
+  'stun:stun.cloudflare.com:3478',
+  'stun:global.stun.twilio.com:3478',
+];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.82+282';
+const _appVersion = '0.2.83+283';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 

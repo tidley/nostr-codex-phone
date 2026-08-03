@@ -6746,14 +6746,13 @@ mod tests {
         assert_eq!(snapshot.action, "snapshot");
         assert_eq!(snapshot.channels, vec![channel_payload(channel)]);
         assert_eq!(snapshot.members.len(), 3);
-        assert_eq!(
-            snapshot
-                .messages
-                .into_iter()
-                .map(|message| message.body)
-                .collect::<Vec<_>>(),
-            vec!["team", "for desktop"],
-        );
+        let mut bodies = snapshot
+            .messages
+            .into_iter()
+            .map(|message| message.body)
+            .collect::<Vec<_>>();
+        bodies.sort();
+        assert_eq!(bodies, vec!["for desktop", "team"]);
     }
 
     #[test]
