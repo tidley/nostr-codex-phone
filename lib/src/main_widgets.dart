@@ -630,6 +630,10 @@ class _TeamWorkspace extends StatefulWidget {
 class _TeamWorkspaceState extends State<_TeamWorkspace> {
   final _composer = TextEditingController();
   final _composerFocus = FocusNode();
+  final _selectedComposerMentions = <WorkspaceMention>[];
+  final _threadComposer = TextEditingController();
+  final _threadComposerFocus = FocusNode();
+  final _selectedThreadMentions = <WorkspaceMention>[];
   Timer? _typingRefreshTimer;
   Timer? _typingExpiryTimer;
   _WorkspaceSection _section = _WorkspaceSection.channel;
@@ -642,6 +646,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     super.initState();
     _composer.addListener(_onComposerChanged);
     _composerFocus.addListener(_onComposerChanged);
+    _threadComposer.addListener(_onComposerChanged);
+    _threadComposerFocus.addListener(_onComposerChanged);
     unawaited(widget.onRequest({'action': 'list'}));
   }
 
@@ -651,6 +657,10 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     _composer.dispose();
     _composerFocus.removeListener(_onComposerChanged);
     _composerFocus.dispose();
+    _threadComposer.removeListener(_onComposerChanged);
+    _threadComposer.dispose();
+    _threadComposerFocus.removeListener(_onComposerChanged);
+    _threadComposerFocus.dispose();
     _typingRefreshTimer?.cancel();
     _typingExpiryTimer?.cancel();
     super.dispose();
@@ -664,8 +674,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   bool get _canSendTyping =>
       (_section == _WorkspaceSection.channel ||
           _section == _WorkspaceSection.direct) &&
-      _composerFocus.hasFocus &&
-      _composer.text.trim().isNotEmpty;
+      ((_composerFocus.hasFocus && _composer.text.trim().isNotEmpty) ||
+          (_threadComposerFocus.hasFocus &&
+              _threadComposer.text.trim().isNotEmpty));
 
   void _syncTypingLease() {
     if (!_canSendTyping) {
@@ -692,7 +703,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     );
   }
 
-  List<WorkspaceMention> get _mentionOptions {
+  List<WorkspaceMention> _mentionOptionsFor(TextEditingController composer) {
     final options = <WorkspaceMention>[
       for (final member in widget.workspace.members)
         WorkspaceMention(
@@ -703,7 +714,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       for (final agent in _activeAgents)
         WorkspaceMention(kind: 'agent', id: agent.id, label: agent.name),
     ];
-    final query = _mentionQuery;
+    final query = _mentionQueryFor(composer);
     if (query == null) return const [];
     final normalized = query.toLowerCase();
     return options
@@ -711,12 +722,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         .toList(growable: false);
   }
 
-  String? get _mentionQuery {
-    final selection = _composer.selection;
-    final cursor = selection.isValid ? selection.start : _composer.text.length;
-    final prefix = _composer.text.substring(
+  String? _mentionQueryFor(TextEditingController composer) {
+    final selection = composer.selection;
+    final cursor = selection.isValid ? selection.start : composer.text.length;
+    final prefix = composer.text.substring(
       0,
-      cursor.clamp(0, _composer.text.length),
+      cursor.clamp(0, composer.text.length),
     );
     final start = prefix.lastIndexOf('@');
     if (start < 0 || prefix.substring(start).contains(RegExp(r'\s'))) {
@@ -725,19 +736,28 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     return prefix.substring(start + 1);
   }
 
-  void _insertMention(WorkspaceMention mention) {
-    final selection = _composer.selection;
-    final cursor = selection.isValid ? selection.start : _composer.text.length;
-    final text = _composer.text;
+  void _insertMention(
+    TextEditingController composer,
+    List<WorkspaceMention> selectedMentions,
+    WorkspaceMention mention,
+  ) {
+    final selection = composer.selection;
+    final cursor = selection.isValid ? selection.start : composer.text.length;
+    final text = composer.text;
     final start = text
         .substring(0, cursor.clamp(0, text.length))
         .lastIndexOf('@');
     if (start < 0) return;
-    final replacement = '${workspaceMentionSyntax(mention)} ';
-    _composer.value = TextEditingValue(
+    final replacement = '@${mention.label} ';
+    composer.value = TextEditingValue(
       text: text.replaceRange(start, cursor, replacement),
       selection: TextSelection.collapsed(offset: start + replacement.length),
     );
+    if (!selectedMentions.any(
+      (selected) => selected.kind == mention.kind && selected.id == mention.id,
+    )) {
+      selectedMentions.add(mention);
+    }
   }
 
   List<WorkspaceMessage> get _activeMessages =>
@@ -791,8 +811,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         compactIdentifier(pubkey);
   }
 
-  void _send() {
-    final text = _composer.text.trim();
+  void _send({WorkspaceMessage? thread}) {
+    final composer = thread == null ? _composer : _threadComposer;
+    final selectedMentions = thread == null
+        ? _selectedComposerMentions
+        : _selectedThreadMentions;
+    final text = composer.text.trim();
     if (text.isEmpty) return;
     final request = <String, Object?>{
       'action': _section == _WorkspaceSection.channel
@@ -801,31 +825,41 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       if (_section == _WorkspaceSection.channel) 'channel_id': _active,
       if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
       'body': text,
-      'mentions': workspaceMentionsIn(
+      'mentions': workspaceSelectedMentionsIn(
         text,
+        selectedMentions,
       ).map((mention) => mention.toJson()).toList(),
-      if (_thread != null) 'parent_id': _thread!.id,
-      if (_thread != null) 'also_send_to_main': _alsoSendToMain,
+      if (thread != null) 'parent_id': thread.id,
+      if (thread != null) 'also_send_to_main': _alsoSendToMain,
     };
-    _composer.clear();
+    composer.clear();
+    selectedMentions.clear();
     unawaited(widget.onRequest(request));
   }
 
-  Future<void> _attach() async {
+  Future<void> _attach({WorkspaceMessage? thread}) async {
+    final composer = thread == null ? _composer : _threadComposer;
+    final selectedMentions = thread == null
+        ? _selectedComposerMentions
+        : _selectedThreadMentions;
     final sent = await widget.onAttach({
       'action': _section == _WorkspaceSection.channel
           ? 'send_channel_message'
           : 'send_direct_message',
       if (_section == _WorkspaceSection.channel) 'channel_id': _active,
       if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
-      'body': _composer.text.trim(),
-      'mentions': workspaceMentionsIn(
-        _composer.text,
+      'body': composer.text.trim(),
+      'mentions': workspaceSelectedMentionsIn(
+        composer.text,
+        selectedMentions,
       ).map((mention) => mention.toJson()).toList(),
-      if (_thread != null) 'parent_id': _thread!.id,
-      if (_thread != null) 'also_send_to_main': _alsoSendToMain,
+      if (thread != null) 'parent_id': thread.id,
+      if (thread != null) 'also_send_to_main': _alsoSendToMain,
     });
-    if (sent && mounted) _composer.clear();
+    if (sent && mounted) {
+      composer.clear();
+      selectedMentions.clear();
+    }
   }
 
   void _select(_WorkspaceSection section, String id) {
@@ -834,6 +868,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _active = id;
       _thread = null;
       _alsoSendToMain = false;
+      _threadComposer.clear();
+      _selectedThreadMentions.clear();
     });
     _syncTypingLease();
     if (section == _WorkspaceSection.channel) {
@@ -896,6 +932,10 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onAttach: _attach,
       onOpenAttachment: widget.onOpenAttachment,
       onOpenThread: (message) => setState(() {
+        if (_thread?.id != message.id) {
+          _threadComposer.clear();
+          _selectedThreadMentions.clear();
+        }
         _thread = message;
         _alsoSendToMain = false;
       }),
@@ -918,6 +958,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       memberStatus: widget.memberStatus,
       onCreateInvite: widget.onCreateInvite,
       members: widget.workspace.members,
+      channelHumanMemberCount: _section == _WorkspaceSection.channel
+          ? widget.workspace.channelHumanMemberCount(_active)
+          : 0,
       ownPubkey: widget.ownPubkey,
       displayName: widget.displayName,
       memberAliases: widget.memberAliases,
@@ -931,8 +974,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
               _section == _WorkspaceSection.direct
           ? () => _manageAgents(context)
           : null,
-      mentionOptions: _mentionOptions,
-      onMentionSelected: _insertMention,
+      mentionOptions: _mentionOptionsFor(_composer),
+      onMentionSelected: (mention) =>
+          _insertMention(_composer, _selectedComposerMentions, mention),
       typingLabels: typing
           .map(
             (status) => status.agentName ?? _memberLabel(status.senderPubkey),
@@ -955,6 +999,16 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       message: _thread,
       replies: _threadReplies,
       title: _title,
+      composer: _threadComposer,
+      composerFocus: _threadComposerFocus,
+      mentionOptions: _mentionOptionsFor(_threadComposer),
+      onMentionSelected: (mention) =>
+          _insertMention(_threadComposer, _selectedThreadMentions, mention),
+      onSend: () => _send(thread: _thread),
+      onAttach: () => _attach(thread: _thread),
+      alsoSendToMain: _alsoSendToMain,
+      onAlsoSendToMainChanged: (value) =>
+          setState(() => _alsoSendToMain = value),
       onClose: () => setState(() {
         _thread = null;
         _alsoSendToMain = false;
@@ -982,7 +1036,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           children: [
             if (wide) SizedBox(width: 280, child: sidebar),
             if (wide) const VerticalDivider(width: 1),
-            Expanded(child: conversation),
+            Expanded(
+              child: medium || _thread == null ? conversation : contextPane,
+            ),
             if (medium) ...[
               const VerticalDivider(width: 1),
               SizedBox(width: wide ? 340 : 300, child: contextPane),
@@ -1311,6 +1367,7 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.memberStatus,
     required this.onCreateInvite,
     required this.members,
+    required this.channelHumanMemberCount,
     required this.ownPubkey,
     required this.displayName,
     required this.memberAliases,
@@ -1360,6 +1417,7 @@ class _WorkspaceConversation extends StatefulWidget {
   final String memberStatus;
   final Future<void> Function() onCreateInvite;
   final List<String> members;
+  final int channelHumanMemberCount;
   final String ownPubkey;
   final String displayName;
   final Map<String, String> memberAliases;
@@ -1501,7 +1559,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      '${widget.section == _WorkspaceSection.channel ? '${widget.members.length} member${widget.members.length == 1 ? '' : 's'}' : 'Direct message'}${widget.agents.isEmpty ? '' : ' · ${widget.agents.map((agent) => agent.name).join(', ')}'}',
+                      '${widget.section == _WorkspaceSection.channel ? '${widget.channelHumanMemberCount} member${widget.channelHumanMemberCount == 1 ? '' : 's'}' : 'Direct message'}${widget.agents.isEmpty ? '' : ' · ${widget.agents.map((agent) => agent.name).join(', ')}'}',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ],
@@ -1591,88 +1649,14 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),
-              if (widget.thread != null)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Row(
-                    children: [
-                      IconButton(
-                        tooltip: 'Close thread',
-                        onPressed: widget.onCloseThread,
-                        icon: const Icon(Icons.forum_outlined, size: 18),
-                      ),
-                      Expanded(
-                        child: Text(
-                          'Replying in thread',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ),
-                      Checkbox(
-                        value: widget.alsoSendToMain,
-                        onChanged: (value) =>
-                            widget.onAlsoSendToMainChanged(value ?? false),
-                      ),
-                      const Text('Also send to main'),
-                    ],
-                  ),
-                ),
-              if (widget.mentionOptions.isNotEmpty)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Material(
-                    elevation: 4,
-                    borderRadius: BorderRadius.circular(10),
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 176),
-                      child: ListView(
-                        shrinkWrap: true,
-                        children: [
-                          for (final mention in widget.mentionOptions)
-                            ListTile(
-                              dense: true,
-                              leading: Icon(
-                                mention.kind == 'agent'
-                                    ? Icons.smart_toy_outlined
-                                    : Icons.person_outline,
-                              ),
-                              title: Text('@${mention.label}'),
-                              subtitle: Text(
-                                mention.kind == 'agent' ? 'Agent' : 'Member',
-                              ),
-                              onTap: () => widget.onMentionSelected(mention),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              CallbackShortcuts(
-                bindings: {
-                  const SingleActivator(LogicalKeyboardKey.enter):
-                      widget.onSend,
-                },
-                child: TextField(
-                  controller: widget.composer,
-                  focusNode: widget.composerFocus,
-                  minLines: 1,
-                  maxLines: 5,
-                  textInputAction: TextInputAction.newline,
-                  decoration: InputDecoration(
-                    hintText: 'Message ${widget.title}',
-                    prefixIcon: IconButton(
-                      tooltip: 'Attach file',
-                      onPressed: () => unawaited(widget.onAttach()),
-                      icon: const Icon(Icons.attach_file),
-                    ),
-                    suffixIcon: IconButton(
-                      onPressed: widget.onSend,
-                      icon: const Icon(Icons.send),
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                ),
+              WorkspaceComposer(
+                composer: widget.composer,
+                composerFocus: widget.composerFocus,
+                hintText: 'Message ${widget.title}',
+                mentionOptions: widget.mentionOptions,
+                onMentionSelected: widget.onMentionSelected,
+                onSend: widget.onSend,
+                onAttach: widget.onAttach,
               ),
             ],
           ),
@@ -1934,11 +1918,27 @@ class _WorkspaceContext extends StatelessWidget {
     required this.message,
     required this.replies,
     required this.title,
+    required this.composer,
+    required this.composerFocus,
+    required this.mentionOptions,
+    required this.onMentionSelected,
+    required this.onSend,
+    required this.onAttach,
+    required this.alsoSendToMain,
+    required this.onAlsoSendToMainChanged,
     required this.onClose,
   });
   final WorkspaceMessage? message;
   final List<WorkspaceMessage> replies;
   final String title;
+  final TextEditingController composer;
+  final FocusNode composerFocus;
+  final List<WorkspaceMention> mentionOptions;
+  final ValueChanged<WorkspaceMention> onMentionSelected;
+  final VoidCallback onSend;
+  final Future<void> Function() onAttach;
+  final bool alsoSendToMain;
+  final ValueChanged<bool> onAlsoSendToMainChanged;
   final VoidCallback onClose;
   @override
   Widget build(BuildContext context) => Padding(
@@ -1988,29 +1988,129 @@ class _WorkspaceContext extends StatelessWidget {
               ),
               const Divider(),
               const SizedBox(height: 12),
-              SelectionArea(
-                child: Text(
-                  message!.body,
-                  style: Theme.of(context).textTheme.bodyLarge,
+              Expanded(
+                child: ListView(
+                  padding: EdgeInsets.zero,
+                  children: [
+                    SelectionArea(
+                      child: Text(
+                        message!.body,
+                        style: Theme.of(context).textTheme.bodyLarge,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    for (final reply in replies)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: SelectionArea(child: Text(reply.body)),
+                      ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 16),
-              Text(
-                '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
-                style: Theme.of(context).textTheme.labelLarge,
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: alsoSendToMain,
+                onChanged: (value) => onAlsoSendToMainChanged(value ?? false),
+                title: const Text('Also send to main'),
+                controlAffinity: ListTileControlAffinity.leading,
               ),
-              const SizedBox(height: 8),
-              for (final reply in replies)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: SelectionArea(child: Text(reply.body)),
-                ),
-              const Spacer(),
-              const Text(
-                'Reply from the composer. Enable Also send to main to show the reply in the conversation.',
+              WorkspaceComposer(
+                composer: composer,
+                composerFocus: composerFocus,
+                hintText: 'Reply in thread',
+                mentionOptions: mentionOptions,
+                onMentionSelected: onMentionSelected,
+                onSend: onSend,
+                onAttach: onAttach,
               ),
             ],
           ),
+  );
+}
+
+class WorkspaceComposer extends StatelessWidget {
+  const WorkspaceComposer({
+    super.key,
+    required this.composer,
+    required this.composerFocus,
+    required this.hintText,
+    required this.mentionOptions,
+    required this.onMentionSelected,
+    required this.onSend,
+    required this.onAttach,
+  });
+
+  final TextEditingController composer;
+  final FocusNode composerFocus;
+  final String hintText;
+  final List<WorkspaceMention> mentionOptions;
+  final ValueChanged<WorkspaceMention> onMentionSelected;
+  final VoidCallback onSend;
+  final Future<void> Function() onAttach;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      if (mentionOptions.isNotEmpty)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Material(
+            elevation: 4,
+            borderRadius: BorderRadius.circular(10),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 176),
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final mention in mentionOptions)
+                    ListTile(
+                      dense: true,
+                      leading: Icon(
+                        mention.kind == 'agent'
+                            ? Icons.smart_toy_outlined
+                            : Icons.person_outline,
+                      ),
+                      title: Text('@${mention.label}'),
+                      subtitle: Text(
+                        mention.kind == 'agent' ? 'Agent' : 'Member',
+                      ),
+                      onTap: () => onMentionSelected(mention),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      CallbackShortcuts(
+        bindings: {const SingleActivator(LogicalKeyboardKey.enter): onSend},
+        child: TextField(
+          controller: composer,
+          focusNode: composerFocus,
+          minLines: 1,
+          maxLines: 5,
+          textInputAction: TextInputAction.newline,
+          decoration: InputDecoration(
+            hintText: hintText,
+            prefixIcon: IconButton(
+              tooltip: 'Attach file',
+              onPressed: () => unawaited(onAttach()),
+              icon: const Icon(Icons.attach_file),
+            ),
+            suffixIcon: IconButton(
+              onPressed: onSend,
+              icon: const Icon(Icons.send),
+            ),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          ),
+        ),
+      ),
+    ],
   );
 }
 

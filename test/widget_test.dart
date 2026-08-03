@@ -10,10 +10,64 @@ import 'package:nostr_codex_phone/src/repo_target.dart';
 import 'package:nostr_codex_phone/src/text_utils.dart';
 import 'package:nostr_codex_phone/src/tool_result_models.dart';
 import 'package:nostr_codex_phone/src/voice_recording.dart';
+import 'package:nostr_codex_phone/src/workspace_models.dart';
 
 void main() {
   test('app widget is available', () {
     expect(const NostrCodexApp(), isA<StatefulWidget>());
+  });
+
+  testWidgets('main and thread composers keep separate drafts and sends', (
+    tester,
+  ) async {
+    final mainController = TextEditingController();
+    final threadController = TextEditingController();
+    final mainFocus = FocusNode();
+    final threadFocus = FocusNode();
+    var mainSends = 0;
+    var threadSends = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Material(
+          child: Column(
+            children: [
+              WorkspaceComposer(
+                composer: mainController,
+                composerFocus: mainFocus,
+                hintText: 'Message # workspace',
+                mentionOptions: const <WorkspaceMention>[],
+                onMentionSelected: (_) {},
+                onSend: () => mainSends++,
+                onAttach: () async {},
+              ),
+              WorkspaceComposer(
+                composer: threadController,
+                composerFocus: threadFocus,
+                hintText: 'Reply in thread',
+                mentionOptions: const <WorkspaceMention>[],
+                onMentionSelected: (_) {},
+                onSend: () => threadSends++,
+                onAttach: () async {},
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField).at(1), 'Thread reply');
+    await tester.tap(find.byIcon(Icons.send).at(1));
+
+    expect(mainController.text, isEmpty);
+    expect(threadController.text, 'Thread reply');
+    expect(mainSends, 0);
+    expect(threadSends, 1);
+
+    mainController.dispose();
+    threadController.dispose();
+    mainFocus.dispose();
+    threadFocus.dispose();
   });
 
   test('cleans markdown before text to speech', () {

@@ -142,22 +142,16 @@ class WorkspaceMention {
   Map<String, Object> toJson() => {'kind': kind, 'id': id, 'label': label};
 }
 
-String workspaceMentionSyntax(WorkspaceMention mention) =>
-    '@[${mention.label}](${mention.kind}:${mention.id})';
-
-List<WorkspaceMention> workspaceMentionsIn(String text) {
-  final pattern = RegExp(r'@\[([^\]\r\n]+)\]\((member|agent):([^\)\s]+)\)');
-  return pattern
-      .allMatches(text)
-      .map(
-        (match) => WorkspaceMention(
-          label: match.group(1)!,
-          kind: match.group(2)!,
-          id: match.group(3)!,
-        ),
-      )
-      .toList(growable: false);
-}
+List<WorkspaceMention> workspaceSelectedMentionsIn(
+  String text,
+  Iterable<WorkspaceMention> selected,
+) => selected
+    .where(
+      (mention) => RegExp(
+        '${RegExp.escape('@${mention.label}')}(?![A-Za-z0-9_-])',
+      ).hasMatch(text),
+    )
+    .toList(growable: false);
 
 List<BridgeAudioReference> _attachments(Object? raw) {
   if (raw is! List) return const [];
@@ -493,6 +487,11 @@ class WorkspaceState {
       if (channel.id == id && channel.name.isNotEmpty) return channel.name;
     }
     return null;
+  }
+
+  int channelHumanMemberCount(String channelId) {
+    if (!channels.any((channel) => channel.id == channelId)) return 0;
+    return members.where((member) => !member.startsWith('agent:')).length;
   }
 
   static String _directKey(String one, String? two) =>
