@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -294836103;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 919982125;
 
 // Section: executor
 
@@ -124,7 +124,7 @@ fn wire__crate__api__nostr__blossom_upload_audio_impl(
         },
     )
 }
-fn wire__crate__api__nostr__fips_call_accept_impl(
+fn wire__crate__api__nostr__fips_call_accept_complete_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -132,7 +132,42 @@ fn wire__crate__api__nostr__fips_call_accept_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "fips_call_accept",
+            debug_name: "fips_call_accept_complete",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::nostr::fips_call_accept_complete().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__nostr__fips_call_accept_start_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fips_call_accept_start",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -152,7 +187,8 @@ fn wire__crate__api__nostr__fips_call_accept_impl(
             move |context| async move {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
-                        let output_ok = crate::api::nostr::fips_call_accept(api_config).await?;
+                        let output_ok =
+                            crate::api::nostr::fips_call_accept_start(api_config).await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -1327,63 +1363,71 @@ fn pde_ffi_dispatcher_primary_impl(
             data_len,
         ),
         2 => wire__crate__api__nostr__blossom_upload_audio_impl(port, ptr, rust_vec_len, data_len),
-        3 => wire__crate__api__nostr__fips_call_accept_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__nostr__fips_call_connect_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__nostr__fips_call_receive_datagram_impl(
+        3 => wire__crate__api__nostr__fips_call_accept_complete_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        6 => wire__crate__api__nostr__fips_call_receive_realtime_audio_impl(
+        4 => {
+            wire__crate__api__nostr__fips_call_accept_start_impl(port, ptr, rust_vec_len, data_len)
+        }
+        5 => wire__crate__api__nostr__fips_call_connect_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__nostr__fips_call_receive_datagram_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        7 => wire__crate__api__nostr__fips_call_receive_realtime_pcm_impl(
+        7 => wire__crate__api__nostr__fips_call_receive_realtime_audio_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        8 => {
+        8 => wire__crate__api__nostr__fips_call_receive_realtime_pcm_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        9 => {
             wire__crate__api__nostr__fips_call_send_datagram_impl(port, ptr, rust_vec_len, data_len)
         }
-        9 => wire__crate__api__nostr__fips_call_send_realtime_audio_impl(
+        10 => wire__crate__api__nostr__fips_call_send_realtime_audio_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        10 => wire__crate__api__nostr__fips_call_send_realtime_pcm_impl(
+        11 => wire__crate__api__nostr__fips_call_send_realtime_pcm_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        11 => wire__crate__api__nostr__fips_call_stop_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__nostr__nostr_fetch_recent_messages_impl(
+        12 => wire__crate__api__nostr__fips_call_stop_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__nostr__nostr_fetch_recent_messages_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        16 => wire__crate__api__nostr__nostr_is_started_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__nostr__nostr_next_message_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__nostr__nostr_send_audio_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__nostr__nostr_send_ephemeral_query_impl(
+        17 => wire__crate__api__nostr__nostr_is_started_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__nostr__nostr_next_message_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__nostr__nostr_send_audio_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__nostr__nostr_send_ephemeral_query_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        21 => wire__crate__api__nostr__nostr_send_error_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__nostr__nostr_send_query_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__nostr__nostr_send_response_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__nostr__nostr_start_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__nostr__nostr_stop_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__nostr__nostr_send_error_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__nostr__nostr_send_query_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__nostr__nostr_send_response_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__nostr__nostr_start_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__nostr__nostr_stop_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1396,9 +1440,9 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        13 => wire__crate__api__nostr__nostr_default_relays_impl(ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__nostr__nostr_generate_secret_key_impl(ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__nostr__nostr_public_key_impl(ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__nostr__nostr_default_relays_impl(ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__nostr__nostr_generate_secret_key_impl(ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__nostr__nostr_public_key_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

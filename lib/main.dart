@@ -49,7 +49,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.2.83+283';
+const _appVersion = '0.2.84+284';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -4270,7 +4270,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             _callPeerPubkey = sender;
             _callAnswerSent = false;
           });
-          unawaited(_prepareIncomingWorkspaceCall(callId));
         } else {
           unawaited(_sendCallControl('call_hangup', sender, callId));
         }
@@ -6983,18 +6982,9 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
   }
 
-  Future<void> _prepareIncomingWorkspaceCall(String callId) async {
+  Future<void> _completeIncomingWorkspaceCall(String callId) async {
     try {
-      // FIPS publishes this client's NAT advert before Answer is enabled.
-      final accepting = fipsCallAccept(config: _callConfig());
-      if (!mounted || _callId != callId || _callPhase != _CallPhase.incoming) {
-        await fipsCallStop();
-        try {
-          await accepting;
-        } catch (_) {}
-        return;
-      }
-      final status = await accepting;
+      final status = await fipsCallAcceptComplete();
       if (mounted && _callId == callId && _callAnswerSent) {
         await _activateCallAudio(callId, status);
       } else {
@@ -7002,7 +6992,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       }
     } catch (error) {
       if (mounted && _callId == callId) {
-        _showError('Could not prepare incoming call: $error');
+        _showError('Could not connect incoming call: $error');
         await _clearCall();
       }
     }
@@ -7019,9 +7009,19 @@ Return a concise catch-up summary of what happened after that point: completed w
     try {
       setState(() {
         _callPhase = _CallPhase.connecting;
-        _callAnswerSent = true;
       });
+      // Do not make an endpoint visible until the user has answered, but do
+      // not signal the caller until its advert publication has completed.
+      await fipsCallAcceptStart(config: _callConfig());
+      if (!mounted || _callId != callId || _callPhase != _CallPhase.connecting) {
+        await fipsCallStop();
+        return;
+      }
       await _sendCallControl('call_answer', peerPubkey, callId);
+      if (mounted && _callId == callId) {
+        setState(() => _callAnswerSent = true);
+        unawaited(_completeIncomingWorkspaceCall(callId));
+      }
     } catch (error) {
       if (mounted && _callId == callId) {
         _showError('Could not answer call: $error');

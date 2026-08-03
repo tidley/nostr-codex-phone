@@ -104,6 +104,7 @@ async fn run(args: Args) -> Result<FipsHarnessReport> {
         }
         session.connect(peer).await?;
     } else {
+        session.start_accept().await?;
         session.accept().await?;
     }
 
