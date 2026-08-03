@@ -293,21 +293,34 @@ pub async fn fips_call_connect(
     Ok(status)
 }
 
-pub async fn fips_call_accept(config: BridgeFipsCallConfig) -> Result<BridgeFipsCallStatus> {
+/// Publish the responder advert. This completes before traversal so callers can
+/// send their signaling answer only after the caller can discover this endpoint.
+pub async fn fips_call_accept_start(config: BridgeFipsCallConfig) -> Result<BridgeFipsCallStatus> {
     let audio = RealtimeAudioPipeline::new()?;
     let mut session = build_fips_call_session(config)?;
-    let (cancel, cancelled) = oneshot::channel();
-    *CALL_ACCEPT_CANCEL.lock().await = Some(cancel);
-    let result: Result<()> = tokio::select! {
-        result = session.accept() => result.map_err(Into::into),
-        _ = cancelled => Err(anyhow!("FIPS call acceptance cancelled")),
-    };
-    CALL_ACCEPT_CANCEL.lock().await.take();
-    result?;
+    session.start_accept().await?;
     let status = fips_call_status(&session);
     *CALL_SESSION.lock().await = Some(session);
     *REALTIME_AUDIO.lock().await = Some(audio);
     Ok(status)
+}
+
+/// Wait for the caller's traversal after [`fips_call_accept_start`] has made
+/// the responder advert available.
+pub async fn fips_call_accept_complete() -> Result<BridgeFipsCallStatus> {
+    let mut session = CALL_SESSION.lock().await;
+    let session = session
+        .as_mut()
+        .ok_or_else(|| anyhow!("FIPS call acceptance is not started"))?;
+    let (cancel, cancelled) = oneshot::channel();
+    *CALL_ACCEPT_CANCEL.lock().await = Some(cancel);
+    let result = tokio::select! {
+        result = session.accept() => result.map_err(anyhow::Error::from),
+        _ = cancelled => Err(anyhow!("FIPS call acceptance cancelled")),
+    };
+    CALL_ACCEPT_CANCEL.lock().await.take();
+    result?;
+    Ok(fips_call_status(session))
 }
 
 pub async fn fips_call_send_datagram(payload: Vec<u8>) -> Result<()> {
@@ -456,6 +469,13 @@ mod tests {
         fips_call_stop().await.unwrap();
 
         assert!(cancelled.await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn completing_acceptance_requires_a_published_advert() {
+        let error = fips_call_accept_complete().await.unwrap_err();
+
+        assert!(error.to_string().contains("acceptance is not started"));
     }
 }
 

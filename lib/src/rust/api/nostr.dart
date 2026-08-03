@@ -76,9 +76,16 @@ Future<BridgeFipsCallStatus> fipsCallConnect({
   peerNpub: peerNpub,
 );
 
-Future<BridgeFipsCallStatus> fipsCallAccept({
+/// Publish the responder advert. This completes before traversal so callers can
+/// send their signaling answer only after the caller can discover this endpoint.
+Future<BridgeFipsCallStatus> fipsCallAcceptStart({
   required BridgeFipsCallConfig config,
-}) => RustLib.instance.api.crateApiNostrFipsCallAccept(config: config);
+}) => RustLib.instance.api.crateApiNostrFipsCallAcceptStart(config: config);
+
+/// Wait for the caller's traversal after [`fips_call_accept_start`] has made
+/// the responder advert available.
+Future<BridgeFipsCallStatus> fipsCallAcceptComplete() =>
+    RustLib.instance.api.crateApiNostrFipsCallAcceptComplete();
 
 Future<void> fipsCallSendDatagram({required List<int> payload}) =>
     RustLib.instance.api.crateApiNostrFipsCallSendDatagram(payload: payload);
