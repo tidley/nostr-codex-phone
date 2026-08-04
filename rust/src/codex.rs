@@ -81,6 +81,13 @@ impl OpenCodeSessionInfo {
 pub struct CodexRunResult {
     pub response: String,
     pub session_id: Option<String>,
+    pub token_usage: Option<CodexTokenUsage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodexTokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
 }
 
 pub type CodexJsonEventSender = mpsc::UnboundedSender<Value>;
@@ -258,6 +265,7 @@ pub async fn run_codex_session_with_cancel_and_events(
             .map(|response| CodexRunResult {
                 response,
                 session_id: None,
+                token_usage: None,
             });
     }
 
@@ -340,6 +348,7 @@ async fn run_opencode_session(
     Ok(CodexRunResult {
         response: parsed.response,
         session_id: parsed.session_id.or(Some(session_id)),
+        token_usage: parsed.token_usage,
     })
 }
 
@@ -958,6 +967,7 @@ fn parse_opencode_model_list(output: &str) -> Result<Vec<OpenCodeModelInfo>> {
 fn parse_opencode_json_output(stdout: &str) -> Result<CodexRunResult> {
     let mut session_id = None;
     let mut response = None;
+    let mut token_usage = None;
     for line in stdout
         .lines()
         .map(str::trim)
@@ -966,6 +976,9 @@ fn parse_opencode_json_output(stdout: &str) -> Result<CodexRunResult> {
         let value: Value = serde_json::from_str(line)
             .with_context(|| format!("OpenCode emitted invalid JSONL event: {line}"))?;
         find_opencode_session_id(&value, &mut session_id);
+        if value.get("type").and_then(Value::as_str) == Some("turn.completed") {
+            token_usage = opencode_token_usage(&value).or(token_usage);
+        }
         if let Some(text) = find_opencode_text(&value) {
             response = Some(text);
         }
@@ -975,8 +988,18 @@ fn parse_opencode_json_output(stdout: &str) -> Result<CodexRunResult> {
         .map(|response| CodexRunResult {
             response,
             session_id,
+            token_usage,
         })
         .ok_or_else(|| anyhow!("OpenCode completed but produced no text response"))
+}
+
+// Only a completed event with both numeric fields is safe to account for.
+fn opencode_token_usage(value: &Value) -> Option<CodexTokenUsage> {
+    let usage = value.get("usage")?;
+    Some(CodexTokenUsage {
+        input_tokens: usage.get("input_tokens")?.as_u64()?,
+        output_tokens: usage.get("output_tokens")?.as_u64()?,
+    })
 }
 
 fn find_opencode_session_id(value: &Value, session_id: &mut Option<String>) {
@@ -1289,6 +1312,7 @@ fn strip_arg(args: &[String], arg: &str) -> Vec<String> {
 fn parse_codex_json_output(stdout: &str) -> Result<CodexRunResult> {
     let mut session_id = None;
     let mut response = None;
+    let mut token_usage = None;
     let mut errors = Vec::new();
 
     for line in stdout
@@ -1317,6 +1341,9 @@ fn parse_codex_json_output(stdout: &str) -> Result<CodexRunResult> {
             Some("turn.failed") | Some("error") => {
                 errors.push(value.to_string());
             }
+            Some("turn.completed") => {
+                token_usage = opencode_token_usage(&value).or(token_usage);
+            }
             _ => {}
         }
     }
@@ -1325,6 +1352,7 @@ fn parse_codex_json_output(stdout: &str) -> Result<CodexRunResult> {
         return Ok(CodexRunResult {
             response,
             session_id,
+            token_usage,
         });
     }
 
@@ -1542,6 +1570,24 @@ mod tests {
 
         assert_eq!(parsed.session_id.as_deref(), Some("ses_Abc123"));
         assert_eq!(parsed.response, "Done.");
+        assert_eq!(parsed.token_usage, None);
+    }
+
+    #[test]
+    fn accounts_only_complete_opencode_usage() {
+        let parsed = parse_opencode_json_output(
+            r#"{"type":"text","usage":{"input_tokens":99,"output_tokens":4},"text":"Done."}
+{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.token_usage,
+            Some(CodexTokenUsage {
+                input_tokens: 12,
+                output_tokens: 3,
+            })
+        );
     }
 
     #[test]

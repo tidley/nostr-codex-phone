@@ -1907,6 +1907,9 @@ fn agent_payload(
         instance_id: agent.instance_id,
         created_by: agent.created_by,
         created_at: agent.created_at,
+        initialized_at: agent.initialized_at,
+        input_tokens: agent.input_tokens,
+        output_tokens: agent.output_tokens,
     }
 }
 fn conversation_agent_payload(
@@ -2139,7 +2142,7 @@ async fn route_conversation_agents(
                 continue;
             }
         };
-        let response = match run_workspace_agent_with_typing(
+        let result = match run_workspace_agent_with_typing(
             workspace,
             messenger,
             &agent,
@@ -2152,7 +2155,7 @@ async fn route_conversation_agents(
         )
         .await
         {
-            Ok(result) if !result.response.trim().is_empty() => result.response,
+            Ok(result) if !result.response.trim().is_empty() => result,
             Ok(_) => continue,
             Err(err) if agent.restart_on_failure => {
                 warn!(agent = %agent.id, "workspace agent response failed; restarting dedicated session: {err:#}");
@@ -2214,7 +2217,7 @@ async fn route_conversation_agents(
                 )
                 .await
                 {
-                    Ok(result) if !result.response.trim().is_empty() => result.response,
+                    Ok(result) if !result.response.trim().is_empty() => result,
                     Ok(_) => continue,
                     Err(restart_err) => {
                         warn!(agent = %agent.id, "workspace agent response failed after restart: {restart_err:#}");
@@ -2227,11 +2230,32 @@ async fn route_conversation_agents(
                 continue;
             }
         };
+        if let Some(usage) = result.token_usage {
+            let updated = workspace.record_agent_token_usage(
+                &agent.id,
+                usage.input_tokens,
+                usage.output_tokens,
+            )?;
+            broadcast_workspace_update(
+                workspace,
+                messenger,
+                &WorkspaceUpdate {
+                    action: "agent_usage_updated".to_string(),
+                    channels: vec![],
+                    members: vec![],
+                    messages: vec![],
+                    agents: vec![agent_payload(updated)],
+                    conversation_agents: vec![],
+                    typing: None,
+                },
+            )
+            .await?;
+        }
         let message = match channel_id {
             Some(channel_id) => workspace.add_channel_message(
                 &format!("agent:{}", agent.id),
                 channel_id,
-                &response,
+                &result.response,
                 &[],
                 &[],
                 None,
@@ -2239,7 +2263,7 @@ async fn route_conversation_agents(
             None => workspace.add_direct_message(
                 &format!("agent:{}", agent.id),
                 peer.unwrap_or_default(),
-                &response,
+                &result.response,
                 &[],
                 &[],
                 None,

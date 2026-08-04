@@ -2930,6 +2930,7 @@ class _AgentsPage extends StatefulWidget {
 }
 
 class _AgentsPageState extends State<_AgentsPage> {
+  String? _selectedAgentId;
   static const _presets = [
     (
       'Builder',
@@ -3064,67 +3065,82 @@ class _AgentsPageState extends State<_AgentsPage> {
   }
 
   @override
-  Widget build(BuildContext context) => ListView(
-    padding: const EdgeInsets.all(24),
-    children: [
-      Text(
-        'Agents',
-        style: Theme.of(
-          context,
-        ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
-      ),
-      const SizedBox(height: 6),
-      Text(
-        'Agents receive a dedicated OpenCode session in this workspace when created.',
-        style: Theme.of(context).textTheme.bodyMedium,
-      ),
-      const SizedBox(height: 24),
-      Align(
-        alignment: Alignment.centerLeft,
-        child: FilledButton.icon(
-          onPressed: _createCustom,
-          icon: const Icon(Icons.add),
-          label: const Text('Custom agent'),
+  Widget build(BuildContext context) {
+    WorkspaceAgent? selected;
+    for (final agent in widget.workspace.agents) {
+      if (agent.id == _selectedAgentId) {
+        selected = agent;
+        break;
+      }
+    }
+    if (selected != null) {
+      return _agentDetail(selected);
+    }
+    return ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        Text(
+          'Agents',
+          style: Theme.of(
+            context,
+          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
         ),
-      ),
-      const SizedBox(height: 24),
-      Text('Start with a role', style: Theme.of(context).textTheme.titleMedium),
-      const SizedBox(height: 8),
-      Wrap(
-        spacing: 10,
-        runSpacing: 10,
-        children: [
-          for (final preset in _presets)
-            SizedBox(
-              width: 170,
-              child: OutlinedButton.icon(
-                onPressed: () => _createPreset(preset),
-                icon: Icon(preset.$3),
-                label: Text(preset.$1),
-              ),
-            ),
-        ],
-      ),
-      const SizedBox(height: 28),
-      Text('Your agents', style: Theme.of(context).textTheme.titleMedium),
-      const SizedBox(height: 8),
-      ValueListenableBuilder<int>(
-        valueListenable: widget.workspaceRevision,
-        builder: (context, _, _) => Column(
+        const SizedBox(height: 6),
+        Text(
+          'Agents receive a dedicated OpenCode session in this workspace when created.',
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 24),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: FilledButton.icon(
+            onPressed: _createCustom,
+            icon: const Icon(Icons.add),
+            label: const Text('Custom agent'),
+          ),
+        ),
+        const SizedBox(height: 24),
+        Text(
+          'Start with a role',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
           children: [
-            if (widget.workspace.agents.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 32),
-                child: Center(
-                  child: Text('Add a preset or create a custom agent.'),
+            for (final preset in _presets)
+              SizedBox(
+                width: 170,
+                child: OutlinedButton.icon(
+                  onPressed: () => _createPreset(preset),
+                  icon: Icon(preset.$3),
+                  label: Text(preset.$1),
                 ),
               ),
-            for (final agent in widget.workspace.agents) _agentCard(agent),
           ],
         ),
-      ),
-    ],
-  );
+        const SizedBox(height: 28),
+        Text('Your agents', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        ValueListenableBuilder<int>(
+          valueListenable: widget.workspaceRevision,
+          builder: (context, _, _) => Column(
+            children: [
+              if (widget.workspace.agents.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 32),
+                  child: Center(
+                    child: Text('Add a preset or create a custom agent.'),
+                  ),
+                ),
+              for (final agent in widget.workspace.agents) _agentCard(agent),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
 
   Widget _agentCard(WorkspaceAgent agent) => ListTile(
     contentPadding: EdgeInsets.zero,
@@ -3160,8 +3176,208 @@ class _AgentsPageState extends State<_AgentsPage> {
         PopupMenuItem(value: 'delete', child: Text('Delete')),
       ],
     ),
-    onTap: () => widget.onOpenConversation(agent),
+    onTap: () => setState(() => _selectedAgentId = agent.id),
   );
+
+  Widget _agentDetail(WorkspaceAgent agent) {
+    final theme = Theme.of(context);
+    final memberships = widget.workspace.conversationAgents
+        .where((membership) => membership.agentId == agent.id)
+        .toList(growable: false);
+    final tokens = agent.inputTokens == null || agent.outputTokens == null
+        ? 'Unavailable'
+        : '${_formatTokenCount(agent.inputTokens! + agent.outputTokens!)} total';
+    return ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: () => setState(() => _selectedAgentId = null),
+            icon: const Icon(Icons.arrow_back),
+            label: const Text('All agents'),
+          ),
+        ),
+        const SizedBox(height: 14),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            CircleAvatar(
+              radius: 28,
+              child: Icon(
+                agent.preset == 'reviewer'
+                    ? Icons.fact_check
+                    : Icons.smart_toy_outlined,
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    agent.name,
+                    style: theme.textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(agent.role, style: theme.textTheme.titleMedium),
+                  const SizedBox(height: 10),
+                  Chip(
+                    avatar: Icon(
+                      agent.sessionStatus == 'ready'
+                          ? Icons.check_circle_outline
+                          : Icons.error_outline,
+                      size: 18,
+                    ),
+                    label: Text(
+                      agent.sessionStatus == 'ready'
+                          ? 'OpenCode ready'
+                          : 'Session unavailable',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        if (agent.sessionStatus != 'ready' && agent.sessionError != null) ...[
+          const SizedBox(height: 16),
+          Text(agent.sessionError!, style: theme.textTheme.bodyMedium),
+        ],
+        const SizedBox(height: 28),
+        Text('Activity', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 8),
+        _agentDetailRow(
+          Icons.schedule_outlined,
+          'Initialized',
+          _formatTimestamp(agent.initializedAt),
+        ),
+        _agentDetailRow(Icons.data_usage_outlined, 'Tokens used', tokens),
+        if (agent.inputTokens != null && agent.outputTokens != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 52, bottom: 8),
+            child: Text(
+              '${_formatTokenCount(agent.inputTokens!)} input · ${_formatTokenCount(agent.outputTokens!)} output',
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+        const SizedBox(height: 20),
+        Text('Conversations', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 6),
+        if (memberships.isEmpty)
+          const ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.forum_outlined),
+            title: Text('Not added to a conversation'),
+            subtitle: Text('Add this agent from a channel or direct message.'),
+          ),
+        for (final membership in memberships)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+              membership.channelId == null
+                  ? Icons.forum_outlined
+                  : Icons.tag_outlined,
+            ),
+            title: Text(_conversationLabel(membership)),
+            subtitle: membership.folderScope.isEmpty
+                ? const Text('No folder scope selected')
+                : Text('Folders: ${membership.folderScope.join(', ')}'),
+          ),
+        const SizedBox(height: 20),
+        Text('Configuration', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 8),
+        _agentDetailRow(
+          Icons.memory_outlined,
+          'OpenCode agent',
+          agent.openCodeAgent ?? 'Worker default',
+        ),
+        _agentDetailRow(
+          Icons.model_training_outlined,
+          'Model',
+          _modelLabel(agent),
+        ),
+        _agentDetailRow(
+          Icons.folder_outlined,
+          'Folder',
+          agent.workdir ?? 'Worker default',
+        ),
+        _agentDetailRow(
+          Icons.restart_alt_outlined,
+          'Restart after failure',
+          agent.restartOnFailure ? 'Enabled' : 'Disabled',
+        ),
+        if (agent.traits.isNotEmpty || agent.skills.isNotEmpty) ...[
+          const SizedBox(height: 20),
+          Text('Capabilities', style: theme.textTheme.titleMedium),
+          if (agent.traits.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(agent.traits),
+          ],
+          if (agent.skills.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final skill in agent.skills) Chip(label: Text(skill)),
+              ],
+            ),
+          ],
+        ],
+        const SizedBox(height: 28),
+        FilledButton.icon(
+          onPressed: agent.sessionStatus == 'ready'
+              ? () => widget.onOpenConversation(agent)
+              : null,
+          icon: const Icon(Icons.open_in_new),
+          label: const Text('Open session'),
+        ),
+      ],
+    );
+  }
+
+  Widget _agentDetailRow(IconData icon, String label, String value) => ListTile(
+    contentPadding: EdgeInsets.zero,
+    leading: Icon(icon),
+    title: Text(label),
+    subtitle: SelectableText(value),
+  );
+
+  String _conversationLabel(WorkspaceConversationAgent membership) {
+    if (membership.channelId case final channelId?) {
+      return '# ${widget.workspace.channelName(channelId) ?? channelId}';
+    }
+    return 'Direct message: ${_memberLabel(membership.memberPubkey)} and ${_memberLabel(membership.peerPubkey)}';
+  }
+
+  String _memberLabel(String? pubkey) => pubkey == null
+      ? 'Unknown member'
+      : widget.workspace.memberNames[pubkey] ?? compactIdentifier(pubkey);
+
+  String _modelLabel(WorkspaceAgent agent) =>
+      agent.openCodeProviderId == null || agent.openCodeModelId == null
+      ? 'Worker default'
+      : '${agent.openCodeProviderName ?? agent.openCodeProviderId} / ${agent.openCodeModelName ?? agent.openCodeModelId}';
+
+  String _formatTimestamp(int? seconds) {
+    if (seconds == null || seconds <= 0) return 'Unavailable';
+    return DateTime.fromMillisecondsSinceEpoch(
+      seconds * 1000,
+    ).toLocal().toString().substring(0, 16);
+  }
+
+  String _formatTokenCount(int value) {
+    if (value < 1000) {
+      return '$value';
+    }
+    if (value < 1000000) {
+      return '${(value / 1000).toStringAsFixed(value % 1000 == 0 ? 0 : 1)}K';
+    }
+    return '${(value / 1000000).toStringAsFixed(value % 1000000 == 0 ? 0 : 1)}M';
+  }
 
   String _profileSummary(WorkspaceAgent agent) {
     final model =
