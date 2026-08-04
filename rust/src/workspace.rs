@@ -56,6 +56,9 @@ pub struct WorkspaceAgent {
     pub instance_id: String,
     pub created_by: String,
     pub created_at: i64,
+    pub initialized_at: Option<i64>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -96,7 +99,7 @@ impl WorkspaceStore {
                CREATE TABLE IF NOT EXISTS workspace_messages (id TEXT PRIMARY KEY, channel_id TEXT, recipient_pubkey TEXT, sender_pubkey TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', mentions_json TEXT NOT NULL DEFAULT '[]', parent_id TEXT, also_send_to_main INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
                  CHECK ((channel_id IS NOT NULL) != (recipient_pubkey IS NOT NULL)));
                CREATE TABLE IF NOT EXISTS workspace_message_reactions (message_id TEXT NOT NULL REFERENCES workspace_messages(id), emoji TEXT NOT NULL, sender_pubkey TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (message_id, emoji, sender_pubkey));
-               CREATE TABLE IF NOT EXISTS workspace_agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, traits TEXT NOT NULL DEFAULT '', skills_json TEXT NOT NULL DEFAULT '[]', preset TEXT, opencode_provider_id TEXT, opencode_provider_name TEXT, opencode_model_id TEXT, opencode_model_name TEXT, opencode_agent TEXT, workdir TEXT, restart_on_failure INTEGER NOT NULL DEFAULT 1, opencode_session_id TEXT, session_status TEXT NOT NULL DEFAULT 'failed', session_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+               CREATE TABLE IF NOT EXISTS workspace_agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, traits TEXT NOT NULL DEFAULT '', skills_json TEXT NOT NULL DEFAULT '[]', preset TEXT, opencode_provider_id TEXT, opencode_provider_name TEXT, opencode_model_id TEXT, opencode_model_name TEXT, opencode_agent TEXT, workdir TEXT, restart_on_failure INTEGER NOT NULL DEFAULT 1, opencode_session_id TEXT, session_status TEXT NOT NULL DEFAULT 'failed', session_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, initialized_at INTEGER, input_tokens INTEGER, output_tokens INTEGER);
               CREATE TABLE IF NOT EXISTS workspace_agent_instances (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES workspace_agents(id), opencode_session_id TEXT, created_at INTEGER NOT NULL);
                CREATE TABLE IF NOT EXISTS workspace_conversation_agents (agent_id TEXT NOT NULL REFERENCES workspace_agents(id), channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT,
                   folder_scope_json TEXT NOT NULL DEFAULT '[]',
@@ -183,6 +186,9 @@ impl WorkspaceStore {
             ("opencode_model_name", "TEXT"),
             ("opencode_agent", "TEXT"),
             ("workdir", "TEXT"),
+            ("initialized_at", "INTEGER"),
+            ("input_tokens", "INTEGER"),
+            ("output_tokens", "INTEGER"),
             ("restart_on_failure", "INTEGER NOT NULL DEFAULT 1"),
         ] {
             if !agent_columns.iter().any(|existing| existing == column) {
@@ -373,14 +379,17 @@ impl WorkspaceStore {
             instance_id: new_id(),
             created_by: required("creator", created_by)?,
             created_at: now(),
+            initialized_at: (session_status == "ready" && opencode_session_id.is_some()).then(now),
+            input_tokens: None,
+            output_tokens: None,
         };
-        self.conn.execute("INSERT INTO workspace_agents (id, name, role, traits, skills_json, preset, opencode_provider_id, opencode_provider_name, opencode_model_id, opencode_model_name, opencode_agent, workdir, restart_on_failure, opencode_session_id, session_status, session_error, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)", params![agent.id, agent.name, agent.role, agent.traits, serde_json::to_string(&agent.skills)?, agent.preset, agent.opencode_provider_id, agent.opencode_provider_name, agent.opencode_model_id, agent.opencode_model_name, agent.opencode_agent, agent.workdir, agent.restart_on_failure, agent.opencode_session_id, agent.session_status, agent.session_error, agent.created_by, agent.created_at])?;
+        self.conn.execute("INSERT INTO workspace_agents (id, name, role, traits, skills_json, preset, opencode_provider_id, opencode_provider_name, opencode_model_id, opencode_model_name, opencode_agent, workdir, restart_on_failure, opencode_session_id, session_status, session_error, created_by, created_at, initialized_at, input_tokens, output_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)", params![agent.id, agent.name, agent.role, agent.traits, serde_json::to_string(&agent.skills)?, agent.preset, agent.opencode_provider_id, agent.opencode_provider_name, agent.opencode_model_id, agent.opencode_model_name, agent.opencode_agent, agent.workdir, agent.restart_on_failure, agent.opencode_session_id, agent.session_status, agent.session_error, agent.created_by, agent.created_at, agent.initialized_at, agent.input_tokens, agent.output_tokens])?;
         self.conn.execute("INSERT INTO workspace_agent_instances (id, agent_id, opencode_session_id, created_at) VALUES (?1, ?2, ?3, ?4)", params![agent.instance_id, agent.id, agent.opencode_session_id, agent.created_at])?;
         Ok(agent)
     }
 
     pub fn agents(&self) -> Result<Vec<WorkspaceAgent>> {
-        let mut statement = self.conn.prepare("SELECT a.id, a.name, a.role, a.traits, a.skills_json, a.preset, a.opencode_provider_id, a.opencode_provider_name, a.opencode_model_id, a.opencode_model_name, a.opencode_agent, a.workdir, a.restart_on_failure, i.opencode_session_id, a.session_status, a.session_error, i.id, a.created_by, a.created_at FROM workspace_agents a JOIN workspace_agent_instances i ON i.agent_id = a.id ORDER BY a.created_at, a.name")?;
+        let mut statement = self.conn.prepare("SELECT a.id, a.name, a.role, a.traits, a.skills_json, a.preset, a.opencode_provider_id, a.opencode_provider_name, a.opencode_model_id, a.opencode_model_name, a.opencode_agent, a.workdir, a.restart_on_failure, i.opencode_session_id, a.session_status, a.session_error, i.id, a.created_by, a.created_at, a.initialized_at, a.input_tokens, a.output_tokens FROM workspace_agents a JOIN workspace_agent_instances i ON i.agent_id = a.id ORDER BY a.created_at, a.name")?;
         let agents = statement
             .query_map([], |row| {
                 Ok(WorkspaceAgent {
@@ -403,6 +412,9 @@ impl WorkspaceStore {
                     instance_id: row.get(16)?,
                     created_by: row.get(17)?,
                     created_at: row.get(18)?,
+                    initialized_at: row.get(19)?,
+                    input_tokens: row.get(20)?,
+                    output_tokens: row.get(21)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -418,11 +430,14 @@ impl WorkspaceStore {
     ) -> Result<WorkspaceAgent> {
         let agent_id = required("agent id", agent_id)?;
         if self.conn.execute(
-            "UPDATE workspace_agents SET session_status = ?2, session_error = ?3 WHERE id = ?1",
+            "UPDATE workspace_agents SET session_status = ?2, session_error = ?3, initialized_at = CASE WHEN initialized_at IS NULL AND ?4 = 'ready' AND ?5 IS NOT NULL THEN ?6 ELSE initialized_at END WHERE id = ?1",
             params![
                 agent_id,
                 required("agent session status", session_status)?,
-                session_error.and_then(non_empty)
+                session_error.and_then(non_empty),
+                session_status,
+                opencode_session_id.and_then(non_empty),
+                now(),
             ],
         )? == 0
         {
@@ -438,6 +453,27 @@ impl WorkspaceStore {
             .context("updated agent instance is missing")
     }
 
+    pub fn record_agent_token_usage(
+        &self,
+        agent_id: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> Result<WorkspaceAgent> {
+        let input_tokens = i64::try_from(input_tokens).context("input token count is too large")?;
+        let output_tokens =
+            i64::try_from(output_tokens).context("output token count is too large")?;
+        if self.conn.execute(
+            "UPDATE workspace_agents SET input_tokens = COALESCE(input_tokens, 0) + ?2, output_tokens = COALESCE(output_tokens, 0) + ?3 WHERE id = ?1",
+            params![required("agent id", agent_id)?, input_tokens, output_tokens],
+        )? == 0 {
+            bail!("agent does not exist");
+        }
+        self.agents()?
+            .into_iter()
+            .find(|agent| agent.id == agent_id)
+            .context("updated agent is missing")
+    }
+
     pub fn update_agent_profile_and_session(
         &self,
         agent_id: &str,
@@ -448,8 +484,8 @@ impl WorkspaceStore {
     ) -> Result<WorkspaceAgent> {
         let agent_id = required("agent id", agent_id)?;
         if self.conn.execute(
-            "UPDATE workspace_agents SET opencode_provider_id = ?2, opencode_provider_name = ?3, opencode_model_id = ?4, opencode_model_name = ?5, opencode_agent = ?6, workdir = ?7, restart_on_failure = ?8, session_status = ?9, session_error = ?10 WHERE id = ?1",
-            params![agent_id, profile.provider_id.and_then(|value| non_empty(&value)), profile.provider_name.and_then(|value| non_empty(&value)), profile.model_id.and_then(|value| non_empty(&value)), profile.model_name.and_then(|value| non_empty(&value)), profile.agent.and_then(|value| non_empty(&value)), profile.workdir.and_then(|value| non_empty(&value)), profile.restart_on_failure, required("agent session status", session_status)?, session_error.and_then(non_empty)],
+            "UPDATE workspace_agents SET opencode_provider_id = ?2, opencode_provider_name = ?3, opencode_model_id = ?4, opencode_model_name = ?5, opencode_agent = ?6, workdir = ?7, restart_on_failure = ?8, session_status = ?9, session_error = ?10, initialized_at = CASE WHEN initialized_at IS NULL AND ?9 = 'ready' AND ?11 IS NOT NULL THEN ?12 ELSE initialized_at END WHERE id = ?1",
+            params![agent_id, profile.provider_id.and_then(|value| non_empty(&value)), profile.provider_name.and_then(|value| non_empty(&value)), profile.model_id.and_then(|value| non_empty(&value)), profile.model_name.and_then(|value| non_empty(&value)), profile.agent.and_then(|value| non_empty(&value)), profile.workdir.and_then(|value| non_empty(&value)), profile.restart_on_failure, required("agent session status", session_status)?, session_error.and_then(non_empty), opencode_session_id.and_then(non_empty), now()],
         )? == 0 {
             bail!("agent does not exist");
         }
@@ -1126,6 +1162,30 @@ mod tests {
         drop(store);
         let agents = WorkspaceStore::open(path.path()).unwrap().agents().unwrap();
         assert_eq!(agents, vec![agent]);
+    }
+
+    #[test]
+    fn records_initialized_time_and_reliable_token_usage() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        let agent = store
+            .create_agent(
+                "Scout",
+                "Researcher",
+                "",
+                &[],
+                None,
+                Some("ses_1"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        assert!(agent.initialized_at.is_some());
+        assert_eq!(agent.input_tokens, None);
+
+        let updated = store.record_agent_token_usage(&agent.id, 12, 3).unwrap();
+        assert_eq!(updated.input_tokens, Some(12));
+        assert_eq!(updated.output_tokens, Some(3));
     }
 
     #[test]

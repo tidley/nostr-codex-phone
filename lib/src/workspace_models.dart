@@ -275,6 +275,10 @@ class WorkspaceAgent {
     this.openCodeSessionId,
     this.sessionStatus = 'failed',
     this.sessionError,
+    this.createdAt = 0,
+    this.initializedAt,
+    this.inputTokens,
+    this.outputTokens,
   });
   final String id;
   final String name;
@@ -292,6 +296,10 @@ class WorkspaceAgent {
   final String? openCodeSessionId;
   final String sessionStatus;
   final String? sessionError;
+  final int createdAt;
+  final int? initializedAt;
+  final int? inputTokens;
+  final int? outputTokens;
 
   factory WorkspaceAgent.fromJson(Map<String, dynamic> json) => WorkspaceAgent(
     id: json['id']?.toString() ?? '',
@@ -317,6 +325,10 @@ class WorkspaceAgent {
         json['session_status']?.toString() ??
         (json['opencode_session_id'] == null ? 'failed' : 'ready'),
     sessionError: json['session_error']?.toString(),
+    createdAt: (json['created_at'] as num?)?.toInt() ?? 0,
+    initializedAt: (json['initialized_at'] as num?)?.toInt(),
+    inputTokens: (json['input_tokens'] as num?)?.toInt(),
+    outputTokens: (json['output_tokens'] as num?)?.toInt(),
   );
 }
 

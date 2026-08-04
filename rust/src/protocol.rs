@@ -358,6 +358,12 @@ pub struct WorkspaceAgentPayload {
     pub instance_id: String,
     pub created_by: String,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initialized_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<i64>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceConversationAgentPayload {
@@ -2024,7 +2030,7 @@ mod tests {
     fn parses_agent_workspace_request_and_update() {
         let parsed = parse_wire_message(r#"{"workspace_request":{"action":"create_agent","agent_name":"Scout","agent_role":"Researcher","agent_skills":["Research"],"opencode_session_id":"ses_1"}}"#).unwrap();
         assert_eq!(parsed.kind(), "workspace_request");
-        let update = parse_wire_message(r#"{"workspace_update":{"action":"agent_created","agents":[{"id":"agent-1","name":"Scout","role":"Researcher","traits":"Careful","skills":["Research"],"opencode_session_id":"ses_1","created_by":"owner","created_at":42}]}}"#).unwrap();
+        let update = parse_wire_message(r#"{"workspace_update":{"action":"agent_created","agents":[{"id":"agent-1","name":"Scout","role":"Researcher","traits":"Careful","skills":["Research"],"opencode_session_id":"ses_1","created_by":"owner","created_at":42,"initialized_at":43,"input_tokens":12,"output_tokens":3}]}}"#).unwrap();
         assert_eq!(update.kind(), "workspace_update");
     }
 

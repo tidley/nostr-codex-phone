@@ -384,6 +384,10 @@ void main() {
               'opencode_agent': 'review',
               'workdir': '/workspace/phone',
               'restart_on_failure': false,
+              'created_at': 100,
+              'initialized_at': 120,
+              'input_tokens': 300,
+              'output_tokens': 50,
             },
           ],
         },
@@ -400,6 +404,10 @@ void main() {
     expect(state.agents.single.openCodeAgent, 'review');
     expect(state.agents.single.workdir, '/workspace/phone');
     expect(state.agents.single.restartOnFailure, isFalse);
+    expect(state.agents.single.createdAt, 100);
+    expect(state.agents.single.initializedAt, 120);
+    expect(state.agents.single.inputTokens, 300);
+    expect(state.agents.single.outputTokens, 50);
   });
 
   test('selected workspace mention keeps stable metadata with plain text', () {
