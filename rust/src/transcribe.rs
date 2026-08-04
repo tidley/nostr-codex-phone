@@ -233,19 +233,32 @@ async fn download_public_https_attachment(initial_url: Url) -> Result<Response> 
 }
 
 fn public_https_client(host: &str, addresses: &[SocketAddr]) -> Result<Client> {
-    let mut builder = Client::builder()
+    let addresses = prefer_ipv4_addresses(addresses);
+    Client::builder()
         .https_only(true)
         .no_proxy()
         // Redirects are followed manually so every target is validated and pinned.
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(60));
-    for address in addresses {
-        builder = builder.resolve(host, *address);
-    }
-    builder
+        .timeout(Duration::from_secs(60))
+        // `resolve` replaces previous overrides for the same host. Pin all
+        // usable addresses at once, preferring IPv4 when this host has no IPv6 route.
+        .resolve_to_addrs(host, &addresses)
         .build()
         .context("failed to configure attachment download client")
+}
+
+fn prefer_ipv4_addresses(addresses: &[SocketAddr]) -> Vec<SocketAddr> {
+    let ipv4_addresses = addresses
+        .iter()
+        .copied()
+        .filter(|address| address.is_ipv4())
+        .collect::<Vec<_>>();
+    if ipv4_addresses.is_empty() {
+        addresses.to_vec()
+    } else {
+        ipv4_addresses
+    }
 }
 
 async fn resolve_public_https_host(url: &Url) -> Result<(String, Vec<SocketAddr>)> {
@@ -880,6 +893,30 @@ mod tests {
         assert!(validate_public_resolved_addresses("media.example", &private).is_err());
         assert!(validate_public_resolved_addresses("media.example", &documentation).is_err());
         assert!(validate_public_resolved_addresses("media.example", &[]).is_err());
+    }
+
+    #[test]
+    fn prefers_ipv4_addresses_when_both_families_are_available() {
+        let addresses = [
+            "[2606:4700:20::681a:9c5]:443".parse().unwrap(),
+            "104.26.9.197:443".parse().unwrap(),
+            "172.67.68.169:443".parse().unwrap(),
+        ];
+
+        assert_eq!(
+            prefer_ipv4_addresses(&addresses),
+            vec![
+                "104.26.9.197:443".parse().unwrap(),
+                "172.67.68.169:443".parse().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn retains_ipv6_addresses_when_no_ipv4_address_is_available() {
+        let addresses = ["[2606:4700:20::681a:9c5]:443".parse().unwrap()];
+
+        assert_eq!(prefer_ipv4_addresses(&addresses), addresses);
     }
 
     #[test]

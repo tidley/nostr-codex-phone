@@ -56,6 +56,7 @@ const WORKER_REGISTRY_FILE: &str = "workers.json";
 const WORKER_LOCK_FILE: &str = "worker.lock";
 const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(45);
 const CODEX_STATUS_MIN_INTERVAL: Duration = Duration::from_secs(8);
+const WORKSPACE_VOICE_DEDUPE_CAPACITY: usize = 256;
 // SHA-256 input is the UTF-8 bytes of this domain, a zero byte, then the pairing secret.
 const PAIRING_CONFIRMATION_DOMAIN: &str = "nostr-codex/first-owner-confirmation/v1";
 
@@ -86,6 +87,44 @@ enum NonblockingControlRequest {
     Spawn(SpawnWorkerRequest),
     RepoList(Option<String>),
     OpenCodeSessions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkspaceVoiceKey {
+    sender_pubkey: String,
+    sha256: String,
+}
+
+/// Tracks voice blobs that the workspace route has already transcribed. Some
+/// clients/relays replay the same blob through the legacy media route later.
+struct WorkspaceVoiceDeduper {
+    keys: HashSet<WorkspaceVoiceKey>,
+    order: VecDeque<WorkspaceVoiceKey>,
+}
+
+impl WorkspaceVoiceDeduper {
+    fn new() -> Self {
+        Self {
+            keys: HashSet::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn contains(&self, key: &WorkspaceVoiceKey) -> bool {
+        self.keys.contains(key)
+    }
+
+    fn insert(&mut self, key: WorkspaceVoiceKey) {
+        if !self.keys.insert(key.clone()) {
+            return;
+        }
+        self.order.push_back(key);
+        if self.order.len() > WORKSPACE_VOICE_DEDUPE_CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.keys.remove(&oldest);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -743,6 +782,7 @@ async fn main() -> Result<()> {
 
 async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     let mut session_workers = HashMap::<String, mpsc::Sender<IncomingMessage>>::new();
+    let mut workspace_voice_deduper = WorkspaceVoiceDeduper::new();
 
     loop {
         let message = tokio::select! {
@@ -865,7 +905,18 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         }
 
         if let Some(request) = workspace_request(&message) {
-            if let Err(err) = process_workspace_request(
+            let workspace_voice_key = workspace_voice_key(&message.sender_pubkey_hex, &request);
+            if workspace_voice_key
+                .as_ref()
+                .is_some_and(|key| workspace_voice_deduper.contains(key))
+            {
+                info!(
+                    "ignored duplicate workspace voice event {} from {}",
+                    message.event_id, message.sender_pubkey
+                );
+                continue;
+            }
+            match process_workspace_request(
                 &config.workspace,
                 config.messenger.as_ref(),
                 &message.sender_pubkey_hex,
@@ -877,11 +928,26 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             )
             .await
             {
-                let _ = config
-                    .messenger
-                    .send_error_to(&message.sender_pubkey_hex, err.to_string())
-                    .await;
+                Ok(()) => {
+                    if let Some(key) = workspace_voice_key {
+                        workspace_voice_deduper.insert(key);
+                    }
+                }
+                Err(err) => {
+                    let _ = config
+                        .messenger
+                        .send_error_to(&message.sender_pubkey_hex, err.to_string())
+                        .await;
+                }
             }
+            continue;
+        }
+
+        if legacy_message_replays_workspace_voice(&message, &workspace_voice_deduper) {
+            info!(
+                "ignored legacy replay of workspace voice event {} from {}",
+                message.event_id, message.sender_pubkey
+            );
             continue;
         }
 
@@ -1064,6 +1130,52 @@ fn workspace_request(message: &IncomingMessage) -> Option<WorkspaceRequest> {
         WireMessage::WorkspaceRequest { workspace_request } => Some(workspace_request),
         _ => None,
     }
+}
+
+fn workspace_voice_key(
+    sender_pubkey: &str,
+    request: &WorkspaceRequest,
+) -> Option<WorkspaceVoiceKey> {
+    if request.action != "transcribe_workspace_voice" {
+        return None;
+    }
+    let attachment = request.attachments.first()?;
+    attachment
+        .media_type
+        .starts_with("audio/")
+        .then(|| WorkspaceVoiceKey {
+            sender_pubkey: sender_pubkey.to_string(),
+            sha256: attachment.sha256.to_ascii_lowercase(),
+        })
+}
+
+fn legacy_message_replays_workspace_voice(
+    message: &IncomingMessage,
+    deduper: &WorkspaceVoiceDeduper,
+) -> bool {
+    let parsed = parse_wire_message(&message.raw_json)
+        .ok()
+        .or_else(|| parse_wire_message(&message.text).ok());
+    let attachments = match parsed {
+        Some(WireMessage::Audio { audio }) => vec![audio],
+        Some(WireMessage::MediaBundle { media_bundle }) => media_bundle
+            .attachments
+            .into_iter()
+            .map(|attachment| media_reference_to_audio(&attachment))
+            .collect(),
+        _ => return false,
+    };
+
+    !attachments.is_empty()
+        && attachments
+            .iter()
+            .all(|attachment| attachment.media_type.starts_with("audio/"))
+        && attachments.iter().all(|attachment| {
+            deduper.contains(&WorkspaceVoiceKey {
+                sender_pubkey: message.sender_pubkey_hex.clone(),
+                sha256: attachment.sha256.to_ascii_lowercase(),
+            })
+        })
 }
 
 async fn process_workspace_request(
@@ -6372,6 +6484,77 @@ mod tests {
     fn allows_meaningful_transcripts() {
         assert!(low_information_transcript_response("status").is_none());
         assert!(low_information_transcript_response("turn the lights off").is_none());
+    }
+
+    fn legacy_voice_message(sha256: &str) -> IncomingMessage {
+        IncomingMessage {
+            sender_pubkey: "npub-sender".to_string(),
+            sender_pubkey_hex: "sender".to_string(),
+            kind: "media_bundle".to_string(),
+            text: "[media bundle]".to_string(),
+            raw_json: serde_json::json!({
+                "media_bundle": {
+                    "attachments": [{
+                        "url": "https://media.example/voice.ogg",
+                        "sha256": sha256,
+                        "size": 4,
+                        "type": "audio/ogg"
+                    }]
+                }
+            })
+            .to_string(),
+            event_id: "legacy-event".to_string(),
+        }
+    }
+
+    #[test]
+    fn suppresses_legacy_replay_after_workspace_voice_transcription() {
+        let sha256 = "a".repeat(64);
+        let request = parse_wire_message(
+            &serde_json::json!({
+                "workspace_request": {
+                    "action": "transcribe_workspace_voice",
+                    "channel_id": "general",
+                    "attachments": [{
+                        "url": "https://media.example/voice.ogg",
+                        "sha256": sha256,
+                        "size": 4,
+                        "type": "audio/ogg"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let WireMessage::WorkspaceRequest { workspace_request } = request else {
+            panic!("expected workspace request");
+        };
+        let key = workspace_voice_key("sender", &workspace_request).unwrap();
+        let mut deduper = WorkspaceVoiceDeduper::new();
+
+        assert!(!legacy_message_replays_workspace_voice(
+            &legacy_voice_message(&sha256),
+            &deduper,
+        ));
+        deduper.insert(key);
+        assert!(legacy_message_replays_workspace_voice(
+            &legacy_voice_message(&sha256),
+            &deduper,
+        ));
+    }
+
+    #[test]
+    fn does_not_suppress_independent_session_voice() {
+        let mut deduper = WorkspaceVoiceDeduper::new();
+        deduper.insert(WorkspaceVoiceKey {
+            sender_pubkey: "sender".to_string(),
+            sha256: "a".repeat(64),
+        });
+
+        assert!(!legacy_message_replays_workspace_voice(
+            &legacy_voice_message(&"b".repeat(64)),
+            &deduper,
+        ));
     }
 
     #[test]
