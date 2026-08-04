@@ -52,7 +52,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.4+304';
+const _appVersion = '0.3.5+305';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -808,14 +808,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         !shouldScrollChatToLatest(isAtBottom: _chatAtBottom, force: force)) {
       return;
     }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_chatScrollController.hasClients) return;
-      _chatScrollController.animateTo(
-        _chatScrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-      );
-    });
+    unawaited(scrollChatToLatestAfterLayout(_chatScrollController));
   }
 
   void _updateChatScrollPosition() {
@@ -6879,7 +6872,9 @@ Return a concise catch-up summary of what happened after that point: completed w
                     right: 16,
                     bottom: 12,
                     child: IconButton.filledTonal(
-                      onPressed: _chatAtBottom ? null : _scrollToLatestMessage,
+                      onPressed: _chatAtBottom
+                          ? null
+                          : () => _scrollToLatestMessage(force: true),
                       tooltip: _chatAtBottom
                           ? 'Already at latest message'
                           : 'Jump to latest message',
