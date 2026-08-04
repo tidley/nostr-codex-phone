@@ -17,6 +17,7 @@ import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
 import 'package:nostr_codex_phone/src/bridge_json.dart';
 import 'package:nostr_codex_phone/src/blossom_config.dart';
 import 'package:nostr_codex_phone/src/compact_identifier.dart';
+import 'package:nostr_codex_phone/src/chat_scroll.dart';
 import 'package:nostr_codex_phone/src/conversation_message.dart';
 import 'package:nostr_codex_phone/src/incoming_route.dart';
 import 'package:nostr_codex_phone/src/repo_target_merge.dart';
@@ -51,7 +52,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.3+303';
+const _appVersion = '0.3.4+304';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -532,6 +533,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _pendingReplyTargetIds = <String>{};
   final _pendingTargetInvites = <RepoTarget>[];
   final ScrollController _chatScrollController = ScrollController();
+  bool _chatAtBottom = true;
   final _pendingConversationHistorySaves = <String>{};
   Future<void> _conversationHistoryWriteTail = Future<void>.value();
   Timer? _conversationHistorySaveTimer;
@@ -750,7 +752,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       );
       _syncPendingReplyTarget(activeKey);
     });
-    _scrollToLatestMessage();
+    _scrollToLatestMessage(force: true);
   }
 
   List<ConversationMessage> _mergeConversationMessages(
@@ -801,8 +803,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     return 'incoming:$kind:$eventId';
   }
 
-  void _scrollToLatestMessage() {
-    if (!mounted) return;
+  void _scrollToLatestMessage({bool force = false}) {
+    if (!mounted ||
+        !shouldScrollChatToLatest(isAtBottom: _chatAtBottom, force: force)) {
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_chatScrollController.hasClients) return;
       _chatScrollController.animateTo(
@@ -811,6 +816,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         curve: Curves.easeOut,
       );
     });
+  }
+
+  void _updateChatScrollPosition() {
+    if (!_chatScrollController.hasClients) return;
+    final position = _chatScrollController.position;
+    final atBottom = isChatAtBottom(
+      pixels: position.pixels,
+      maxScrollExtent: position.maxScrollExtent,
+    );
+    if (atBottom != _chatAtBottom && mounted) {
+      setState(() => _chatAtBottom = atBottom);
+    }
   }
 
   void _dismissQueryKeyboard() {
@@ -827,6 +844,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       duration: const Duration(milliseconds: 620),
     );
     _configureTtsHandlers();
+    _chatScrollController.addListener(_updateChatScrollPosition);
     unawaited(_loadSettingsWithFallback());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _dismissQueryKeyboard();
@@ -856,6 +874,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _inactiveReplyNoticeController?.dispose();
     _incomingCallOverlay?.remove();
     _tts.stop();
+    _chatScrollController.removeListener(_updateChatScrollPosition);
     _chatScrollController.dispose();
     _secretKeyController.dispose();
     _targetNameController.dispose();
@@ -6794,58 +6813,81 @@ Return a concise catch-up summary of what happened after that point: completed w
         child: Column(
           children: [
             Expanded(
-              child: _recentMessagesForActiveConversation.isEmpty
-                  ? const Center(child: Text('No messages in last 4 days'))
-                  : ScrollConfiguration(
-                      behavior: ScrollConfiguration.of(
-                        context,
-                      ).copyWith(overscroll: false),
-                      child: ListView.builder(
-                        controller: _chatScrollController,
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                        itemCount: _recentMessagesForActiveConversation.length,
-                        itemBuilder: (context, index) {
-                          final message =
-                              _recentMessagesForActiveConversation[index];
-                          return Padding(
-                            padding: const EdgeInsets.only(bottom: 10),
-                            child: _MessageTile(
-                              message: message,
-                              showResend: _isResendableMessage(message),
-                              speaking:
-                                  _speaking &&
-                                  message.eventId == _speakingMessageEventId,
-                              workingAnimationStyle: _workingAnimationStyle,
-                              workingAnimationSpeed: _workingAnimationSpeed,
-                              stopSpeakingOnTap:
-                                  _speaking &&
-                                  message.direction ==
-                                      MessageDirection.incoming,
-                              onSpeak: () => unawaited(
-                                _speak(
-                                  message.text,
-                                  remember: true,
-                                  manual: true,
-                                  messageEventId: message.eventId,
-                                ),
-                              ),
-                              onStopSpeaking: _stopSpeaking,
-                              onResend: _canResendMessage(message)
-                                  ? () => _resendMessage(message)
-                                  : null,
-                              onCancelPending:
-                                  message.kind == 'processing' &&
-                                      message.direction ==
-                                          MessageDirection.incoming
-                                  ? () => unawaited(
-                                      _cancelPendingResponse(message),
-                                    )
-                                  : null,
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: _recentMessagesForActiveConversation.isEmpty
+                        ? const Center(
+                            child: Text('No messages in last 4 days'),
+                          )
+                        : ScrollConfiguration(
+                            behavior: ScrollConfiguration.of(
+                              context,
+                            ).copyWith(overscroll: false),
+                            child: ListView.builder(
+                              controller: _chatScrollController,
+                              padding: const EdgeInsets.fromLTRB(16, 8, 16, 64),
+                              itemCount:
+                                  _recentMessagesForActiveConversation.length,
+                              itemBuilder: (context, index) {
+                                final message =
+                                    _recentMessagesForActiveConversation[index];
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 10),
+                                  child: _MessageTile(
+                                    message: message,
+                                    showResend: _isResendableMessage(message),
+                                    speaking:
+                                        _speaking &&
+                                        message.eventId ==
+                                            _speakingMessageEventId,
+                                    workingAnimationStyle:
+                                        _workingAnimationStyle,
+                                    workingAnimationSpeed:
+                                        _workingAnimationSpeed,
+                                    stopSpeakingOnTap:
+                                        _speaking &&
+                                        message.direction ==
+                                            MessageDirection.incoming,
+                                    onSpeak: () => unawaited(
+                                      _speak(
+                                        message.text,
+                                        remember: true,
+                                        manual: true,
+                                        messageEventId: message.eventId,
+                                      ),
+                                    ),
+                                    onStopSpeaking: _stopSpeaking,
+                                    onResend: _canResendMessage(message)
+                                        ? () => _resendMessage(message)
+                                        : null,
+                                    onCancelPending:
+                                        message.kind == 'processing' &&
+                                            message.direction ==
+                                                MessageDirection.incoming
+                                        ? () => unawaited(
+                                            _cancelPendingResponse(message),
+                                          )
+                                        : null,
+                                  ),
+                                );
+                              },
                             ),
-                          );
-                        },
-                      ),
+                          ),
+                  ),
+                  Positioned(
+                    right: 16,
+                    bottom: 12,
+                    child: IconButton.filledTonal(
+                      onPressed: _chatAtBottom ? null : _scrollToLatestMessage,
+                      tooltip: _chatAtBottom
+                          ? 'Already at latest message'
+                          : 'Jump to latest message',
+                      icon: const Icon(Icons.arrow_downward, size: 20),
                     ),
+                  ),
+                ],
+              ),
             ),
             _Composer(
               controller: _queryController,
