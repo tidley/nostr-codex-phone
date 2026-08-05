@@ -14,7 +14,7 @@ class BackgroundDeliveryService : Service() {
         createChannel()
         val notification = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(com.tidley.nostrcodexphone.R.mipmap.ic_launcher)
-            .setContentTitle("Code Call is listening")
+            .setContentTitle("Crew is listening")
             .setContentText("Keeping worker replies connected in the background")
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)

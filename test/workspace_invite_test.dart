@@ -1,7 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:nostr_codex_phone/src/workspace_invite.dart';
+import 'package:crew/src/workspace_invite.dart';
 
 void main() {
   final code =

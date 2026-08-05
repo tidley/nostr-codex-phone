@@ -48,7 +48,7 @@ use rust_lib_nostr_codex_phone::workspace::{
     WorkspaceConversationPreprompt, WorkspaceMessage, WorkspaceStore,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{error, info, warn};
 
@@ -58,6 +58,10 @@ const WORKER_LOCK_FILE: &str = "worker.lock";
 const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(45);
 const CODEX_STATUS_MIN_INTERVAL: Duration = Duration::from_secs(8);
 const WORKSPACE_VOICE_DEDUPE_CAPACITY: usize = 256;
+const WORKSPACE_HISTORY_REQUEST_STEP: usize = 5;
+const WORKSPACE_HISTORY_REQUEST_MAX: usize = 50;
+const WORKSPACE_HISTORY_REQUEST_ATTEMPTS: usize = 3;
+const WORKSPACE_AGENT_QUEUE_CAPACITY: usize = 16;
 // SHA-256 input is the UTF-8 bytes of this domain, a zero byte, then the pairing secret.
 const PAIRING_CONFIRMATION_DOMAIN: &str = "nostr-codex/first-owner-confirmation/v1";
 
@@ -175,6 +179,112 @@ struct WorkerRuntimeConfig {
     manager: RepoRuntimeManager,
     invites: InviteStore,
     workspace: WorkspaceStore,
+    workspace_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum WorkspaceConversation {
+    Channel(String),
+    Direct(String, String),
+}
+
+impl WorkspaceConversation {
+    fn from_message(message: &WorkspaceMessage) -> Option<Self> {
+        match (&message.channel_id, &message.recipient_pubkey) {
+            (Some(channel_id), None) => Some(Self::Channel(channel_id.clone())),
+            (None, Some(recipient)) => {
+                let mut participants = [message.sender_pubkey.clone(), recipient.clone()];
+                participants.sort();
+                Some(Self::Direct(
+                    participants[0].clone(),
+                    participants[1].clone(),
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
+fn workspace_agent_job_matches_trigger(
+    message: &WorkspaceMessage,
+    conversation: &WorkspaceConversation,
+) -> bool {
+    !message.sender_pubkey.starts_with("agent:")
+        && WorkspaceConversation::from_message(message).as_ref() == Some(conversation)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkspaceAgentQueueKey {
+    agent_id: String,
+    conversation: WorkspaceConversation,
+}
+
+struct WorkspaceAgentJob {
+    trigger_message_id: String,
+}
+
+struct WorkspaceAgentQueues {
+    senders: HashMap<WorkspaceAgentQueueKey, mpsc::Sender<WorkspaceAgentJob>>,
+    turn_locks: HashMap<String, Arc<Mutex<()>>>,
+    workspace_path: PathBuf,
+    messenger: Arc<NostrMessenger>,
+    codex_config: CodexConfig,
+}
+
+impl WorkspaceAgentQueues {
+    fn new(
+        workspace_path: PathBuf,
+        messenger: Arc<NostrMessenger>,
+        codex_config: CodexConfig,
+    ) -> Self {
+        Self {
+            senders: HashMap::new(),
+            turn_locks: HashMap::new(),
+            workspace_path,
+            messenger,
+            codex_config,
+        }
+    }
+
+    fn enqueue(
+        &mut self,
+        agent_id: String,
+        conversation: WorkspaceConversation,
+        trigger_message_id: String,
+    ) {
+        let key = WorkspaceAgentQueueKey {
+            agent_id: agent_id.clone(),
+            conversation: conversation.clone(),
+        };
+        let sender = self.senders.entry(key).or_insert_with(|| {
+            let (sender, receiver) = mpsc::channel(WORKSPACE_AGENT_QUEUE_CAPACITY);
+            let turn_lock = Arc::clone(
+                self.turn_locks
+                    .entry(agent_id.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            );
+            tokio::task::spawn_local(workspace_agent_queue_worker(
+                receiver,
+                agent_id.clone(),
+                conversation,
+                turn_lock,
+                self.workspace_path.clone(),
+                Arc::clone(&self.messenger),
+                self.codex_config.clone(),
+            ));
+            sender
+        });
+        if let Err(err) = sender.try_send(WorkspaceAgentJob { trigger_message_id }) {
+            match err {
+                mpsc::error::TrySendError::Full(job) => {
+                    warn!(agent = %agent_id, trigger = %job.trigger_message_id, "workspace agent queue is full; dropping turn")
+                }
+                mpsc::error::TrySendError::Closed(job) => {
+                    warn!(agent = %agent_id, trigger = %job.trigger_message_id, "workspace agent queue stopped; dropping turn")
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -756,12 +866,10 @@ async fn main() -> Result<()> {
         &codex_config.working_dir,
         "invites.sqlite3",
     ))?;
-    let workspace = WorkspaceStore::open(&worker_state_path(
-        &codex_config.working_dir,
-        "workspace.sqlite3",
-    ))?;
+    let workspace_path = worker_state_path(&codex_config.working_dir, "workspace.sqlite3");
+    let workspace = WorkspaceStore::open(&workspace_path)?;
     initialize_workspace_members(&workspace, owner_peer_hex.as_deref(), &allowed_owner_hexes)?;
-    run_worker_runtime(WorkerRuntimeConfig {
+    let config = WorkerRuntimeConfig {
         messenger,
         worker_env,
         owner_peer_hex,
@@ -777,13 +885,21 @@ async fn main() -> Result<()> {
         manager,
         invites,
         workspace,
-    })
-    .await
+        workspace_path,
+    };
+    tokio::task::LocalSet::new()
+        .run_until(run_worker_runtime(config))
+        .await
 }
 
 async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     let mut session_workers = HashMap::<String, mpsc::Sender<IncomingMessage>>::new();
     let mut workspace_voice_deduper = WorkspaceVoiceDeduper::new();
+    let mut workspace_agent_queues = WorkspaceAgentQueues::new(
+        config.workspace_path.clone(),
+        Arc::clone(&config.messenger),
+        config.codex_config.clone(),
+    );
 
     loop {
         let message = tokio::select! {
@@ -937,6 +1053,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                 &config.codex_config,
                 &config.audio_config,
                 &config.transcribe_config,
+                &mut workspace_agent_queues,
             )
             .await
             {
@@ -1199,6 +1316,7 @@ async fn process_workspace_request(
     codex_config: &CodexConfig,
     audio_config: &AudioConfig,
     transcribe_config: &TranscribeConfig,
+    agent_queues: &mut WorkspaceAgentQueues,
 ) -> Result<()> {
     let update = match request.action.as_str() {
         "typing" => {
@@ -1282,10 +1400,15 @@ async fn process_workspace_request(
                 &WorkspaceUpdate {
                     action: "channel_renamed".to_string(),
                     channels: vec![channel_payload(channel)],
-                    members: vec![], messages: vec![], agents: vec![],
-                    conversation_agents: vec![], conversation_preprompts: vec![], typing: None,
+                    members: vec![],
+                    messages: vec![],
+                    agents: vec![],
+                    conversation_agents: vec![],
+                    conversation_preprompts: vec![],
+                    typing: None,
                 },
-            ).await?;
+            )
+            .await?;
             return Ok(());
         }
         "delete_channel" => {
@@ -1294,7 +1417,10 @@ async fn process_workspace_request(
             return Ok(());
         }
         "delete_direct_conversation" => {
-            workspace.delete_direct_conversation(sender, request.recipient_pubkey.as_deref().unwrap_or_default())?;
+            workspace.delete_direct_conversation(
+                sender,
+                request.recipient_pubkey.as_deref().unwrap_or_default(),
+            )?;
             broadcast_workspace_snapshots(workspace, messenger).await?;
             return Ok(());
         }
@@ -1440,6 +1566,7 @@ async fn process_workspace_request(
                 request.parent_id.as_deref(),
                 request.also_send_to_main,
             )?;
+            let message_id = message.id.clone();
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
                 channels: vec![],
@@ -1450,19 +1577,18 @@ async fn process_workspace_request(
                 conversation_preprompts: vec![],
                 typing: None,
             };
-            broadcast_workspace_update(workspace, messenger, &update).await?;
-            route_conversation_agents(
+            if let Err(err) = broadcast_workspace_update(workspace, messenger, &update).await {
+                warn!(message = %message_id, "persisted workspace message notification failed: {err:#}");
+            }
+            enqueue_conversation_agents(
                 workspace,
-                messenger,
-                codex_config,
+                agent_queues,
                 Some(request.channel_id.as_deref().unwrap_or_default()),
                 None,
                 None,
-                request.parent_id.as_deref(),
-                &request.body.unwrap_or_default(),
                 &request.mentions,
-            )
-            .await?;
+                &message_id,
+            )?;
             return Ok(());
         }
         "send_direct_message" => {
@@ -1475,6 +1601,7 @@ async fn process_workspace_request(
                 request.parent_id.as_deref(),
                 request.also_send_to_main,
             )?;
+            let message_id = message.id.clone();
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
                 channels: vec![],
@@ -1490,22 +1617,22 @@ async fn process_workspace_request(
                 sender,
                 request.recipient_pubkey.as_deref().unwrap_or_default(),
             ] {
-                messenger
+                if let Err(err) = messenger
                     .send_wire_to_pubkey(member, WireMessage::workspace_update(update.clone()))
-                    .await?;
+                    .await
+                {
+                    warn!(message = %message_id, recipient = %member, "persisted workspace direct-message notification failed: {err:#}");
+                }
             }
-            route_conversation_agents(
+            enqueue_conversation_agents(
                 workspace,
-                messenger,
-                codex_config,
+                agent_queues,
                 None,
                 Some(sender),
                 request.recipient_pubkey.as_deref(),
-                request.parent_id.as_deref(),
-                &request.body.unwrap_or_default(),
                 &request.mentions,
-            )
-            .await?;
+                &message_id,
+            )?;
             return Ok(());
         }
         "call_invite" | "call_answer" | "call_hangup" => {
@@ -2242,6 +2369,120 @@ async fn provision_workspace_agent_session(
     }
 }
 
+fn enqueue_conversation_agents(
+    workspace: &WorkspaceStore,
+    queues: &mut WorkspaceAgentQueues,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+    mentions: &[WorkspaceMentionPayload],
+    trigger_message_id: &str,
+) -> Result<()> {
+    let conversation = match channel_id {
+        Some(channel_id) => WorkspaceConversation::Channel(channel_id.to_string()),
+        None => {
+            let mut participants = [
+                member
+                    .context("direct workspace message is missing sender")?
+                    .to_string(),
+                peer.context("direct workspace message is missing recipient")?
+                    .to_string(),
+            ];
+            participants.sort();
+            WorkspaceConversation::Direct(participants[0].clone(), participants[1].clone())
+        }
+    };
+    for agent in workspace.agents_for_conversation(channel_id, member, peer)? {
+        if conversation_agent_is_targeted(&agent.id, mentions) {
+            queues.enqueue(
+                agent.id,
+                conversation.clone(),
+                trigger_message_id.to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn workspace_agent_queue_worker(
+    mut receiver: mpsc::Receiver<WorkspaceAgentJob>,
+    agent_id: String,
+    conversation: WorkspaceConversation,
+    turn_lock: Arc<Mutex<()>>,
+    workspace_path: PathBuf,
+    messenger: Arc<NostrMessenger>,
+    codex_config: CodexConfig,
+) {
+    while let Some(job) = receiver.recv().await {
+        // Different conversations may dequeue concurrently, but OpenCode sessions
+        // for one agent must never receive overlapping turns.
+        let _turn = turn_lock.lock().await;
+        if let Err(err) = process_workspace_agent_job(
+            &workspace_path,
+            messenger.as_ref(),
+            &codex_config,
+            &agent_id,
+            &conversation,
+            &job.trigger_message_id,
+        )
+        .await
+        {
+            warn!(agent = %agent_id, trigger = %job.trigger_message_id, "workspace agent job failed: {err:#}");
+        }
+    }
+}
+
+async fn process_workspace_agent_job(
+    workspace_path: &Path,
+    messenger: &NostrMessenger,
+    codex_config: &CodexConfig,
+    agent_id: &str,
+    conversation: &WorkspaceConversation,
+    trigger_message_id: &str,
+) -> Result<()> {
+    let workspace = WorkspaceStore::open_existing(workspace_path)?;
+    let Some(message) = workspace.message_by_id(trigger_message_id)? else {
+        return Ok(());
+    };
+    if !workspace_agent_job_matches_trigger(&message, conversation) {
+        return Ok(());
+    }
+
+    match (&message.channel_id, &message.recipient_pubkey) {
+        (Some(channel_id), None) => {
+            route_conversation_agents(
+                &workspace,
+                messenger,
+                codex_config,
+                Some(agent_id),
+                Some(channel_id),
+                None,
+                None,
+                message.parent_id.as_deref(),
+                &message.body,
+                &message.mentions,
+            )
+            .await
+        }
+        (None, Some(recipient)) => {
+            route_conversation_agents(
+                &workspace,
+                messenger,
+                codex_config,
+                Some(agent_id),
+                None,
+                Some(&message.sender_pubkey),
+                Some(recipient),
+                message.parent_id.as_deref(),
+                &message.body,
+                &message.mentions,
+            )
+            .await
+        }
+        _ => Ok(()),
+    }
+}
+
 fn workspace_agent_profile_from_request(
     request: &WorkspaceRequest,
     codex_config: &CodexConfig,
@@ -2355,6 +2596,7 @@ async fn route_conversation_agents(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
     codex_config: &CodexConfig,
+    only_agent_id: Option<&str>,
     channel_id: Option<&str>,
     member: Option<&str>,
     peer: Option<&str>,
@@ -2365,6 +2607,9 @@ async fn route_conversation_agents(
     let memberships = workspace.conversation_agents()?;
     let preprompts = workspace.conversation_preprompts()?;
     for agent in workspace.agents_for_conversation(channel_id, member, peer)? {
+        if only_agent_id.is_some_and(|agent_id| agent.id != agent_id) {
+            continue;
+        }
         if !conversation_agent_is_targeted(&agent.id, mentions) {
             continue;
         }
@@ -2416,7 +2661,8 @@ async fn route_conversation_agents(
                 continue;
             }
         };
-        let result = match run_workspace_agent_with_typing(
+        let mut active_session_id = session_id.to_string();
+        let mut result = match run_workspace_agent_with_typing(
             workspace,
             messenger,
             &agent,
@@ -2425,7 +2671,7 @@ async fn route_conversation_agents(
             peer,
             &scoped_body,
             &agent_config,
-            session_id,
+            &active_session_id,
         )
         .await
         {
@@ -2465,6 +2711,7 @@ async fn route_conversation_agents(
                     &status,
                     None,
                 )?;
+                active_session_id = new_session_id;
                 broadcast_workspace_update(
                     workspace,
                     messenger,
@@ -2489,7 +2736,7 @@ async fn route_conversation_agents(
                     peer,
                     &scoped_body,
                     &agent_config,
-                    &new_session_id,
+                    &active_session_id,
                 )
                 .await
                 {
@@ -2506,6 +2753,36 @@ async fn route_conversation_agents(
                 continue;
             }
         };
+        for _ in 0..WORKSPACE_HISTORY_REQUEST_ATTEMPTS {
+            let Some(message_count) = workspace_history_request_count(&result.response) else {
+                break;
+            };
+            let history =
+                workspace_agent_history(workspace, channel_id, member, peer, message_count)?;
+            let prompt = format!(
+                "Here is the requested conversation history. Use it to answer the user's message. Do not mention this retrieval.\n\n{history}"
+            );
+            match run_workspace_agent_with_typing(
+                workspace,
+                messenger,
+                &agent,
+                channel_id,
+                member,
+                peer,
+                &prompt,
+                &agent_config,
+                &active_session_id,
+            )
+            .await
+            {
+                Ok(next) if !next.response.trim().is_empty() => result = next,
+                Ok(_) => break,
+                Err(err) => {
+                    warn!(agent = %agent.id, "workspace history request failed: {err:#}");
+                    break;
+                }
+            }
+        }
         if let Some(usage) = result.token_usage {
             let updated = workspace.record_agent_token_usage(
                 &agent.id,
@@ -2557,12 +2834,17 @@ async fn route_conversation_agents(
             typing: None,
         };
         if channel_id.is_some() {
-            broadcast_workspace_update(workspace, messenger, &update).await?;
+            if let Err(err) = broadcast_workspace_update(workspace, messenger, &update).await {
+                warn!(agent = %agent.id, "persisted workspace agent reply notification failed: {err:#}");
+            }
         } else {
             for recipient in [member.unwrap_or_default(), peer.unwrap_or_default()] {
-                messenger
+                if let Err(err) = messenger
                     .send_wire_to_pubkey(recipient, WireMessage::workspace_update(update.clone()))
-                    .await?;
+                    .await
+                {
+                    warn!(agent = %agent.id, recipient = %recipient, "persisted workspace agent direct-reply notification failed: {err:#}");
+                }
             }
         }
     }
@@ -2599,9 +2881,6 @@ fn direct_preprompt_matches(
 }
 
 fn conversation_agent_prompt(preprompt: &str, scope: &str, body: &str) -> String {
-    if preprompt.is_empty() && scope.is_empty() {
-        return body.to_string();
-    }
     let mut sections = Vec::new();
     if !preprompt.is_empty() {
         sections.push(preprompt.to_string());
@@ -2609,8 +2888,53 @@ fn conversation_agent_prompt(preprompt: &str, scope: &str, body: &str) -> String
     if !scope.is_empty() {
         sections.push(scope.to_string());
     }
+    sections.push(format!(
+        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying."
+    ));
     sections.push(format!("User message:\n{body}"));
     sections.join("\n\n")
+}
+
+fn workspace_history_request_count(response: &str) -> Option<usize> {
+    let value = response
+        .trim()
+        .strip_prefix("[[WORKSPACE_HISTORY: ")?
+        .strip_suffix("]]")?
+        .trim()
+        .parse::<usize>()
+        .ok()?;
+    (value >= WORKSPACE_HISTORY_REQUEST_STEP
+        && value <= WORKSPACE_HISTORY_REQUEST_MAX
+        && value % WORKSPACE_HISTORY_REQUEST_STEP == 0)
+        .then_some(value)
+}
+
+fn workspace_agent_history(
+    workspace: &WorkspaceStore,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+    message_count: usize,
+) -> Result<String> {
+    let messages = match channel_id {
+        Some(channel_id) => workspace.channel_messages(channel_id)?,
+        None => workspace.direct_messages(member.unwrap_or_default(), peer.unwrap_or_default())?,
+    };
+    let recent = messages
+        .iter()
+        .rev()
+        .take(message_count)
+        .rev()
+        .map(|message| format!("{}: {}", message.sender_pubkey, message.body))
+        .collect::<Vec<_>>();
+    Ok(format!(
+        "Recent conversation messages (up to {message_count}):\n{}",
+        if recent.is_empty() {
+            "(No earlier messages.)".to_string()
+        } else {
+            recent.join("\n")
+        }
+    ))
 }
 
 fn repositories_in_folder_scope(folders: &[String]) -> Result<Vec<String>> {
@@ -6715,6 +7039,56 @@ mod tests {
     }
 
     #[test]
+    fn workspace_agent_jobs_use_a_canonical_direct_conversation_key() {
+        let message = WorkspaceMessage {
+            id: "trigger".to_string(),
+            channel_id: None,
+            recipient_pubkey: Some("alice".to_string()),
+            sender_pubkey: "bob".to_string(),
+            body: "hello".to_string(),
+            attachments: vec![],
+            mentions: vec![],
+            parent_id: None,
+            also_send_to_main: false,
+            reactions: vec![],
+            created_at: 0,
+        };
+        let conversation = WorkspaceConversation::Direct("alice".to_string(), "bob".to_string());
+
+        assert_eq!(
+            WorkspaceConversation::from_message(&message),
+            Some(conversation.clone())
+        );
+        assert!(workspace_agent_job_matches_trigger(&message, &conversation));
+        assert!(!workspace_agent_job_matches_trigger(
+            &WorkspaceMessage {
+                sender_pubkey: "agent:scout".to_string(),
+                ..message
+            },
+            &conversation,
+        ));
+    }
+
+    #[test]
+    fn workspace_agent_turn_queue_is_bounded_and_nonblocking() {
+        let (sender, _receiver) = mpsc::channel(WORKSPACE_AGENT_QUEUE_CAPACITY);
+        for index in 0..WORKSPACE_AGENT_QUEUE_CAPACITY {
+            sender
+                .try_send(WorkspaceAgentJob {
+                    trigger_message_id: index.to_string(),
+                })
+                .unwrap();
+        }
+
+        assert!(matches!(
+            sender.try_send(WorkspaceAgentJob {
+                trigger_message_id: "overflow".to_string(),
+            }),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+    }
+
+    #[test]
     fn finds_repositories_recursively_in_selected_folders() {
         let root = tempfile::tempdir().unwrap();
         let nested_repo = root.path().join("apps").join("phone");
@@ -6737,14 +7111,32 @@ mod tests {
 
     #[test]
     fn conversation_preprompt_precedes_scope_and_user_message() {
+        let prompt =
+            conversation_agent_prompt("Review carefully.", "Folder scope.", "Fix the bug.");
+        assert!(prompt.starts_with("Review carefully.\n\nFolder scope."));
+        assert!(prompt.contains("[[WORKSPACE_HISTORY: N]]"));
+        assert!(prompt.ends_with("User message:\nFix the bug."));
+    }
+
+    #[test]
+    fn accepts_only_bounded_incremental_workspace_history_requests() {
         assert_eq!(
-            conversation_agent_prompt("Review carefully.", "Folder scope.", "Fix the bug."),
-            "Review carefully.\n\nFolder scope.\n\nUser message:\nFix the bug."
+            workspace_history_request_count("[[WORKSPACE_HISTORY: 5]]"),
+            Some(5)
         );
         assert_eq!(
-            conversation_agent_prompt("", "", "Fix the bug."),
-            "Fix the bug."
+            workspace_history_request_count(" [[WORKSPACE_HISTORY: 50]] "),
+            Some(50)
         );
+        assert_eq!(
+            workspace_history_request_count("[[WORKSPACE_HISTORY: 6]]"),
+            None
+        );
+        assert_eq!(
+            workspace_history_request_count("[[WORKSPACE_HISTORY: 55]]"),
+            None
+        );
+        assert_eq!(workspace_history_request_count("History: 5"), None);
     }
 
     #[test]

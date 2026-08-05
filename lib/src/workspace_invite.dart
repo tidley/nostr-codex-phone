@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:nostr_codex_phone/src/repo_target.dart';
+import 'package:crew/src/repo_target.dart';
 
 const _workspaceInvitePrefix = 'nci1.';
 const _maxWorkspaceInviteLength = 4096;

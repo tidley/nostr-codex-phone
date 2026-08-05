@@ -1,21 +1,32 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:nostr_codex_phone/main.dart';
-import 'package:nostr_codex_phone/src/bridge_json.dart';
-import 'package:nostr_codex_phone/src/repo_choice.dart';
-import 'package:nostr_codex_phone/src/repo_target.dart';
-import 'package:nostr_codex_phone/src/text_utils.dart';
-import 'package:nostr_codex_phone/src/tool_result_models.dart';
-import 'package:nostr_codex_phone/src/voice_recording.dart';
-import 'package:nostr_codex_phone/src/workspace_models.dart';
+import 'package:crew/main.dart';
+import 'package:crew/src/bridge_json.dart';
+import 'package:crew/src/repo_choice.dart';
+import 'package:crew/src/repo_target.dart';
+import 'package:crew/src/text_utils.dart';
+import 'package:crew/src/tool_result_models.dart';
+import 'package:crew/src/voice_recording.dart';
+import 'package:crew/src/workspace_models.dart';
 
 void main() {
   test('app widget is available', () {
     expect(const NostrCodexApp(), isA<StatefulWidget>());
   });
+
+  test(
+    'trims trailing whitespace without changing indentation or line endings',
+    () {
+      expect(
+        trimTrailingLineWhitespace('  first  \r\nsecond\t\n  third'),
+        '  first\r\nsecond\n  third',
+      );
+    },
+  );
 
   testWidgets('incoming group call prompt shows context and actions', (
     tester,
@@ -184,6 +195,42 @@ void main() {
     expect(find.text('Transcribing voice...'), findsOneWidget);
     expect(controller.text, 'Draft stays here');
     expect(sends, 0);
+
+    controller.dispose();
+    focus.dispose();
+  });
+
+  testWidgets('desktop composer retains focus after Shift+Enter', (
+    tester,
+  ) async {
+    final controller = TextEditingController(text: 'Draft');
+    final focus = FocusNode();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData(platform: TargetPlatform.windows),
+        home: Material(
+          child: WorkspaceComposer(
+            composer: controller,
+            composerFocus: focus,
+            hintText: 'Message',
+            mentionOptions: const [],
+            onMentionSelected: (_) {},
+            onSend: () {},
+            onAttach: () async {},
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byType(TextField));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    tester.widget<TextField>(find.byType(TextField)).onSubmitted!('Draft');
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+
+    expect(controller.text, 'Draft\n');
+    expect(focus.hasFocus, isTrue);
 
     controller.dispose();
     focus.dispose();

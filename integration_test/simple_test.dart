@@ -1,8 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
-import 'package:nostr_codex_phone/main.dart';
-import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
-import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
+import 'package:crew/main.dart';
+import 'package:crew/src/rust/api/nostr.dart';
+import 'package:crew/src/rust/frb_generated.dart';
 import 'package:integration_test/integration_test.dart';
 
 void main() {

@@ -20,7 +20,7 @@
     </queries>
 
     <application
-        android:label="Code Call"
+        android:label="Crew"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"

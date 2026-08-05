@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
+import 'package:crew/src/rust/api/nostr.dart';
 
 Map<String, String> decodeWorkspaceMemberAliases(String? raw) {
   if (raw == null || raw.isEmpty) return {};
@@ -424,17 +424,33 @@ class WorkspaceState {
   List<WorkspaceConversationPreprompt> conversationPreprompts = [];
   final Map<String, WorkspaceTyping> typing = {};
 
-  List<WorkspaceMessage> apply(Map<String, dynamic> raw) {
+  List<WorkspaceMessage> apply(
+    Map<String, dynamic> raw, {
+    Iterable<String> localSenderIds = const [],
+  }) {
     final update = raw['workspace_update'];
     if (update is! Map) return const [];
     final data = Map<String, dynamic>.from(update);
     final addedMessages = <WorkspaceMessage>[];
     final isSnapshot = data['action'] == 'snapshot';
     if (isSnapshot) {
+      // A delayed snapshot can predate a local broadcast. Keep those rows until
+      // the server includes them, rather than making a sent message vanish.
+      final localMessages = <String, List<WorkspaceMessage>>{};
+      for (final entry in messages.entries) {
+        final local = entry.value
+            .where(
+              (message) =>
+                  isWorkspaceLocalSender(message.senderPubkey, localSenderIds),
+            )
+            .toList(growable: false);
+        if (local.isNotEmpty) localMessages[entry.key] = local;
+      }
       channels = [];
       members = [];
       memberNames.clear();
       messages.clear();
+      messages.addAll(localMessages);
       agents = [];
       conversationAgents = [];
       conversationPreprompts = [];
@@ -599,7 +615,8 @@ class WorkspaceState {
     for (final conversation in messages.values) {
       for (final message in conversation) {
         if (message.channelId != null) continue;
-        if (message.senderPubkey == ownPubkey && message.recipientPubkey != null) {
+        if (message.senderPubkey == ownPubkey &&
+            message.recipientPubkey != null) {
           peers.add(message.recipientPubkey!);
         } else if (message.recipientPubkey == ownPubkey &&
             !isWorkspaceAgentSender(message.senderPubkey)) {

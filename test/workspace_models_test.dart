@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:nostr_codex_phone/src/workspace_models.dart';
+import 'package:crew/src/workspace_models.dart';
 
 void main() {
   test('agent profiles retain an optional saved working folder', () {
@@ -431,6 +431,34 @@ void main() {
       isEmpty,
     );
   });
+
+  test(
+    'workspace snapshots retain local messages missing from a delayed relay',
+    () {
+      final state = WorkspaceState()
+        ..apply({
+          'workspace_update': {
+            'action': 'message_created',
+            'messages': [
+              {
+                'id': 'local-message',
+                'channel_id': 'workspace',
+                'sender_pubkey': 'you',
+                'body': 'Still sending',
+              },
+            ],
+          },
+        })
+        ..apply(
+          {
+            'workspace_update': {'action': 'snapshot', 'messages': []},
+          },
+          localSenderIds: {'you'},
+        );
+
+      expect(state.messages['workspace']?.single.id, 'local-message');
+    },
+  );
 
   test('workspace state merges broadcast agent renames', () {
     final state = WorkspaceState()

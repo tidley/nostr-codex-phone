@@ -318,8 +318,8 @@ class _SessionDrawer extends StatelessWidget {
                                                     color: statusColor,
                                                     fontWeight:
                                                         selected || connected
-                                                        ? FontWeight.w700
-                                                        : FontWeight.w600,
+                                                        ? FontWeight.bold
+                                                        : FontWeight.normal,
                                                   ),
                                           ),
                                         ),
@@ -526,11 +526,28 @@ enum _WorkerAction { test, remove }
 
 enum _WorkspaceSection { channel, direct, people, access, agents }
 
+class _WorkspaceDraft {
+  _WorkspaceDraft(this.value, List<WorkspaceMention> mentions)
+    : mentions = List.unmodifiable(mentions);
+
+  final TextEditingValue value;
+  final List<WorkspaceMention> mentions;
+}
+
+class _WorkspacePanelState {
+  const _WorkspacePanelState({required this.isOpen, required this.width});
+
+  final bool isOpen;
+  final double width;
+}
+
 class _TeamWorkspace extends StatefulWidget {
   const _TeamWorkspace({
     required this.sessions,
     required this.onOpenSessions,
     required this.onOpenSettings,
+    required this.diagnostics,
+    required this.onOpenDiagnostics,
     required this.onOpenFiles,
     required this.fileBrowser,
     required this.filePreview,
@@ -580,11 +597,14 @@ class _TeamWorkspace extends StatefulWidget {
   final List<RepoTarget> sessions;
   final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
+  final ValueNotifier<List<String>> diagnostics;
+  final VoidCallback onOpenDiagnostics;
   final Future<void> Function() onOpenFiles;
   final ValueListenable<FileBrowserResult?> fileBrowser;
   final ValueNotifier<FileContentResult?> filePreview;
   final Future<void> Function(String directory, String path) onBrowseFiles;
-  final Future<void> Function(String directory, String path) onReadWorkspaceFile;
+  final Future<void> Function(String directory, String path)
+  onReadWorkspaceFile;
   final ValueListenable<int> workspaceRevision;
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
   final List<RepoChoice> initialFolderChoices;
@@ -641,6 +661,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   final _threadComposer = TextEditingController();
   final _threadComposerFocus = FocusNode();
   final _selectedThreadMentions = <WorkspaceMention>[];
+  final _conversationDrafts = <String, _WorkspaceDraft>{};
+  final _threadDrafts = <String, _WorkspaceDraft>{};
+  final _panelStates = <String, _WorkspacePanelState>{};
   final _voiceRecorder = AudioRecorder();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   bool _voiceRecording = false;
@@ -651,15 +674,91 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   String? _voiceError;
   Timer? _typingRefreshTimer;
   Timer? _typingExpiryTimer;
+  DateTime? _lastTypingLease;
   _WorkspaceSection _section = _WorkspaceSection.channel;
   String _active = 'workspace';
   WorkspaceMessage? _thread;
+  bool _sidePanelOpen = false;
   bool _alsoSendToMain = false;
   bool _filesSelected = false;
   bool _filesFullWindow = false;
   int _agentsPageRevision = 0;
   double _sidebarWidth = 280;
   double _threadPaneWidth = 340;
+
+  String? get _conversationKey => _conversationKeyFor(_section, _active);
+
+  String? _conversationKeyFor(_WorkspaceSection section, String id) =>
+      switch (section) {
+        _WorkspaceSection.channel => id,
+        _WorkspaceSection.direct => WorkspaceState.directKey(
+          widget.ownPubkey,
+          id,
+        ),
+        _ => null,
+      };
+
+  String? get _threadDraftKey {
+    final conversationKey = _conversationKey;
+    final thread = _thread;
+    return conversationKey == null || thread == null
+        ? null
+        : '$conversationKey:${thread.id}';
+  }
+
+  void _saveMainDraft() {
+    final key = _conversationKey;
+    if (key == null) return;
+    _conversationDrafts[key] = _WorkspaceDraft(
+      _composer.value,
+      _selectedComposerMentions,
+    );
+  }
+
+  void _restoreMainDraft(String? key) {
+    final draft = key == null ? null : _conversationDrafts[key];
+    _composer.value = draft?.value ?? TextEditingValue.empty;
+    _selectedComposerMentions
+      ..clear()
+      ..addAll(draft?.mentions ?? const []);
+  }
+
+  void _saveThreadDraft() {
+    final key = _threadDraftKey;
+    if (key == null) return;
+    _threadDrafts[key] = _WorkspaceDraft(
+      _threadComposer.value,
+      _selectedThreadMentions,
+    );
+  }
+
+  void _restoreThreadDraft() {
+    final draft = _threadDraftKey == null
+        ? null
+        : _threadDrafts[_threadDraftKey];
+    _threadComposer.value = draft?.value ?? TextEditingValue.empty;
+    _selectedThreadMentions
+      ..clear()
+      ..addAll(draft?.mentions ?? const []);
+  }
+
+  void _reloadActiveMessages() {
+    if (_section == _WorkspaceSection.channel) {
+      unawaited(
+        widget.onRequest({
+          'action': 'list_channel_messages',
+          'channel_id': _active,
+        }),
+      );
+    } else if (_section == _WorkspaceSection.direct) {
+      unawaited(
+        widget.onRequest({
+          'action': 'list_direct_messages',
+          'recipient_pubkey': _active,
+        }),
+      );
+    }
+  }
 
   @override
   void initState() {
@@ -873,6 +972,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   void _sendTypingLease() {
     if (!_canSendTyping) return;
+    final now = DateTime.now();
+    if (_lastTypingLease != null &&
+        now.difference(_lastTypingLease!) < const Duration(seconds: 6)) {
+      return;
+    }
+    _lastTypingLease = now;
     unawaited(
       widget.onTyping({
         'action': 'typing',
@@ -1026,6 +1131,11 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     };
     composer.clear();
     selectedMentions.clear();
+    if (thread == null) {
+      _conversationDrafts.remove(_conversationKey);
+    } else {
+      _threadDrafts.remove(_threadDraftKey);
+    }
     unawaited(widget.onRequest(request));
   }
 
@@ -1052,6 +1162,11 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     if (sent && mounted) {
       composer.clear();
       selectedMentions.clear();
+      if (thread == null) {
+        _conversationDrafts.remove(_conversationKey);
+      } else {
+        _threadDrafts.remove(_threadDraftKey);
+      }
     }
   }
 
@@ -1078,13 +1193,27 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   void _select(_WorkspaceSection section, String id) {
     _closeDrawer();
+    final previousKey = _conversationKey;
+    if (previousKey != null) {
+      _saveMainDraft();
+      _saveThreadDraft();
+      _panelStates[previousKey] = _WorkspacePanelState(
+        isOpen: _sidePanelOpen,
+        width: _threadPaneWidth,
+      );
+    }
+    final nextKey = _conversationKeyFor(section, id);
+    final nextPanelState = nextKey == null ? null : _panelStates[nextKey];
     setState(() {
       if (section == _WorkspaceSection.agents) _agentsPageRevision++;
       _section = section;
       _active = id;
       _thread = null;
+      _sidePanelOpen = nextPanelState?.isOpen ?? false;
+      _threadPaneWidth = nextPanelState?.width ?? 340;
       _alsoSendToMain = false;
-      _threadComposer.clear();
+      _restoreMainDraft(nextKey);
+      _threadComposer.value = TextEditingValue.empty;
       _selectedThreadMentions.clear();
     });
     if (section == _WorkspaceSection.channel) {
@@ -1095,18 +1224,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       );
     }
     _syncTypingLease();
-    if (section == _WorkspaceSection.channel) {
-      unawaited(
-        widget.onRequest({'action': 'list_channel_messages', 'channel_id': id}),
-      );
-    } else if (section == _WorkspaceSection.direct) {
-      unawaited(
-        widget.onRequest({
-          'action': 'list_direct_messages',
-          'recipient_pubkey': id,
-        }),
-      );
-    }
+    _reloadActiveMessages();
   }
 
   void _closeDrawer() => _scaffoldKey.currentState?.closeDrawer();
@@ -1138,6 +1256,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         _closeDrawer();
         widget.onOpenSettings();
       },
+      onDiagnostics: widget.onOpenDiagnostics,
       onRefresh: () => unawaited(widget.onRequest({'action': 'refresh'})),
       onCreateChannel: () {
         _closeDrawer();
@@ -1177,14 +1296,17 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onOpenAttachment: widget.onOpenAttachment,
       onOpenThread: (message) => setState(() {
         if (_thread?.id != message.id) {
-          _threadComposer.clear();
-          _selectedThreadMentions.clear();
+          _saveThreadDraft();
+          _thread = message;
+          _restoreThreadDraft();
         }
-        _thread = message;
+        _sidePanelOpen = true;
         _alsoSendToMain = false;
       }),
       onCloseThread: () => setState(() {
+        _saveThreadDraft();
         _thread = null;
+        _sidePanelOpen = false;
         _alsoSendToMain = false;
       }),
       onToggleReaction: (message, emoji) => widget.onRequest({
@@ -1197,6 +1319,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onAlsoSendToMainChanged: (value) =>
           setState(() => _alsoSendToMain = value),
       onOpenSettings: widget.onOpenSettings,
+      onReload: _reloadActiveMessages,
+      sidePanelOpen: _sidePanelOpen,
+      onToggleSidePanel: () => setState(() {
+        _sidePanelOpen = !_sidePanelOpen;
+        if (!_sidePanelOpen) _thread = null;
+      }),
       onOpenFiles: widget.onOpenFiles,
       onRenameConversation: (name) async {
         if (_section == _WorkspaceSection.channel) {
@@ -1211,7 +1339,10 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       },
       onDeleteConversation: () async {
         if (_section == _WorkspaceSection.channel) {
-          await widget.onRequest({'action': 'delete_channel', 'channel_id': _active});
+          await widget.onRequest({
+            'action': 'delete_channel',
+            'channel_id': _active,
+          });
         } else if (_section == _WorkspaceSection.direct) {
           await widget.onRequest({
             'action': 'delete_direct_conversation',
@@ -1284,6 +1415,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onMediaSourceChanged: widget.onMediaSourceChanged,
     );
     final contextPane = _WorkspaceContext(
+      key: ValueKey(_thread?.id),
       message: _thread,
       replies: _threadReplies,
       title: _title,
@@ -1303,7 +1435,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onAlsoSendToMainChanged: (value) =>
           setState(() => _alsoSendToMain = value),
       onClose: () => setState(() {
+        _saveThreadDraft();
         _thread = null;
+        _sidePanelOpen = false;
         _alsoSendToMain = false;
       }),
       onToggleReaction: (message, emoji) => widget.onRequest({
@@ -1325,7 +1459,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         : _WorkspaceFilesPanel(
             result: fileBrowser,
             preview: widget.filePreview.value,
-            onBrowse: (path) => widget.onBrowseFiles(fileBrowser.directory, path),
+            onBrowse: (path) =>
+                widget.onBrowseFiles(fileBrowser.directory, path),
             onUp: () {
               final parts = fileBrowser.directory.split('/')..removeLast();
               return widget.onBrowseFiles('', parts.join('/'));
@@ -1337,10 +1472,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             onClosePreview: () => widget.filePreview.value = null,
             fullWindow: _filesFullWindow,
           );
-    final showSidePane = _thread != null || filesPane != null;
+    final showSidePane = _sidePanelOpen || _thread != null || filesPane != null;
     final showFiles = filesPane != null && (_filesSelected || _thread == null);
     final sidePane = _WorkspaceSidePanel(
-      thread: _thread == null ? null : contextPane,
+      // The panel toggle opens conversation details even before a reply thread
+      // is selected. Supplying the context pane prevents a null panel body.
+      thread: _thread != null || _sidePanelOpen ? contextPane : null,
       files: filesPane,
       showFiles: showFiles,
       onShowThread: () => setState(() => _filesSelected = false),
@@ -1355,7 +1492,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       appBar: wide
           ? null
           : AppBar(
-              title: const Text('Code Call'),
+              title: const Text('Crew'),
               actions: [
                 IconButton(
                   onPressed: widget.onOpenSettings,
@@ -1393,14 +1530,18 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                       _threadPaneMinWidth,
                       _threadPaneMaxWidth,
                     );
+                    final key = _conversationKey;
+                    if (key != null) {
+                      _panelStates[key] = _WorkspacePanelState(
+                        isOpen: _sidePanelOpen,
+                        width: _threadPaneWidth,
+                      );
+                    }
                   }),
                 )
               else
                 const VerticalDivider(width: 1),
-              SizedBox(
-                width: wide ? _threadPaneWidth : 300,
-                child: sidePane,
-              ),
+              SizedBox(width: wide ? _threadPaneWidth : 300, child: sidePane),
             ],
           ],
         ),
@@ -1726,6 +1867,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.onSelect,
     required this.onSessions,
     required this.onSettings,
+    required this.onDiagnostics,
     required this.onRefresh,
     required this.onCreateChannel,
     required this.onCreateDirect,
@@ -1744,6 +1886,7 @@ class _WorkspaceSidebar extends StatelessWidget {
   final void Function(_WorkspaceSection, String) onSelect;
   final VoidCallback onSessions;
   final VoidCallback onSettings;
+  final VoidCallback onDiagnostics;
   final VoidCallback onRefresh;
   final VoidCallback onCreateChannel;
   final VoidCallback onCreateDirect;
@@ -1799,9 +1942,9 @@ class _WorkspaceSidebar extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Code Call',
+                      'Crew',
                       style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w800,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
                     Text(
@@ -1892,7 +2035,9 @@ class _WorkspaceSidebar extends StatelessWidget {
           const SizedBox(height: 18),
           Text(
             'Workspace',
-            style: Theme.of(context).textTheme.labelLarge?.copyWith(color: palette.label),
+            style: Theme.of(
+              context,
+            ).textTheme.labelLarge?.copyWith(color: palette.label),
           ),
           const SizedBox(height: 6),
           item(
@@ -1933,6 +2078,8 @@ class _WorkspaceSidebar extends StatelessWidget {
               session.displayName,
               onTap: onSessions,
             ),
+          const SizedBox(height: 18),
+          item(Icons.bug_report_outlined, 'Diagnostics', onTap: onDiagnostics),
         ],
       ),
     );
@@ -1963,6 +2110,9 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.alsoSendToMain,
     required this.onAlsoSendToMainChanged,
     required this.onOpenSettings,
+    required this.onReload,
+    required this.sidePanelOpen,
+    required this.onToggleSidePanel,
     required this.onOpenFiles,
     required this.onRenameConversation,
     required this.onDeleteConversation,
@@ -2032,6 +2182,9 @@ class _WorkspaceConversation extends StatefulWidget {
   final bool alsoSendToMain;
   final ValueChanged<bool> onAlsoSendToMainChanged;
   final VoidCallback onOpenSettings;
+  final VoidCallback onReload;
+  final bool sidePanelOpen;
+  final VoidCallback onToggleSidePanel;
   final Future<void> Function() onOpenFiles;
   final Future<void> Function(String name) onRenameConversation;
   final Future<void> Function() onDeleteConversation;
@@ -2152,8 +2305,14 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         title: const Text('Rename conversation'),
         content: TextField(controller: controller, autofocus: true),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, controller.text), child: const Text('Save')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Save'),
+          ),
         ],
       ),
     );
@@ -2168,10 +2327,18 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Delete conversation?'),
-        content: const Text('This deletes its message history and attached conversation settings.'),
+        content: const Text(
+          'This deletes its message history and attached conversation settings.',
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
         ],
       ),
     );
@@ -2273,7 +2440,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                       Text(
                         widget.title,
                         style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          fontWeight: FontWeight.w800,
+                          fontWeight: FontWeight.bold,
                         ),
                       ),
                       const SizedBox(height: 2),
@@ -2290,14 +2457,38 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                     icon: const Icon(Icons.person_add_alt_1_outlined),
                     tooltip: 'Manage agents',
                   ),
+                IconButton(
+                  onPressed: widget.onReload,
+                  icon: const Icon(Icons.arrow_upward_outlined),
+                  tooltip: 'Reload last messages',
+                ),
+                IconButton(
+                  onPressed: widget.onToggleSidePanel,
+                  icon: Icon(
+                    widget.sidePanelOpen
+                        ? Icons.keyboard_arrow_right
+                        : Icons.keyboard_arrow_left,
+                  ),
+                  tooltip: widget.sidePanelOpen
+                      ? 'Close details panel'
+                      : 'Open details panel',
+                ),
                 PopupMenuButton<String>(
                   tooltip: 'Conversation actions',
                   onSelected: (action) => unawaited(
-                    action == 'rename' ? _renameConversation() : _deleteConversation(),
+                    action == 'rename'
+                        ? _renameConversation()
+                        : _deleteConversation(),
                   ),
                   itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'rename', child: Text('Rename conversation')),
-                    PopupMenuItem(value: 'delete', child: Text('Delete conversation')),
+                    PopupMenuItem(
+                      value: 'rename',
+                      child: Text('Rename conversation'),
+                    ),
+                    PopupMenuItem(
+                      value: 'delete',
+                      child: Text('Delete conversation'),
+                    ),
                   ],
                 ),
                 if (widget.section == _WorkspaceSection.channel)
@@ -2394,7 +2585,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                       index == 0 ? null : widget.messages[index - 1],
                     );
                     return Padding(
-                      padding: EdgeInsets.only(bottom: grouped ? 6 : 18),
+                      padding: const EdgeInsets.only(bottom: 10),
                       child: KeyedSubtree(
                         key: index == widget.messages.length - 1
                             ? _latestMessageKey
@@ -2611,6 +2802,49 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
     (Color(0xffccfbf1), Color(0xff134e4a)),
   ];
 
+  Future<void> _showMessageActions(BuildContext context) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.copy_outlined),
+              title: const Text('Copy'),
+              onTap: () => Navigator.pop(context, 'copy'),
+            ),
+            if (widget.showThreadAction)
+              ListTile(
+                leading: const Icon(Icons.reply_outlined),
+                title: const Text('Reply in thread'),
+                onTap: () => Navigator.pop(context, 'thread'),
+              ),
+            const Divider(height: 1),
+            for (final emoji in ['👍', '❤️', '👀'])
+              ListTile(
+                leading: Text(emoji, style: const TextStyle(fontSize: 20)),
+                title: Text('React with $emoji'),
+                onTap: () => Navigator.pop(context, 'reaction:$emoji'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (action == 'copy') {
+      await Clipboard.setData(ClipboardData(text: _messageText));
+    } else if (action == 'thread') {
+      widget.onThread();
+    } else if (action?.startsWith('reaction:') == true) {
+      widget.onReact(action!.substring('reaction:'.length));
+    }
+  }
+
+  String get _messageText => isWorkspaceAgentSender(widget.message.senderPubkey)
+      ? trimTrailingLineWhitespace(widget.message.body)
+      : widget.message.body;
+
   @override
   Widget build(BuildContext context) {
     final isAgent = isWorkspaceAgentSender(widget.message.senderPubkey);
@@ -2640,8 +2874,9 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
         ),
       ),
     );
-    final messageContent = Expanded(
+    final messageContent = Flexible(
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: widget.isLocalSender
             ? CrossAxisAlignment.end
             : CrossAxisAlignment.start,
@@ -2656,7 +2891,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
                 ],
                 Text(
                   widget.authorName,
-                  style: const TextStyle(fontWeight: FontWeight.w800),
+                  style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
                 if (isAgent) ...[
                   const SizedBox(width: 6),
@@ -2664,7 +2899,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
                     'AGENT',
                     style: Theme.of(context).textTheme.labelSmall?.copyWith(
                       fontSize: 9,
-                      fontWeight: FontWeight.w800,
+                      fontWeight: FontWeight.bold,
                       letterSpacing: 0.6,
                       color: Theme.of(context).colorScheme.secondary,
                     ),
@@ -2678,8 +2913,11 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
             ),
           if (!widget.groupedWithPrevious) const SizedBox(height: 3),
           if (widget.groupedWithPrevious) _timestamp(context, grouped: true),
-          if (widget.message.body.isNotEmpty)
-            _WorkspaceMessageBody(widget.message.body),
+          if (_messageText.isNotEmpty)
+            _WorkspaceMessageBody(
+              text: _messageText,
+              mentions: widget.message.mentions,
+            ),
           if (widget.message.reactions.isNotEmpty)
             Wrap(
               spacing: 4,
@@ -2715,6 +2953,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
       ),
     );
     final row = Row(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (widget.isLocalSender) ...[
@@ -2728,75 +2967,100 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
         ],
       ],
     );
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: Stack(
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            decoration: BoxDecoration(
-              color: widget.isLocalSender
-                  ? Theme.of(context).colorScheme.primaryContainer
-                  : isAgent
-                  ? const Color(0xff173d35)
-                  : Theme.of(context).colorScheme.surfaceContainerHigh,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: row,
-          ),
-          if (_hovered)
-            Positioned(
-              top: -8,
-              right: 0,
-              child: Material(
-                elevation: 3,
-                borderRadius: BorderRadius.circular(8),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      tooltip: 'Copy',
-                      icon: const Icon(Icons.copy_outlined, size: 18),
-                      onPressed: () => Clipboard.setData(
-                        ClipboardData(text: widget.message.body),
+    return LayoutBuilder(
+      builder: (context, constraints) => Align(
+        alignment: widget.isLocalSender
+            ? Alignment.centerRight
+            : Alignment.centerLeft,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: constraints.maxWidth * 0.82),
+          child: MouseRegion(
+            onEnter: (_) => setState(() => _hovered = true),
+            onExit: (_) => setState(() => _hovered = false),
+            child: GestureDetector(
+              onLongPress: () => unawaited(_showMessageActions(context)),
+              child: Stack(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: widget.isLocalSender
+                          ? Theme.of(context).colorScheme.primaryContainer
+                          : isAgent
+                          ? const Color(0xff12332d)
+                          : Theme.of(context).colorScheme.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: row,
+                  ),
+                  if (_hovered)
+                    Positioned(
+                      top: -8,
+                      right: 0,
+                      child: Material(
+                        elevation: 3,
+                        borderRadius: BorderRadius.circular(8),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: 'Copy',
+                              icon: const Icon(Icons.copy_outlined, size: 18),
+                              onPressed: () => Clipboard.setData(
+                                ClipboardData(text: _messageText),
+                              ),
+                            ),
+                            if (widget.showThreadAction)
+                              IconButton(
+                                tooltip: 'Reply in thread',
+                                icon: const Icon(
+                                  Icons.reply_outlined,
+                                  size: 18,
+                                ),
+                                onPressed: widget.onThread,
+                              ),
+                            PopupMenuButton<String>(
+                              tooltip: 'React',
+                              icon: const Icon(
+                                Icons.add_reaction_outlined,
+                                size: 18,
+                              ),
+                              onSelected: widget.onReact,
+                              itemBuilder: (_) => const [
+                                PopupMenuItem(value: '👍', child: Text('👍')),
+                                PopupMenuItem(value: '❤️', child: Text('❤️')),
+                                PopupMenuItem(value: '👀', child: Text('👀')),
+                              ],
+                            ),
+                            PopupMenuButton<String>(
+                              tooltip: 'More',
+                              icon: const Icon(Icons.more_horiz, size: 18),
+                              onSelected: (value) {
+                                if (value == 'copy') {
+                                  Clipboard.setData(
+                                    ClipboardData(text: _messageText),
+                                  );
+                                }
+                              },
+                              itemBuilder: (_) => const [
+                                PopupMenuItem(
+                                  value: 'copy',
+                                  child: Text('Copy text'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                    if (widget.showThreadAction)
-                      IconButton(
-                        tooltip: 'Reply in thread',
-                        icon: const Icon(Icons.reply_outlined, size: 18),
-                        onPressed: widget.onThread,
-                      ),
-                    PopupMenuButton<String>(
-                      tooltip: 'React',
-                      icon: const Icon(Icons.add_reaction_outlined, size: 18),
-                      onSelected: widget.onReact,
-                      itemBuilder: (_) => const [
-                        PopupMenuItem(value: '👍', child: Text('👍')),
-                        PopupMenuItem(value: '❤️', child: Text('❤️')),
-                        PopupMenuItem(value: '👀', child: Text('👀')),
-                      ],
-                    ),
-                    PopupMenuButton<String>(
-                      tooltip: 'More',
-                      icon: const Icon(Icons.more_horiz, size: 18),
-                      onSelected: (value) {
-                        if (value == 'copy') {
-                          Clipboard.setData(
-                            ClipboardData(text: widget.message.body),
-                          );
-                        }
-                      },
-                      itemBuilder: (_) => const [
-                        PopupMenuItem(value: 'copy', child: Text('Copy text')),
-                      ],
-                    ),
-                  ],
-                ),
+                ],
               ),
             ),
-        ],
+          ),
+        ),
       ),
     );
   }
@@ -2815,14 +3079,26 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
 }
 
 class _WorkspaceMessageBody extends StatelessWidget {
-  const _WorkspaceMessageBody(this.text);
+  const _WorkspaceMessageBody({required this.text, required this.mentions});
   final String text;
+  final List<WorkspaceMention> mentions;
 
   @override
   Widget build(BuildContext context) {
-    final matches = RegExp(
-      r'@\[([^\]\r\n]+)\]\((?:member|agent):[^\)\s]+\)|\*\*[^*\r\n]+\*\*|`[^`\r\n]+`|(?<!\w)(?:[~\w.-]+/)+[~\w.-]+',
-    ).allMatches(text);
+    final recognizedMentions = {
+      for (final mention in mentions) mention.label: mention,
+    };
+    final labels = recognizedMentions.keys.toList()
+      ..sort((left, right) => right.length.compareTo(left.length));
+    final patterns = [
+      r'@\[([^\]\r\n]+)\]\((?:member|agent):[^\)\s]+\)',
+      r'\*\*[^*\r\n]+\*\*',
+      r'`[^`\r\n]+`',
+      r'(?<!\w)(?:[~\w.-]+/)+[~\w.-]+',
+      if (labels.isNotEmpty)
+        '(?<!\\w)@(?:${labels.map(RegExp.escape).join('|')})(?![\\w-])',
+    ];
+    final matches = RegExp(patterns.join('|')).allMatches(text);
     if (matches.isEmpty) return SelectableText(text);
     final style = DefaultTextStyle.of(context).style;
     final spans = <InlineSpan>[];
@@ -2832,23 +3108,29 @@ class _WorkspaceMessageBody extends StatelessWidget {
         spans.add(TextSpan(text: text.substring(offset, match.start)));
       }
       final mention = match.group(1);
-      if (mention != null) {
+      final token = match.group(0)!;
+      final recognizedMention =
+          mention ??
+          (token.startsWith('@')
+              ? recognizedMentions[token.substring(1)]?.label
+              : null);
+      if (recognizedMention != null) {
         spans.add(
           TextSpan(
-            text: '@$mention',
+            text: '@$recognizedMention',
             style: style.copyWith(
-              color: Theme.of(context).extension<_WorkspacePalette>()!.label,
-              fontWeight: FontWeight.w700,
+              color: Theme.of(context).colorScheme.primary,
+              fontWeight: FontWeight.bold,
+              decoration: TextDecoration.underline,
             ),
           ),
         );
       } else {
-        final token = match.group(0)!;
         if (token.startsWith('**')) {
           spans.add(
             TextSpan(
               text: token.substring(2, token.length - 2),
-              style: style.copyWith(fontWeight: FontWeight.w800),
+              style: style.copyWith(fontWeight: FontWeight.bold),
             ),
           );
           offset = match.end;
@@ -2860,7 +3142,6 @@ class _WorkspaceMessageBody extends StatelessWidget {
                 ? token.substring(1, token.length - 1)
                 : token,
             style: style.copyWith(
-              fontFamily: 'monospace',
               fontSize: (style.fontSize ?? 14) - 1,
               color: Theme.of(context).colorScheme.secondary,
               backgroundColor: Theme.of(
@@ -2879,6 +3160,7 @@ class _WorkspaceMessageBody extends StatelessWidget {
 
 class _WorkspaceContext extends StatelessWidget {
   const _WorkspaceContext({
+    super.key,
     required this.message,
     required this.replies,
     required this.title,
@@ -2972,7 +3254,7 @@ class _WorkspaceContext extends StatelessWidget {
                 'Conversation details',
                 style: Theme.of(
                   context,
-                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 18),
               const _ContextLine(
@@ -3000,7 +3282,7 @@ class _WorkspaceContext extends StatelessWidget {
                     child: Text(
                       'Thread',
                       style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w800,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
                   ),
@@ -3165,12 +3447,14 @@ class _WorkspaceFilesPanel extends StatelessWidget {
             Expanded(
               child: Text(
                 preview?.path ??
-                    (result.directory.isEmpty ? 'Repository files' : result.directory),
+                    (result.directory.isEmpty
+                        ? 'Repository files'
+                        : result.directory),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w800,
-                ),
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
               ),
             ),
             if (preview != null)
@@ -3186,9 +3470,13 @@ class _WorkspaceFilesPanel extends StatelessWidget {
                 icon: const Icon(Icons.drive_folder_upload_outlined),
               ),
             IconButton(
-              tooltip: fullWindow ? 'Return to conversation' : 'Open files full-window',
+              tooltip: fullWindow
+                  ? 'Return to conversation'
+                  : 'Open files full-window',
               onPressed: fullWindow ? onCloseFullWindow : onFullWindow,
-              icon: Icon(fullWindow ? Icons.close_fullscreen : Icons.open_in_full),
+              icon: Icon(
+                fullWindow ? Icons.close_fullscreen : Icons.open_in_full,
+              ),
             ),
           ],
         ),
@@ -3201,37 +3489,50 @@ class _WorkspaceFilesPanel extends StatelessWidget {
       else if (result.truncated)
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-          child: Text('This folder has many items. Refine with its subfolders.'),
+          child: Text(
+            'This folder has many items. Refine with its subfolders.',
+          ),
         ),
       const Divider(height: 1),
       Expanded(
         child: preview == null
             ? ListView.separated(
-          itemCount: result.entries.length,
-          separatorBuilder: (_, _) => const Divider(height: 1, indent: 56),
-          itemBuilder: (context, index) {
-            final entry = result.entries[index];
-            return ListTile(
-              leading: Icon(
-                entry.isDirectory ? Icons.folder_outlined : Icons.description_outlined,
-              ),
-              title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-              trailing: Icon(
-                entry.isDirectory ? Icons.chevron_right : Icons.open_in_new,
-                size: 20,
-              ),
-              onTap: () => unawaited(
-                entry.isDirectory ? onBrowse(entry.path) : onReadFile(entry.path),
-              ),
-            );
-          },
+                itemCount: result.entries.length,
+                separatorBuilder: (_, _) =>
+                    const Divider(height: 1, indent: 56),
+                itemBuilder: (context, index) {
+                  final entry = result.entries[index];
+                  return ListTile(
+                    leading: Icon(
+                      entry.isDirectory
+                          ? Icons.folder_outlined
+                          : Icons.description_outlined,
+                    ),
+                    title: Text(
+                      entry.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: Icon(
+                      entry.isDirectory
+                          ? Icons.chevron_right
+                          : Icons.open_in_new,
+                      size: 20,
+                    ),
+                    onTap: () => unawaited(
+                      entry.isDirectory
+                          ? onBrowse(entry.path)
+                          : onReadFile(entry.path),
+                    ),
+                  );
+                },
               )
             : SelectionArea(
                 child: SingleChildScrollView(
                   padding: const EdgeInsets.all(16),
                   child: Text(
                     preview!.content,
-                    style: const TextStyle(fontFamily: 'monospace', height: 1.45),
+                    style: const TextStyle(height: 1.45),
                   ),
                 ),
               ),
@@ -3242,6 +3543,97 @@ class _WorkspaceFilesPanel extends StatelessWidget {
 
 class _SelectMentionIntent extends Intent {
   const _SelectMentionIntent();
+}
+
+class _WorkspaceMentionOverlay extends StatefulWidget {
+  const _WorkspaceMentionOverlay({
+    required this.mentionOptions,
+    required this.onMentionSelected,
+    required this.child,
+  });
+
+  final List<WorkspaceMention> mentionOptions;
+  final ValueChanged<WorkspaceMention> onMentionSelected;
+  final Widget child;
+
+  @override
+  State<_WorkspaceMentionOverlay> createState() =>
+      _WorkspaceMentionOverlayState();
+}
+
+class _WorkspaceMentionOverlayState extends State<_WorkspaceMentionOverlay> {
+  final _controller = OverlayPortalController();
+  final _link = LayerLink();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncVisibility());
+  }
+
+  @override
+  void didUpdateWidget(covariant _WorkspaceMentionOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.mentionOptions.isEmpty != widget.mentionOptions.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _syncVisibility());
+    }
+  }
+
+  void _syncVisibility() {
+    if (!mounted) return;
+    if (widget.mentionOptions.isEmpty) {
+      _controller.hide();
+    } else {
+      _controller.show();
+    }
+  }
+
+  void _selectMention(WorkspaceMention mention) {
+    _controller.hide();
+    widget.onMentionSelected(mention);
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) => OverlayPortal(
+      controller: _controller,
+      overlayChildBuilder: (context) => CompositedTransformFollower(
+        link: _link,
+        targetAnchor: Alignment.topLeft,
+        followerAnchor: Alignment.bottomLeft,
+        child: SizedBox(
+          width: constraints.maxWidth,
+          child: Material(
+            elevation: 4,
+            borderRadius: BorderRadius.circular(10),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 144),
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final mention in widget.mentionOptions)
+                    ListTile(
+                      dense: true,
+                      leading: Icon(
+                        mention.kind == 'agent'
+                            ? Icons.smart_toy_outlined
+                            : Icons.person_outline,
+                      ),
+                      title: Text('@${mention.label}'),
+                      subtitle: Text(
+                        mention.kind == 'agent' ? 'Agent' : 'Member',
+                      ),
+                      onTap: () => _selectMention(mention),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+      child: CompositedTransformTarget(link: _link, child: widget.child),
+    ),
+  );
 }
 
 class WorkspaceComposer extends StatelessWidget {
@@ -3297,155 +3689,135 @@ class WorkspaceComposer extends StatelessWidget {
       text: composer.text.replaceRange(start, end, '\n'),
       selection: TextSelection.collapsed(offset: start + 1),
     );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (composerFocus.canRequestFocus) composerFocus.requestFocus();
+    });
   }
 
   @override
-  Widget build(BuildContext context) =>
-      ValueListenableBuilder<TextEditingValue>(
-        valueListenable: composer,
-        builder: (context, value, _) {
-          final canSend = value.text.trim().isNotEmpty;
-          final desktop = _isDesktop(Theme.of(context).platform);
-          final voiceStatus =
-              voiceError ??
-              (voiceRecording
-                  ? 'Recording voice. Tap the microphone to stop.'
-                  : voiceTranscribing
-                  ? 'Transcribing voice...'
-                  : null);
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (mentionOptions.isNotEmpty)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Material(
-                    elevation: 4,
-                    borderRadius: BorderRadius.circular(10),
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 176),
-                      child: ListView(
-                        shrinkWrap: true,
-                        children: [
-                          for (final mention in mentionOptions)
-                            ListTile(
-                              dense: true,
-                              leading: Icon(
-                                mention.kind == 'agent'
-                                    ? Icons.smart_toy_outlined
-                                    : Icons.person_outline,
-                              ),
-                              title: Text('@${mention.label}'),
-                              subtitle: Text(
-                                mention.kind == 'agent' ? 'Agent' : 'Member',
-                              ),
-                              onTap: () => onMentionSelected(mention),
-                            ),
-                        ],
-                      ),
-                    ),
+  Widget build(
+    BuildContext context,
+  ) => ValueListenableBuilder<TextEditingValue>(
+    valueListenable: composer,
+    builder: (context, value, _) {
+      final canSend = value.text.trim().isNotEmpty;
+      final desktop = _isDesktop(Theme.of(context).platform);
+      final voiceStatus =
+          voiceError ??
+          (voiceRecording
+              ? 'Recording voice. Tap the microphone to stop.'
+              : voiceTranscribing
+              ? 'Transcribing voice...'
+              : null);
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _WorkspaceMentionOverlay(
+            mentionOptions: mentionOptions,
+            onMentionSelected: onMentionSelected,
+            child: Shortcuts(
+              shortcuts: mentionOptions.length == 1
+                  ? const {
+                      SingleActivator(LogicalKeyboardKey.tab):
+                          _SelectMentionIntent(),
+                    }
+                  : const {},
+              child: Actions(
+                actions: {
+                  _SelectMentionIntent: CallbackAction<_SelectMentionIntent>(
+                    onInvoke: (_) {
+                      onMentionSelected(mentionOptions.single);
+                      return null;
+                    },
                   ),
-                ),
-              Shortcuts(
-                shortcuts: mentionOptions.length == 1
-                    ? const {
-                        SingleActivator(LogicalKeyboardKey.tab):
-                            _SelectMentionIntent(),
-                      }
-                    : const {},
-                child: Actions(
-                  actions: {
-                    _SelectMentionIntent: CallbackAction<_SelectMentionIntent>(
-                      onInvoke: (_) {
-                        onMentionSelected(mentionOptions.single);
-                        return null;
-                      },
-                    ),
-                  },
-                  child: TextField(
-                    controller: composer,
-                    focusNode: composerFocus,
-                    minLines: 1,
-                    maxLines: 6,
-                    textInputAction: desktop
-                        ? TextInputAction.send
-                        : TextInputAction.newline,
-                    onSubmitted: desktop
-                        ? (_) {
-                            if (HardwareKeyboard.instance.isShiftPressed) {
-                              _insertNewline();
-                            } else if (mentionOptions.length == 1) {
-                              onMentionSelected(mentionOptions.single);
-                            } else {
-                              _sendOnSubmit(canSend);
-                            }
+                },
+                child: TextField(
+                  controller: composer,
+                  focusNode: composerFocus,
+                  minLines: 1,
+                  maxLines: 6,
+                  textInputAction: desktop
+                      ? TextInputAction.send
+                      : TextInputAction.newline,
+                  onSubmitted: desktop
+                      ? (_) {
+                          if (HardwareKeyboard.instance.isShiftPressed) {
+                            _insertNewline();
+                          } else if (mentionOptions.length == 1) {
+                            onMentionSelected(mentionOptions.single);
+                          } else {
+                            _sendOnSubmit(canSend);
                           }
-                        : null,
-                    decoration: InputDecoration(
-                      hintText: hintText,
-                      helperText: desktop
-                          ? voiceStatus ??
-                                'Enter to send. Shift+Enter for new line.'
-                          : voiceStatus ?? 'Enter for new line',
-                      filled: true,
-                      fillColor:
-                          Theme.of(
-                            context,
-                          ).extension<_WorkspacePalette>()?.composer ??
-                          Theme.of(context).colorScheme.surfaceContainerHighest,
-                      prefixIcon: IconButton(
-                        tooltip: 'Attach file',
-                        onPressed: () => unawaited(onAttach()),
-                        icon: const Icon(Icons.attach_file),
-                      ),
-                      suffixIcon: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (onVoicePressed != null)
-                            IconButton(
-                              tooltip: voiceTranscribing
-                                  ? 'Transcribing voice'
-                                  : voiceRecording
-                                  ? 'Stop recording and transcribe'
-                                  : 'Record voice to text',
-                              onPressed: voiceTranscribing
-                                  ? null
-                                  : onVoicePressed,
-                              icon: voiceTranscribing
-                                  ? const SizedBox.square(
-                                      dimension: 18,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : Icon(
-                                      voiceRecording
-                                          ? Icons.stop_circle_outlined
-                                          : Icons.mic_none_outlined,
-                                    ),
-                            ),
+                        }
+                      : null,
+                  // Keep desktop focus in this field after a submit action.
+                  onEditingComplete: () {},
+                  decoration: InputDecoration(
+                    hintText: hintText,
+                    helperText: desktop
+                        ? voiceStatus ??
+                              'Enter to send. Shift+Enter for new line.'
+                        : voiceStatus ?? 'Enter for new line',
+                    filled: true,
+                    fillColor:
+                        Theme.of(
+                          context,
+                        ).extension<_WorkspacePalette>()?.composer ??
+                        Theme.of(context).colorScheme.surfaceContainerHighest,
+                    prefixIcon: IconButton(
+                      tooltip: 'Attach file',
+                      onPressed: () => unawaited(onAttach()),
+                      icon: const Icon(Icons.attach_file),
+                    ),
+                    suffixIcon: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (onVoicePressed != null)
                           IconButton(
-                            tooltip: canSend
-                                ? desktop
-                                      ? 'Send message (Enter)'
-                                      : 'Send message'
-                                : 'Write a message to send',
-                            onPressed: canSend ? onSend : null,
-                            icon: const Icon(Icons.send),
+                            tooltip: voiceTranscribing
+                                ? 'Transcribing voice'
+                                : voiceRecording
+                                ? 'Stop recording and transcribe'
+                                : 'Record voice to text',
+                            onPressed: voiceTranscribing
+                                ? null
+                                : onVoicePressed,
+                            icon: voiceTranscribing
+                                ? const SizedBox.square(
+                                    dimension: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : Icon(
+                                    voiceRecording
+                                        ? Icons.stop_circle_outlined
+                                        : Icons.mic_none_outlined,
+                                  ),
                           ),
-                        ],
-                      ),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
+                        IconButton(
+                          tooltip: canSend
+                              ? desktop
+                                    ? 'Send message (Enter)'
+                                    : 'Send message'
+                              : 'Write a message to send',
+                          onPressed: canSend ? onSend : null,
+                          icon: const Icon(Icons.send),
+                        ),
+                      ],
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
                     ),
                   ),
                 ),
               ),
-            ],
-          );
-        },
+            ),
+          ),
+        ],
       );
+    },
+  );
 }
 
 class _ContextLine extends StatelessWidget {
@@ -3646,7 +4018,7 @@ class _AgentsPageState extends State<_AgentsPage> {
           'Agents',
           style: Theme.of(
             context,
-          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 6),
         Text(
@@ -3764,7 +4136,7 @@ class _AgentsPageState extends State<_AgentsPage> {
                   Text(
                     agent.name,
                     style: theme.textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.w800,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
                   const SizedBox(height: 3),
@@ -4590,7 +4962,7 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
           'People',
           style: Theme.of(
             context,
-          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 6),
         Text('Manage your profile and workspace members.'),
@@ -4665,7 +5037,7 @@ class _WorkspaceAccessPage extends StatelessWidget {
         Text(
           'Access',
           style: theme.textTheme.headlineSmall?.copyWith(
-            fontWeight: FontWeight.w800,
+            fontWeight: FontWeight.bold,
           ),
         ),
         const SizedBox(height: 6),
@@ -4782,6 +5154,47 @@ class _ToolTextPage extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ClientDiagnosticsPage extends StatelessWidget {
+  const _ClientDiagnosticsPage({required this.diagnostics});
+
+  final ValueNotifier<List<String>> diagnostics;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('Client diagnostics'),
+      actions: [
+        IconButton(
+          tooltip: 'Copy diagnostics',
+          onPressed: () => Clipboard.setData(
+            ClipboardData(text: diagnostics.value.join('\n')),
+          ),
+          icon: const Icon(Icons.copy_outlined),
+        ),
+        IconButton(
+          tooltip: 'Clear diagnostics',
+          onPressed: () => diagnostics.value = const [],
+          icon: const Icon(Icons.delete_outline),
+        ),
+      ],
+    ),
+    body: ValueListenableBuilder<List<String>>(
+      valueListenable: diagnostics,
+      builder: (context, entries, _) => entries.isEmpty
+          ? const Center(child: Text('No client errors or timeouts recorded.'))
+          : ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: entries.length,
+              separatorBuilder: (_, _) => const Divider(height: 12),
+              itemBuilder: (_, index) => SelectableText(
+                entries[index],
+                style: const TextStyle(fontFamily: 'monospace'),
+              ),
+            ),
+    ),
+  );
 }
 
 class _OpenCodeModelPickerPage extends StatefulWidget {
@@ -4947,7 +5360,7 @@ class _GitStatusPageState extends State<_GitStatusPage> {
                               ? 'Detached HEAD'
                               : widget.result.branch,
                           style: theme.textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
+                            fontWeight: FontWeight.bold,
                           ),
                         ),
                       ),
@@ -4976,7 +5389,7 @@ class _GitStatusPageState extends State<_GitStatusPage> {
                       '${widget.result.latestHash}  ${widget.result.latestSubject}',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontFamily: 'monospace'),
+                      style: const TextStyle(),
                     ),
                   ],
                 ],
@@ -5040,10 +5453,7 @@ class _GitStatusPageState extends State<_GitStatusPage> {
                     file.path,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 12,
-                    ),
+                    style: const TextStyle(fontSize: 12),
                   ),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: file.untracked
@@ -5081,7 +5491,7 @@ class _CountPill extends StatelessWidget {
         style: TextStyle(
           color: color,
           fontSize: 12,
-          fontWeight: FontWeight.w700,
+          fontWeight: FontWeight.bold,
         ),
       ),
     );
@@ -5140,7 +5550,7 @@ class _FileStatusIcon extends StatelessWidget {
               : file.staged
               ? 'S'
               : 'M',
-          style: TextStyle(color: color, fontWeight: FontWeight.w800),
+          style: TextStyle(color: color, fontWeight: FontWeight.bold),
         ),
       ),
     );
@@ -5267,10 +5677,7 @@ class _DiffViewerPageState extends State<_DiffViewerPage> {
                     file.path,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 12,
-                    ),
+                    style: const TextStyle(fontSize: 12),
                   ),
                 ),
                 Text(
@@ -5418,11 +5825,7 @@ class _PatchLineRow extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
             child: SelectableText(
               line.text,
-              style: TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 12.5,
-                color: foreground,
-              ),
+              style: TextStyle(fontSize: 12.5, color: foreground),
             ),
           ),
         ],
@@ -5447,11 +5850,7 @@ class _LineNumber extends StatelessWidget {
       ),
       child: Text(
         value?.toString() ?? '',
-        style: const TextStyle(
-          color: Color(0xff6e7b77),
-          fontFamily: 'monospace',
-          fontSize: 11,
-        ),
+        style: const TextStyle(color: Color(0xff6e7b77), fontSize: 11),
       ),
     );
   }
@@ -5607,7 +6006,9 @@ class _FileBrowserPageState extends State<_FileBrowserPage> {
                           size: 20,
                         ),
                         onTap: entry.isDirectory
-                            ? () => unawaited(widget.onBrowseDirectory(entry.path))
+                            ? () => unawaited(
+                                widget.onBrowseDirectory(entry.path),
+                              )
                             : () => widget.onReadFile(entry.path),
                       );
                     },
@@ -5865,7 +6266,6 @@ class _FileViewerPageState extends State<_FileViewerPage> {
                                       textAlign: TextAlign.right,
                                       style: const TextStyle(
                                         color: Color(0xff687570),
-                                        fontFamily: 'monospace',
                                         fontSize: 11,
                                       ),
                                     ),
@@ -5877,7 +6277,6 @@ class _FileViewerPageState extends State<_FileViewerPage> {
                                       maxLines: 1,
                                       style: const TextStyle(
                                         color: Color(0xffd7e0dc),
-                                        fontFamily: 'monospace',
                                         fontSize: 12.5,
                                       ),
                                     ),
@@ -6089,7 +6488,7 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
                             choice.path,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontFamily: 'monospace'),
+                            style: const TextStyle(),
                           ),
                           trailing: Radio<String>(value: choice.path),
                           onTap: () => _loadFolders(choice.relativePath),
@@ -6279,7 +6678,7 @@ class _SpawnSessionPageState extends State<_SpawnSessionPage> {
                         'Create a new repo session',
                         style: TextStyle(
                           fontSize: 20,
-                          fontWeight: FontWeight.w700,
+                          fontWeight: FontWeight.bold,
                         ),
                       ),
                       SizedBox(height: 8),
@@ -6389,7 +6788,7 @@ class _SpawnSessionPageState extends State<_SpawnSessionPage> {
                               choice.relativePath,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontFamily: 'monospace'),
+                              style: const TextStyle(),
                             ),
                             trailing: Radio<String>(value: choice.relativePath),
                             onTap: () {
@@ -6874,7 +7273,7 @@ class _BackgroundDeliverySettingsState
         secondary: const Icon(Icons.cloud_sync_outlined),
         title: const Text('Background delivery'),
         subtitle: const Text(
-          'Keep receiving replies while Code Call is in the background. Android shows a persistent notification.',
+          'Keep receiving replies while Crew is in the background. Android shows a persistent notification.',
         ),
         value: _enabled,
         onChanged: (enabled) {

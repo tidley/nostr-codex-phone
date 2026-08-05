@@ -12,27 +12,27 @@ import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:open_filex/open_filex.dart';
-import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
-import 'package:nostr_codex_phone/src/rust/frb_generated.dart';
-import 'package:nostr_codex_phone/src/bridge_json.dart';
-import 'package:nostr_codex_phone/src/blossom_config.dart';
-import 'package:nostr_codex_phone/src/compact_identifier.dart';
-import 'package:nostr_codex_phone/src/chat_scroll.dart';
-import 'package:nostr_codex_phone/src/conversation_message.dart';
-import 'package:nostr_codex_phone/src/incoming_route.dart';
-import 'package:nostr_codex_phone/src/repo_target_merge.dart';
-import 'package:nostr_codex_phone/src/repo_choice.dart';
-import 'package:nostr_codex_phone/src/repo_target.dart';
-import 'package:nostr_codex_phone/src/realtime_audio.dart';
-import 'package:nostr_codex_phone/src/realtime_video.dart';
-import 'package:nostr_codex_phone/src/settings_storage.dart';
-import 'package:nostr_codex_phone/src/media_models.dart';
-import 'package:nostr_codex_phone/src/text_utils.dart';
-import 'package:nostr_codex_phone/src/tool_result_models.dart';
-import 'package:nostr_codex_phone/src/working_animation.dart';
-import 'package:nostr_codex_phone/src/workspace_invite.dart';
-import 'package:nostr_codex_phone/src/workspace_models.dart';
-import 'package:nostr_codex_phone/src/voice_recording.dart';
+import 'package:crew/src/rust/api/nostr.dart';
+import 'package:crew/src/rust/frb_generated.dart';
+import 'package:crew/src/bridge_json.dart';
+import 'package:crew/src/blossom_config.dart';
+import 'package:crew/src/compact_identifier.dart';
+import 'package:crew/src/chat_scroll.dart';
+import 'package:crew/src/conversation_message.dart';
+import 'package:crew/src/incoming_route.dart';
+import 'package:crew/src/repo_target_merge.dart';
+import 'package:crew/src/repo_choice.dart';
+import 'package:crew/src/repo_target.dart';
+import 'package:crew/src/realtime_audio.dart';
+import 'package:crew/src/realtime_video.dart';
+import 'package:crew/src/settings_storage.dart';
+import 'package:crew/src/media_models.dart';
+import 'package:crew/src/text_utils.dart';
+import 'package:crew/src/tool_result_models.dart';
+import 'package:crew/src/working_animation.dart';
+import 'package:crew/src/workspace_invite.dart';
+import 'package:crew/src/workspace_models.dart';
+import 'package:crew/src/voice_recording.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -352,7 +352,7 @@ class _NostrCodexAppState extends State<NostrCodexApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Code Call',
+      title: 'Crew',
       debugShowCheckedModeBanner: false,
       theme: _appTheme(_selectedTheme),
       themeMode: ThemeMode.dark,
@@ -401,6 +401,7 @@ ThemeData _appTheme(AppTheme theme) {
           brandForeground: Color(0xff082019),
         );
   return ThemeData(
+    fontFamily: 'Roboto',
     colorScheme: scheme,
     scaffoldBackgroundColor: ember
         ? const Color(0xff101010)
@@ -572,6 +573,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _pendingToolViews = <String, _PendingToolView>{};
   final _workspaceFileBrowser = ValueNotifier<FileBrowserResult?>(null);
   final _workspaceFilePreview = ValueNotifier<FileContentResult?>(null);
+  final _clientDiagnostics = ValueNotifier<List<String>>(const []);
   Completer<List<_OpenCodeModelChoice>>? _pendingOpenCodeModelListCompleter;
   final _completedVoiceEventIds = <String>{};
   Completer<List<RepoChoice>>? _pendingRepoListCompleter;
@@ -885,6 +887,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _workspaceRevision.dispose();
     _workspaceFileBrowser.dispose();
     _workspaceFilePreview.dispose();
+    _clientDiagnostics.dispose();
     _workspaceVoiceResult.dispose();
     _queryController.dispose();
     _queryFocusNode.dispose();
@@ -4225,13 +4228,23 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _pollLoop() async {
+    var emptyPolls = 0;
     while (mounted && _polling) {
       try {
         final message = await nostrNextMessage(timeoutMs: BigInt.from(1500));
-        if (message == null || !mounted) continue;
+        if (message == null || !mounted) {
+          emptyPolls += 1;
+          if (emptyPolls >= 10) {
+            emptyPolls = 0;
+            await _fetchRecentInboxMessages();
+          }
+          continue;
+        }
+        emptyPolls = 0;
         _receiveMessage(message);
       } catch (error) {
         if (!mounted || !_polling) return;
+        _recordDiagnostic('Receive error: $error');
         setState(() => _status = 'Receive error: $error');
         await Future<void>.delayed(const Duration(seconds: 2));
       }
@@ -4261,6 +4274,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       }
       return accepted;
     } catch (error) {
+      _recordDiagnostic('Recent message fetch failed: $error');
       if (mounted) setState(() => _status = 'Recent message fetch failed');
       debugPrint('recent message fetch failed: $error');
       return 0;
@@ -4308,7 +4322,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         final isMessageCreated =
             update is Map && update['action'] == 'message_created';
         setState(() {
-          final addedMessages = _workspace.apply(decoded);
+          final addedMessages = _workspace.apply(
+            decoded,
+            localSenderIds: {_ownPubkey ?? '', _ownPubkeyHex ?? ''},
+          );
           if (isMessageCreated) {
             for (final workspaceMessage in addedMessages) {
               if (isWorkspaceLocalSender(workspaceMessage.senderPubkey, {
@@ -4508,7 +4525,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           unawaited(_openModelPicker(result));
         } else if (result.tool == 'file_browser' && _showTeamWorkspace) {
           _workspaceFileBrowser.value = FileBrowserResult.fromPayload(result);
-        } else if (result.tool == 'read_file' && pending?.workspacePanel == true) {
+        } else if (result.tool == 'read_file' &&
+            pending?.workspacePanel == true) {
           _workspaceFilePreview.value = FileContentResult.fromPayload(result);
         } else {
           unawaited(_openToolResult(result));
@@ -6524,12 +6542,21 @@ Return a concise catch-up summary of what happened after that point: completed w
 
   void _showError(String message) {
     if (!mounted) return;
+    _recordDiagnostic(message);
     final previousStatus = _status;
     setState(() => _status = message);
     debugPrint('status update: ${previousStatus ?? '(none)'} -> $message');
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _recordDiagnostic(String message) {
+    final timestamp = DateTime.now().toIso8601String().substring(11, 19);
+    final next = [..._clientDiagnostics.value, '$timestamp  $message'];
+    _clientDiagnostics.value = List.unmodifiable(
+      next.length > 200 ? next.sublist(next.length - 200) : next,
+    );
   }
 
   void _showStatus(String message) {
@@ -6622,7 +6649,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         : theme.colorScheme.onSurfaceVariant;
     final textStyle = titleStyle?.copyWith(
       color: compact ? titleStyle.color : statusColor,
-      fontWeight: selected || connected ? FontWeight.w700 : FontWeight.w500,
+      fontWeight: selected || connected ? FontWeight.bold : FontWeight.normal,
     );
 
     return Row(
@@ -6680,6 +6707,13 @@ Return a concise catch-up summary of what happened after that point: completed w
         sessions: _repoTargets,
         onOpenSessions: () => setState(() => _showTeamWorkspace = false),
         onOpenSettings: () => unawaited(_openSettings()),
+        diagnostics: _clientDiagnostics,
+        onOpenDiagnostics: () => Navigator.of(context).push<void>(
+          MaterialPageRoute(
+            builder: (_) =>
+                _ClientDiagnosticsPage(diagnostics: _clientDiagnostics),
+          ),
+        ),
         onOpenFiles: () => _sendToolRequest('file_browser'),
         fileBrowser: _workspaceFileBrowser,
         filePreview: _workspaceFilePreview,

@@ -82,7 +82,7 @@ class _InactiveReplyNotice extends StatelessWidget {
                                   'NEW REPLY',
                                   style: theme.textTheme.labelSmall?.copyWith(
                                     color: colorScheme.primary,
-                                    fontWeight: FontWeight.w800,
+                                    fontWeight: FontWeight.bold,
                                     letterSpacing: 1.1,
                                   ),
                                 ),
@@ -92,7 +92,7 @@ class _InactiveReplyNotice extends StatelessWidget {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: theme.textTheme.titleSmall?.copyWith(
-                                    fontWeight: FontWeight.w700,
+                                    fontWeight: FontWeight.bold,
                                   ),
                                 ),
                               ],

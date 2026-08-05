@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::protocol::{MediaReference, WorkspaceMentionPayload, WorkspaceReactionPayload};
 use anyhow::{bail, Context, Result};
@@ -98,27 +98,46 @@ impl WorkspaceStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let conn = Self::open_connection(path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS workspace_members (pubkey TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '', joined_at INTEGER NOT NULL);
+               CREATE TABLE IF NOT EXISTS workspace_channels (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+                 CREATE TABLE IF NOT EXISTS workspace_messages (id TEXT PRIMARY KEY, channel_id TEXT, recipient_pubkey TEXT, sender_pubkey TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', mentions_json TEXT NOT NULL DEFAULT '[]', parent_id TEXT, also_send_to_main INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+                   CHECK ((channel_id IS NOT NULL) != (recipient_pubkey IS NOT NULL)));
+                 CREATE TABLE IF NOT EXISTS workspace_message_reactions (message_id TEXT NOT NULL REFERENCES workspace_messages(id), emoji TEXT NOT NULL, sender_pubkey TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (message_id, emoji, sender_pubkey));
+                 CREATE TABLE IF NOT EXISTS workspace_agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, traits TEXT NOT NULL DEFAULT '', skills_json TEXT NOT NULL DEFAULT '[]', preset TEXT, opencode_provider_id TEXT, opencode_provider_name TEXT, opencode_model_id TEXT, opencode_model_name TEXT, opencode_agent TEXT, workdir TEXT, restart_on_failure INTEGER NOT NULL DEFAULT 1, opencode_session_id TEXT, session_status TEXT NOT NULL DEFAULT 'failed', session_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, initialized_at INTEGER, input_tokens INTEGER, output_tokens INTEGER);
+                CREATE TABLE IF NOT EXISTS workspace_agent_instances (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES workspace_agents(id), opencode_session_id TEXT, created_at INTEGER NOT NULL);
+                 CREATE TABLE IF NOT EXISTS workspace_conversation_agents (agent_id TEXT NOT NULL REFERENCES workspace_agents(id), channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT,
+                    folder_scope_json TEXT NOT NULL DEFAULT '[]',
+                    PRIMARY KEY (agent_id, channel_id, member_pubkey, peer_pubkey),
+                    CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+                 CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL,
+                    PRIMARY KEY (channel_id, member_pubkey, peer_pubkey),
+                    CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+                CREATE INDEX IF NOT EXISTS workspace_messages_channel ON workspace_messages(channel_id, created_at);
+                CREATE INDEX IF NOT EXISTS workspace_messages_direct ON workspace_messages(recipient_pubkey, sender_pubkey, created_at);",
+        )?;
+        Self::migrate(conn)
+    }
+
+    /// Opens an already initialized workspace for a queued agent turn.
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        Ok(Self {
+            conn: Self::open_connection(path)?,
+        })
+    }
+
+    fn open_connection(path: &Path) -> Result<Connection> {
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open workspace store `{}`", path.display()))?;
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             CREATE TABLE IF NOT EXISTS workspace_members (pubkey TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '', joined_at INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS workspace_channels (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
-               CREATE TABLE IF NOT EXISTS workspace_messages (id TEXT PRIMARY KEY, channel_id TEXT, recipient_pubkey TEXT, sender_pubkey TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', mentions_json TEXT NOT NULL DEFAULT '[]', parent_id TEXT, also_send_to_main INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
-                 CHECK ((channel_id IS NOT NULL) != (recipient_pubkey IS NOT NULL)));
-               CREATE TABLE IF NOT EXISTS workspace_message_reactions (message_id TEXT NOT NULL REFERENCES workspace_messages(id), emoji TEXT NOT NULL, sender_pubkey TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (message_id, emoji, sender_pubkey));
-               CREATE TABLE IF NOT EXISTS workspace_agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, traits TEXT NOT NULL DEFAULT '', skills_json TEXT NOT NULL DEFAULT '[]', preset TEXT, opencode_provider_id TEXT, opencode_provider_name TEXT, opencode_model_id TEXT, opencode_model_name TEXT, opencode_agent TEXT, workdir TEXT, restart_on_failure INTEGER NOT NULL DEFAULT 1, opencode_session_id TEXT, session_status TEXT NOT NULL DEFAULT 'failed', session_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, initialized_at INTEGER, input_tokens INTEGER, output_tokens INTEGER);
-              CREATE TABLE IF NOT EXISTS workspace_agent_instances (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES workspace_agents(id), opencode_session_id TEXT, created_at INTEGER NOT NULL);
-               CREATE TABLE IF NOT EXISTS workspace_conversation_agents (agent_id TEXT NOT NULL REFERENCES workspace_agents(id), channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT,
-                  folder_scope_json TEXT NOT NULL DEFAULT '[]',
-                  PRIMARY KEY (agent_id, channel_id, member_pubkey, peer_pubkey),
-                  CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
-               CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL,
-                  PRIMARY KEY (channel_id, member_pubkey, peer_pubkey),
-                  CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
-              CREATE INDEX IF NOT EXISTS workspace_messages_channel ON workspace_messages(channel_id, created_at);
-              CREATE INDEX IF NOT EXISTS workspace_messages_direct ON workspace_messages(recipient_pubkey, sender_pubkey, created_at);",
-        )?;
+        // Queue workers open their own connections. Wait briefly for a concurrent
+        // writer instead of failing a turn with SQLite's immediate busy error.
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+        Ok(conn)
+    }
+
+    fn migrate(conn: Connection) -> Result<Self> {
         let has_display_name = conn
             .prepare("PRAGMA table_info(workspace_members)")?
             .query_map([], |row| row.get::<_, String>(1))?
@@ -319,14 +338,17 @@ impl WorkspaceStore {
         if self.conn.execute(
             "UPDATE workspace_channels SET name = ?2 WHERE id = ?1",
             params![required("channel id", channel_id)?, name],
-        )? == 0 {
+        )? == 0
+        {
             bail!("channel does not exist");
         }
-        self.conn.query_row(
-            "SELECT id, name, created_by, created_at FROM workspace_channels WHERE id = ?1",
-            [channel_id],
-            channel_from_row,
-        ).map_err(Into::into)
+        self.conn
+            .query_row(
+                "SELECT id, name, created_by, created_at FROM workspace_channels WHERE id = ?1",
+                [channel_id],
+                channel_from_row,
+            )
+            .map_err(Into::into)
     }
 
     pub fn delete_channel(&self, channel_id: &str) -> Result<()> {
@@ -335,10 +357,20 @@ impl WorkspaceStore {
             "DELETE FROM workspace_message_reactions WHERE message_id IN (SELECT id FROM workspace_messages WHERE channel_id = ?1)",
             [channel_id],
         )?;
-        self.conn.execute("DELETE FROM workspace_messages WHERE channel_id = ?1", [channel_id])?;
-        self.conn.execute("DELETE FROM workspace_conversation_agents WHERE channel_id = ?1", [channel_id])?;
-        self.conn.execute("DELETE FROM workspace_conversation_preprompts WHERE channel_id = ?1", [channel_id])?;
-        self.conn.execute("DELETE FROM workspace_channels WHERE id = ?1", [channel_id])?;
+        self.conn.execute(
+            "DELETE FROM workspace_messages WHERE channel_id = ?1",
+            [channel_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM workspace_conversation_agents WHERE channel_id = ?1",
+            [channel_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM workspace_conversation_preprompts WHERE channel_id = ?1",
+            [channel_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM workspace_channels WHERE id = ?1", [channel_id])?;
         Ok(())
     }
 
@@ -927,10 +959,22 @@ impl WorkspaceStore {
         Ok(messages)
     }
 
+    pub fn message_by_id(&self, id: &str) -> Result<Option<WorkspaceMessage>> {
+        let message = self
+            .conn
+            .query_row("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, created_at FROM workspace_messages WHERE id = ?1", [id], message_from_row)
+            .optional()?;
+        message
+            .map(|mut message| {
+                message.reactions = self.reactions_for_message(id)?;
+                Ok(message)
+            })
+            .transpose()
+    }
+
     fn message(&self, id: &str) -> Result<WorkspaceMessage> {
-        let mut message = self.conn.query_row("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, created_at FROM workspace_messages WHERE id = ?1", [id], message_from_row)?;
-        message.reactions = self.reactions_for_message(id)?;
-        Ok(message)
+        self.message_by_id(id)?
+            .context("workspace message is missing")
     }
 
     fn reactions_for_message(&self, message_id: &str) -> Result<Vec<WorkspaceReactionPayload>> {
@@ -1096,6 +1140,19 @@ mod tests {
             .unwrap()
             .iter()
             .any(|message| message.parent_id.as_deref() == Some(parent.id.as_str())));
+    }
+
+    #[test]
+    fn loads_a_message_by_id_or_returns_none() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let message = store
+            .add_channel_message("owner", &channel.id, "hello", &[], &[], None)
+            .unwrap();
+
+        assert_eq!(store.message_by_id(&message.id).unwrap(), Some(message));
+        assert_eq!(store.message_by_id("missing").unwrap(), None);
     }
 
     #[test]

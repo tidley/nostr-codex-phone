@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:nostr_codex_phone/src/rust/api/nostr.dart';
+import 'package:crew/src/rust/api/nostr.dart';
 
 enum MessageDirection { incoming, outgoing }
 
