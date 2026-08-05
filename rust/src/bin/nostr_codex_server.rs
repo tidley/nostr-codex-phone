@@ -1271,6 +1271,33 @@ async fn process_workspace_request(
             broadcast_workspace_update(workspace, messenger, &update).await?;
             return Ok(());
         }
+        "rename_channel" => {
+            let channel = workspace.rename_channel(
+                request.channel_id.as_deref().unwrap_or_default(),
+                request.channel_name.as_deref().unwrap_or_default(),
+            )?;
+            broadcast_workspace_update(
+                workspace,
+                messenger,
+                &WorkspaceUpdate {
+                    action: "channel_renamed".to_string(),
+                    channels: vec![channel_payload(channel)],
+                    members: vec![], messages: vec![], agents: vec![],
+                    conversation_agents: vec![], conversation_preprompts: vec![], typing: None,
+                },
+            ).await?;
+            return Ok(());
+        }
+        "delete_channel" => {
+            workspace.delete_channel(request.channel_id.as_deref().unwrap_or_default())?;
+            broadcast_workspace_snapshots(workspace, messenger).await?;
+            return Ok(());
+        }
+        "delete_direct_conversation" => {
+            workspace.delete_direct_conversation(sender, request.recipient_pubkey.as_deref().unwrap_or_default())?;
+            broadcast_workspace_snapshots(workspace, messenger).await?;
+            return Ok(());
+        }
         "set_profile" => {
             let member = workspace.set_member_display_name(
                 sender,
@@ -1855,6 +1882,21 @@ async fn broadcast_workspace_update(
             .send_wire_to_pubkey(
                 &member.pubkey,
                 WireMessage::workspace_update(update.clone()),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn broadcast_workspace_snapshots(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+) -> Result<()> {
+    for member in workspace.members()? {
+        messenger
+            .send_wire_to_pubkey(
+                &member.pubkey,
+                WireMessage::workspace_update(workspace_snapshot(workspace, &member.pubkey)?),
             )
             .await?;
     }

@@ -594,6 +594,22 @@ class WorkspaceState {
     return '';
   }
 
+  List<String> directPeers(String ownPubkey) {
+    final peers = <String>{};
+    for (final conversation in messages.values) {
+      for (final message in conversation) {
+        if (message.channelId != null) continue;
+        if (message.senderPubkey == ownPubkey && message.recipientPubkey != null) {
+          peers.add(message.recipientPubkey!);
+        } else if (message.recipientPubkey == ownPubkey &&
+            !isWorkspaceAgentSender(message.senderPubkey)) {
+          peers.add(message.senderPubkey);
+        }
+      }
+    }
+    return peers.toList()..sort();
+  }
+
   int channelHumanMemberCount(String channelId) {
     if (!channels.any((channel) => channel.id == channelId)) return 0;
     return members.where((member) => !member.startsWith('agent:')).length;

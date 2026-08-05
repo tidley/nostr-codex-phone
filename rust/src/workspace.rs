@@ -308,6 +308,55 @@ impl WorkspaceStore {
         channels
     }
 
+    pub fn rename_channel(&self, channel_id: &str, name: &str) -> Result<WorkspaceChannel> {
+        let name = required("channel name", name)?.to_ascii_lowercase();
+        if !name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        {
+            bail!("channel name may contain lowercase letters, numbers, and hyphens only");
+        }
+        if self.conn.execute(
+            "UPDATE workspace_channels SET name = ?2 WHERE id = ?1",
+            params![required("channel id", channel_id)?, name],
+        )? == 0 {
+            bail!("channel does not exist");
+        }
+        self.conn.query_row(
+            "SELECT id, name, created_by, created_at FROM workspace_channels WHERE id = ?1",
+            [channel_id],
+            channel_from_row,
+        ).map_err(Into::into)
+    }
+
+    pub fn delete_channel(&self, channel_id: &str) -> Result<()> {
+        self.require_channel(channel_id)?;
+        self.conn.execute(
+            "DELETE FROM workspace_message_reactions WHERE message_id IN (SELECT id FROM workspace_messages WHERE channel_id = ?1)",
+            [channel_id],
+        )?;
+        self.conn.execute("DELETE FROM workspace_messages WHERE channel_id = ?1", [channel_id])?;
+        self.conn.execute("DELETE FROM workspace_conversation_agents WHERE channel_id = ?1", [channel_id])?;
+        self.conn.execute("DELETE FROM workspace_conversation_preprompts WHERE channel_id = ?1", [channel_id])?;
+        self.conn.execute("DELETE FROM workspace_channels WHERE id = ?1", [channel_id])?;
+        Ok(())
+    }
+
+    pub fn delete_direct_conversation(&self, member: &str, peer: &str) -> Result<()> {
+        let (member, peer) = direct_participants(member, peer)?;
+        self.conn.execute(
+            "DELETE FROM workspace_message_reactions WHERE message_id IN (SELECT id FROM workspace_messages WHERE channel_id IS NULL AND ((sender_pubkey = ?1 AND recipient_pubkey = ?2) OR (sender_pubkey = ?2 AND recipient_pubkey = ?1)))",
+            params![member, peer],
+        )?;
+        self.conn.execute(
+            "DELETE FROM workspace_messages WHERE channel_id IS NULL AND ((sender_pubkey = ?1 AND recipient_pubkey = ?2) OR (sender_pubkey = ?2 AND recipient_pubkey = ?1))",
+            params![member, peer],
+        )?;
+        self.conn.execute("DELETE FROM workspace_conversation_agents WHERE member_pubkey = ?1 AND peer_pubkey = ?2", params![member, peer])?;
+        self.conn.execute("DELETE FROM workspace_conversation_preprompts WHERE member_pubkey = ?1 AND peer_pubkey = ?2", params![member, peer])?;
+        Ok(())
+    }
+
     pub fn has_channel(&self, channel_id: &str) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM workspace_channels WHERE id = ?1)",
