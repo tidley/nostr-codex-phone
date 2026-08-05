@@ -18,7 +18,7 @@ class ScreenShareService : Service() {
         }
         val notification = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("Code Call is sharing your screen")
+            .setContentTitle("Crew is sharing your screen")
             .setContentText("Screen video is being sent to call participants")
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)

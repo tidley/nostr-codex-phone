@@ -1,10 +1,10 @@
 import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:nostr_codex_phone/src/conversation_message.dart';
-import 'package:nostr_codex_phone/src/incoming_route.dart';
-import 'package:nostr_codex_phone/src/repo_target.dart';
-import 'package:nostr_codex_phone/src/repo_target_merge.dart';
+import 'package:crew/src/conversation_message.dart';
+import 'package:crew/src/incoming_route.dart';
+import 'package:crew/src/repo_target.dart';
+import 'package:crew/src/repo_target_merge.dart';
 
 void main() {
   test('matches target invites by workdir before pubkey', () {

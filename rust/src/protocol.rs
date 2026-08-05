@@ -1321,12 +1321,33 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
         }
         "set_profile" => Ok(()),
         "rename_channel"
-            if request.channel_id.as_deref().is_some_and(|id| !id.trim().is_empty())
-                && request.channel_name.as_deref().is_some_and(|name| !name.trim().is_empty()) => Ok(()),
+            if request
+                .channel_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && request
+                    .channel_name
+                    .as_deref()
+                    .is_some_and(|name| !name.trim().is_empty()) =>
+        {
+            Ok(())
+        }
         "delete_channel"
-            if request.channel_id.as_deref().is_some_and(|id| !id.trim().is_empty()) => Ok(()),
+            if request
+                .channel_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty()) =>
+        {
+            Ok(())
+        }
         "delete_direct_conversation"
-            if request.recipient_pubkey.as_deref().is_some_and(|id| !id.trim().is_empty()) => Ok(()),
+            if request
+                .recipient_pubkey
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty()) =>
+        {
+            Ok(())
+        }
         "set_conversation_preprompt"
             if request
                 .body

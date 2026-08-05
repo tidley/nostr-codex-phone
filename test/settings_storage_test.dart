@@ -2,7 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:nostr_codex_phone/src/settings_storage.dart';
+import 'package:crew/src/settings_storage.dart';
 
 class _LockedSecureStorage implements SecureSettingsStorage {
   int readCalls = 0;

@@ -1,4 +1,4 @@
-import 'package:nostr_codex_phone/src/compact_identifier.dart';
+import 'package:crew/src/compact_identifier.dart';
 
 class RepoTarget {
   const RepoTarget({

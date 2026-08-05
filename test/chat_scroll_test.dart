@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:nostr_codex_phone/src/chat_scroll.dart';
+import 'package:crew/src/chat_scroll.dart';
 
 void main() {
   test('identifies the latest-message position with a small tolerance', () {

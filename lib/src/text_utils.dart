@@ -1,3 +1,10 @@
+String trimTrailingLineWhitespace(String text) {
+  return text.replaceAllMapped(
+    RegExp(r'[^\r\n]+'),
+    (match) => match.group(0)!.trimRight(),
+  );
+}
+
 String cleanTextForSpeech(String text) {
   var cleaned = _speakMarkdownTables(
     _stripUrlSchemes(text.replaceAll('\r\n', '\n')),

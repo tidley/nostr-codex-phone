@@ -1,7 +1,7 @@
 import 'dart:convert';
 
-import 'package:nostr_codex_phone/src/conversation_message.dart';
-import 'package:nostr_codex_phone/src/repo_target.dart';
+import 'package:crew/src/conversation_message.dart';
+import 'package:crew/src/repo_target.dart';
 
 String? incomingRouteWorkdir(String rawJson) {
   if (rawJson.trim().isEmpty) return null;
