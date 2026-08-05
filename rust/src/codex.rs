@@ -58,6 +58,11 @@ pub struct OpenCodeSessionInfo {
     pub directory: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    pub agent: Option<String>,
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -673,6 +678,18 @@ fn opencode_session_info_from_value(value: &Value) -> Option<OpenCodeSessionInfo
         directory,
         created_at,
         updated_at,
+        agent: json_string_at(value, &["agent"]),
+        provider_id: json_string_at(value, &["model", "providerID"])
+            .or_else(|| json_string_at(value, &["model", "provider_id"])),
+        model_id: json_string_at(value, &["model", "id"]),
+        input_tokens: value
+            .get("tokens")
+            .and_then(|tokens| tokens.get("input"))
+            .and_then(Value::as_u64),
+        output_tokens: value
+            .get("tokens")
+            .and_then(|tokens| tokens.get("output"))
+            .and_then(Value::as_u64),
     })
 }
 
@@ -806,6 +823,21 @@ fn parse_opencode_session_list(value: &Value) -> Result<Vec<OpenCodeSessionInfo>
                     .or_else(|| value.get("updatedAt"))
                     .or_else(|| value.pointer("/time/updated"))
                     .map(|value| value.to_string().trim_matches('"').to_owned()),
+                agent: value
+                    .get("agent")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                provider_id: value
+                    .pointer("/model/providerID")
+                    .or_else(|| value.pointer("/model/provider_id"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                model_id: value
+                    .pointer("/model/id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                input_tokens: value.pointer("/tokens/input").and_then(Value::as_u64),
+                output_tokens: value.pointer("/tokens/output").and_then(Value::as_u64),
                 id,
             })
         })
@@ -1615,7 +1647,10 @@ mod tests {
                     "id": "ses_Newer1",
                     "title": "Newer",
                     "path": { "cwd": "/repo" },
-                    "updatedAt": "2026-07-09T12:00:00Z"
+                    "updatedAt": "2026-07-09T12:00:00Z",
+                    "agent": "build",
+                    "model": { "providerID": "openai", "id": "gpt-5.6-terra" },
+                    "tokens": { "input": 1200, "output": 34 }
                 }
             ]
         });
@@ -1624,6 +1659,11 @@ mod tests {
 
         assert_eq!(sessions[0].id, "ses_Newer1");
         assert_eq!(sessions[0].directory.as_deref(), Some("/repo"));
+        assert_eq!(sessions[0].agent.as_deref(), Some("build"));
+        assert_eq!(sessions[0].provider_id.as_deref(), Some("openai"));
+        assert_eq!(sessions[0].model_id.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(sessions[0].input_tokens, Some(1200));
+        assert_eq!(sessions[0].output_tokens, Some(34));
         assert_eq!(sessions[1].updated_at.as_deref(), Some("1"));
     }
 

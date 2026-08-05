@@ -293,10 +293,15 @@ class _PendingSessionStart {
 }
 
 class _PendingToolView {
-  const _PendingToolView({required this.tool, required this.conversationKey});
+  const _PendingToolView({
+    required this.tool,
+    required this.conversationKey,
+    this.workspacePanel = false,
+  });
 
   final String tool;
   final String conversationKey;
+  final bool workspacePanel;
 }
 
 class _WorkspaceVoiceResult {
@@ -365,7 +370,7 @@ ThemeData _appTheme(AppTheme theme) {
       ).copyWith(
         primary: ember ? const Color(0xffffb74d) : const Color(0xff42d3a6),
         onPrimary: ember ? const Color(0xff281900) : const Color(0xff06251b),
-        secondary: ember ? const Color(0xff56d8d2) : const Color(0xff8ed1bd),
+        secondary: ember ? const Color(0xff56d8d2) : const Color(0xff73e0bd),
         onSecondary: const Color(0xff071c1c),
         surface: ember ? const Color(0xff171717) : const Color(0xff151b1a),
         onSurface: ember ? const Color(0xffeee8df) : const Color(0xffe8f3ef),
@@ -390,8 +395,8 @@ ThemeData _appTheme(AppTheme theme) {
           sidebar: Color(0xff142321),
           content: Color(0xff101a19),
           composer: Color(0xff1e2d29),
-          selected: Color(0xff24554b),
-          label: Color(0xff9cc6bb),
+          selected: Color(0xff1d6c5a),
+          label: Color(0xffb6e2d4),
           brand: Color(0xff65d8b1),
           brandForeground: Color(0xff082019),
         );
@@ -565,6 +570,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _recordingDurationLabel = ValueNotifier<String>('00:00');
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   final _pendingToolViews = <String, _PendingToolView>{};
+  final _workspaceFileBrowser = ValueNotifier<FileBrowserResult?>(null);
+  final _workspaceFilePreview = ValueNotifier<FileContentResult?>(null);
   Completer<List<_OpenCodeModelChoice>>? _pendingOpenCodeModelListCompleter;
   final _completedVoiceEventIds = <String>{};
   Completer<List<RepoChoice>>? _pendingRepoListCompleter;
@@ -876,6 +883,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _blossomServerController.dispose();
     _workspaceDisplayNameController.dispose();
     _workspaceRevision.dispose();
+    _workspaceFileBrowser.dispose();
+    _workspaceFilePreview.dispose();
     _workspaceVoiceResult.dispose();
     _queryController.dispose();
     _queryFocusNode.dispose();
@@ -4497,6 +4506,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       if (!fromCatchUp) {
         if (result.tool == 'model_list' && result.error == null) {
           unawaited(_openModelPicker(result));
+        } else if (result.tool == 'file_browser' && _showTeamWorkspace) {
+          _workspaceFileBrowser.value = FileBrowserResult.fromPayload(result);
+        } else if (result.tool == 'read_file' && pending?.workspacePanel == true) {
+          _workspaceFilePreview.value = FileContentResult.fromPayload(result);
         } else {
           unawaited(_openToolResult(result));
         }
@@ -5018,6 +5031,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     String tool, {
     Map<String, dynamic> extra = const {},
     String? visibleText,
+    bool workspacePanel = false,
   }) async {
     if (_sending || !await _ensureConnectedForSend()) return;
     final conversationKey = _activeConversationKey;
@@ -5033,6 +5047,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _pendingToolViews[requestId] = _PendingToolView(
       tool: tool,
       conversationKey: conversationKey,
+      workspacePanel: workspacePanel,
     );
     setState(() {
       _sending = true;
@@ -5108,13 +5123,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         );
         break;
       case 'file_browser':
+        final result = FileBrowserResult.fromPayload(payload);
         page = _FileBrowserPage(
-          result: FileBrowserResult.fromPayload(payload),
+          result: result,
           workdir: payload.workdir,
           onReadFile: (path) => _sendToolRequest(
             'read_file',
-            extra: {'path': path},
+            extra: {'path': _fileBrowserPath(result.directory, path)},
             visibleText: 'read $path',
+          ),
+          onBrowseDirectory: (path) => _sendToolRequest(
+            'file_browser',
+            extra: {'path': _fileBrowserPath(result.directory, path)},
+            visibleText: 'browse $path',
           ),
         );
         break;
@@ -5127,6 +5148,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await Navigator.of(
       context,
     ).push<void>(MaterialPageRoute(builder: (_) => page));
+  }
+
+  String _fileBrowserPath(String directory, String path) {
+    final base = directory.trim().replaceAll(RegExp(r'^/+|/+$'), '');
+    final child = path.trim().replaceAll(RegExp(r'^/+'), '');
+    return base.isEmpty ? child : '$base/$child';
   }
 
   Future<void> _openToolsSheet() async {
@@ -6653,6 +6680,20 @@ Return a concise catch-up summary of what happened after that point: completed w
         sessions: _repoTargets,
         onOpenSessions: () => setState(() => _showTeamWorkspace = false),
         onOpenSettings: () => unawaited(_openSettings()),
+        onOpenFiles: () => _sendToolRequest('file_browser'),
+        fileBrowser: _workspaceFileBrowser,
+        filePreview: _workspaceFilePreview,
+        onBrowseFiles: (directory, path) => _sendToolRequest(
+          'file_browser',
+          extra: {'path': _fileBrowserPath(directory, path)},
+          visibleText: 'browse $path',
+        ),
+        onReadWorkspaceFile: (directory, path) => _sendToolRequest(
+          'read_file',
+          extra: {'path': _fileBrowserPath(directory, path)},
+          visibleText: 'read $path',
+          workspacePanel: true,
+        ),
         workspaceRevision: _workspaceRevision,
         onLoadOpenCodeModels: _loadOpenCodeModels,
         initialFolderChoices: _cachedRepoChoices,
@@ -6930,6 +6971,11 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _sendWorkspaceRequest(Map<String, Object?> request) async {
+    if (request['action'] == 'refresh') {
+      // A cached Flutter connection can outlive its native relay session.
+      if (_connected || _connecting) await _disconnect(expand: false);
+      request = {'action': 'list'};
+    }
     if (!await _ensureConnectedToParentService()) return;
     await nostrSendQuery(query: jsonEncode({'workspace_request': request}));
   }

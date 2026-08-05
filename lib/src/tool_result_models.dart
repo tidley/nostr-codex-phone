@@ -192,14 +192,20 @@ class FileBrowserEntry {
 }
 
 class FileBrowserResult {
-  const FileBrowserResult({required this.entries, required this.truncated});
+  const FileBrowserResult({
+    required this.directory,
+    required this.entries,
+    required this.truncated,
+  });
 
+  final String directory;
   final List<FileBrowserEntry> entries;
   final bool truncated;
 
   factory FileBrowserResult.fromPayload(ToolResultPayload payload) {
     final rawEntries = payload.data['entries'];
     return FileBrowserResult(
+      directory: payload.data['directory']?.toString() ?? '',
       entries: rawEntries is Iterable
           ? rawEntries
                 .map(FileBrowserEntry.fromJson)
