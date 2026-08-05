@@ -1123,7 +1123,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       direct: _section == _WorkspaceSection.direct ? _active : null,
       sessions: widget.sessions,
       channels: widget.workspace.channels,
-      members: widget.workspace.members,
+      members: widget.workspace.directPeers(widget.ownPubkey),
       ownPubkey: widget.ownPubkey,
       displayName: widget.displayName,
       memberAliases: widget.memberAliases,
@@ -1198,6 +1198,28 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           setState(() => _alsoSendToMain = value),
       onOpenSettings: widget.onOpenSettings,
       onOpenFiles: widget.onOpenFiles,
+      onRenameConversation: (name) async {
+        if (_section == _WorkspaceSection.channel) {
+          await widget.onRequest({
+            'action': 'rename_channel',
+            'channel_id': _active,
+            'channel_name': name,
+          });
+        } else if (_section == _WorkspaceSection.direct) {
+          widget.onMemberAliasChanged(_active, name);
+        }
+      },
+      onDeleteConversation: () async {
+        if (_section == _WorkspaceSection.channel) {
+          await widget.onRequest({'action': 'delete_channel', 'channel_id': _active});
+        } else if (_section == _WorkspaceSection.direct) {
+          await widget.onRequest({
+            'action': 'delete_direct_conversation',
+            'recipient_pubkey': _active,
+          });
+        }
+        if (mounted) _select(_WorkspaceSection.channel, 'workspace');
+      },
       inviteCode: widget.inviteCode,
       memberStatus: widget.memberStatus,
       onCreateInvite: widget.onCreateInvite,
@@ -1855,9 +1877,9 @@ class _WorkspaceSidebar extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 6),
-          if (members.where((member) => member != ownPubkey).isEmpty)
+          if (members.isEmpty)
             const ListTile(dense: true, title: Text('No direct messages yet')),
-          for (final member in members.where((member) => member != ownPubkey))
+          for (final member in members)
             item(
               Icons.chat_bubble_outline,
               memberLabel(member),
@@ -1867,6 +1889,12 @@ class _WorkspaceSidebar extends StatelessWidget {
                   0,
               onTap: () => onSelect(_WorkspaceSection.direct, member),
             ),
+          const SizedBox(height: 18),
+          Text(
+            'Workspace',
+            style: Theme.of(context).textTheme.labelLarge?.copyWith(color: palette.label),
+          ),
+          const SizedBox(height: 6),
           item(
             Icons.people_outline,
             'People',
@@ -1936,6 +1964,8 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.onAlsoSendToMainChanged,
     required this.onOpenSettings,
     required this.onOpenFiles,
+    required this.onRenameConversation,
+    required this.onDeleteConversation,
     required this.inviteCode,
     required this.memberStatus,
     required this.onCreateInvite,
@@ -2003,6 +2033,8 @@ class _WorkspaceConversation extends StatefulWidget {
   final ValueChanged<bool> onAlsoSendToMainChanged;
   final VoidCallback onOpenSettings;
   final Future<void> Function() onOpenFiles;
+  final Future<void> Function(String name) onRenameConversation;
+  final Future<void> Function() onDeleteConversation;
   final String? inviteCode;
   final String memberStatus;
   final Future<void> Function() onCreateInvite;
@@ -2111,6 +2143,40 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
 
   String? get _latestMessageId =>
       widget.messages.isEmpty ? null : widget.messages.last.id;
+
+  Future<void> _renameConversation() async {
+    final controller = TextEditingController(text: widget.title);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename conversation'),
+        content: TextField(controller: controller, autofocus: true),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, controller.text), child: const Text('Save')),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name != null && name.trim().isNotEmpty) {
+      await widget.onRenameConversation(name.trim());
+    }
+  }
+
+  Future<void> _deleteConversation() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete conversation?'),
+        content: const Text('This deletes its message history and attached conversation settings.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (confirmed == true) await widget.onDeleteConversation();
+  }
 
   void _queueScrollToLatest() {
     if (_scrollQueued) return;
@@ -2224,6 +2290,16 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                     icon: const Icon(Icons.person_add_alt_1_outlined),
                     tooltip: 'Manage agents',
                   ),
+                PopupMenuButton<String>(
+                  tooltip: 'Conversation actions',
+                  onSelected: (action) => unawaited(
+                    action == 'rename' ? _renameConversation() : _deleteConversation(),
+                  ),
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'rename', child: Text('Rename conversation')),
+                    PopupMenuItem(value: 'delete', child: Text('Delete conversation')),
+                  ],
+                ),
                 if (widget.section == _WorkspaceSection.channel)
                   IconButton(
                     onPressed: () => unawaited(widget.onOpenFiles()),

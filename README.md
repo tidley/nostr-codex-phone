@@ -1,12 +1,21 @@
 # Code Call
 
-Android phone remote for OpenCode over encrypted Nostr GiftWrapped DMs.
+Encrypted collaborative workspace and remote client for OpenCode.
 
-Code Call lets a phone talk to an OpenCode worker running on a computer. You can type, record voice, attach files, switch repo sessions, inspect git state, request diffs, read files, and stop active tasks without opening a laptop.
+Code Call connects Android and Linux clients to an OpenCode worker on your computer through encrypted Nostr GiftWrapped DMs. It combines persistent team channels, direct messages, conversation agents, repository tools, voice and media, and peer-to-peer calls with focused repository sessions for individual work.
+
+## Core Capabilities
+
+- **Collaborative workspace:** persistent channels and direct messages for people and OpenCode agents, with Markdown, attachments, reactions, unread state, threads, and copyable text.
+- **Conversation agents:** attach named agents to a conversation, mention them to route work, configure their model, execution profile, working folder, and restart behavior, and inspect session health and token usage.
+- **Scoped agent work:** set a durable agent brief and a folder scope for each conversation. Agent replies remain in the originating thread.
+- **Repository access:** switch or spawn repository sessions, inspect Git status and diffs, browse worker files on demand, and preview file content beside the conversation or in a full workspace view.
+- **Voice, media, and calls:** send Whisper-transcribed voice and encrypted attachments through Blossom, or make STUN-only peer-to-peer direct and channel calls with optional camera or screen-share video.
+- **Focused remote control:** request status, stop active tasks, inspect history and model configuration, prepare commits, and start release workflows without opening a laptop.
 
 ## Screenshots
 
-These screens were captured from a Pixel 5 connected to a temporary `code-call-demo` worker. The conversation, OpenCode session, repository files, and Git changes are real; no UI data was mocked.
+These focused-session screens were captured from a Pixel 5 connected to a temporary `code-call-demo` worker. The conversation, OpenCode session, repository files, and Git changes are real; no UI data was mocked.
 
 | Encrypted chat | Session drawer | Spawn session |
 | --- | --- | --- |
@@ -24,38 +33,6 @@ These screens were captured from a Pixel 5 connected to a temporary `code-call-d
 | --- |
 | ![Push-to-talk waveform recording flow](screenshots/recording.png) |
 
-### Feature Tour
-
-- **Encrypted chat:** typed prompts and Markdown responses stay attached to the selected repository session, with resend, copy, read-aloud, and attachment actions.
-- **Session drawer:** search, select, pin, rename, restart, or remove saved worker targets; connected and loaded states are visible at a glance.
-- **Spawn session:** create a folder or search and open an existing repository through the computer service.
-- **Tools:** request status, stop work, inspect Git, read files, view history/configuration, prepare a commit, or start a release workflow.
-- **Git status and diff:** filter staged, working, and untracked files, then inspect changed files with patch navigation and line numbers.
-- **Repository browser:** navigate folders, search relative paths, and open readable files without typing a path.
-- **File viewer:** inspect selectable, line-numbered content with horizontal scrolling and find-in-file navigation.
-- **Voice and attachments:** record encrypted audio for Whisper transcription or send encrypted media/file references through Blossom.
-- **Team workspace:** collaborate in persistent channels and direct messages with member profiles, unread counts, reactions, Markdown, copyable text, attachments, and focused threads.
-- **Conversation agents:** attach named OpenCode agents to a channel or direct message, mention them to route work, and keep their replies, typing state, usage, model, execution profile, and session health visible.
-- **Agent briefs and folder scopes:** give each conversation durable instructions and restrict its agents to selected folders, including their nested repositories.
-- **Workspace files:** browse the worker repository from a channel, load folders on demand, move up to parent folders, preview selectable file content beside the conversation, switch between Files and Thread tabs, or expand files to the full workspace.
-- **Direct calls:** make encrypted peer-to-peer audio calls and channel calls, with optional camera or screen-share video. Calls use STUN for direct connectivity and do not require a TURN relay.
-- **Settings:** manage worker targets, local keys, relays, Blossom, TTS, haptics, profile import/export, and connection diagnostics.
-
-## What It Does
-
-- Sends typed requests to OpenCode through encrypted Nostr DMs.
-- Records push-to-talk audio, encrypts it, uploads it to Blossom, and lets the worker transcribe it with Whisper.
-- Supports encrypted file/media attachments through Blossom references.
-- Stores multiple repo targets and routes each request to the selected workdir.
-- Spawns or reopens repo workers from the phone through the session drawer.
-- Provides a mobile Tools menu for status, stop task, Git inspection, file reading, task history, model config, commit prep, and release workflow help.
-- Renders responses as Markdown and can speak replies with Android TTS.
-- Provides a shared workspace with channels, direct messages, threads, reactions, member names, unread state, and attachment sharing.
-- Runs durable OpenCode agents in workspace conversations. Agents can use an assigned model, OpenCode profile, working folder, restart policy, conversation brief, and folder scope.
-- Keeps agent replies in the originating thread and targets the agent implicitly when replying to an agent message in a thread.
-- Lets workspace members browse worker files folder by folder and preview readable content in a resizable Files panel.
-- Supports direct and channel FIPS calls with Opus audio, STUN-only peer-to-peer connectivity, and optional H.264 camera or screen-share video.
-
 ## Team Workspace
 
 The workspace is a collaboration surface for people and OpenCode agents, not a stream of transient prompts. Channels and direct messages retain their history on the worker. Messages support Markdown, attachments, reactions, thread replies, and selectable text. Mentions offer only the people and agents who participate in the current conversation.
@@ -66,9 +43,9 @@ Agents are configured from the workspace: create, rename, restart, delete, set t
 
 Channels include a repository Files action. The Files panel loads one directory at a time to remain reliable over encrypted relay messages. It shows the current folder, provides an Up folder control, and never relies on a partial recursive directory index. It shares the right-hand workspace panel with threads, offers Thread and Files tabs when both are open, previews selectable file content in place, and can expand to fill the workspace.
 
-## Mobile UI
+## Clients and Focused Sessions
 
-The main screen is a chat view with a composer at the bottom. Type in the query box and tap send, or leave it empty and tap `Record` for a voice request. The attachment button sends encrypted media/file references.
+The focused-session view is a remote repository workspace with a composer at the bottom. Type in the query box and tap send, or leave it empty and tap `Record` for a voice request. The attachment button sends encrypted media/file references.
 
 The session drawer contains:
 
@@ -104,10 +81,10 @@ The browser layout and file contents are returned as structured NIP-17/NIP-59 Gi
 
 - Text, transcripts, responses, attachment URLs, and decryption keys are inside NIP-17/NIP-59 encrypted GiftWrapped DMs.
 - Blossom uploads are public blobs, but the uploaded payload is encrypted locally before upload.
-- The worker only accepts the configured phone pubkey, or claims the first phone during pairing when no owner is configured. First-owner pairing requires both the QR secret and its six-digit confirmation code.
+- The worker authorizes configured accepted peers and persisted workspace members. New members join through an invitation; first-owner pairing requires both the QR secret and its six-digit confirmation code.
 - SQLite memory, if enabled, is local to the worker and contains decrypted request/response history.
 
-## Install APK
+## Install Clients
 
 Download the latest APK from GitHub Releases:
 
@@ -115,7 +92,7 @@ Download the latest APK from GitHub Releases:
 https://github.com/tidley/nostr-codex-phone/releases
 ```
 
-Install on Android, then scan the worker QR code or paste the worker target details in Settings. Keep the APK and worker on the same release version so structured tool views use the same wire contract.
+Install on Android, then scan the worker QR code or paste the worker target details in Settings. A Linux desktop client can be built with `flutter build linux --release`. Keep each client and its worker on the same release version so structured tool views use the same wire contract.
 
 ## Start A Worker
 
@@ -143,7 +120,7 @@ NOSTR_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://nostr.mom'
 AGENT_BACKEND='opencode'
 OPENCODE_BIN='opencode'
 OPENCODE_AGENT='build'
-OPENCODE_MODEL='openai/gpt-5.5'
+OPENCODE_MODEL='provider/model-id'
 AGENT_WORKDIR='/path/to/repo'
 
 TRANSCRIBE_BIN='/home/user/.local/bin/whisper-cpp'
