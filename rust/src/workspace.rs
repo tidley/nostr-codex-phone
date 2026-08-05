@@ -81,6 +81,14 @@ pub struct WorkspaceConversationAgent {
     pub folder_scope: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceConversationPreprompt {
+    pub channel_id: Option<String>,
+    pub member_pubkey: Option<String>,
+    pub peer_pubkey: Option<String>,
+    pub preprompt: String,
+}
+
 pub struct WorkspaceStore {
     conn: Connection,
 }
@@ -104,7 +112,10 @@ impl WorkspaceStore {
                CREATE TABLE IF NOT EXISTS workspace_conversation_agents (agent_id TEXT NOT NULL REFERENCES workspace_agents(id), channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT,
                   folder_scope_json TEXT NOT NULL DEFAULT '[]',
                   PRIMARY KEY (agent_id, channel_id, member_pubkey, peer_pubkey),
-                 CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+                  CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+               CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL,
+                  PRIMARY KEY (channel_id, member_pubkey, peer_pubkey),
+                  CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
               CREATE INDEX IF NOT EXISTS workspace_messages_channel ON workspace_messages(channel_id, created_at);
               CREATE INDEX IF NOT EXISTS workspace_messages_direct ON workspace_messages(recipient_pubkey, sender_pubkey, created_at);",
         )?;
@@ -549,6 +560,46 @@ impl WorkspaceStore {
         Ok(memberships)
     }
 
+    pub fn conversation_preprompts(&self) -> Result<Vec<WorkspaceConversationPreprompt>> {
+        let mut statement = self.conn.prepare("SELECT channel_id, member_pubkey, peer_pubkey, preprompt FROM workspace_conversation_preprompts ORDER BY channel_id, member_pubkey, peer_pubkey")?;
+        let preprompts = statement
+            .query_map([], conversation_preprompt_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(preprompts)
+    }
+
+    pub fn set_conversation_preprompt(
+        &self,
+        channel_id: Option<&str>,
+        member: Option<&str>,
+        peer: Option<&str>,
+        preprompt: &str,
+    ) -> Result<()> {
+        if preprompt.chars().count() > 4_000 {
+            bail!("conversation pre-prompt may not exceed 4000 characters");
+        }
+        let (channel_id, member, peer) = match (channel_id, member, peer) {
+            (Some(channel_id), None, None) => {
+                self.require_channel(channel_id)?;
+                (Some(channel_id.to_string()), None, None)
+            }
+            (None, Some(member), Some(peer)) => {
+                let (member, peer) = direct_participants(member, peer)?;
+                if !self.is_member(&member)? || !self.is_member(&peer)? {
+                    bail!("direct conversation participant is not a workspace member");
+                }
+                (None, Some(member), Some(peer))
+            }
+            _ => bail!("conversation must be a channel or a direct message"),
+        };
+        let preprompt = preprompt.trim();
+        self.conn.execute("DELETE FROM workspace_conversation_preprompts WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3", params![channel_id, member, peer])?;
+        if !preprompt.is_empty() {
+            self.conn.execute("INSERT INTO workspace_conversation_preprompts (channel_id, member_pubkey, peer_pubkey, preprompt) VALUES (?1, ?2, ?3, ?4)", params![channel_id, member, peer, preprompt])?;
+        }
+        Ok(())
+    }
+
     pub fn add_conversation_agent(
         &self,
         agent_id: &str,
@@ -935,6 +986,16 @@ fn conversation_agent_from_row(
         folder_scope: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
     })
 }
+fn conversation_preprompt_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkspaceConversationPreprompt> {
+    Ok(WorkspaceConversationPreprompt {
+        channel_id: row.get(0)?,
+        member_pubkey: row.get(1)?,
+        peer_pubkey: row.get(2)?,
+        preprompt: row.get(3)?,
+    })
+}
 fn direct_participants(member: &str, peer: &str) -> Result<(String, String)> {
     let mut participants = [required("member", member)?, required("peer", peer)?];
     participants.sort();
@@ -1300,6 +1361,42 @@ mod tests {
             .conversation_agents()
             .unwrap();
         assert_eq!(memberships[0].folder_scope, scope);
+    }
+
+    #[test]
+    fn persists_channel_and_direct_conversation_preprompts() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        store.add_member("owner").unwrap();
+        store.add_member("member").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        store
+            .set_conversation_preprompt(Some(&channel.id), None, None, "Review carefully.")
+            .unwrap();
+        store
+            .set_conversation_preprompt(None, Some("member"), Some("owner"), "Be concise.")
+            .unwrap();
+        drop(store);
+
+        let mut preprompts = WorkspaceStore::open(path.path())
+            .unwrap()
+            .conversation_preprompts()
+            .unwrap();
+        preprompts.sort_by(|left, right| left.preprompt.cmp(&right.preprompt));
+        assert_eq!(preprompts[0].preprompt, "Be concise.");
+        assert_eq!(preprompts[0].member_pubkey.as_deref(), Some("member"));
+        assert_eq!(preprompts[0].peer_pubkey.as_deref(), Some("owner"));
+        assert_eq!(preprompts[1].preprompt, "Review carefully.");
+        assert_eq!(
+            preprompts[1].channel_id.as_deref(),
+            Some(channel.id.as_str())
+        );
+
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        store
+            .set_conversation_preprompt(Some(&channel.id), None, None, "")
+            .unwrap();
+        assert_eq!(store.conversation_preprompts().unwrap().len(), 1);
     }
 
     #[test]

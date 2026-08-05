@@ -35,16 +35,17 @@ use rust_lib_nostr_codex_phone::protocol::{
     InviteCreated, InviteRejected, MediaBundle, MediaReference, OpenCodeSessionList,
     OpenCodeSessionListEntry, RedeemInvite, RepoList, RepoListEntry, RepoListRoot, TargetInvite,
     TargetParent, ToolResult, WireMessage, WorkspaceAgentPayload, WorkspaceChannelPayload,
-    WorkspaceConversationAgentPayload, WorkspaceMemberPayload, WorkspaceMentionPayload,
-    WorkspaceMessagePayload, WorkspaceRequest, WorkspaceTypingPayload, WorkspaceUpdate,
+    WorkspaceConversationAgentPayload, WorkspaceConversationPrepromptPayload,
+    WorkspaceMemberPayload, WorkspaceMentionPayload, WorkspaceMessagePayload, WorkspaceRequest,
+    WorkspaceTypingPayload, WorkspaceUpdate,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
     DownloadedAudio, TranscribeConfig,
 };
 use rust_lib_nostr_codex_phone::workspace::{
-    WorkspaceAgent, WorkspaceAgentOpenCodeProfile, WorkspaceConversationAgent, WorkspaceMessage,
-    WorkspaceStore,
+    WorkspaceAgent, WorkspaceAgentOpenCodeProfile, WorkspaceConversationAgent,
+    WorkspaceConversationPreprompt, WorkspaceMessage, WorkspaceStore,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
@@ -796,6 +797,12 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             }
         };
         let Some(message) = message else { continue };
+        info!(
+            event_id = %message.event_id,
+            sender = %message.sender_pubkey,
+            kind = %message.kind,
+            "received Nostr message"
+        );
         // Invite redemption must run before the owner gate because invitees are not
         // members yet and desktop clients wrap the request in a query message.
         if let Some(code) = invite_redemption_code(&message) {
@@ -905,6 +912,11 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         }
 
         if let Some(request) = workspace_request(&message) {
+            info!(
+                action = %request.action,
+                sender = %message.sender_pubkey,
+                "received workspace request"
+            );
             let workspace_voice_key = workspace_voice_key(&message.sender_pubkey_hex, &request);
             if workspace_voice_key
                 .as_ref()
@@ -1203,6 +1215,7 @@ async fn process_workspace_request(
                 messages: vec![],
                 agents: vec![],
                 conversation_agents: vec![],
+                conversation_preprompts: vec![],
                 typing: Some(WorkspaceTypingPayload {
                     sender_pubkey: sender.to_string(),
                     agent_id: None,
@@ -1238,7 +1251,10 @@ async fn process_workspace_request(
             }
             return Ok(());
         }
-        "list" => workspace_snapshot(workspace, sender)?,
+        "list" => {
+            send_workspace_snapshot(workspace, messenger, sender).await?;
+            return Ok(());
+        }
         "create_channel" => {
             let channel = workspace
                 .create_channel(request.channel_name.as_deref().unwrap_or_default(), sender)?;
@@ -1249,6 +1265,7 @@ async fn process_workspace_request(
                 messages: vec![],
                 agents: vec![],
                 conversation_agents: vec![],
+                conversation_preprompts: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
@@ -1266,6 +1283,33 @@ async fn process_workspace_request(
                 messages: vec![],
                 agents: vec![],
                 conversation_agents: vec![],
+                conversation_preprompts: vec![],
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, &update).await?;
+            return Ok(());
+        }
+        "set_conversation_preprompt" => {
+            let channel_id = request.channel_id.as_deref();
+            let recipient = request.recipient_pubkey.as_deref();
+            workspace.set_conversation_preprompt(
+                channel_id,
+                channel_id.is_none().then_some(sender),
+                recipient,
+                request.body.as_deref().unwrap_or_default(),
+            )?;
+            let update = WorkspaceUpdate {
+                action: "conversation_preprompt_updated".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![],
+                agents: vec![],
+                conversation_agents: vec![],
+                conversation_preprompts: workspace
+                    .conversation_preprompts()?
+                    .into_iter()
+                    .map(conversation_preprompt_payload)
+                    .collect(),
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
@@ -1288,6 +1332,14 @@ async fn process_workspace_request(
                     membership.channel_id.as_deref() == request.channel_id.as_deref()
                 })
                 .map(conversation_agent_payload)
+                .collect(),
+            conversation_preprompts: workspace
+                .conversation_preprompts()?
+                .into_iter()
+                .filter(|preprompt| {
+                    preprompt.channel_id.as_deref() == request.channel_id.as_deref()
+                })
+                .map(conversation_preprompt_payload)
                 .collect(),
             typing: None,
         },
@@ -1315,6 +1367,18 @@ async fn process_workspace_request(
                     )
                 })
                 .map(conversation_agent_payload)
+                .collect(),
+            conversation_preprompts: workspace
+                .conversation_preprompts()?
+                .into_iter()
+                .filter(|preprompt| {
+                    direct_preprompt_matches(
+                        preprompt,
+                        sender,
+                        request.recipient_pubkey.as_deref().unwrap_or_default(),
+                    )
+                })
+                .map(conversation_preprompt_payload)
                 .collect(),
             typing: None,
         },
@@ -1356,6 +1420,7 @@ async fn process_workspace_request(
                 messages: vec![message_payload(message)],
                 agents: vec![],
                 conversation_agents: vec![],
+                conversation_preprompts: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
@@ -1366,6 +1431,7 @@ async fn process_workspace_request(
                 Some(request.channel_id.as_deref().unwrap_or_default()),
                 None,
                 None,
+                request.parent_id.as_deref(),
                 &request.body.unwrap_or_default(),
                 &request.mentions,
             )
@@ -1389,6 +1455,7 @@ async fn process_workspace_request(
                 messages: vec![message_payload(message)],
                 agents: vec![],
                 conversation_agents: vec![],
+                conversation_preprompts: vec![],
                 typing: None,
             };
             // A direct message is only delivered to its two participants.
@@ -1407,6 +1474,7 @@ async fn process_workspace_request(
                 None,
                 Some(sender),
                 request.recipient_pubkey.as_deref(),
+                request.parent_id.as_deref(),
                 &request.body.unwrap_or_default(),
                 &request.mentions,
             )
@@ -1483,6 +1551,7 @@ async fn process_workspace_request(
                 messages: vec![message_payload(message)],
                 agents: vec![],
                 conversation_agents: vec![],
+                conversation_preprompts: vec![],
                 typing: None,
             };
             if update.messages[0].channel_id.is_some() {
@@ -1502,19 +1571,35 @@ async fn process_workspace_request(
             }
             return Ok(());
         }
-        "list_agents" => WorkspaceUpdate {
-            action: "agents".to_string(),
-            channels: vec![],
-            members: vec![],
-            messages: vec![],
-            agents: workspace.agents()?.into_iter().map(agent_payload).collect(),
-            conversation_agents: workspace
-                .conversation_agents()?
-                .into_iter()
-                .map(conversation_agent_payload)
-                .collect(),
-            typing: None,
-        },
+        "list_agents" => {
+            let sessions = list_opencode_sessions(codex_config)
+                .await
+                .unwrap_or_default();
+            WorkspaceUpdate {
+                action: "agents".to_string(),
+                channels: vec![],
+                members: vec![],
+                messages: vec![],
+                agents: workspace
+                    .agents()?
+                    .into_iter()
+                    .map(|agent| {
+                        agent_payload(resolve_agent_runtime(agent, &sessions, codex_config))
+                    })
+                    .collect(),
+                conversation_agents: workspace
+                    .conversation_agents()?
+                    .into_iter()
+                    .map(conversation_agent_payload)
+                    .collect(),
+                conversation_preprompts: workspace
+                    .conversation_preprompts()?
+                    .into_iter()
+                    .map(conversation_preprompt_payload)
+                    .collect(),
+                typing: None,
+            }
+        }
         "create_agent" => {
             let profile = workspace_agent_profile_from_request(&request, codex_config)?;
             let agent_config = codex_config_for_workspace_agent(codex_config, &profile)?;
@@ -1539,6 +1624,7 @@ async fn process_workspace_request(
                 messages: vec![],
                 agents: vec![agent_payload(agent)],
                 conversation_agents: vec![],
+                conversation_preprompts: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
@@ -1556,6 +1642,7 @@ async fn process_workspace_request(
                 messages: vec![],
                 agents: vec![agent_payload(agent)],
                 conversation_agents: vec![],
+                conversation_preprompts: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
@@ -1584,6 +1671,7 @@ async fn process_workspace_request(
                 messages: vec![],
                 agents: vec![agent_payload(agent)],
                 conversation_agents: vec![],
+                conversation_preprompts: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
@@ -1609,6 +1697,7 @@ async fn process_workspace_request(
                 messages: vec![],
                 agents: vec![agent_payload(agent)],
                 conversation_agents: vec![],
+                conversation_preprompts: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
@@ -1626,6 +1715,11 @@ async fn process_workspace_request(
                     .conversation_agents()?
                     .into_iter()
                     .map(conversation_agent_payload)
+                    .collect(),
+                conversation_preprompts: workspace
+                    .conversation_preprompts()?
+                    .into_iter()
+                    .map(conversation_preprompt_payload)
                     .collect(),
                 typing: None,
             };
@@ -1662,6 +1756,11 @@ async fn process_workspace_request(
                     .into_iter()
                     .map(conversation_agent_payload)
                     .collect(),
+                conversation_preprompts: workspace
+                    .conversation_preprompts()?
+                    .into_iter()
+                    .map(conversation_preprompt_payload)
+                    .collect(),
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, &update).await?;
@@ -1672,6 +1771,44 @@ async fn process_workspace_request(
     messenger
         .send_wire_to_pubkey(sender, WireMessage::workspace_update(update))
         .await?;
+    Ok(())
+}
+
+async fn send_workspace_snapshot(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+    sender: &str,
+) -> Result<()> {
+    let mut snapshot = workspace_snapshot(workspace, sender)?;
+    let messages = std::mem::take(&mut snapshot.messages);
+    let payload = WireMessage::workspace_update(snapshot.clone()).to_json()?;
+    info!(
+        channels = snapshot.channels.len(),
+        members = snapshot.members.len(),
+        messages = messages.len(),
+        agents = snapshot.agents.len(),
+        payload_bytes = payload.len(),
+        "sending workspace snapshot header"
+    );
+    messenger
+        .send_wire_to_pubkey(sender, WireMessage::workspace_update(snapshot))
+        .await?;
+
+    for messages in messages.chunks(16) {
+        let update = WorkspaceUpdate {
+            action: "snapshot_messages".to_string(),
+            channels: vec![],
+            members: vec![],
+            messages: messages.to_vec(),
+            agents: vec![],
+            conversation_agents: vec![],
+            conversation_preprompts: vec![],
+            typing: None,
+        };
+        messenger
+            .send_wire_to_pubkey(sender, WireMessage::workspace_update(update))
+            .await?;
+    }
     Ok(())
 }
 
@@ -1688,6 +1825,11 @@ fn workspace_snapshot(workspace: &WorkspaceStore, member: &str) -> Result<Worksp
             .conversation_agents()?
             .into_iter()
             .map(conversation_agent_payload)
+            .collect(),
+        conversation_preprompts: workspace
+            .conversation_preprompts()?
+            .into_iter()
+            .map(conversation_preprompt_payload)
             .collect(),
         members: workspace
             .members()?
@@ -1744,6 +1886,7 @@ async fn send_agent_typing(
         messages: vec![],
         agents: vec![],
         conversation_agents: vec![],
+        conversation_preprompts: vec![],
         typing: Some(WorkspaceTypingPayload {
             sender_pubkey: format!("agent:{}", agent.id),
             agent_id: Some(agent.id.clone()),
@@ -1912,6 +2055,70 @@ fn agent_payload(
         output_tokens: agent.output_tokens,
     }
 }
+
+fn resolve_agent_runtime(
+    mut agent: rust_lib_nostr_codex_phone::workspace::WorkspaceAgent,
+    sessions: &[OpenCodeSessionInfo],
+    config: &CodexConfig,
+) -> rust_lib_nostr_codex_phone::workspace::WorkspaceAgent {
+    let session = agent
+        .opencode_session_id
+        .as_deref()
+        .and_then(|id| sessions.iter().find(|session| session.id == id));
+    if let Some(session) = session {
+        agent.workdir = session.directory.clone().or(agent.workdir);
+        agent.opencode_agent = session.agent.clone().or(agent.opencode_agent);
+        agent.opencode_provider_id = session.provider_id.clone().or(agent.opencode_provider_id);
+        agent.opencode_provider_name = agent
+            .opencode_provider_name
+            .or_else(|| agent.opencode_provider_id.clone());
+        agent.opencode_model_id = session.model_id.clone().or(agent.opencode_model_id);
+        agent.opencode_model_name = agent
+            .opencode_model_name
+            .or_else(|| agent.opencode_model_id.clone());
+        agent.initialized_at = session_created_at(session).or(agent.initialized_at);
+        agent.input_tokens = session
+            .input_tokens
+            .and_then(|tokens| i64::try_from(tokens).ok())
+            .or(agent.input_tokens);
+        agent.output_tokens = session
+            .output_tokens
+            .and_then(|tokens| i64::try_from(tokens).ok())
+            .or(agent.output_tokens);
+    }
+    agent.workdir = agent
+        .workdir
+        .or_else(|| Some(config.working_dir.to_string_lossy().to_string()));
+    agent.opencode_agent = agent
+        .opencode_agent
+        .or_else(|| Some(config.opencode.agent.clone()));
+    if agent.opencode_provider_id.is_none() {
+        agent.opencode_provider_id = config
+            .opencode
+            .model
+            .as_ref()
+            .map(|model| model.provider_id.clone());
+        agent.opencode_provider_name = agent.opencode_provider_id.clone();
+    }
+    if agent.opencode_model_id.is_none() {
+        agent.opencode_model_id = config
+            .opencode
+            .model
+            .as_ref()
+            .map(|model| model.model_id.clone());
+        agent.opencode_model_name = agent.opencode_model_id.clone();
+    }
+    agent
+}
+
+fn session_created_at(session: &OpenCodeSessionInfo) -> Option<i64> {
+    let timestamp = session.created_at.as_deref()?.parse::<i64>().ok()?;
+    Some(if timestamp > 10_000_000_000 {
+        timestamp / 1000
+    } else {
+        timestamp
+    })
+}
 fn conversation_agent_payload(
     agent: WorkspaceConversationAgent,
 ) -> WorkspaceConversationAgentPayload {
@@ -1921,6 +2128,17 @@ fn conversation_agent_payload(
         member_pubkey: agent.member_pubkey,
         peer_pubkey: agent.peer_pubkey,
         folder_scope: agent.folder_scope,
+    }
+}
+
+fn conversation_preprompt_payload(
+    preprompt: WorkspaceConversationPreprompt,
+) -> WorkspaceConversationPrepromptPayload {
+    WorkspaceConversationPrepromptPayload {
+        channel_id: preprompt.channel_id,
+        member_pubkey: preprompt.member_pubkey,
+        peer_pubkey: preprompt.peer_pubkey,
+        preprompt: preprompt.preprompt,
     }
 }
 
@@ -2098,10 +2316,12 @@ async fn route_conversation_agents(
     channel_id: Option<&str>,
     member: Option<&str>,
     peer: Option<&str>,
+    parent_id: Option<&str>,
     body: &str,
     mentions: &[WorkspaceMentionPayload],
 ) -> Result<()> {
     let memberships = workspace.conversation_agents()?;
+    let preprompts = workspace.conversation_preprompts()?;
     for agent in workspace.agents_for_conversation(channel_id, member, peer)? {
         if !conversation_agent_is_targeted(&agent.id, mentions) {
             continue;
@@ -2135,8 +2355,20 @@ async fn route_conversation_agents(
             })
             .map(|membership| membership.folder_scope.as_slice())
             .unwrap_or_default();
+        let preprompt = preprompts
+            .iter()
+            .find(|preprompt| match channel_id {
+                Some(channel_id) => preprompt.channel_id.as_deref() == Some(channel_id),
+                None => direct_preprompt_matches(
+                    preprompt,
+                    member.unwrap_or_default(),
+                    peer.unwrap_or_default(),
+                ),
+            })
+            .map(|preprompt| preprompt.preprompt.as_str())
+            .unwrap_or_default();
         let scoped_body = match conversation_scope_prompt(folder_scope, &agent_config) {
-            Ok(scope) => format!("{scope}\n\nUser message:\n{body}"),
+            Ok(scope) => conversation_agent_prompt(preprompt, &scope, body),
             Err(err) => {
                 warn!(agent = %agent.id, "conversation folder scope is invalid: {err:#}");
                 continue;
@@ -2178,6 +2410,7 @@ async fn route_conversation_agents(
                             messages: vec![],
                             agents: vec![agent_payload(updated)],
                             conversation_agents: vec![],
+                            conversation_preprompts: vec![],
                             typing: None,
                         },
                     )
@@ -2200,6 +2433,7 @@ async fn route_conversation_agents(
                         messages: vec![],
                         agents: vec![agent_payload(updated)],
                         conversation_agents: vec![],
+                        conversation_preprompts: vec![],
                         typing: None,
                     },
                 )
@@ -2246,6 +2480,7 @@ async fn route_conversation_agents(
                     messages: vec![],
                     agents: vec![agent_payload(updated)],
                     conversation_agents: vec![],
+                    conversation_preprompts: vec![],
                     typing: None,
                 },
             )
@@ -2258,7 +2493,7 @@ async fn route_conversation_agents(
                 &result.response,
                 &[],
                 &[],
-                None,
+                parent_id,
             )?,
             None => workspace.add_direct_message(
                 &format!("agent:{}", agent.id),
@@ -2266,7 +2501,7 @@ async fn route_conversation_agents(
                 &result.response,
                 &[],
                 &[],
-                None,
+                parent_id,
             )?,
         };
         let update = WorkspaceUpdate {
@@ -2276,6 +2511,7 @@ async fn route_conversation_agents(
             messages: vec![message_payload(message)],
             agents: vec![],
             conversation_agents: vec![],
+            conversation_preprompts: vec![],
             typing: None,
         };
         if channel_id.is_some() {
@@ -2292,12 +2528,10 @@ async fn route_conversation_agents(
 }
 
 fn conversation_scope_prompt(scope: &[String], config: &CodexConfig) -> Result<String> {
-    // Empty scopes only occur in workspace data written before folder scopes existed.
-    let folders = if scope.is_empty() {
-        vec![config.working_dir.to_string_lossy().to_string()]
-    } else {
-        canonical_conversation_folder_scope(scope, config)?
-    };
+    if scope.is_empty() {
+        return Ok(String::new());
+    }
+    let folders = canonical_conversation_folder_scope(scope, config)?;
     let repositories = repositories_in_folder_scope(&folders)?;
     let repository_list = if repositories.is_empty() {
         "No Git repositories were found in the selected folders.".to_string()
@@ -2309,6 +2543,32 @@ fn conversation_scope_prompt(scope: &[String], config: &CodexConfig) -> Result<S
         folders.join("\n"),
         repository_list,
     ))
+}
+
+fn direct_preprompt_matches(
+    preprompt: &WorkspaceConversationPreprompt,
+    one: &str,
+    two: &str,
+) -> bool {
+    let mut participants = [one, two];
+    participants.sort();
+    preprompt.member_pubkey.as_deref() == Some(participants[0])
+        && preprompt.peer_pubkey.as_deref() == Some(participants[1])
+}
+
+fn conversation_agent_prompt(preprompt: &str, scope: &str, body: &str) -> String {
+    if preprompt.is_empty() && scope.is_empty() {
+        return body.to_string();
+    }
+    let mut sections = Vec::new();
+    if !preprompt.is_empty() {
+        sections.push(preprompt.to_string());
+    }
+    if !scope.is_empty() {
+        sections.push(scope.to_string());
+    }
+    sections.push(format!("User message:\n{body}"));
+    sections.join("\n\n")
 }
 
 fn repositories_in_folder_scope(folders: &[String]) -> Result<Vec<String>> {
@@ -4747,7 +5007,10 @@ fn structured_tool_result(
             .and_then(serde_json::Value::as_str)
             .map(|path| read_file_data(workdir, path))
             .unwrap_or_else(|| serde_json::json!({ "error": "A file path is required." })),
-        "file_browser" => file_browser_data(workdir),
+        "file_browser" => file_browser_data(
+            workdir,
+            object.get("path").and_then(serde_json::Value::as_str),
+        ),
         _ => serde_json::json!({
             "text": handle_tool_request(memory, peer_pubkey, request, workdir)
                 .unwrap_or_else(|| format!("Unknown tool request `{tool}`.")),
@@ -4894,7 +5157,7 @@ fn read_file_data(workdir: &Path, requested: &str) -> serde_json::Value {
     }
 }
 
-fn file_browser_data(workdir: &Path) -> serde_json::Value {
+fn file_browser_data(workdir: &Path, requested: Option<&str>) -> serde_json::Value {
     const MAX_ENTRIES: usize = 500;
     const MAX_SERIALIZED_ENTRY_BYTES: usize = 16000;
     let root = match workdir.canonicalize() {
@@ -4903,52 +5166,31 @@ fn file_browser_data(workdir: &Path) -> serde_json::Value {
             return serde_json::json!({ "error": format!("Could not open repo: {error}") })
         }
     };
+    let requested = requested.unwrap_or_default();
+    let directory = if requested.trim().is_empty() {
+        root.clone()
+    } else {
+        root.join(clean_path_argument(requested))
+    };
+    let directory = match directory.canonicalize() {
+        Ok(directory) if directory.starts_with(&root) && directory.is_dir() => directory,
+        Ok(_) => return serde_json::json!({ "error": "Folder is outside the repository." }),
+        Err(error) => {
+            return serde_json::json!({ "error": format!("Could not open `{requested}`: {error}") })
+        }
+    };
     let mut entries = Vec::new();
     let mut serialized_entry_bytes = 0;
     let mut truncated = false;
-    collect_file_browser_entries(
-        &root,
-        &root,
-        0,
-        MAX_ENTRIES,
-        MAX_SERIALIZED_ENTRY_BYTES,
-        &mut serialized_entry_bytes,
-        &mut truncated,
-        &mut entries,
-    );
-    serde_json::json!({
-        "entries": entries,
-        "truncated": truncated,
-    })
-}
-
-fn collect_file_browser_entries(
-    root: &Path,
-    directory: &Path,
-    depth: usize,
-    max_entries: usize,
-    max_serialized_entry_bytes: usize,
-    serialized_entry_bytes: &mut usize,
-    truncated: &mut bool,
-    entries: &mut Vec<serde_json::Value>,
-) {
-    if depth >= 16
-        || entries.len() >= max_entries
-        || *serialized_entry_bytes >= max_serialized_entry_bytes
-    {
-        *truncated = true;
-        return;
-    }
-    let Ok(read_dir) = fs::read_dir(directory) else {
-        return;
+    let Ok(read_dir) = fs::read_dir(&directory) else {
+        return serde_json::json!({ "error": format!("Could not read `{}`", directory.display()) });
     };
     let mut children = read_dir.filter_map(|entry| entry.ok()).collect::<Vec<_>>();
     children.sort_by_key(|entry| entry.file_name().to_string_lossy().to_ascii_lowercase());
-
     for entry in children {
-        if entries.len() >= max_entries {
-            *truncated = true;
-            return;
+        if entries.len() >= MAX_ENTRIES {
+            truncated = true;
+            break;
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -4958,34 +5200,23 @@ fn collect_file_browser_entries(
         if file_type.is_symlink() || file_browser_entry_excluded(&name, file_type.is_dir()) {
             continue;
         }
-        let path = entry.path();
-        let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
         let value = serde_json::json!({
-            "path": relative,
+            "path": name,
             "is_dir": file_type.is_dir(),
         });
         let value_bytes = value.to_string().len() + 1;
-        if *serialized_entry_bytes + value_bytes > max_serialized_entry_bytes {
-            *truncated = true;
-            return;
+        if serialized_entry_bytes + value_bytes > MAX_SERIALIZED_ENTRY_BYTES {
+            truncated = true;
+            break;
         }
-        *serialized_entry_bytes += value_bytes;
-        if file_type.is_dir() {
-            entries.push(value);
-            collect_file_browser_entries(
-                root,
-                &path,
-                depth + 1,
-                max_entries,
-                max_serialized_entry_bytes,
-                serialized_entry_bytes,
-                truncated,
-                entries,
-            );
-        } else if file_type.is_file() {
-            entries.push(value);
-        }
+        serialized_entry_bytes += value_bytes;
+        entries.push(value);
     }
+    serde_json::json!({
+        "directory": directory.strip_prefix(&root).unwrap_or(&directory).to_string_lossy(),
+        "entries": entries,
+        "truncated": truncated,
+    })
 }
 
 fn file_browser_entry_excluded(name: &str, is_dir: bool) -> bool {
@@ -6455,6 +6686,26 @@ mod tests {
     }
 
     #[test]
+    fn empty_conversation_scope_does_not_restrict_the_agent() {
+        let root = tempfile::tempdir().unwrap();
+        let config = test_codex_config(root.path().to_path_buf());
+
+        assert_eq!(conversation_scope_prompt(&[], &config).unwrap(), "");
+    }
+
+    #[test]
+    fn conversation_preprompt_precedes_scope_and_user_message() {
+        assert_eq!(
+            conversation_agent_prompt("Review carefully.", "Folder scope.", "Fix the bug."),
+            "Review carefully.\n\nFolder scope.\n\nUser message:\nFix the bug."
+        );
+        assert_eq!(
+            conversation_agent_prompt("", "", "Fix the bug."),
+            "Fix the bug."
+        );
+    }
+
+    #[test]
     fn seeds_all_trusted_recipients_as_workspace_members() {
         let temp_dir = tempfile::tempdir().unwrap();
         let workspace = WorkspaceStore::open(&temp_dir.path().join("workspace.sqlite3")).unwrap();
@@ -6673,12 +6924,18 @@ mod tests {
 
         assert!(paths.contains(&"README.md"));
         assert!(paths.contains(&"lib"));
-        assert!(paths.contains(&"lib/main.dart"));
         assert!(!paths.iter().any(|path| path.starts_with(".git")));
         assert!(!paths.iter().any(|path| path.starts_with("node_modules")));
         assert!(!paths.iter().any(|path| path.starts_with(".nostr-codex")));
         assert!(!paths.contains(&".env"));
         assert!(!paths.contains(&"image.png"));
+
+        let lib = file_browser_data(temp_dir.path(), Some("lib"));
+        assert!(lib["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == "main.dart"));
     }
 
     #[test]
@@ -6694,10 +6951,31 @@ mod tests {
             .unwrap();
         }
 
-        let data = file_browser_data(temp_dir.path());
+        let data = file_browser_data(temp_dir.path(), None);
 
         assert_eq!(data["truncated"], true);
         assert!(data.to_string().len() <= 16100);
+    }
+
+    #[test]
+    fn file_browser_loads_a_requested_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let crowded = temp_dir.path().join("aaa-crowded");
+        fs::create_dir(&crowded).unwrap();
+        fs::create_dir(temp_dir.path().join("zzz-needed")).unwrap();
+        for index in 0..600 {
+            fs::write(crowded.join(format!("{index:04}.txt")), "content").unwrap();
+        }
+
+        let data = file_browser_data(temp_dir.path(), Some("aaa-crowded"));
+        let paths = data["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["path"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&"0000.txt"));
     }
 
     #[test]
@@ -7167,12 +7445,20 @@ mod tests {
         workspace
             .add_direct_message("owner", "other", "not for desktop", &[], &[], None)
             .unwrap();
+        workspace
+            .set_conversation_preprompt(Some(&channel.id), None, None, "Review carefully.")
+            .unwrap();
 
         let snapshot = workspace_snapshot(&workspace, "desktop").unwrap();
 
         assert_eq!(snapshot.action, "snapshot");
         assert_eq!(snapshot.channels, vec![channel_payload(channel)]);
         assert_eq!(snapshot.members.len(), 3);
+        assert_eq!(snapshot.conversation_preprompts.len(), 1);
+        assert_eq!(
+            snapshot.conversation_preprompts[0].preprompt,
+            "Review carefully."
+        );
         let mut bodies = snapshot
             .messages
             .into_iter()

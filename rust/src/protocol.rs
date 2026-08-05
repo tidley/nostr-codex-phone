@@ -293,6 +293,8 @@ pub struct WorkspaceUpdate {
     pub agents: Vec<WorkspaceAgentPayload>,
     #[serde(default)]
     pub conversation_agents: Vec<WorkspaceConversationAgentPayload>,
+    #[serde(default)]
+    pub conversation_preprompts: Vec<WorkspaceConversationPrepromptPayload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typing: Option<WorkspaceTypingPayload>,
 }
@@ -376,6 +378,17 @@ pub struct WorkspaceConversationAgentPayload {
     pub peer_pubkey: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folder_scope: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceConversationPrepromptPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_pubkey: Option<String>,
+    pub preprompt: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1307,6 +1320,22 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
             Ok(())
         }
         "set_profile" => Ok(()),
+        "set_conversation_preprompt"
+            if request
+                .body
+                .as_ref()
+                .is_some_and(|body| body.chars().count() <= 4_000)
+                && (request
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || request
+                        .recipient_pubkey
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty())) =>
+        {
+            Ok(())
+        }
         "list_agents" => Ok(()),
         "add_conversation_agent" | "remove_conversation_agent"
             if request
@@ -2049,6 +2078,21 @@ mod tests {
             workspace_update.conversation_agents[0].folder_scope,
             ["/work/apps"]
         );
+    }
+
+    #[test]
+    fn parses_and_bounds_conversation_preprompt_requests() {
+        let request = parse_wire_message(r#"{"workspace_request":{"action":"set_conversation_preprompt","channel_id":"channel-1","body":"Review carefully."}}"#).unwrap();
+        assert_eq!(request.kind(), "workspace_request");
+
+        let too_long = serde_json::json!({
+            "workspace_request": {
+                "action": "set_conversation_preprompt",
+                "channel_id": "channel-1",
+                "body": "x".repeat(4_001),
+            }
+        });
+        assert!(parse_wire_message(&too_long.to_string()).is_err());
     }
 
     #[test]

@@ -359,6 +359,27 @@ class WorkspaceConversationAgent {
       );
 }
 
+class WorkspaceConversationPreprompt {
+  const WorkspaceConversationPreprompt({
+    required this.preprompt,
+    this.channelId,
+    this.memberPubkey,
+    this.peerPubkey,
+  });
+  final String preprompt;
+  final String? channelId;
+  final String? memberPubkey;
+  final String? peerPubkey;
+
+  factory WorkspaceConversationPreprompt.fromJson(Map<String, dynamic> json) =>
+      WorkspaceConversationPreprompt(
+        preprompt: json['preprompt']?.toString() ?? '',
+        channelId: json['channel_id']?.toString(),
+        memberPubkey: json['member_pubkey']?.toString(),
+        peerPubkey: json['peer_pubkey']?.toString(),
+      );
+}
+
 class WorkspaceTyping {
   const WorkspaceTyping({
     required this.senderPubkey,
@@ -400,6 +421,7 @@ class WorkspaceState {
   final Map<String, List<WorkspaceMessage>> messages = {};
   List<WorkspaceAgent> agents = [];
   List<WorkspaceConversationAgent> conversationAgents = [];
+  List<WorkspaceConversationPreprompt> conversationPreprompts = [];
   final Map<String, WorkspaceTyping> typing = {};
 
   List<WorkspaceMessage> apply(Map<String, dynamic> raw) {
@@ -415,6 +437,7 @@ class WorkspaceState {
       messages.clear();
       agents = [];
       conversationAgents = [];
+      conversationPreprompts = [];
       typing.clear();
     }
     final incomingTyping = data['typing'];
@@ -436,6 +459,12 @@ class WorkspaceState {
         data['action'] == 'conversation_agents_updated' ||
         data['action'] == 'agent_deleted') {
       conversationAgents = incomingConversationAgents;
+    }
+    final incomingPreprompts = _conversationPreprompts(
+      data['conversation_preprompts'],
+    );
+    if (isSnapshot || data['action'] == 'conversation_preprompt_updated') {
+      conversationPreprompts = incomingPreprompts;
     }
     final incomingAgents = _agents(data['agents']);
     if (isSnapshot || data['action'] == 'agent_deleted') {
@@ -547,6 +576,24 @@ class WorkspaceState {
     return null;
   }
 
+  String conversationPreprompt({
+    required String? channelId,
+    required String ownPubkey,
+    required String? peerPubkey,
+  }) {
+    for (final prompt in conversationPreprompts) {
+      if (channelId != null && prompt.channelId == channelId) {
+        return prompt.preprompt;
+      }
+      if (channelId == null &&
+          {prompt.memberPubkey, prompt.peerPubkey}.contains(ownPubkey) &&
+          {prompt.memberPubkey, prompt.peerPubkey}.contains(peerPubkey)) {
+        return prompt.preprompt;
+      }
+    }
+    return '';
+  }
+
   int channelHumanMemberCount(String channelId) {
     if (!channels.any((channel) => channel.id == channelId)) return 0;
     return members.where((member) => !member.startsWith('agent:')).length;
@@ -626,5 +673,17 @@ class WorkspaceState {
             )
             .where((item) => item.agentId.isNotEmpty)
             .toList()
+      : [];
+  static List<WorkspaceConversationPreprompt> _conversationPreprompts(
+    Object? raw,
+  ) => raw is List
+      ? raw
+            .whereType<Map>()
+            .map(
+              (item) => WorkspaceConversationPreprompt.fromJson(
+                Map<String, dynamic>.from(item),
+              ),
+            )
+            .toList(growable: false)
       : [];
 }

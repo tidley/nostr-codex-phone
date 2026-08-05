@@ -113,7 +113,7 @@ void main() {
     );
 
     expect(
-      find.text('Enter to send. Ctrl+Enter for new line.'),
+      find.text('Enter to send. Shift+Enter for new line.'),
       findsNWidgets(2),
     );
     await tester.enterText(find.byType(TextField).at(0), 'Main message');
