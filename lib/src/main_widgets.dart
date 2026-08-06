@@ -3006,14 +3006,6 @@ class _WorkspaceMessageRow extends StatefulWidget {
 class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
   bool _hovered = false;
 
-  static const _avatarColors = [
-    (Color(0xffdbeafe), Color(0xff1e3a8a)),
-    (Color(0xfffce7f3), Color(0xff831843)),
-    (Color(0xffede9fe), Color(0xff4c1d95)),
-    (Color(0xffffedd5), Color(0xff7c2d12)),
-    (Color(0xffccfbf1), Color(0xff134e4a)),
-  ];
-
   Future<void> _showMessageActions(BuildContext context) async {
     final action = await showModalBottomSheet<String>(
       context: context,
@@ -3060,30 +3052,13 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
   @override
   Widget build(BuildContext context) {
     final isAgent = isWorkspaceAgentSender(widget.message.senderPubkey);
-    final color =
-        _avatarColors[workspaceAvatarColorIndex(
-          widget.message.senderPubkey,
-          widget.authorName,
-          _avatarColors.length,
-        )];
     final avatar = Semantics(
       label: isAgent ? '${widget.authorName}, agent' : widget.authorName,
-      child: CircleAvatar(
+      child: _WorkspaceFrogAvatar(
+        identity: widget.message.senderPubkey,
+        label: widget.authorName,
         radius: 18,
-        backgroundColor: widget.isLocalSender
-            ? Theme.of(context).colorScheme.primaryContainer
-            : color.$1,
-        foregroundColor: widget.isLocalSender
-            ? Theme.of(context).colorScheme.onPrimaryContainer
-            : color.$2,
-        child: Icon(
-          isAgent
-              ? Icons.smart_toy_outlined
-              : widget.isLocalSender
-              ? Icons.account_circle_outlined
-              : Icons.person_outline,
-          size: 20,
-        ),
+        bot: isAgent,
       ),
     );
     final compactMessage =
@@ -3311,6 +3286,108 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
       ).colorScheme.onSurface.withValues(alpha: grouped ? 0.42 : 0.52),
     ),
   );
+}
+
+/// A stable frog tint keeps participants recognizable without storing UI state.
+class _WorkspaceFrogAvatar extends StatelessWidget {
+  const _WorkspaceFrogAvatar({
+    required this.identity,
+    required this.label,
+    this.radius = 18,
+    this.bot = false,
+  });
+
+  final String identity;
+  final String label;
+  final double radius;
+  final bool bot;
+
+  static const _colors = [
+    (Color(0xff78b9df), Color(0xff173d5c)),
+    (Color(0xffdfb777), Color(0xff593914)),
+    (Color(0xffdf8582), Color(0xff5f2027)),
+    (Color(0xff87c8a0), Color(0xff1d563a)),
+    (Color(0xffaa96df), Color(0xff38295e)),
+    (Color(0xffdf91bc), Color(0xff612546)),
+    (Color(0xff79c9c9), Color(0xff155556)),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final colors =
+        _colors[workspaceAvatarColorIndex(identity, label, _colors.length)];
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: colors.$1,
+      child: bot
+          ? CustomPaint(
+              size: Size.square(radius * 1.6),
+              painter: _WorkspaceBotAvatarPainter(colors.$2),
+            )
+          : ColorFiltered(
+              colorFilter: ColorFilter.mode(colors.$2, BlendMode.srcIn),
+              child: Image.asset(
+                'assets/branding/ribbet-mark.png',
+                width: radius * 1.85,
+                height: radius * 1.85,
+                filterQuality: FilterQuality.medium,
+              ),
+            ),
+    );
+  }
+}
+
+class _WorkspaceBotAvatarPainter extends CustomPainter {
+  const _WorkspaceBotAvatarPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final scale = size.width / 32;
+    final stroke = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.7 * scale
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final fill = Paint()..color = color;
+
+    canvas.drawLine(
+      Offset(16 * scale, 8 * scale),
+      Offset(16 * scale, 4 * scale),
+      stroke,
+    );
+    canvas.drawCircle(Offset(16 * scale, 3 * scale), 1.1 * scale, fill);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(6 * scale, 8 * scale, 20 * scale, 18 * scale),
+        Radius.circular(4 * scale),
+      ),
+      stroke,
+    );
+    canvas.drawLine(
+      Offset(3.5 * scale, 14 * scale),
+      Offset(6 * scale, 14 * scale),
+      stroke,
+    );
+    canvas.drawLine(
+      Offset(26 * scale, 14 * scale),
+      Offset(28.5 * scale, 14 * scale),
+      stroke,
+    );
+    canvas.drawCircle(Offset(12 * scale, 15 * scale), 1.15 * scale, fill);
+    canvas.drawCircle(Offset(20 * scale, 15 * scale), 1.15 * scale, fill);
+    canvas.drawLine(
+      Offset(12 * scale, 21 * scale),
+      Offset(20 * scale, 21 * scale),
+      stroke,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _WorkspaceBotAvatarPainter oldDelegate) =>
+      oldDelegate.color != color;
 }
 
 class _WorkspaceMessageBody extends StatefulWidget {
@@ -3885,6 +3962,10 @@ class _InsertComposerNewlineIntent extends Intent {
   const _InsertComposerNewlineIntent();
 }
 
+class _DeleteComposerWordIntent extends Intent {
+  const _DeleteComposerWordIntent();
+}
+
 class _WorkspaceMentionOverlay extends StatelessWidget {
   const _WorkspaceMentionOverlay({
     required this.mentionOptions,
@@ -3994,6 +4075,27 @@ class WorkspaceComposer extends StatelessWidget {
     });
   }
 
+  void _deletePreviousWord() {
+    final selection = composer.selection;
+    final end = selection.isValid ? selection.end : composer.text.length;
+    var start = selection.isValid ? selection.start : end;
+    if (start == end) {
+      while (start > 0 && RegExp(r'\s').hasMatch(composer.text[start - 1])) {
+        start--;
+      }
+      while (start > 0 && !RegExp(r'\s').hasMatch(composer.text[start - 1])) {
+        start--;
+      }
+    }
+    composer.value = composer.value.copyWith(
+      text: composer.text.replaceRange(start, end, ''),
+      selection: TextSelection.collapsed(offset: start),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (composerFocus.canRequestFocus) composerFocus.requestFocus();
+    });
+  }
+
   @override
   Widget build(
     BuildContext context,
@@ -4012,6 +4114,8 @@ class WorkspaceComposer extends StatelessWidget {
               shortcuts: {
                 const SingleActivator(LogicalKeyboardKey.enter, alt: true):
                     const _InsertComposerNewlineIntent(),
+                const SingleActivator(LogicalKeyboardKey.backspace, alt: true):
+                    const _DeleteComposerWordIntent(),
                 if (mentionOptions.length == 1)
                   const SingleActivator(LogicalKeyboardKey.tab):
                       const _SelectMentionIntent(),
@@ -4028,6 +4132,13 @@ class WorkspaceComposer extends StatelessWidget {
                       CallbackAction<_InsertComposerNewlineIntent>(
                         onInvoke: (_) {
                           _insertNewline();
+                          return null;
+                        },
+                      ),
+                  _DeleteComposerWordIntent:
+                      CallbackAction<_DeleteComposerWordIntent>(
+                        onInvoke: (_) {
+                          _deletePreviousWord();
                           return null;
                         },
                       ),
@@ -5444,21 +5555,22 @@ class _WorkspaceAccessPage extends StatelessWidget {
         ),
         if (inviteCode != null) ...[
           const SizedBox(height: 12),
+          Center(
+            child: QrImageView(
+              data: inviteCode!,
+              size: 220,
+              errorCorrectionLevel: QrErrorCorrectLevel.M,
+            ),
+          ),
           ListTile(
             contentPadding: EdgeInsets.zero,
-            title: SelectableText(
-              inviteCode!,
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
-                letterSpacing: 2,
-              ),
-            ),
-            subtitle: const Text('Share this code with a workspace member.'),
+            title: const Text('Workspace invite QR'),
+            subtitle: const Text('Scan this code or copy the invite payload.'),
             trailing: IconButton(
               icon: const Icon(Icons.copy),
               onPressed: () =>
                   Clipboard.setData(ClipboardData(text: inviteCode!)),
-              tooltip: 'Copy code',
+              tooltip: 'Copy invite code',
             ),
           ),
         ],
@@ -5538,9 +5650,13 @@ class _ToolTextPage extends StatelessWidget {
 }
 
 class _ClientDiagnosticsPage extends StatelessWidget {
-  const _ClientDiagnosticsPage({required this.diagnostics});
+  const _ClientDiagnosticsPage({
+    required this.diagnostics,
+    required this.fipsHeartbeat,
+  });
 
   final ValueNotifier<List<String>> diagnostics;
+  final ValueNotifier<_WorkspaceFipsHeartbeat> fipsHeartbeat;
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -5561,21 +5677,76 @@ class _ClientDiagnosticsPage extends StatelessWidget {
         ),
       ],
     ),
-    body: ValueListenableBuilder<List<String>>(
-      valueListenable: diagnostics,
-      builder: (context, entries, _) => entries.isEmpty
-          ? const Center(child: Text('No client errors or timeouts recorded.'))
-          : ListView.separated(
-              padding: const EdgeInsets.all(16),
-              itemCount: entries.length,
-              separatorBuilder: (_, _) => const Divider(height: 12),
-              itemBuilder: (_, index) => SelectableText(
-                entries[index],
-                style: const TextStyle(fontFamily: 'monospace'),
+    body: Column(
+      children: [
+        ValueListenableBuilder<_WorkspaceFipsHeartbeat>(
+          valueListenable: fipsHeartbeat,
+          builder: (context, heartbeat, _) {
+            final now = DateTime.now();
+            final liveFor = heartbeat.connectedAt == null
+                ? null
+                : now.difference(heartbeat.connectedAt!);
+            final lastHeartbeat = heartbeat.lastHeartbeatAt == null
+                ? null
+                : now.difference(heartbeat.lastHeartbeatAt!);
+            return Container(
+              width: double.infinity,
+              margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(12),
               ),
-            ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'FIPS link: ${heartbeat.connectionState}',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  if (liveFor != null)
+                    Text(
+                      'Live ${_formatFipsDuration(liveFor)} · '
+                      '${heartbeat.count} heartbeat${heartbeat.count == 1 ? '' : 's'}',
+                    ),
+                  if (lastHeartbeat != null)
+                    Text(
+                      'Last heartbeat ${_formatFipsDuration(lastHeartbeat)} ago',
+                    ),
+                ],
+              ),
+            );
+          },
+        ),
+        Expanded(
+          child: ValueListenableBuilder<List<String>>(
+            valueListenable: diagnostics,
+            builder: (context, entries, _) => entries.isEmpty
+                ? const Center(
+                    child: Text('No client errors or timeouts recorded.'),
+                  )
+                : ListView.separated(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: entries.length,
+                    separatorBuilder: (_, _) => const Divider(height: 12),
+                    itemBuilder: (_, index) => SelectableText(
+                      entries[index],
+                      style: const TextStyle(fontFamily: 'monospace'),
+                    ),
+                  ),
+          ),
+        ),
+      ],
     ),
   );
+}
+
+String _formatFipsDuration(Duration duration) {
+  final minutes = duration.inMinutes;
+  final seconds = duration.inSeconds.remainder(60);
+  return minutes == 0
+      ? '${seconds}s'
+      : '${minutes}m ${seconds.toString().padLeft(2, '0')}s';
 }
 
 class _WorkerConsolePage extends StatefulWidget {

@@ -133,6 +133,31 @@ Future<Uint8List?> fipsCallReceiveRealtimeVideo({required BigInt timeoutMs}) =>
 
 Future<void> fipsCallStop() => RustLib.instance.api.crateApiNostrFipsCallStop();
 
+/// Connect to the worker's workspace transport and prove possession of the
+/// one-time capability delivered to this authenticated Nostr member.
+Future<void> fipsWorkspaceSnapshotConnect({
+  required BridgeFipsCallConfig config,
+  required String peerNpub,
+  required String capability,
+}) => RustLib.instance.api.crateApiNostrFipsWorkspaceSnapshotConnect(
+  config: config,
+  peerNpub: peerNpub,
+  capability: capability,
+);
+
+/// Receive one JSON workspace frame from the reliable FIPS stream.
+Future<String?> fipsWorkspaceSnapshotReceive({required BigInt timeoutMs}) =>
+    RustLib.instance.api.crateApiNostrFipsWorkspaceSnapshotReceive(
+      timeoutMs: timeoutMs,
+    );
+
+/// Send one JSON workspace control frame over the dedicated reliable stream.
+Future<void> fipsWorkspaceSnapshotSend({required String frame}) =>
+    RustLib.instance.api.crateApiNostrFipsWorkspaceSnapshotSend(frame: frame);
+
+Future<void> fipsWorkspaceSnapshotStop() =>
+    RustLib.instance.api.crateApiNostrFipsWorkspaceSnapshotStop();
+
 /// Starts one direct FIPS edge of a channel-call mesh. These keyed sessions do
 /// not share the legacy direct-call slot, so direct calls retain their protocol.
 Future<BridgeFipsCallStatus> fipsGroupCallConnect({

@@ -19,6 +19,10 @@ use crate::realtime_video::RealtimeVideoFragment;
 
 static SESSION: Lazy<Mutex<Option<Arc<NostrMessenger>>>> = Lazy::new(|| Mutex::new(None));
 static CALL_SESSION: Lazy<Mutex<Option<FipsMobileQuicSession>>> = Lazy::new(|| Mutex::new(None));
+// Workspace transfer uses its own reliable stream. It must never share the
+// call session, whose datagrams are consumed by realtime media.
+static WORKSPACE_SNAPSHOT_SESSION: Lazy<Mutex<Option<FipsMobileQuicSession>>> =
+    Lazy::new(|| Mutex::new(None));
 static CALL_ACCEPT_CANCEL: Lazy<Mutex<Option<oneshot::Sender<()>>>> =
     Lazy::new(|| Mutex::new(None));
 static REALTIME_AUDIO: Lazy<Mutex<Option<RealtimeAudioPipeline>>> = Lazy::new(|| Mutex::new(None));
@@ -493,6 +497,58 @@ pub async fn fips_call_stop() -> Result<()> {
     Ok(())
 }
 
+/// Connect to the worker's workspace transport and prove possession of the
+/// one-time capability delivered to this authenticated Nostr member.
+pub async fn fips_workspace_snapshot_connect(
+    config: BridgeFipsCallConfig,
+    peer_npub: String,
+    capability: String,
+) -> Result<()> {
+    if capability.len() < 32 {
+        return Err(anyhow!("workspace FIPS capability is invalid"));
+    }
+    let mut session = build_fips_call_session(config)?;
+    let peer_npub = PublicKey::parse(peer_npub.trim())?.to_bech32()?;
+    session.connect(&peer_npub).await?;
+    session.send(capability.as_bytes()).await?;
+    *WORKSPACE_SNAPSHOT_SESSION.lock().await = Some(session);
+    Ok(())
+}
+
+/// Receive one JSON workspace frame from the reliable FIPS stream.
+pub async fn fips_workspace_snapshot_receive(timeout_ms: u64) -> Result<Option<String>> {
+    let mut session = WORKSPACE_SNAPSHOT_SESSION.lock().await;
+    let session = session
+        .as_mut()
+        .ok_or_else(|| anyhow!("FIPS workspace transport is not active"))?;
+    match tokio::time::timeout(
+        Duration::from_millis(timeout_ms.clamp(1, 5_000)),
+        session.receive(),
+    )
+    .await
+    {
+        Ok(result) => String::from_utf8(result?).map(Some).map_err(Into::into),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Send one JSON workspace control frame over the dedicated reliable stream.
+pub async fn fips_workspace_snapshot_send(frame: String) -> Result<()> {
+    let mut session = WORKSPACE_SNAPSHOT_SESSION.lock().await;
+    let session = session
+        .as_mut()
+        .ok_or_else(|| anyhow!("FIPS workspace transport is not active"))?;
+    session.send(frame.as_bytes()).await?;
+    Ok(())
+}
+
+pub async fn fips_workspace_snapshot_stop() -> Result<()> {
+    if let Some(mut session) = WORKSPACE_SNAPSHOT_SESSION.lock().await.take() {
+        session.stop().await?;
+    }
+    Ok(())
+}
+
 /// Starts one direct FIPS edge of a channel-call mesh. These keyed sessions do
 /// not share the legacy direct-call slot, so direct calls retain their protocol.
 pub async fn fips_group_call_connect(
@@ -773,6 +829,24 @@ mod tests {
         let error = fips_call_accept_complete().await.unwrap_err();
 
         assert!(error.to_string().contains("acceptance is not started"));
+    }
+
+    #[tokio::test]
+    async fn workspace_transport_does_not_use_the_call_slot() {
+        *CALL_SESSION.lock().await = Some(FipsMobileQuicSession::new(
+            Identity::generate(),
+            FipsMobileQuicSessionConfig::default(),
+        ));
+        *WORKSPACE_SNAPSHOT_SESSION.lock().await = Some(FipsMobileQuicSession::new(
+            Identity::generate(),
+            FipsMobileQuicSessionConfig::default(),
+        ));
+
+        fips_workspace_snapshot_stop().await.unwrap();
+
+        assert!(WORKSPACE_SNAPSHOT_SESSION.lock().await.is_none());
+        assert!(CALL_SESSION.lock().await.is_some());
+        fips_call_stop().await.unwrap();
     }
 }
 

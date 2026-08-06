@@ -13,6 +13,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:open_filex/open_filex.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:crew/src/rust/api/nostr.dart';
 import 'package:crew/src/rust/frb_generated.dart';
 import 'package:crew/src/bridge_json.dart';
@@ -54,7 +55,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.12+312';
+const _appVersion = '0.3.13+313';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -63,6 +64,20 @@ enum _PendingMessageCompletion { transcript, response }
 enum _CallPhase { idle, outgoing, incoming, connecting, active }
 
 enum _CallMediaSource { audioOnly, camera, screen }
+
+class _WorkspaceFipsHeartbeat {
+  const _WorkspaceFipsHeartbeat({
+    this.connectionState = 'disconnected',
+    this.connectedAt,
+    this.lastHeartbeatAt,
+    this.count = 0,
+  });
+
+  final String connectionState;
+  final DateTime? connectedAt;
+  final DateTime? lastHeartbeatAt;
+  final int count;
+}
 
 class _GroupCallState {
   _GroupCallState({
@@ -630,6 +645,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   String? _pendingMediaFileName;
   bool _showTeamWorkspace = true;
   String? _workspaceInviteCode;
+  Timer? _workspaceInviteTimer;
   String _workspaceMemberStatus = 'Not yet confirmed';
   _CallPhase _callPhase = _CallPhase.idle;
   String? _callId;
@@ -651,6 +667,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _workspaceCache = WorkspaceCache();
   Timer? _workspaceCacheSaveTimer;
   String? _workspaceCacheRestoredKey;
+  bool _workspaceFipsSnapshotInFlight = false;
+  String _workspaceFipsConnectionState = 'disconnected';
+  final _workspaceFipsHeartbeat = ValueNotifier<_WorkspaceFipsHeartbeat>(
+    const _WorkspaceFipsHeartbeat(),
+  );
+  Timer? _workspaceFipsHeartbeatTicker;
+  Timer? _workspaceFipsRetryTimer;
+  int _workspaceFipsRetryAttempt = 0;
   final Map<String, int> _workspaceUnreadCounts = {};
   final Map<String, int> _workspaceThreadUnreadCounts = {};
   String? _workspaceOpenThreadKey;
@@ -884,6 +908,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _recordingTimer?.cancel();
     _conversationHistorySaveTimer?.cancel();
     _workspaceCacheSaveTimer?.cancel();
+    _workspaceFipsRetryTimer?.cancel();
+    _workspaceFipsHeartbeatTicker?.cancel();
+    _workspaceInviteTimer?.cancel();
     unawaited(_saveWorkspaceCache());
     _inactiveReplyNoticeTimer?.cancel();
     _inactiveReplyNotice?.remove();
@@ -902,6 +929,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _workspaceFileBrowser.dispose();
     _workspaceFilePreview.dispose();
     _clientDiagnostics.dispose();
+    _workspaceFipsHeartbeat.dispose();
     _workspaceVoiceResult.dispose();
     _queryController.dispose();
     _queryFocusNode.dispose();
@@ -3952,6 +3980,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     );
     if (!mounted || payload == null || payload.trim().isEmpty) return null;
 
+    final workspaceInvite = parseWorkspaceInviteCode(payload);
+    if (workspaceInvite != null) {
+      await _redeemWorkspaceInvite(payload);
+      return _computerServiceTarget ?? workspaceInvite.target;
+    }
     final scannedTarget = _repoTargetFromQrPayload(payload);
     final target = scannedTarget == null
         ? null
@@ -4099,7 +4132,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _clearPairingSecret(target.id);
       await nostrSendQuery(
         query: jsonEncode({
-          'workspace_request': {'action': 'list'},
+          'workspace_request': {'action': 'list', 'fips_snapshot': true},
         }),
       );
       if (mounted) setState(() => _status = 'Paired ${target.displayName}');
@@ -4256,6 +4289,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<void> _disconnect({bool expand = true}) async {
     _polling = false;
+    _workspaceFipsRetryTimer?.cancel();
+    _setWorkspaceFipsConnectionState('disconnected');
+    await fipsWorkspaceSnapshotStop();
     await nostrStop();
     if (!mounted) return;
     setState(() {
@@ -4392,12 +4428,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
       setState(() {
         if (message.kind == 'invite_created') {
+          _workspaceInviteTimer?.cancel();
           final invite = decoded['invite_created'] as Map<String, dynamic>?;
           _workspaceInviteCode = invite?['code']?.toString();
           _workspaceMemberStatus = 'Invite ready';
         } else if (message.kind == 'invite_accepted') {
+          _workspaceInviteTimer?.cancel();
           _workspaceMemberStatus = 'Accepted';
         } else {
+          _workspaceInviteTimer?.cancel();
           final rejected = decoded['invite_rejected'] as Map<String, dynamic>?;
           final reason = rejected?['reason']?.toString();
           _workspaceMemberStatus = reason == null || reason.isEmpty
@@ -4413,6 +4452,22 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       try {
         final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
         final update = decoded['workspace_update'];
+        final action = update is Map ? update['action']?.toString() : null;
+        final capability = action == null
+            ? null
+            : _workspaceFipsCapabilityFromOffer(action);
+        if (capability != null) {
+          if (_workspaceFipsSnapshotInFlight) {
+            _recordDiagnostic(
+              'Ignored duplicate FIPS workspace snapshot offer',
+            );
+            return true;
+          }
+          _workspaceFipsSnapshotInFlight = true;
+          _recordDiagnostic('FIPS workspace snapshot offer received');
+          unawaited(_receiveWorkspaceSnapshotOverFips(capability));
+          return true;
+        }
         final isMessageCreated =
             update is Map && update['action'] == 'message_created';
         setState(() {
@@ -6857,7 +6912,10 @@ Return a concise catch-up summary of what happened after that point: completed w
         onOpenDiagnostics: () => Navigator.of(context).push<void>(
           MaterialPageRoute(
             builder: (_) =>
-                _ClientDiagnosticsPage(diagnostics: _clientDiagnostics),
+                _ClientDiagnosticsPage(
+                  diagnostics: _clientDiagnostics,
+                  fipsHeartbeat: _workspaceFipsHeartbeat,
+                ),
           ),
         ),
         onOpenWorkerConsole: () => unawaited(_openWorkerConsole()),
@@ -7156,12 +7214,32 @@ Return a concise catch-up summary of what happened after that point: completed w
 
   Future<void> _createWorkspaceInvite() async {
     if (!await _ensureConnectedToParentService()) return;
-    await nostrSendQuery(
-      query: jsonEncode({
-        'create_invite': {'expires_in_seconds': 900},
-      }),
-    );
-    if (mounted) setState(() => _workspaceMemberStatus = 'Creating invite...');
+    _workspaceInviteTimer?.cancel();
+    setState(() {
+      _workspaceInviteCode = null;
+      _workspaceMemberStatus = 'Creating invite...';
+    });
+    _workspaceInviteTimer = Timer(const Duration(seconds: 15), () {
+      if (mounted && _workspaceMemberStatus == 'Creating invite...') {
+        setState(() => _workspaceMemberStatus = 'Invite request timed out');
+      }
+    });
+    try {
+      await _sendWithAutoRecovery(
+        label: 'workspace invite request',
+        sender: () => nostrSendQuery(
+          query: jsonEncode({
+            'create_invite': {'expires_in_seconds': 900},
+          }),
+        ),
+      );
+    } catch (error) {
+      _workspaceInviteTimer?.cancel();
+      if (mounted && _workspaceMemberStatus == 'Creating invite...') {
+        setState(() => _workspaceMemberStatus = 'Invite request failed');
+      }
+      _showError('Could not create workspace invite: $error');
+    }
   }
 
   Future<void> _sendWorkspaceRequest(Map<String, Object?> request) async {
@@ -7170,8 +7248,197 @@ Return a concise catch-up summary of what happened after that point: completed w
       if (_connected || _connecting) await _disconnect(expand: false);
       request = {'action': 'list'};
     }
+    if (request['action'] == 'list') {
+      request = {...request, 'fips_snapshot': true};
+    }
     if (!await _ensureConnectedToParentService()) return;
     await nostrSendQuery(query: jsonEncode({'workspace_request': request}));
+  }
+
+  String? _workspaceFipsCapabilityFromOffer(String action) {
+    const prefix = 'fips_snapshot_offer:';
+    final capability = action.startsWith(prefix)
+        ? action.substring(prefix.length)
+        : null;
+    // A 32-byte URL-safe base64 value is 43 characters. Reject malformed
+    // signaling before it reaches the native transport.
+    return capability != null &&
+            RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(capability)
+        ? capability
+        : null;
+  }
+
+  Future<void> _receiveWorkspaceSnapshotOverFips(String capability) async {
+    var snapshotComplete = false;
+    try {
+      _setWorkspaceFipsConnectionState('connecting');
+      await fipsWorkspaceSnapshotStop();
+      await fipsWorkspaceSnapshotConnect(
+        config: _callConfig(),
+        peerNpub: _connectedPeerPubkey ?? _peerPubkeyController.text.trim(),
+        capability: capability,
+      );
+      var emptyReads = 0;
+      while (mounted) {
+        final frame = await fipsWorkspaceSnapshotReceive(
+          timeoutMs: BigInt.from(5000),
+        );
+        if (frame == null) {
+          emptyReads += 1;
+          if (emptyReads >= 7) {
+            throw TimeoutException('FIPS workspace heartbeat timed out');
+          }
+          continue;
+        }
+        emptyReads = 0;
+        final envelope = jsonDecode(frame) as Map<String, dynamic>;
+        if (envelope['version'] != 1 || envelope['type'] is! String) {
+          throw const FormatException('FIPS workspace envelope is invalid');
+        }
+        switch (envelope['type']) {
+          case 'hello':
+            _setWorkspaceFipsConnectionState('connected');
+            continue;
+          case 'ping':
+            await fipsWorkspaceSnapshotSend(
+              frame: jsonEncode({'version': 1, 'type': 'pong'}),
+            );
+            _recordWorkspaceFipsHeartbeat();
+            _setWorkspaceFipsConnectionState('active');
+            continue;
+          case 'snapshot':
+            final snapshotFrame = envelope['frame'];
+            if (snapshotFrame is! String) {
+              throw const FormatException(
+                'FIPS workspace snapshot frame is invalid',
+              );
+            }
+            final decoded = jsonDecode(snapshotFrame) as Map<String, dynamic>;
+            if (decoded['workspace_update'] is! Map) {
+              throw const FormatException('FIPS workspace frame is invalid');
+            }
+            if (!mounted) return;
+            setState(() {
+              _workspace.apply(
+                decoded,
+                localSenderIds: {_ownPubkey ?? '', _ownPubkeyHex ?? ''},
+                preserveMessagesOnSnapshot:
+                    _workspaceCacheRestoredKey == _workspaceCacheKey,
+              );
+              _workspaceRevision.value++;
+            });
+            _scheduleWorkspaceCacheSave();
+            if (_isFinalWorkspaceSnapshotFrame(decoded)) {
+              snapshotComplete = true;
+              _workspaceFipsRetryTimer?.cancel();
+              _workspaceFipsRetryAttempt = 0;
+              _setWorkspaceFipsConnectionState('active');
+            }
+            continue;
+          default:
+            throw FormatException(
+              'Unsupported FIPS workspace envelope: ${envelope['type']}',
+            );
+        }
+      }
+    } catch (error) {
+      _setWorkspaceFipsConnectionState('reconnecting');
+      _recordDiagnostic(
+        'FIPS workspace ${snapshotComplete ? 'session' : 'bootstrap'} failed, using Nostr: $error',
+      );
+      try {
+        await _sendWorkspaceRequest({'action': 'list_fallback'});
+      } catch (fallbackError) {
+        _recordDiagnostic('Nostr workspace fallback failed: $fallbackError');
+      }
+      _scheduleWorkspaceFipsRetry();
+    } finally {
+      try {
+        await fipsWorkspaceSnapshotStop();
+      } catch (_) {
+        // The worker can close after the final frame before Dart closes locally.
+      }
+      _workspaceFipsSnapshotInFlight = false;
+    }
+  }
+
+  void _setWorkspaceFipsConnectionState(String state) {
+    if (_workspaceFipsConnectionState == state) return;
+    _workspaceFipsConnectionState = state;
+    final previous = _workspaceFipsHeartbeat.value;
+    if (state == 'connected' || state == 'active') {
+      _workspaceFipsHeartbeat.value = _WorkspaceFipsHeartbeat(
+        connectionState: state,
+        connectedAt: previous.connectedAt ?? DateTime.now(),
+        lastHeartbeatAt: previous.lastHeartbeatAt,
+        count: previous.count,
+      );
+    } else {
+      _workspaceFipsHeartbeat.value = _WorkspaceFipsHeartbeat(
+        connectionState: state,
+      );
+    }
+    if (state == 'active') {
+      _workspaceFipsHeartbeatTicker ??= Timer.periodic(
+        const Duration(seconds: 1),
+        (_) {
+          final heartbeat = _workspaceFipsHeartbeat.value;
+          if (heartbeat.connectionState != 'active') return;
+          // Notify the diagnostics panel so elapsed times stay live.
+          _workspaceFipsHeartbeat.value = _WorkspaceFipsHeartbeat(
+            connectionState: heartbeat.connectionState,
+            connectedAt: heartbeat.connectedAt,
+            lastHeartbeatAt: heartbeat.lastHeartbeatAt,
+            count: heartbeat.count,
+          );
+        },
+      );
+    } else {
+      _workspaceFipsHeartbeatTicker?.cancel();
+      _workspaceFipsHeartbeatTicker = null;
+    }
+    _recordDiagnostic('FIPS workspace connection: $state');
+  }
+
+  void _recordWorkspaceFipsHeartbeat() {
+    final previous = _workspaceFipsHeartbeat.value;
+    _workspaceFipsHeartbeat.value = _WorkspaceFipsHeartbeat(
+      connectionState: 'active',
+      connectedAt: previous.connectedAt ?? DateTime.now(),
+      lastHeartbeatAt: DateTime.now(),
+      count: previous.count + 1,
+    );
+  }
+
+  void _scheduleWorkspaceFipsRetry() {
+    _workspaceFipsRetryTimer?.cancel();
+    final delaySeconds = (10 * (1 << _workspaceFipsRetryAttempt)).clamp(
+      10,
+      300,
+    );
+    _workspaceFipsRetryAttempt = (_workspaceFipsRetryAttempt + 1).clamp(0, 5);
+    _recordDiagnostic('FIPS workspace snapshot: retrying in ${delaySeconds}s');
+    _workspaceFipsRetryTimer = Timer(Duration(seconds: delaySeconds), () {
+      if (_workspaceFipsSnapshotInFlight) return;
+      _recordDiagnostic('FIPS workspace snapshot: retrying');
+      unawaited(_sendWorkspaceRequest({'action': 'list'}));
+    });
+  }
+
+  bool _isFinalWorkspaceSnapshotFrame(Map<String, dynamic> frame) {
+    final update = frame['workspace_update'];
+    final action = update is Map ? update['action']?.toString() : null;
+    if (action == null) return false;
+    final parts = action.split(':');
+    if (parts.length != 6 ||
+        parts[0] != 'history_transfer' ||
+        parts[1] != 'v1' ||
+        parts[5] != 'snapshot_messages' && parts[5] != 'snapshot') {
+      return false;
+    }
+    final sequence = int.tryParse(parts[3]);
+    final total = int.tryParse(parts[4]);
+    return sequence != null && total != null && sequence + 1 == total;
   }
 
   BridgeFipsCallConfig _callConfig() {
@@ -8105,6 +8372,11 @@ Return a concise catch-up summary of what happened after that point: completed w
       status: 'Imported workspace target',
     );
     if (target == null || !await _ensureConnectedToParentService()) return;
+    if (_isComputerServiceTarget(target)) {
+      await _storeComputerServiceTarget(
+        _normalizeComputerServiceTarget(target),
+      );
+    }
     await nostrSendQuery(
       query: jsonEncode({
         'redeem_invite': {'code': invite.secret},
