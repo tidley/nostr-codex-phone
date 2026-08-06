@@ -54,6 +54,8 @@ ExecStart=$worker
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
+MemoryHigh=900M
+MemoryMax=1G
 
 [Install]
 WantedBy=default.target

@@ -385,6 +385,7 @@ class WorkspaceTyping {
     required this.senderPubkey,
     this.agentId,
     this.agentName,
+    this.stage,
     this.channelId,
     this.recipientPubkey,
     this.memberPubkey,
@@ -395,6 +396,7 @@ class WorkspaceTyping {
   final String senderPubkey;
   final String? agentId;
   final String? agentName;
+  final String? stage;
   final String? channelId;
   final String? recipientPubkey;
   final String? memberPubkey;
@@ -406,6 +408,7 @@ class WorkspaceTyping {
         senderPubkey: json['sender_pubkey']?.toString() ?? '',
         agentId: json['agent_id']?.toString(),
         agentName: json['agent_name']?.toString(),
+        stage: json['stage']?.toString(),
         channelId: json['channel_id']?.toString(),
         recipientPubkey: json['recipient_pubkey']?.toString(),
         memberPubkey: json['member_pubkey']?.toString(),
@@ -433,24 +436,34 @@ class WorkspaceState {
     final data = Map<String, dynamic>.from(update);
     final addedMessages = <WorkspaceMessage>[];
     final isSnapshot = data['action'] == 'snapshot';
+    final isSnapshotHeaderWithoutMessages =
+        isSnapshot && (data['messages'] as List?)?.isEmpty == true;
     if (isSnapshot) {
-      // A delayed snapshot can predate a local broadcast. Keep those rows until
-      // the server includes them, rather than making a sent message vanish.
+      // Large snapshots arrive as an empty header followed by message chunks.
+      // Keep visible rows until those chunks arrive, including local rows that
+      // have not yet returned through a relay.
       final localMessages = <String, List<WorkspaceMessage>>{};
-      for (final entry in messages.entries) {
-        final local = entry.value
-            .where(
-              (message) =>
-                  isWorkspaceLocalSender(message.senderPubkey, localSenderIds),
-            )
-            .toList(growable: false);
-        if (local.isNotEmpty) localMessages[entry.key] = local;
+      if (!isSnapshotHeaderWithoutMessages) {
+        for (final entry in messages.entries) {
+          final local = entry.value
+              .where(
+                (message) => isWorkspaceLocalSender(
+                  message.senderPubkey,
+                  localSenderIds,
+                ),
+              )
+              .toList(growable: false);
+          if (local.isNotEmpty) localMessages[entry.key] = local;
+        }
       }
       channels = [];
       members = [];
       memberNames.clear();
-      messages.clear();
-      messages.addAll(localMessages);
+      if (!isSnapshotHeaderWithoutMessages) {
+        messages
+          ..clear()
+          ..addAll(localMessages);
+      }
       agents = [];
       conversationAgents = [];
       conversationPreprompts = [];

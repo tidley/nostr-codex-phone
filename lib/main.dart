@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter/services.dart';
@@ -352,7 +353,7 @@ class _NostrCodexAppState extends State<NostrCodexApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Crew',
+      title: 'Ribbit',
       debugShowCheckedModeBanner: false,
       theme: _appTheme(_selectedTheme),
       themeMode: ThemeMode.dark,
@@ -5157,6 +5158,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           ),
         );
         break;
+      case 'system_status':
+        page = _WorkerConsolePage(
+          data: payload.data,
+          onRefresh: () => _sendToolRequest('system_status'),
+        );
+        break;
       default:
         page = _ToolTextPage(
           title: payload.tool.replaceAll('_', ' '),
@@ -6714,6 +6721,7 @@ Return a concise catch-up summary of what happened after that point: completed w
                 _ClientDiagnosticsPage(diagnostics: _clientDiagnostics),
           ),
         ),
+        onOpenWorkerConsole: () => unawaited(_sendToolRequest('system_status')),
         onOpenFiles: () => _sendToolRequest('file_browser'),
         fileBrowser: _workspaceFileBrowser,
         filePreview: _workspaceFilePreview,

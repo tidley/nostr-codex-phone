@@ -62,6 +62,7 @@ const WORKSPACE_HISTORY_REQUEST_STEP: usize = 5;
 const WORKSPACE_HISTORY_REQUEST_MAX: usize = 50;
 const WORKSPACE_HISTORY_REQUEST_ATTEMPTS: usize = 3;
 const WORKSPACE_AGENT_QUEUE_CAPACITY: usize = 16;
+const SYSTEM_STATUS_HISTORY_MAX_BYTES: usize = 10 * 1024 * 1024;
 // SHA-256 input is the UTF-8 bytes of this domain, a zero byte, then the pairing secret.
 const PAIRING_CONFIRMATION_DOMAIN: &str = "nostr-codex/first-owner-confirmation/v1";
 
@@ -1338,6 +1339,7 @@ async fn process_workspace_request(
                     sender_pubkey: sender.to_string(),
                     agent_id: None,
                     agent_name: None,
+                    stage: None,
                     channel_id: request.channel_id.clone(),
                     recipient_pubkey: request.recipient_pubkey.clone(),
                     member_pubkey: None,
@@ -1468,34 +1470,16 @@ async fn process_workspace_request(
             broadcast_workspace_update(workspace, messenger, &update).await?;
             return Ok(());
         }
-        "list_channel_messages" => WorkspaceUpdate {
-            action: "channel_messages".to_string(),
-            channels: vec![],
-            members: vec![],
-            messages: workspace
-                .channel_messages(request.channel_id.as_deref().unwrap_or_default())?
-                .into_iter()
-                .map(message_payload)
-                .collect(),
-            agents: vec![],
-            conversation_agents: workspace
-                .conversation_agents()?
-                .into_iter()
-                .filter(|membership| {
-                    membership.channel_id.as_deref() == request.channel_id.as_deref()
-                })
-                .map(conversation_agent_payload)
-                .collect(),
-            conversation_preprompts: workspace
-                .conversation_preprompts()?
-                .into_iter()
-                .filter(|preprompt| {
-                    preprompt.channel_id.as_deref() == request.channel_id.as_deref()
-                })
-                .map(conversation_preprompt_payload)
-                .collect(),
-            typing: None,
-        },
+        "list_channel_messages" => {
+            send_channel_history(
+                workspace,
+                messenger,
+                sender,
+                request.channel_id.as_deref().unwrap_or_default(),
+            )
+            .await?;
+            return Ok(());
+        }
         "list_direct_messages" => WorkspaceUpdate {
             action: "direct_messages".to_string(),
             channels: vec![],
@@ -1966,6 +1950,61 @@ async fn send_workspace_snapshot(
     Ok(())
 }
 
+async fn send_channel_history(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+    sender: &str,
+    channel_id: &str,
+) -> Result<()> {
+    let messages = workspace
+        .channel_messages(channel_id)?
+        .into_iter()
+        .map(message_payload)
+        .collect::<Vec<_>>();
+    info!(channel_id, count = messages.len(), "sending channel history");
+    let header = WorkspaceUpdate {
+        action: "channel_messages".to_string(),
+        channels: vec![],
+        members: vec![],
+        messages: vec![],
+        agents: vec![],
+        conversation_agents: workspace
+            .conversation_agents()?
+            .into_iter()
+            .filter(|membership| membership.channel_id.as_deref() == Some(channel_id))
+            .map(conversation_agent_payload)
+            .collect(),
+        conversation_preprompts: workspace
+            .conversation_preprompts()?
+            .into_iter()
+            .filter(|preprompt| preprompt.channel_id.as_deref() == Some(channel_id))
+            .map(conversation_preprompt_payload)
+            .collect(),
+        typing: None,
+    };
+    messenger
+        .send_wire_to_pubkey(sender, WireMessage::workspace_update(header))
+        .await?;
+    for chunk in messages.chunks(16) {
+        messenger
+            .send_wire_to_pubkey(
+                sender,
+                WireMessage::workspace_update(WorkspaceUpdate {
+                    action: "channel_messages".to_string(),
+                    channels: vec![],
+                    members: vec![],
+                    messages: chunk.to_vec(),
+                    agents: vec![],
+                    conversation_agents: vec![],
+                    conversation_preprompts: vec![],
+                    typing: None,
+                }),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 fn workspace_snapshot(workspace: &WorkspaceStore, member: &str) -> Result<WorkspaceUpdate> {
     Ok(WorkspaceUpdate {
         action: "snapshot".to_string(),
@@ -2037,6 +2076,7 @@ async fn send_agent_typing(
     channel_id: Option<&str>,
     member: Option<&str>,
     peer: Option<&str>,
+    stage: Option<&str>,
     expires_in: Option<Duration>,
 ) -> Result<()> {
     let expires_at = expires_in
@@ -2060,6 +2100,7 @@ async fn send_agent_typing(
             sender_pubkey: format!("agent:{}", agent.id),
             agent_id: Some(agent.id.clone()),
             agent_name: Some(agent.name.clone()),
+            stage: stage.map(str::to_string),
             channel_id: channel_id.map(str::to_string),
             recipient_pubkey: None,
             member_pubkey: member.map(str::to_string),
@@ -2105,6 +2146,7 @@ async fn run_workspace_agent_with_typing(
     session_id: &str,
 ) -> Result<CodexRunResult> {
     const TYPING_LEASE: Duration = Duration::from_secs(6);
+    let mut stage = "Starting work.".to_string();
     if let Err(err) = send_agent_typing(
         workspace,
         messenger,
@@ -2112,6 +2154,7 @@ async fn run_workspace_agent_with_typing(
         channel_id,
         member,
         peer,
+        Some(&stage),
         Some(TYPING_LEASE),
     )
     .await
@@ -2121,25 +2164,40 @@ async fn run_workspace_agent_with_typing(
     let mut renew = interval(Duration::from_secs(3));
     renew.set_missed_tick_behavior(MissedTickBehavior::Delay);
     renew.tick().await;
+    let (stage_sender, mut stage_receiver) = mpsc::unbounded_channel();
     let mut run = Box::pin(run_codex_session_with_cancel_and_events(
         body,
         config,
         Some(session_id),
         None,
-        None,
+        Some(stage_sender),
     ));
     let result = loop {
         tokio::select! {
             result = &mut run => break result,
+            Some(event) = stage_receiver.recv() => {
+                let Some((next_stage, _)) = codex_status_from_event(&event) else {
+                    continue;
+                };
+                if next_stage == stage {
+                    continue;
+                }
+                stage = next_stage;
+                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, Some(&stage), Some(TYPING_LEASE)).await {
+                    warn!(agent = %agent.id, "failed to send agent work stage: {err:#}");
+                }
+            }
             _ = renew.tick() => {
-                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, Some(TYPING_LEASE)).await {
+                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, Some(&stage), Some(TYPING_LEASE)).await {
                     warn!(agent = %agent.id, "failed to refresh agent typing state: {err:#}");
                 }
             }
         }
     };
-    if let Err(err) =
-        send_agent_typing(workspace, messenger, agent, channel_id, member, peer, None).await
+    if let Err(err) = send_agent_typing(
+        workspace, messenger, agent, channel_id, member, peer, None, None,
+    )
+    .await
     {
         warn!(agent = %agent.id, "failed to clear agent typing state: {err:#}");
     }
@@ -2447,6 +2505,7 @@ async fn process_workspace_agent_job(
     if !workspace_agent_job_matches_trigger(&message, conversation) {
         return Ok(());
     }
+    let reply_parent_id = workspace_agent_reply_parent_id(&message);
 
     match (&message.channel_id, &message.recipient_pubkey) {
         (Some(channel_id), None) => {
@@ -2458,7 +2517,7 @@ async fn process_workspace_agent_job(
                 Some(channel_id),
                 None,
                 None,
-                message.parent_id.as_deref(),
+                Some(reply_parent_id),
                 &message.body,
                 &message.mentions,
             )
@@ -2473,7 +2532,7 @@ async fn process_workspace_agent_job(
                 None,
                 Some(&message.sender_pubkey),
                 Some(recipient),
-                message.parent_id.as_deref(),
+                Some(reply_parent_id),
                 &message.body,
                 &message.mentions,
             )
@@ -2481,6 +2540,10 @@ async fn process_workspace_agent_job(
         }
         _ => Ok(()),
     }
+}
+
+fn workspace_agent_reply_parent_id(message: &WorkspaceMessage) -> &str {
+    message.parent_id.as_deref().unwrap_or(&message.id)
 }
 
 fn workspace_agent_profile_from_request(
@@ -2654,8 +2717,10 @@ async fn route_conversation_agents(
             })
             .map(|preprompt| preprompt.preprompt.as_str())
             .unwrap_or_default();
+        let thread_context =
+            workspace_thread_context(workspace, parent_id, channel_id, member, peer)?;
         let scoped_body = match conversation_scope_prompt(folder_scope, &agent_config) {
-            Ok(scope) => conversation_agent_prompt(preprompt, &scope, body),
+            Ok(scope) => conversation_agent_prompt(preprompt, &scope, &thread_context, body),
             Err(err) => {
                 warn!(agent = %agent.id, "conversation folder scope is invalid: {err:#}");
                 continue;
@@ -2806,21 +2871,23 @@ async fn route_conversation_agents(
             .await?;
         }
         let message = match channel_id {
-            Some(channel_id) => workspace.add_channel_message(
+            Some(channel_id) => workspace.add_channel_message_with_main(
                 &format!("agent:{}", agent.id),
                 channel_id,
                 &result.response,
                 &[],
                 &[],
                 parent_id,
+                true,
             )?,
-            None => workspace.add_direct_message(
+            None => workspace.add_direct_message_with_main(
                 &format!("agent:{}", agent.id),
                 peer.unwrap_or_default(),
                 &result.response,
                 &[],
                 &[],
                 parent_id,
+                true,
             )?,
         };
         let update = WorkspaceUpdate {
@@ -2880,7 +2947,12 @@ fn direct_preprompt_matches(
         && preprompt.peer_pubkey.as_deref() == Some(participants[1])
 }
 
-fn conversation_agent_prompt(preprompt: &str, scope: &str, body: &str) -> String {
+fn conversation_agent_prompt(
+    preprompt: &str,
+    scope: &str,
+    thread_context: &str,
+    body: &str,
+) -> String {
     let mut sections = Vec::new();
     if !preprompt.is_empty() {
         sections.push(preprompt.to_string());
@@ -2891,8 +2963,35 @@ fn conversation_agent_prompt(preprompt: &str, scope: &str, body: &str) -> String
     sections.push(format!(
         "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying."
     ));
+    if !thread_context.is_empty() {
+        sections.push(format!("Thread context:\n{thread_context}"));
+    }
     sections.push(format!("User message:\n{body}"));
     sections.join("\n\n")
+}
+
+fn workspace_thread_context(
+    workspace: &WorkspaceStore,
+    parent_id: Option<&str>,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+) -> Result<String> {
+    let Some(parent_id) = parent_id else {
+        return Ok(String::new());
+    };
+    let messages = match channel_id {
+        Some(channel_id) => workspace.channel_messages(channel_id)?,
+        None => workspace.direct_messages(member.unwrap_or_default(), peer.unwrap_or_default())?,
+    };
+    let thread = messages
+        .iter()
+        .filter(|message| {
+            message.id == parent_id || message.parent_id.as_deref() == Some(parent_id)
+        })
+        .map(|message| format!("{}: {}", message.sender_pubkey, message.body))
+        .collect::<Vec<_>>();
+    Ok(thread.join("\n"))
 }
 
 fn workspace_history_request_count(response: &str) -> Option<usize> {
@@ -5377,6 +5476,14 @@ fn structured_tool_result(
             workdir,
             object.get("path").and_then(serde_json::Value::as_str),
         ),
+        "system_status" => worker_system_status_data(
+            workdir,
+            object
+                .get("history_seconds")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(60)
+                .clamp(10, 3600),
+        ),
         _ => serde_json::json!({
             "text": handle_tool_request(memory, peer_pubkey, request, workdir)
                 .unwrap_or_else(|| format!("Unknown tool request `{tool}`.")),
@@ -5388,6 +5495,229 @@ fn structured_tool_result(
         request_id: request_id.to_string(),
         workdir: workdir.to_string_lossy().to_string(),
         data,
+    })
+}
+
+fn worker_system_status_data(workdir: &Path, history_seconds: u64) -> serde_json::Value {
+    let sampled_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let first_cpu = read_cpu_counters();
+    std::thread::sleep(Duration::from_millis(250));
+    let cpu_percent = first_cpu
+        .zip(read_cpu_counters())
+        .and_then(|(first, second)| {
+            let total = second.0.checked_sub(first.0)?;
+            let idle = second.1.checked_sub(first.1)?;
+            (total > 0).then(|| 100.0 * (total.saturating_sub(idle) as f64) / total as f64)
+        });
+    let memory = read_meminfo();
+    let sample = serde_json::json!({
+        "sampled_at": sampled_at,
+        "uptime_seconds": read_proc_number("/proc/uptime").map(|value| value as u64),
+        "cpu_percent": cpu_percent,
+        "memory": memory.as_ref().map(|values| serde_json::json!({
+            "used_bytes": values.get("MemTotal").unwrap_or(&0).saturating_sub(*values.get("MemAvailable").unwrap_or(&0)),
+            "total_bytes": values.get("MemTotal").unwrap_or(&0),
+        })),
+        "swap": memory.as_ref().map(|values| serde_json::json!({
+            "used_bytes": values.get("SwapTotal").unwrap_or(&0).saturating_sub(*values.get("SwapFree").unwrap_or(&0)),
+            "total_bytes": values.get("SwapTotal").unwrap_or(&0),
+        })),
+        "load": fs::read_to_string("/proc/loadavg").ok().map(|raw| raw.split_whitespace().take(3).filter_map(|value| value.parse::<f64>().ok()).collect::<Vec<_>>()),
+        "filesystem": root_filesystem_status(),
+        "disk_io": read_disk_io(),
+        "networks": read_networks(),
+        "temperatures": read_temperatures(),
+        "battery": read_battery_status(),
+    });
+    let history_path = worker_state_path(workdir, "system-status.jsonl");
+    let history = append_and_read_system_status_history(&history_path, &sample, history_seconds);
+    serde_json::json!({"current": sample, "history": history})
+}
+
+fn append_and_read_system_status_history(
+    path: &Path,
+    sample: &serde_json::Value,
+    history_seconds: u64,
+) -> Vec<serde_json::Value> {
+    let line = match serde_json::to_string(sample) {
+        Ok(line) => line,
+        Err(err) => {
+            warn!("failed to serialize system status sample: {err}");
+            return vec![sample.clone()];
+        }
+    };
+    let mut contents = fs::read_to_string(path).unwrap_or_default();
+    contents.push_str(&line);
+    contents.push('\n');
+    if contents.len() > SYSTEM_STATUS_HISTORY_MAX_BYTES {
+        let start = contents
+            .len()
+            .saturating_sub(SYSTEM_STATUS_HISTORY_MAX_BYTES);
+        contents = contents[start..]
+            .split_once('\n')
+            .map(|(_, remainder)| remainder.to_string())
+            .unwrap_or_default();
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            warn!(path = %path.display(), "failed to create system status history directory: {err}");
+        }
+    }
+    if let Err(err) = fs::write(path, &contents) {
+        warn!(path = %path.display(), "failed to save system status history: {err}");
+    }
+    let sampled_at = sample
+        .get("sampled_at")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|entry| {
+            entry
+                .get("sampled_at")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|timestamp| sampled_at.saturating_sub(timestamp) <= history_seconds)
+        })
+        .collect()
+}
+
+fn read_cpu_counters() -> Option<(u64, u64)> {
+    let fields = fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .next()?
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|value| value.parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    let total = fields.iter().sum();
+    Some((
+        total,
+        fields
+            .get(3)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(fields.get(4).copied().unwrap_or_default()),
+    ))
+}
+
+fn read_proc_number(path: &str) -> Option<f64> {
+    fs::read_to_string(path)
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn read_meminfo() -> Option<HashMap<String, u64>> {
+    let values = fs::read_to_string("/proc/meminfo")
+        .ok()?
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((
+                name.to_string(),
+                value
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()?
+                    .saturating_mul(1024),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    Some(values)
+}
+
+fn root_filesystem_status() -> Option<serde_json::Value> {
+    let path = std::ffi::CString::new("/").ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    (unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } == 0).then(|| {
+        let stat = unsafe { stat.assume_init() };
+        let total = stat.f_blocks.saturating_mul(stat.f_frsize);
+        let available = stat.f_bavail.saturating_mul(stat.f_frsize);
+        serde_json::json!({"mount": "/", "total_bytes": total, "available_bytes": available, "used_bytes": total.saturating_sub(available)})
+    })
+}
+
+fn read_disk_io() -> serde_json::Value {
+    let (read_sectors, write_sectors) = fs::read_dir("/sys/block")
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("loop")
+                || name.starts_with("ram")
+                || name.starts_with("zram")
+                || name.starts_with("dm-")
+                || name.starts_with("md")
+            {
+                return None;
+            }
+            Some(
+                fs::read_to_string(entry.path().join("stat"))
+                    .ok()?
+                    .split_whitespace()
+                    .filter_map(|value| value.parse::<u64>().ok())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .fold((0_u64, 0_u64), |(read, write), values| {
+            (
+                read.saturating_add(values.get(2).copied().unwrap_or_default()),
+                write.saturating_add(values.get(6).copied().unwrap_or_default()),
+            )
+        });
+    serde_json::json!({"read_bytes": read_sectors.saturating_mul(512), "written_bytes": write_sectors.saturating_mul(512)})
+}
+
+fn read_networks() -> Vec<serde_json::Value> {
+    let Ok(raw) = fs::read_to_string("/proc/net/dev") else {
+        return vec![];
+    };
+    raw.lines().skip(2).filter_map(|line| {
+        let (name, values) = line.split_once(':')?;
+        let values = values.split_whitespace().filter_map(|value| value.parse::<u64>().ok()).collect::<Vec<_>>();
+        (name.trim() != "lo").then(|| serde_json::json!({"name": name.trim(), "received_bytes": values.first().copied().unwrap_or_default(), "transmitted_bytes": values.get(8).copied().unwrap_or_default()}))
+    }).collect()
+}
+
+fn read_temperatures() -> Vec<serde_json::Value> {
+    fs::read_dir("/sys/class/thermal")
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let milli_celsius = fs::read_to_string(path.join("temp"))
+                .ok()?
+                .trim()
+                .parse::<f64>()
+                .ok()?;
+            let label = fs::read_to_string(path.join("type"))
+                .ok()
+                .map(|label| label.trim().to_string())
+                .unwrap_or_else(|| entry.file_name().to_string_lossy().to_string());
+            Some(serde_json::json!({"label": label, "celsius": milli_celsius / 1000.0}))
+        })
+        .collect()
+}
+
+fn read_battery_status() -> Option<serde_json::Value> {
+    fs::read_dir("/sys/class/power_supply").ok()?.filter_map(Result::ok).find_map(|entry| {
+        let path = entry.path();
+        (fs::read_to_string(path.join("type")).ok()?.trim() == "Battery").then(|| serde_json::json!({
+            "capacity_percent": fs::read_to_string(path.join("capacity")).ok().and_then(|value| value.trim().parse::<u8>().ok()),
+            "status": fs::read_to_string(path.join("status")).ok().map(|value| value.trim().to_string()),
+        }))
     })
 }
 
@@ -7060,6 +7390,12 @@ mod tests {
             Some(conversation.clone())
         );
         assert!(workspace_agent_job_matches_trigger(&message, &conversation));
+        assert_eq!(workspace_agent_reply_parent_id(&message), "trigger");
+        let threaded = WorkspaceMessage {
+            parent_id: Some("thread-root".to_string()),
+            ..message.clone()
+        };
+        assert_eq!(workspace_agent_reply_parent_id(&threaded), "thread-root");
         assert!(!workspace_agent_job_matches_trigger(
             &WorkspaceMessage {
                 sender_pubkey: "agent:scout".to_string(),
@@ -7111,10 +7447,15 @@ mod tests {
 
     #[test]
     fn conversation_preprompt_precedes_scope_and_user_message() {
-        let prompt =
-            conversation_agent_prompt("Review carefully.", "Folder scope.", "Fix the bug.");
+        let prompt = conversation_agent_prompt(
+            "Review carefully.",
+            "Folder scope.",
+            "ResearchBot: Proposed implementation.",
+            "Fix the bug.",
+        );
         assert!(prompt.starts_with("Review carefully.\n\nFolder scope."));
         assert!(prompt.contains("[[WORKSPACE_HISTORY: N]]"));
+        assert!(prompt.contains("Thread context:\nResearchBot: Proposed implementation."));
         assert!(prompt.ends_with("User message:\nFix the bug."));
     }
 

@@ -177,6 +177,20 @@ path, installs the release binary there, verifies matching SHA-256 checksums,
 and restarts the service. Set `CODEX_WORKDIR` or `NOSTR_CODEX_WORKER` when the
 worker state is outside the repository's parent directory.
 
+The deploy script needs access to the worker user's DBus session. It sets these
+values automatically when `/run/user/$(id -u)/bus` is available:
+
+```bash
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+```
+
+If that socket is unavailable, the script stops before copying the binary and
+reports that manual deployment from the worker user's desktop session is
+required. Every worker source change must build the release binary, run the
+deploy script, and restart `nostr-codex-server.service`; automatic systemd
+restarts do not require manual action.
+
 Verify:
 
 ```bash
