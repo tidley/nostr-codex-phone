@@ -1379,15 +1379,10 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       mentionOptions: _mentionOptionsFor(_composer),
       onMentionSelected: (mention) =>
           _insertMention(_composer, _selectedComposerMentions, mention),
-      typingLabels: typing.map((status) {
-        final name = status.agentName ?? _memberLabel(status.senderPubkey);
-        final stage = status.stage?.trim();
-        if (stage != null && stage.isNotEmpty) return '$name: $stage';
-        return status.agentId != null ||
-                isWorkspaceAgentSender(status.senderPubkey)
-            ? '$name: Working...'
-            : '$name is typing...';
-      }).toList(),
+      typingLabels: typing
+          .map((status) =>
+              '${status.agentName ?? _memberLabel(status.senderPubkey)} is typing...')
+          .toList(),
       callPhase: widget.callPhase,
       callPeerPubkey: widget.callPeerPubkey,
       groupCallPhase: widget.groupCallPhase,
@@ -3587,50 +3582,43 @@ class _WorkspaceMentionOverlay extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, constraints) {
-      final height = (mentionOptions.length * 56.0).clamp(56.0, 240.0);
-      return Stack(
-        clipBehavior: Clip.none,
-        children: [
-          child,
-          if (mentionOptions.isNotEmpty)
-            Positioned(
-              left: 0,
-              top: -height - 4,
-              child: SizedBox(
-                width: constraints.maxWidth.clamp(0.0, 420.0).toDouble(),
-                height: height,
-                child: Material(
-                  elevation: 4,
-                  borderRadius: BorderRadius.circular(10),
-                  clipBehavior: Clip.antiAlias,
-                  child: ListView(
-                    padding: EdgeInsets.zero,
-                    children: [
-                      for (final mention in mentionOptions)
-                        ListTile(
-                          dense: true,
-                          leading: Icon(
-                            mention.kind == 'agent'
-                                ? Icons.smart_toy_outlined
-                                : Icons.person_outline,
-                          ),
-                          title: Text('@${mention.label}'),
-                          subtitle: Text(
-                            mention.kind == 'agent' ? 'Agent' : 'Member',
-                          ),
-                          onTap: () => onMentionSelected(mention),
-                        ),
-                    ],
-                  ),
-                ),
+  Widget build(BuildContext context) {
+    final height = (mentionOptions.length * 56.0).clamp(56.0, 144.0);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (mentionOptions.isNotEmpty)
+          SizedBox(
+            height: height,
+            child: Material(
+              elevation: 4,
+              borderRadius: BorderRadius.circular(10),
+              clipBehavior: Clip.antiAlias,
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  for (final mention in mentionOptions)
+                    ListTile(
+                      dense: true,
+                      leading: Icon(
+                        mention.kind == 'agent'
+                            ? Icons.smart_toy_outlined
+                            : Icons.person_outline,
+                      ),
+                      title: Text('@${mention.label}'),
+                      subtitle: Text(
+                        mention.kind == 'agent' ? 'Agent' : 'Member',
+                      ),
+                      onTap: () => onMentionSelected(mention),
+                    ),
+                ],
               ),
             ),
-        ],
-      );
-    },
-  );
+          ),
+        child,
+      ],
+    );
+  }
 }
 
 class WorkspaceComposer extends StatelessWidget {

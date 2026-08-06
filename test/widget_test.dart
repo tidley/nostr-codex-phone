@@ -197,6 +197,37 @@ void main() {
     focus.dispose();
   });
 
+  testWidgets('composer mention suggestions can be selected', (tester) async {
+    final controller = TextEditingController(text: '@');
+    final focus = FocusNode();
+    WorkspaceMention? selected;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData(platform: TargetPlatform.windows),
+        home: Material(
+          child: WorkspaceComposer(
+            composer: controller,
+            composerFocus: focus,
+            hintText: 'Message',
+            mentionOptions: const [
+              WorkspaceMention(kind: 'member', id: 'ada', label: 'Ada'),
+            ],
+            onMentionSelected: (mention) => selected = mention,
+            onSend: () {},
+            onAttach: () async {},
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('@Ada'));
+
+    expect(selected?.id, 'ada');
+    controller.dispose();
+    focus.dispose();
+  });
+
   testWidgets('desktop composer retains focus after Shift+Enter', (
     tester,
   ) async {
