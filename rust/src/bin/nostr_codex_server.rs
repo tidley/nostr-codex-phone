@@ -2146,7 +2146,6 @@ async fn run_workspace_agent_with_typing(
     session_id: &str,
 ) -> Result<CodexRunResult> {
     const TYPING_LEASE: Duration = Duration::from_secs(6);
-    let mut stage = "Starting work.".to_string();
     if let Err(err) = send_agent_typing(
         workspace,
         messenger,
@@ -2154,7 +2153,7 @@ async fn run_workspace_agent_with_typing(
         channel_id,
         member,
         peer,
-        Some(&stage),
+        None,
         Some(TYPING_LEASE),
     )
     .await
@@ -2164,31 +2163,18 @@ async fn run_workspace_agent_with_typing(
     let mut renew = interval(Duration::from_secs(3));
     renew.set_missed_tick_behavior(MissedTickBehavior::Delay);
     renew.tick().await;
-    let (stage_sender, mut stage_receiver) = mpsc::unbounded_channel();
     let mut run = Box::pin(run_codex_session_with_cancel_and_events(
         body,
         config,
         Some(session_id),
         None,
-        Some(stage_sender),
+        None,
     ));
     let result = loop {
         tokio::select! {
             result = &mut run => break result,
-            Some(event) = stage_receiver.recv() => {
-                let Some((next_stage, _)) = codex_status_from_event(&event) else {
-                    continue;
-                };
-                if next_stage == stage {
-                    continue;
-                }
-                stage = next_stage;
-                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, Some(&stage), Some(TYPING_LEASE)).await {
-                    warn!(agent = %agent.id, "failed to send agent work stage: {err:#}");
-                }
-            }
             _ = renew.tick() => {
-                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, Some(&stage), Some(TYPING_LEASE)).await {
+                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, None, Some(TYPING_LEASE)).await {
                     warn!(agent = %agent.id, "failed to refresh agent typing state: {err:#}");
                 }
             }
