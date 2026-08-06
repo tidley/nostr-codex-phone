@@ -33,6 +33,7 @@ import 'package:crew/src/tool_result_models.dart';
 import 'package:crew/src/working_animation.dart';
 import 'package:crew/src/workspace_invite.dart';
 import 'package:crew/src/workspace_models.dart';
+import 'package:crew/src/workspace_cache.dart';
 import 'package:crew/src/voice_recording.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -53,7 +54,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.6+306';
+const _appVersion = '0.3.12+312';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -298,11 +299,15 @@ class _PendingToolView {
     required this.tool,
     required this.conversationKey,
     this.workspacePanel = false,
+    this.workspaceConversationKey,
+    this.onResult,
   });
 
   final String tool;
   final String conversationKey;
   final bool workspacePanel;
+  final String? workspaceConversationKey;
+  final void Function(ToolResultPayload result)? onResult;
 }
 
 class _WorkspaceVoiceResult {
@@ -572,6 +577,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _recordingDurationLabel = ValueNotifier<String>('00:00');
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   final _pendingToolViews = <String, _PendingToolView>{};
+  final _workerConsoleHistoryCache = <String, Map<String, dynamic>>{};
   final _workspaceFileBrowser = ValueNotifier<FileBrowserResult?>(null);
   final _workspaceFilePreview = ValueNotifier<FileContentResult?>(null);
   final _clientDiagnostics = ValueNotifier<List<String>>(const []);
@@ -642,6 +648,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   OverlayEntry? _incomingCallOverlay;
   Future<void> _callSendChain = Future.value();
   final WorkspaceState _workspace = WorkspaceState();
+  final _workspaceCache = WorkspaceCache();
+  Timer? _workspaceCacheSaveTimer;
+  String? _workspaceCacheRestoredKey;
   final Map<String, int> _workspaceUnreadCounts = {};
   final Map<String, int> _workspaceThreadUnreadCounts = {};
   String? _workspaceOpenThreadKey;
@@ -874,6 +883,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _recordingDurationLabel.dispose();
     _recordingTimer?.cancel();
     _conversationHistorySaveTimer?.cancel();
+    _workspaceCacheSaveTimer?.cancel();
+    unawaited(_saveWorkspaceCache());
     _inactiveReplyNoticeTimer?.cancel();
     _inactiveReplyNotice?.remove();
     _inactiveReplyNoticeController?.dispose();
@@ -902,8 +913,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed || !_connected) return;
-    unawaited(_fetchRecentInboxMessages(allowCatchUpSpeech: true));
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      unawaited(_saveWorkspaceCache());
+    }
+    if (state == AppLifecycleState.resumed && _connected) {
+      unawaited(_fetchRecentInboxMessages(allowCatchUpSpeech: true));
+    }
   }
 
   Future<void> _loadSettings() async {
@@ -1090,6 +1107,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _loadConversationHistoryForActiveSession();
     _dismissQueryKeyboard();
     _refreshOwnPubkey();
+    await _restoreWorkspaceCache();
     await _applyTtsSettings();
     unawaited(_syncBackgroundDelivery());
     unawaited(_loadTtsOptions());
@@ -3620,6 +3638,66 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
   }
 
+  String? get _workspaceCacheServicePubkey {
+    final connected = _connectedPeerPubkey?.trim();
+    if (connected != null && connected.isNotEmpty) return connected;
+    final configured = _peerPubkeyController.text.trim();
+    return configured.isEmpty ? null : configured;
+  }
+
+  String? get _workspaceCacheKey {
+    final localPubkey = _ownPubkeyHex?.trim();
+    final servicePubkey = _workspaceCacheServicePubkey;
+    if (localPubkey == null || localPubkey.isEmpty || servicePubkey == null) {
+      return null;
+    }
+    return '${localPubkey.toLowerCase()}:${servicePubkey.toLowerCase()}';
+  }
+
+  Future<void> _restoreWorkspaceCache() async {
+    final localPubkey = _ownPubkeyHex?.trim();
+    final servicePubkey = _workspaceCacheServicePubkey;
+    if (localPubkey == null || localPubkey.isEmpty || servicePubkey == null) {
+      return;
+    }
+    final cached = await _workspaceCache.load(
+      localPubkey: localPubkey,
+      servicePubkey: servicePubkey,
+    );
+    if (!mounted || cached == null) return;
+    setState(() {
+      _workspace.apply({'workspace_update': cached.toSnapshotJson()});
+      _workspaceCacheRestoredKey = _workspaceCacheKey;
+      _workspaceRevision.value++;
+    });
+  }
+
+  void _scheduleWorkspaceCacheSave() {
+    _workspaceCacheSaveTimer?.cancel();
+    _workspaceCacheSaveTimer = Timer(
+      const Duration(milliseconds: 400),
+      () => unawaited(_saveWorkspaceCache()),
+    );
+  }
+
+  Future<void> _saveWorkspaceCache() async {
+    _workspaceCacheSaveTimer?.cancel();
+    final localPubkey = _ownPubkeyHex?.trim();
+    final servicePubkey = _workspaceCacheServicePubkey;
+    if (localPubkey == null || localPubkey.isEmpty || servicePubkey == null) {
+      return;
+    }
+    try {
+      await _workspaceCache.save(
+        localPubkey: localPubkey,
+        servicePubkey: servicePubkey,
+        workspace: _workspace,
+      );
+    } catch (error) {
+      _recordDiagnostic('Workspace cache save failed: $error');
+    }
+  }
+
   Future<void> _connect() async {
     if (_connected || _connecting) return;
 
@@ -3656,6 +3734,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _ownPubkeyHex = status.publicKeyHex;
         _status = 'Checking recent messages...';
       });
+      await _restoreWorkspaceCache();
       await _fetchRecentInboxMessages(allowCatchUpSpeech: true);
       await _sendWorkspaceRequest({'action': 'list'});
       if (!mounted) return;
@@ -3713,6 +3792,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _ownPubkeyHex = status.publicKeyHex;
         _status = 'Connected to ${target.displayName}';
       });
+      await _restoreWorkspaceCache();
       _startPolling();
       unawaited(_fetchRecentInboxMessages());
       unawaited(_sendWorkspaceRequest({'action': 'list'}));
@@ -4159,6 +4239,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       });
       _startPolling();
       unawaited(_fetchRecentInboxMessages());
+      // The workspace cache stays visible until a complete replacement snapshot arrives.
+      unawaited(_sendWorkspaceRequest({'action': 'list'}));
       await Future<void>.delayed(const Duration(milliseconds: 900));
     } catch (error) {
       if (mounted) {
@@ -4248,6 +4330,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       } catch (error) {
         if (!mounted || !_polling) return;
         _recordDiagnostic('Receive error: $error');
+        if (error.toString().contains('Nostr listener has stopped')) {
+          setState(() => _status = 'Listener stopped, reconnecting...');
+          try {
+            await _restartNostrForSendRecovery();
+          } catch (reconnectError) {
+            _recordDiagnostic('Listener recovery failed: $reconnectError');
+          }
+          return;
+        }
         setState(() => _status = 'Receive error: $error');
         await Future<void>.delayed(const Duration(seconds: 2));
       }
@@ -4328,6 +4419,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           final addedMessages = _workspace.apply(
             decoded,
             localSenderIds: {_ownPubkey ?? '', _ownPubkeyHex ?? ''},
+            preserveMessagesOnSnapshot:
+                _workspaceCacheRestoredKey == _workspaceCacheKey,
           );
           if (isMessageCreated) {
             for (final workspaceMessage in addedMessages) {
@@ -4360,6 +4453,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           }
           _workspaceRevision.value++;
         });
+        _scheduleWorkspaceCacheSave();
       } catch (_) {
         _showError('Received malformed workspace update');
       }
@@ -4532,14 +4626,30 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             ? 'Loaded ${result.tool.replaceAll('_', ' ')}'
             : 'Tool request failed';
       });
+      if (result.tool == 'system_status' && result.error == null) {
+        final range = result.data['history_range']?.toString() ?? '24h';
+        _workerConsoleHistoryCache[range] = result.data;
+      }
+      if (pending?.onResult case final onResult?) {
+        onResult(result);
+        return true;
+      }
       if (!fromCatchUp) {
         if (result.tool == 'model_list' && result.error == null) {
           unawaited(_openModelPicker(result));
-        } else if (result.tool == 'file_browser' && _showTeamWorkspace) {
-          _workspaceFileBrowser.value = FileBrowserResult.fromPayload(result);
+        } else if (result.tool == 'file_browser' &&
+            pending?.workspaceConversationKey != null) {
+          if (pending!.workspaceConversationKey ==
+              _workspaceFocusedConversationKey) {
+            _workspaceFileBrowser.value = FileBrowserResult.fromPayload(result);
+          }
         } else if (result.tool == 'read_file' &&
-            pending?.workspacePanel == true) {
-          _workspaceFilePreview.value = FileContentResult.fromPayload(result);
+            pending?.workspacePanel == true &&
+            pending?.workspaceConversationKey != null) {
+          if (pending!.workspaceConversationKey ==
+              _workspaceFocusedConversationKey) {
+            _workspaceFilePreview.value = FileContentResult.fromPayload(result);
+          }
         } else {
           unawaited(_openToolResult(result));
         }
@@ -5062,6 +5172,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     Map<String, dynamic> extra = const {},
     String? visibleText,
     bool workspacePanel = false,
+    String? workspaceConversationKey,
+    void Function(ToolResultPayload result)? onResult,
   }) async {
     if (_sending || !await _ensureConnectedForSend()) return;
     final conversationKey = _activeConversationKey;
@@ -5078,6 +5190,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       tool: tool,
       conversationKey: conversationKey,
       workspacePanel: workspacePanel,
+      workspaceConversationKey: workspaceConversationKey,
+      onResult: onResult,
     );
     setState(() {
       _sending = true;
@@ -5105,6 +5219,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       }
     }
   }
+
+  Future<void> _openWorkerConsole() => _sendToolRequest(
+    'system_status',
+    extra: {'history_range': '24h'},
+    onResult: (result) => unawaited(_openToolResult(result)),
+  );
 
   Future<void> _openToolResult(ToolResultPayload payload) async {
     if (!mounted) return;
@@ -5172,7 +5292,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       case 'system_status':
         page = _WorkerConsolePage(
           data: payload.data,
-          onRefresh: () => _sendToolRequest('system_status'),
+          cache: _workerConsoleHistoryCache,
+          onRequestRange: (range, onResult) => _sendToolRequest(
+            'system_status',
+            extra: {'history_range': range},
+            onResult: (result) => onResult(
+              result.error == null ? result.data : null,
+              result.error,
+            ),
+          ),
         );
         break;
       default:
@@ -6732,21 +6860,27 @@ Return a concise catch-up summary of what happened after that point: completed w
                 _ClientDiagnosticsPage(diagnostics: _clientDiagnostics),
           ),
         ),
-        onOpenWorkerConsole: () => unawaited(_sendToolRequest('system_status')),
-        onOpenFiles: () => _sendToolRequest('file_browser'),
+        onOpenWorkerConsole: () => unawaited(_openWorkerConsole()),
+        onOpenFiles: (conversationKey) => _sendToolRequest(
+          'file_browser',
+          workspaceConversationKey: conversationKey,
+        ),
         fileBrowser: _workspaceFileBrowser,
         filePreview: _workspaceFilePreview,
-        onBrowseFiles: (directory, path) => _sendToolRequest(
+        onBrowseFiles: (conversationKey, directory, path) => _sendToolRequest(
           'file_browser',
           extra: {'path': _fileBrowserPath(directory, path)},
           visibleText: 'browse $path',
+          workspaceConversationKey: conversationKey,
         ),
-        onReadWorkspaceFile: (directory, path) => _sendToolRequest(
-          'read_file',
-          extra: {'path': _fileBrowserPath(directory, path)},
-          visibleText: 'read $path',
-          workspacePanel: true,
-        ),
+        onReadWorkspaceFile: (conversationKey, directory, path) =>
+            _sendToolRequest(
+              'read_file',
+              extra: {'path': _fileBrowserPath(directory, path)},
+              visibleText: 'read $path',
+              workspacePanel: true,
+              workspaceConversationKey: conversationKey,
+            ),
         workspaceRevision: _workspaceRevision,
         onLoadOpenCodeModels: _loadOpenCodeModels,
         initialFolderChoices: _cachedRepoChoices,

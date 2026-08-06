@@ -8,6 +8,7 @@
 .nostr-codex-target.svg
 .nostr-codex-worker.lock
 .nostr-codex-workers.json
+.nostr-codex/
 nostr-codex-worker
 nostr-codex-worker-linux-x64
 .DS_Store

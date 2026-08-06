@@ -8,15 +8,27 @@ use std::sync::{
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+use tracing::warn;
 
 // OpenCode session IDs are `ses_` plus 1-124 ASCII alphanumeric characters.
 const OPENCODE_SESSION_ID_MAX_LEN: usize = 128;
+static OPENCODE_RUNS: Lazy<tokio::sync::Semaphore> = Lazy::new(|| {
+    tokio::sync::Semaphore::new(
+        env::var("OPENCODE_MAX_CONCURRENT_RUNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(10),
+    )
+});
+static OPENCODE_SCOPE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
@@ -926,8 +938,39 @@ async fn run_opencode_cli_with_cancel(
     cancel_token: Option<&CodexCancelToken>,
     event_sender: Option<CodexJsonEventSender>,
 ) -> Result<Output> {
-    let mut child = Command::new(&config.opencode.bin)
-        .args(args)
+    let _permit = OPENCODE_RUNS
+        .acquire()
+        .await
+        .expect("OpenCode concurrency semaphore is never closed");
+    let scope_name = opencode_systemd_scope_enabled().then(|| {
+        format!(
+            "nostr-codex-agent-{}-{}",
+            std::process::id(),
+            OPENCODE_SCOPE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        )
+    });
+    let mut command = if let Some(scope_name) = &scope_name {
+        let mut command = Command::new("systemd-run");
+        command.args([
+            "--user",
+            "--scope",
+            "--collect",
+            "--unit",
+            scope_name,
+            "--slice=agent-workloads.slice",
+            "--property=MemoryHigh=10G",
+            "--property=MemoryMax=12G",
+            "--property=TasksMax=infinity",
+            "--",
+        ]);
+        command.arg(&config.opencode.bin).args(args);
+        command
+    } else {
+        let mut command = Command::new(&config.opencode.bin);
+        command.args(args);
+        command
+    };
+    let mut child = command
         .current_dir(&config.working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -952,8 +995,16 @@ async fn run_opencode_cli_with_cancel(
     let stderr_task = tokio::spawn(read_output(stderr));
     let status = tokio::select! {
         status = child.wait() => status.context("failed to wait for OpenCode output"),
-        _ = wait_for_cancel(cancel_token), if cancel_token.is_some() => { let _ = child.kill().await; Err(anyhow!("OpenCode cancelled")) }
-        _ = sleep(config.timeout) => { let _ = child.kill().await; Err(anyhow!("OpenCode timed out after {}s", config.timeout.as_secs())) }
+        _ = wait_for_cancel(cancel_token), if cancel_token.is_some() => {
+            stop_opencode_scope(scope_name.as_deref()).await;
+            let _ = child.kill().await;
+            Err(anyhow!("OpenCode cancelled"))
+        }
+        _ = sleep(config.timeout) => {
+            stop_opencode_scope(scope_name.as_deref()).await;
+            let _ = child.kill().await;
+            Err(anyhow!("OpenCode timed out after {}s", config.timeout.as_secs()))
+        }
     }?;
     let stdout = stdout_task
         .await
@@ -973,6 +1024,28 @@ async fn run_opencode_cli_with_cancel(
             &String::from_utf8_lossy(&stdout),
             &String::from_utf8_lossy(&stderr),
         ))
+    }
+}
+
+fn opencode_systemd_scope_enabled() -> bool {
+    env::var("OPENCODE_SYSTEMD_SCOPE")
+        .ok()
+        .is_some_and(|value| !is_falsey(&value))
+}
+
+async fn stop_opencode_scope(scope_name: Option<&str>) {
+    let Some(scope_name) = scope_name else {
+        return;
+    };
+    let unit_name = format!("{scope_name}.scope");
+    match Command::new("systemctl")
+        .args(["--user", "stop", &unit_name])
+        .status()
+        .await
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => warn!(%scope_name, %status, "failed to stop OpenCode systemd scope"),
+        Err(err) => warn!(%scope_name, "failed to stop OpenCode systemd scope: {err}"),
     }
 }
 

@@ -277,12 +277,18 @@ impl WorkspaceStore {
     }
 
     pub fn delivered_notification(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM workspace_notification_outbox WHERE id = ?1", [id])?;
+        self.conn.execute(
+            "DELETE FROM workspace_notification_outbox WHERE id = ?1",
+            [id],
+        )?;
         Ok(())
     }
 
     pub fn failed_notification_attempt(&self, id: i64) -> Result<()> {
-        self.conn.execute("UPDATE workspace_notification_outbox SET attempts = attempts + 1 WHERE id = ?1", [id])?;
+        self.conn.execute(
+            "UPDATE workspace_notification_outbox SET attempts = attempts + 1 WHERE id = ?1",
+            [id],
+        )?;
         Ok(())
     }
 

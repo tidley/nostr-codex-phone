@@ -104,6 +104,8 @@ class WorkspaceChannel {
         id: json['id']?.toString() ?? '',
         name: json['name']?.toString() ?? '',
       );
+
+  Map<String, Object> toJson() => {'id': id, 'name': name};
 }
 
 /// Ephemeral channel-call metadata carried by group call control messages.
@@ -181,6 +183,48 @@ class WorkspaceMessage {
         reactions: _reactions(json['reactions']),
         createdAt: (json['created_at'] as num?)?.toInt() ?? 0,
       );
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    if (channelId != null) 'channel_id': channelId,
+    if (recipientPubkey != null) 'recipient_pubkey': recipientPubkey,
+    'sender_pubkey': senderPubkey,
+    'body': body,
+    if (parentId != null) 'parent_id': parentId,
+    'also_send_to_main': alsoSendToMain,
+    'attachments': attachments
+        .map(
+          (attachment) => {
+            'url': attachment.url,
+            'sha256': attachment.sha256,
+            'size': attachment.size.toString(),
+            'type': attachment.mediaType,
+            if (attachment.name != null) 'name': attachment.name,
+            if (attachment.encryption case final encryption?)
+              'encryption': {
+                'algorithm': encryption.algorithm,
+                'key': encryption.key,
+                'nonce': encryption.nonce,
+                'plaintext_sha256': encryption.plaintextSha256,
+                'plaintext_size': encryption.plaintextSize.toString(),
+                'plaintext_type': encryption.plaintextMediaType,
+              },
+          },
+        )
+        .toList(growable: false),
+    'mentions': mentions
+        .map((mention) => mention.toJson())
+        .toList(growable: false),
+    'reactions': reactions
+        .map(
+          (reaction) => {
+            'emoji': reaction.emoji,
+            'sender_pubkey': reaction.senderPubkey,
+          },
+        )
+        .toList(growable: false),
+    'created_at': createdAt,
+  };
 }
 
 class WorkspaceReaction {
@@ -320,6 +364,11 @@ class WorkspaceAgent {
     this.initializedAt,
     this.inputTokens,
     this.outputTokens,
+    this.availability = 'available',
+    this.scopeMemoryBytes,
+    this.scopeCpuUsageNsec,
+    this.scopeTaskCount,
+    this.scopeStartedAt,
   });
   final String id;
   final String name;
@@ -341,6 +390,11 @@ class WorkspaceAgent {
   final int? initializedAt;
   final int? inputTokens;
   final int? outputTokens;
+  final String availability;
+  final int? scopeMemoryBytes;
+  final int? scopeCpuUsageNsec;
+  final int? scopeTaskCount;
+  final int? scopeStartedAt;
 
   factory WorkspaceAgent.fromJson(Map<String, dynamic> json) => WorkspaceAgent(
     id: json['id']?.toString() ?? '',
@@ -370,7 +424,41 @@ class WorkspaceAgent {
     initializedAt: (json['initialized_at'] as num?)?.toInt(),
     inputTokens: (json['input_tokens'] as num?)?.toInt(),
     outputTokens: (json['output_tokens'] as num?)?.toInt(),
+    availability: json['availability']?.toString() ?? 'available',
+    scopeMemoryBytes: (json['scope_memory_bytes'] as num?)?.toInt(),
+    scopeCpuUsageNsec: (json['scope_cpu_usage_nsec'] as num?)?.toInt(),
+    scopeTaskCount: (json['scope_task_count'] as num?)?.toInt(),
+    scopeStartedAt: (json['scope_started_at'] as num?)?.toInt(),
   );
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'name': name,
+    'role': role,
+    'traits': traits,
+    'skills': skills,
+    if (preset != null) 'preset': preset,
+    if (openCodeProviderId != null) 'opencode_provider_id': openCodeProviderId,
+    if (openCodeProviderName != null)
+      'opencode_provider_name': openCodeProviderName,
+    if (openCodeModelId != null) 'opencode_model_id': openCodeModelId,
+    if (openCodeModelName != null) 'opencode_model_name': openCodeModelName,
+    if (openCodeAgent != null) 'opencode_agent': openCodeAgent,
+    if (workdir != null) 'workdir': workdir,
+    'restart_on_failure': restartOnFailure,
+    if (openCodeSessionId != null) 'opencode_session_id': openCodeSessionId,
+    'session_status': sessionStatus,
+    if (sessionError != null) 'session_error': sessionError,
+    'created_at': createdAt,
+    if (initializedAt != null) 'initialized_at': initializedAt,
+    if (inputTokens != null) 'input_tokens': inputTokens,
+    if (outputTokens != null) 'output_tokens': outputTokens,
+    'availability': availability,
+    if (scopeMemoryBytes != null) 'scope_memory_bytes': scopeMemoryBytes,
+    if (scopeCpuUsageNsec != null) 'scope_cpu_usage_nsec': scopeCpuUsageNsec,
+    if (scopeTaskCount != null) 'scope_task_count': scopeTaskCount,
+    if (scopeStartedAt != null) 'scope_started_at': scopeStartedAt,
+  };
 }
 
 class WorkspaceConversationAgent {
@@ -379,12 +467,14 @@ class WorkspaceConversationAgent {
     this.channelId,
     this.memberPubkey,
     this.peerPubkey,
+    this.parentId,
     this.folderScope = const [],
   });
   final String agentId;
   final String? channelId;
   final String? memberPubkey;
   final String? peerPubkey;
+  final String? parentId;
   final List<String> folderScope;
 
   factory WorkspaceConversationAgent.fromJson(Map<String, dynamic> json) =>
@@ -393,11 +483,21 @@ class WorkspaceConversationAgent {
         channelId: json['channel_id']?.toString(),
         memberPubkey: json['member_pubkey']?.toString(),
         peerPubkey: json['peer_pubkey']?.toString(),
+        parentId: json['parent_id']?.toString(),
         folderScope: (json['folder_scope'] as List? ?? const [])
             .map((path) => path.toString().trim())
             .where((path) => path.isNotEmpty)
             .toList(growable: false),
       );
+
+  Map<String, Object?> toJson() => {
+    'agent_id': agentId,
+    if (channelId != null) 'channel_id': channelId,
+    if (memberPubkey != null) 'member_pubkey': memberPubkey,
+    if (peerPubkey != null) 'peer_pubkey': peerPubkey,
+    if (parentId != null) 'parent_id': parentId,
+    'folder_scope': folderScope,
+  };
 }
 
 class WorkspaceConversationPreprompt {
@@ -419,6 +519,13 @@ class WorkspaceConversationPreprompt {
         memberPubkey: json['member_pubkey']?.toString(),
         peerPubkey: json['peer_pubkey']?.toString(),
       );
+
+  Map<String, Object?> toJson() => {
+    'preprompt': preprompt,
+    if (channelId != null) 'channel_id': channelId,
+    if (memberPubkey != null) 'member_pubkey': memberPubkey,
+    if (peerPubkey != null) 'peer_pubkey': peerPubkey,
+  };
 }
 
 class WorkspaceTyping {
@@ -431,6 +538,7 @@ class WorkspaceTyping {
     this.recipientPubkey,
     this.memberPubkey,
     this.peerPubkey,
+    this.parentId,
     required this.expiresAt,
   });
 
@@ -442,6 +550,7 @@ class WorkspaceTyping {
   final String? recipientPubkey;
   final String? memberPubkey;
   final String? peerPubkey;
+  final String? parentId;
   final int expiresAt;
 
   factory WorkspaceTyping.fromJson(Map<String, dynamic> json) =>
@@ -454,6 +563,7 @@ class WorkspaceTyping {
         recipientPubkey: json['recipient_pubkey']?.toString(),
         memberPubkey: json['member_pubkey']?.toString(),
         peerPubkey: json['peer_pubkey']?.toString(),
+        parentId: json['parent_id']?.toString(),
         expiresAt: (json['expires_at'] as num?)?.toInt() ?? 0,
       );
 }
@@ -469,9 +579,32 @@ class WorkspaceState {
   final Map<String, WorkspaceTyping> typing = {};
   final Map<String, _WorkspaceHistoryTransfer> _historyTransfers = {};
 
+  Map<String, Object> toSnapshotJson() => {
+    'action': 'snapshot',
+    'channels': channels
+        .map((channel) => channel.toJson())
+        .toList(growable: false),
+    'members': [
+      for (final member in members)
+        {'pubkey': member, 'display_name': memberNames[member] ?? ''},
+    ],
+    'messages': [
+      for (final conversation in messages.values)
+        for (final message in conversation) message.toJson(),
+    ],
+    'agents': agents.map((agent) => agent.toJson()).toList(growable: false),
+    'conversation_agents': conversationAgents
+        .map((agent) => agent.toJson())
+        .toList(growable: false),
+    'conversation_preprompts': conversationPreprompts
+        .map((preprompt) => preprompt.toJson())
+        .toList(growable: false),
+  };
+
   List<WorkspaceMessage> apply(
     Map<String, dynamic> raw, {
     Iterable<String> localSenderIds = const [],
+    bool preserveMessagesOnSnapshot = false,
   }) {
     final update = raw['workspace_update'];
     if (update is! Map) return const [];
@@ -484,23 +617,43 @@ class WorkspaceState {
       );
       if (pending.total != transfer.total) return const [];
       pending.chunks.putIfAbsent(transfer.sequence, () => data);
+      if (transfer.sequence == 0 && transfer.action == 'snapshot') {
+        // Header metadata is useful immediately, but must not clear cached rows
+        // while a slow relay is still delivering the message chunks.
+        final header = Map<String, dynamic>.from(data)
+          ..['action'] = 'snapshot_header';
+        apply(
+          {'workspace_update': header},
+          localSenderIds: localSenderIds,
+          preserveMessagesOnSnapshot: preserveMessagesOnSnapshot,
+        );
+      }
       if (pending.chunks.length != pending.total) return const [];
       _historyTransfers.remove(transfer.id);
-      final added = <WorkspaceMessage>[];
+      final chunks = <Map<String, dynamic>>[];
       for (var sequence = 0; sequence < pending.total; sequence++) {
         final chunk = pending.chunks[sequence];
         if (chunk == null) return const [];
-        chunk['action'] = _historyTransferAction(
-          chunk['action']?.toString(),
-        )!.action;
-        added.addAll(
-          apply({'workspace_update': chunk}, localSenderIds: localSenderIds),
-        );
+        chunks.add(chunk);
       }
-      return added;
+      // Apply the transfer atomically. Applying an empty snapshot header before
+      // its message chunks would otherwise clear channels and agents in the UI.
+      final header = Map<String, dynamic>.from(chunks.first);
+      final action = _historyTransferAction(header['action']?.toString());
+      if (action == null) return const [];
+      header['action'] = action.action;
+      header['messages'] = [
+        for (final chunk in chunks) ...(chunk['messages'] as List? ?? const []),
+      ];
+      return apply(
+        {'workspace_update': header},
+        localSenderIds: localSenderIds,
+        preserveMessagesOnSnapshot: preserveMessagesOnSnapshot,
+      );
     }
     final addedMessages = <WorkspaceMessage>[];
     final isSnapshot = data['action'] == 'snapshot';
+    final isSnapshotHeader = data['action'] == 'snapshot_header';
     final isSnapshotHeaderWithoutMessages =
         isSnapshot && (data['messages'] as List?)?.isEmpty == true;
     if (isSnapshot) {
@@ -508,14 +661,22 @@ class WorkspaceState {
       // Keep visible rows until those chunks arrive, including local rows that
       // have not yet returned through a relay.
       final localMessages = <String, List<WorkspaceMessage>>{};
+      final currentChannelIds = _channels(
+        data['channels'],
+      ).map((channel) => channel.id).toSet();
       if (!isSnapshotHeaderWithoutMessages) {
         for (final entry in messages.entries) {
           final local = entry.value
               .where(
-                (message) => isWorkspaceLocalSender(
-                  message.senderPubkey,
-                  localSenderIds,
-                ),
+                (message) =>
+                    (message.channelId == null ||
+                        currentChannelIds.isEmpty ||
+                        currentChannelIds.contains(message.channelId)) &&
+                    (preserveMessagesOnSnapshot ||
+                        isWorkspaceLocalSender(
+                          message.senderPubkey,
+                          localSenderIds,
+                        )),
               )
               .toList(growable: false);
           if (local.isNotEmpty) localMessages[entry.key] = local;
@@ -550,6 +711,7 @@ class WorkspaceState {
       data['conversation_agents'],
     );
     if (isSnapshot ||
+        isSnapshotHeader ||
         data['action'] == 'conversation_agents_updated' ||
         data['action'] == 'agent_deleted') {
       conversationAgents = incomingConversationAgents;
@@ -557,11 +719,13 @@ class WorkspaceState {
     final incomingPreprompts = _conversationPreprompts(
       data['conversation_preprompts'],
     );
-    if (isSnapshot || data['action'] == 'conversation_preprompt_updated') {
+    if (isSnapshot ||
+        isSnapshotHeader ||
+        data['action'] == 'conversation_preprompt_updated') {
       conversationPreprompts = incomingPreprompts;
     }
     final incomingAgents = _agents(data['agents']);
-    if (isSnapshot || data['action'] == 'agent_deleted') {
+    if (isSnapshot || isSnapshotHeader || data['action'] == 'agent_deleted') {
       agents = incomingAgents;
     } else if (incomingAgents.isNotEmpty) {
       final byId = {for (final agent in agents) agent.id: agent};
@@ -580,7 +744,7 @@ class WorkspaceState {
     }
     final incomingMembers = _members(data['members']);
     if (incomingMembers.isNotEmpty) {
-      if (isSnapshot) {
+      if (isSnapshot || isSnapshotHeader) {
         members = incomingMembers.keys.toList();
       } else {
         final knownMembers = members.toSet()..addAll(incomingMembers.keys);
@@ -622,12 +786,14 @@ class WorkspaceState {
     status.memberPubkey ?? '',
     status.peerPubkey ?? '',
     status.recipientPubkey ?? '',
+    status.parentId ?? '',
   ].join(':');
   static bool _typingMatchesMessage(
     WorkspaceTyping status,
     WorkspaceMessage message,
   ) {
     if (status.senderPubkey != message.senderPubkey) return false;
+    if (status.parentId != message.parentId) return false;
     if (status.channelId != null) return status.channelId == message.channelId;
     if (status.agentId != null) {
       return message.channelId == null &&
@@ -641,11 +807,14 @@ class WorkspaceState {
     required String? channelId,
     required String ownPubkey,
     required String? peerPubkey,
+    String? parentId,
+    bool includeThreadTyping = false,
     required int nowSeconds,
   }) {
     typing.removeWhere((_, status) => status.expiresAt <= nowSeconds);
     return typing.values
         .where((status) {
+          if (!includeThreadTyping && status.parentId != parentId) return false;
           if (status.channelId != null) return status.channelId == channelId;
           if (status.agentId != null) {
             return channelId == null &&

@@ -535,10 +535,21 @@ class _WorkspaceDraft {
 }
 
 class _WorkspacePanelState {
-  const _WorkspacePanelState({required this.isOpen, required this.width});
+  const _WorkspacePanelState({
+    required this.threadId,
+    required this.width,
+    required this.alsoSendToMain,
+    required this.filesSelected,
+    this.fileBrowser,
+    this.filePreview,
+  });
 
-  final bool isOpen;
+  final String? threadId;
   final double width;
+  final bool alsoSendToMain;
+  final bool filesSelected;
+  final FileBrowserResult? fileBrowser;
+  final FileContentResult? filePreview;
 }
 
 class _TeamWorkspace extends StatefulWidget {
@@ -604,11 +615,20 @@ class _TeamWorkspace extends StatefulWidget {
   final ValueNotifier<List<String>> diagnostics;
   final VoidCallback onOpenDiagnostics;
   final VoidCallback onOpenWorkerConsole;
-  final Future<void> Function() onOpenFiles;
-  final ValueListenable<FileBrowserResult?> fileBrowser;
+  final Future<void> Function(String conversationKey) onOpenFiles;
+  final ValueNotifier<FileBrowserResult?> fileBrowser;
   final ValueNotifier<FileContentResult?> filePreview;
-  final Future<void> Function(String directory, String path) onBrowseFiles;
-  final Future<void> Function(String directory, String path)
+  final Future<void> Function(
+    String conversationKey,
+    String directory,
+    String path,
+  )
+  onBrowseFiles;
+  final Future<void> Function(
+    String conversationKey,
+    String directory,
+    String path,
+  )
   onReadWorkspaceFile;
   final ValueListenable<int> workspaceRevision;
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
@@ -686,7 +706,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   _WorkspaceSection _section = _WorkspaceSection.channel;
   String _active = 'workspace';
   WorkspaceMessage? _thread;
-  bool _sidePanelOpen = false;
   bool _alsoSendToMain = false;
   bool _filesSelected = false;
   bool _filesFullWindow = false;
@@ -748,6 +767,14 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     _selectedThreadMentions
       ..clear()
       ..addAll(draft?.mentions ?? const []);
+  }
+
+  WorkspaceMessage? _threadWithId(String? id) {
+    if (id == null) return null;
+    for (final message in _activeMessages) {
+      if (message.id == id) return message;
+    }
+    return null;
   }
 
   void _reloadActiveMessages() {
@@ -991,6 +1018,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         'action': 'typing',
         if (_section == _WorkspaceSection.channel) 'channel_id': _active,
         if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
+        if (_threadComposerFocus.hasFocus && _thread != null)
+          'parent_id': _thread!.id,
         'expires_in_seconds': 4,
       }),
     );
@@ -1188,8 +1217,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _saveMainDraft();
       _saveThreadDraft();
       _panelStates[previousKey] = _WorkspacePanelState(
-        isOpen: _sidePanelOpen,
+        threadId: _thread?.id,
         width: _threadPaneWidth,
+        alsoSendToMain: _alsoSendToMain,
+        filesSelected: _filesSelected,
+        fileBrowser: widget.fileBrowser.value,
+        filePreview: widget.filePreview.value,
       );
     }
     final nextKey = _conversationKeyFor(section, id);
@@ -1198,20 +1231,28 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       if (section == _WorkspaceSection.agents) _agentsPageRevision++;
       _section = section;
       _active = id;
-      _thread = null;
-      _sidePanelOpen = nextPanelState?.isOpen ?? false;
+      _thread = _threadWithId(nextPanelState?.threadId);
       _threadPaneWidth = nextPanelState?.width ?? 340;
-      _alsoSendToMain = false;
+      _alsoSendToMain = nextPanelState?.alsoSendToMain ?? false;
+      _filesSelected = nextPanelState?.filesSelected ?? false;
+      _filesFullWindow = false;
       _restoreMainDraft(nextKey);
-      _threadComposer.value = TextEditingValue.empty;
-      _selectedThreadMentions.clear();
+      _restoreThreadDraft();
     });
+    widget.fileBrowser.value = nextPanelState?.fileBrowser;
+    widget.filePreview.value = nextPanelState?.filePreview;
     if (section == _WorkspaceSection.channel) {
       widget.onFocusConversation(id);
     } else if (section == _WorkspaceSection.direct) {
       widget.onFocusConversation(
         WorkspaceState.directKey(widget.ownPubkey, id),
       );
+    }
+    final thread = _thread;
+    if (nextKey != null && thread != null) {
+      widget.onOpenThread(nextKey, thread.id);
+    } else {
+      widget.onCloseThread();
     }
     _syncTypingLease();
     _reloadActiveMessages();
@@ -1222,7 +1263,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   @override
   Widget build(BuildContext context) {
     final typing = _activeTyping;
-    _scheduleTypingExpiry(typing);
+    final threadTyping = _activeThreadTyping;
+    final activityLabels = _conversationActivityLabels();
+    _scheduleTypingExpiry(widget.workspace.typing.values.toList());
     final wide = MediaQuery.sizeOf(context).width >= 1080;
     final medium = MediaQuery.sizeOf(context).width >= 720;
     final sidebar = _WorkspaceSidebar(
@@ -1237,6 +1280,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       memberAliases: widget.memberAliases,
       memberNames: widget.memberNames,
       unreadCounts: widget.unreadCounts,
+      activityLabels: activityLabels,
       onSelect: _select,
       onSessions: () {
         _closeDrawer();
@@ -1282,6 +1326,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
               entry.key.startsWith('$_conversationKey:'))
             entry.key.substring(_conversationKey!.length + 1): entry.value,
       },
+      threadActivityLabels: _threadActivityLabels(typing),
       composer: _composer,
       composerFocus: _composerFocus,
       onSend: _send,
@@ -1298,7 +1343,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             _thread = message;
             _restoreThreadDraft();
           }
-          _sidePanelOpen = true;
           _alsoSendToMain = false;
         });
         final conversationKey = _conversationKey;
@@ -1310,7 +1354,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         setState(() {
           _saveThreadDraft();
           _thread = null;
-          _sidePanelOpen = false;
           _alsoSendToMain = false;
         });
         widget.onCloseThread();
@@ -1326,8 +1369,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           setState(() => _alsoSendToMain = value),
       onOpenSettings: widget.onOpenSettings,
       onReload: _reloadActiveMessages,
-      sidePanelOpen: _sidePanelOpen,
-      onOpenFiles: widget.onOpenFiles,
+      onOpenFiles: () {
+        final conversationKey = _conversationKey;
+        return conversationKey == null
+            ? Future<void>.value()
+            : widget.onOpenFiles(conversationKey);
+      },
       onRenameConversation: (name) async {
         if (_section == _WorkspaceSection.channel) {
           await widget.onRequest({
@@ -1396,13 +1443,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       mentionOptions: _mentionOptionsFor(_composer),
       onMentionSelected: (mention) =>
           _insertMention(_composer, _selectedComposerMentions, mention),
-      typingLabels: typing
-          .map(
-            (status) => status.agentId != null
-                ? '${status.agentName ?? _memberLabel(status.senderPubkey)} is working...'
-                : '${_memberLabel(status.senderPubkey)} is typing...',
-          )
-          .toList(),
+      typingLabels: _typingLabels(typing),
       callPhase: widget.callPhase,
       callPeerPubkey: widget.callPeerPubkey,
       groupCallPhase: widget.groupCallPhase,
@@ -1438,12 +1479,14 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       alsoSendToMain: _alsoSendToMain,
       onAlsoSendToMainChanged: (value) =>
           setState(() => _alsoSendToMain = value),
-      onClose: () => setState(() {
-        _saveThreadDraft();
-        _thread = null;
-        _sidePanelOpen = false;
-        _alsoSendToMain = false;
-      }),
+      onClose: () {
+        setState(() {
+          _saveThreadDraft();
+          _thread = null;
+          _alsoSendToMain = false;
+        });
+        widget.onCloseThread();
+      },
       onToggleReaction: (message, emoji) => widget.onRequest({
         'action': 'toggle_reaction',
         'parent_id': message.id,
@@ -1456,35 +1499,48 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       memberAliases: widget.memberAliases,
       memberNames: widget.memberNames,
       agents: _activeAgents,
+      typingLabels: _typingLabels(threadTyping),
     );
+    final conversationKey = _conversationKey;
     final fileBrowser = widget.fileBrowser.value;
     final filesPane = fileBrowser == null
         ? null
         : _WorkspaceFilesPanel(
             result: fileBrowser,
             preview: widget.filePreview.value,
-            onBrowse: (path) =>
-                widget.onBrowseFiles(fileBrowser.directory, path),
+            onBrowse: (path) => conversationKey == null
+                ? Future<void>.value()
+                : widget.onBrowseFiles(
+                    conversationKey,
+                    fileBrowser.directory,
+                    path,
+                  ),
             onUp: () {
               final parts = fileBrowser.directory.split('/')..removeLast();
-              return widget.onBrowseFiles('', parts.join('/'));
+              return conversationKey == null
+                  ? Future<void>.value()
+                  : widget.onBrowseFiles(conversationKey, '', parts.join('/'));
             },
-            onReadFile: (path) =>
-                widget.onReadWorkspaceFile(fileBrowser.directory, path),
+            onReadFile: (path) => conversationKey == null
+                ? Future<void>.value()
+                : widget.onReadWorkspaceFile(
+                    conversationKey,
+                    fileBrowser.directory,
+                    path,
+                  ),
             onFullWindow: () => setState(() => _filesFullWindow = true),
             onCloseFullWindow: () => setState(() => _filesFullWindow = false),
             onClosePreview: () => widget.filePreview.value = null,
             fullWindow: _filesFullWindow,
           );
-    final showSidePane = _sidePanelOpen || _thread != null || filesPane != null;
-    final showFiles = filesPane != null && (_filesSelected || _thread == null);
+    final showSidePane =
+        _thread != null || (_filesSelected && filesPane != null);
+    final showFiles = _filesSelected && filesPane != null;
     // A phone cannot accommodate a conversation and its detail pane side by
     // side. Show the detail as the complete working surface instead.
     final showPhoneDetail = !medium && showSidePane && !_filesFullWindow;
     final sidePane = _WorkspaceSidePanel(
-      // The panel toggle opens conversation details even before a reply thread
-      // is selected. Supplying the context pane prevents a null panel body.
-      thread: _thread != null || _sidePanelOpen ? contextPane : null,
+      thread: _thread != null ? contextPane : null,
       files: filesPane,
       showFiles: showFiles,
       onShowThread: () => setState(() => _filesSelected = false),
@@ -1540,8 +1596,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                     final key = _conversationKey;
                     if (key != null) {
                       _panelStates[key] = _WorkspacePanelState(
-                        isOpen: _sidePanelOpen,
+                        threadId: _thread?.id,
                         width: _threadPaneWidth,
+                        alsoSendToMain: _alsoSendToMain,
+                        filesSelected: _filesSelected,
+                        fileBrowser: widget.fileBrowser.value,
+                        filePreview: widget.filePreview.value,
                       );
                     }
                   }),
@@ -1560,8 +1620,75 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     channelId: _section == _WorkspaceSection.channel ? _active : null,
     ownPubkey: widget.ownPubkey,
     peerPubkey: _section == _WorkspaceSection.direct ? _active : null,
+    parentId: null,
+    includeThreadTyping: true,
     nowSeconds: DateTime.now().millisecondsSinceEpoch ~/ 1000,
   );
+
+  List<WorkspaceTyping> get _activeThreadTyping {
+    final parentId = _thread?.id;
+    if (parentId == null) return const [];
+    return widget.workspace.activeTyping(
+      channelId: _section == _WorkspaceSection.channel ? _active : null,
+      ownPubkey: widget.ownPubkey,
+      peerPubkey: _section == _WorkspaceSection.direct ? _active : null,
+      parentId: parentId,
+      nowSeconds: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    );
+  }
+
+  List<String> _typingLabels(List<WorkspaceTyping> statuses) =>
+      statuses.map(_typingLabel).toList(growable: false);
+
+  Map<String, String> _conversationActivityLabels() {
+    final nowSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final labels = <String, String>{};
+    for (final channel in widget.workspace.channels) {
+      final statuses = widget.workspace.activeTyping(
+        channelId: channel.id,
+        ownPubkey: widget.ownPubkey,
+        peerPubkey: null,
+        includeThreadTyping: true,
+        nowSeconds: nowSeconds,
+      );
+      if (statuses.isNotEmpty) {
+        labels[channel.id] = _typingLabels(statuses).join(' · ');
+      }
+    }
+    for (final member in widget.workspace.directPeers(widget.ownPubkey)) {
+      final statuses = widget.workspace.activeTyping(
+        channelId: null,
+        ownPubkey: widget.ownPubkey,
+        peerPubkey: member,
+        includeThreadTyping: true,
+        nowSeconds: nowSeconds,
+      );
+      if (statuses.isNotEmpty) {
+        labels[WorkspaceState.directKey(widget.ownPubkey, member)] =
+            _typingLabels(statuses).join(' · ');
+      }
+    }
+    return labels;
+  }
+
+  Map<String, String> _threadActivityLabels(
+    Iterable<WorkspaceTyping> statuses,
+  ) {
+    final labels = <String, List<String>>{};
+    for (final status in statuses) {
+      final parentId = status.parentId;
+      if (parentId != null) {
+        labels.putIfAbsent(parentId, () => []).add(_typingLabel(status));
+      }
+    }
+    return {
+      for (final entry in labels.entries) entry.key: entry.value.join('\n'),
+    };
+  }
+
+  String _typingLabel(WorkspaceTyping status) => status.agentId != null
+      ? '${status.agentName ?? _memberLabel(status.senderPubkey)} is working...'
+      : '${_memberLabel(status.senderPubkey)} is typing...';
 
   void _scheduleTypingExpiry(List<WorkspaceTyping> typing) {
     _typingExpiryTimer?.cancel();
@@ -1836,6 +1963,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.memberAliases,
     required this.memberNames,
     required this.unreadCounts,
+    required this.activityLabels,
     required this.onSelect,
     required this.onSessions,
     required this.onSettings,
@@ -1856,6 +1984,7 @@ class _WorkspaceSidebar extends StatelessWidget {
   final Map<String, String> memberAliases;
   final Map<String, String> memberNames;
   final Map<String, int> unreadCounts;
+  final Map<String, String> activityLabels;
   final void Function(_WorkspaceSection, String) onSelect;
   final VoidCallback onSessions;
   final VoidCallback onSettings;
@@ -1880,6 +2009,7 @@ class _WorkspaceSidebar extends StatelessWidget {
       VoidCallback? onTap,
       int unreadCount = 0,
       String? count,
+      String? activity,
     }) => ListTile(
       dense: true,
       selected: selected,
@@ -1887,6 +2017,16 @@ class _WorkspaceSidebar extends StatelessWidget {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       leading: Icon(icon, size: 19),
       title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: activity == null
+          ? null
+          : Text(
+              activity,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
       trailing: unreadCount > 0
           ? Semantics(
               label: '$unreadCount unread messages',
@@ -1901,164 +2041,201 @@ class _WorkspaceSidebar extends StatelessWidget {
     );
     return ColoredBox(
       color: palette.sidebar,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(12, 18, 12, 16),
+      child: Column(
         children: [
-          Row(
-            children: [
-              CircleAvatar(
-                backgroundColor: Colors.white,
-                backgroundImage: const AssetImage('assets/branding/ribbet.png'),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(12, 18, 12, 8),
+              children: [
+                Row(
                   children: [
-                    Text(
-                      'Ribbit',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.bold,
+                    CircleAvatar(
+                      backgroundColor: Colors.white,
+                      backgroundImage: const AssetImage(
+                        'assets/branding/ribbet.png',
                       ),
                     ),
-                    Text(
-                      'TEAM WORKSPACE',
-                      style: TextStyle(
-                        fontSize: 10,
-                        letterSpacing: 1.1,
-                        color: palette.label,
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Ribbit',
+                            style: Theme.of(context).textTheme.titleMedium
+                                ?.copyWith(fontWeight: FontWeight.bold),
+                          ),
+                          Text(
+                            'TEAM WORKSPACE',
+                            style: TextStyle(
+                              fontSize: 10,
+                              letterSpacing: 1.1,
+                              color: palette.label,
+                            ),
+                          ),
+                        ],
                       ),
+                    ),
+                    IconButton(
+                      onPressed: onRefresh,
+                      icon: const Icon(Icons.refresh_outlined),
+                      tooltip: 'Refresh workspace',
+                    ),
+                    IconButton(
+                      onPressed: onSettings,
+                      icon: const Icon(Icons.settings_outlined),
+                      tooltip: 'Settings',
                     ),
                   ],
                 ),
-              ),
-              IconButton(
-                onPressed: onRefresh,
-                icon: const Icon(Icons.refresh_outlined),
-                tooltip: 'Refresh workspace',
-              ),
-              IconButton(
-                onPressed: onSettings,
-                icon: const Icon(Icons.settings_outlined),
-                tooltip: 'Settings',
-              ),
-            ],
-          ),
-          const SizedBox(height: 22),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Conversations',
+                const SizedBox(height: 22),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Conversations',
+                        style: Theme.of(
+                          context,
+                        ).textTheme.labelLarge?.copyWith(color: palette.label),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: onCreateChannel,
+                      icon: const Icon(Icons.add, size: 18),
+                      tooltip: 'Create channel',
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                if (channels.isEmpty)
+                  const ListTile(dense: true, title: Text('No channels yet')),
+                for (final channel in channels)
+                  item(
+                    Icons.tag,
+                    channel.name,
+                    selected: selected == channel.id,
+                    unreadCount: unreadCounts[channel.id] ?? 0,
+                    activity: activityLabels[channel.id],
+                    onTap: () =>
+                        onSelect(_WorkspaceSection.channel, channel.id),
+                  ),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Direct messages',
+                        style: Theme.of(
+                          context,
+                        ).textTheme.labelLarge?.copyWith(color: palette.label),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: onCreateDirect,
+                      icon: const Icon(Icons.add, size: 18),
+                      tooltip: 'New direct message',
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                if (members.isEmpty)
+                  const ListTile(
+                    dense: true,
+                    title: Text('No direct messages yet'),
+                  ),
+                for (final member in members)
+                  item(
+                    Icons.chat_bubble_outline,
+                    memberLabel(member),
+                    selected: direct == member,
+                    unreadCount:
+                        unreadCounts[WorkspaceState.directKey(
+                          ownPubkey,
+                          member,
+                        )] ??
+                        0,
+                    activity:
+                        activityLabels[WorkspaceState.directKey(
+                          ownPubkey,
+                          member,
+                        )],
+                    onTap: () => onSelect(_WorkspaceSection.direct, member),
+                  ),
+                const SizedBox(height: 18),
+                Text(
+                  'Workspace',
                   style: Theme.of(
                     context,
                   ).textTheme.labelLarge?.copyWith(color: palette.label),
                 ),
-              ),
-              IconButton(
-                onPressed: onCreateChannel,
-                icon: const Icon(Icons.add, size: 18),
-                tooltip: 'Create channel',
-                visualDensity: VisualDensity.compact,
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          if (channels.isEmpty)
-            const ListTile(dense: true, title: Text('No channels yet')),
-          for (final channel in channels)
-            item(
-              Icons.tag,
-              channel.name,
-              selected: selected == channel.id,
-              unreadCount: unreadCounts[channel.id] ?? 0,
-              onTap: () => onSelect(_WorkspaceSection.channel, channel.id),
-            ),
-          const SizedBox(height: 18),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Direct messages',
+                const SizedBox(height: 6),
+                item(
+                  Icons.people_outline,
+                  'People',
+                  selected: section == _WorkspaceSection.people,
+                  onTap: () => onSelect(_WorkspaceSection.people, 'people'),
+                ),
+                item(
+                  Icons.admin_panel_settings_outlined,
+                  'Access',
+                  selected: section == _WorkspaceSection.access,
+                  onTap: () => onSelect(_WorkspaceSection.access, 'access'),
+                ),
+                item(
+                  Icons.smart_toy_outlined,
+                  'Agents',
+                  selected: section == _WorkspaceSection.agents,
+                  onTap: () => onSelect(_WorkspaceSection.agents, 'agents'),
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  'Focused work',
                   style: Theme.of(
                     context,
                   ).textTheme.labelLarge?.copyWith(color: palette.label),
                 ),
-              ),
-              IconButton(
-                onPressed: onCreateDirect,
-                icon: const Icon(Icons.add, size: 18),
-                tooltip: 'New direct message',
-                visualDensity: VisualDensity.compact,
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          if (members.isEmpty)
-            const ListTile(dense: true, title: Text('No direct messages yet')),
-          for (final member in members)
-            item(
-              Icons.chat_bubble_outline,
-              memberLabel(member),
-              selected: direct == member,
-              unreadCount:
-                  unreadCounts[WorkspaceState.directKey(ownPubkey, member)] ??
-                  0,
-              onTap: () => onSelect(_WorkspaceSection.direct, member),
+                const SizedBox(height: 6),
+                item(
+                  Icons.workspaces_outline,
+                  'Sessions',
+                  count: sessions.isEmpty ? null : '${sessions.length}',
+                  onTap: onSessions,
+                ),
+                for (final session in sessions.take(3))
+                  item(
+                    Icons.terminal_outlined,
+                    session.displayName,
+                    onTap: onSessions,
+                  ),
+                const SizedBox(height: 18),
+                item(
+                  Icons.monitor_heart_outlined,
+                  'Worker console',
+                  onTap: onWorkerConsole,
+                ),
+                item(
+                  Icons.bug_report_outlined,
+                  'Diagnostics',
+                  onTap: onDiagnostics,
+                ),
+              ],
             ),
-          const SizedBox(height: 18),
-          Text(
-            'Workspace',
-            style: Theme.of(
-              context,
-            ).textTheme.labelLarge?.copyWith(color: palette.label),
           ),
-          const SizedBox(height: 6),
-          item(
-            Icons.people_outline,
-            'People',
-            selected: section == _WorkspaceSection.people,
-            onTap: () => onSelect(_WorkspaceSection.people, 'people'),
-          ),
-          item(
-            Icons.admin_panel_settings_outlined,
-            'Access',
-            selected: section == _WorkspaceSection.access,
-            onTap: () => onSelect(_WorkspaceSection.access, 'access'),
-          ),
-          item(
-            Icons.smart_toy_outlined,
-            'Agents',
-            selected: section == _WorkspaceSection.agents,
-            onTap: () => onSelect(_WorkspaceSection.agents, 'agents'),
-          ),
-          const SizedBox(height: 18),
-          Text(
-            'Focused work',
-            style: Theme.of(
-              context,
-            ).textTheme.labelLarge?.copyWith(color: palette.label),
-          ),
-          const SizedBox(height: 6),
-          item(
-            Icons.workspaces_outline,
-            'Sessions',
-            count: sessions.isEmpty ? null : '${sessions.length}',
-            onTap: onSessions,
-          ),
-          for (final session in sessions.take(3))
-            item(
-              Icons.terminal_outlined,
-              session.displayName,
-              onTap: onSessions,
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 10, 18, 12),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Ribbit $_appVersion',
+                style: Theme.of(
+                  context,
+                ).textTheme.labelSmall?.copyWith(color: palette.label),
+              ),
             ),
-          const SizedBox(height: 18),
-          item(
-            Icons.monitor_heart_outlined,
-            'Worker console',
-            onTap: onWorkerConsole,
           ),
-          item(Icons.bug_report_outlined, 'Diagnostics', onTap: onDiagnostics),
         ],
       ),
     );
@@ -2074,6 +2251,7 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.messages,
     required this.threadReplyCounts,
     required this.threadUnreadCounts,
+    required this.threadActivityLabels,
     required this.composer,
     required this.composerFocus,
     required this.onSend,
@@ -2091,7 +2269,6 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.onAlsoSendToMainChanged,
     required this.onOpenSettings,
     required this.onReload,
-    required this.sidePanelOpen,
     required this.onOpenFiles,
     required this.onRenameConversation,
     required this.onDeleteConversation,
@@ -2145,6 +2322,7 @@ class _WorkspaceConversation extends StatefulWidget {
   final List<WorkspaceMessage> messages;
   final Map<String, int> threadReplyCounts;
   final Map<String, int> threadUnreadCounts;
+  final Map<String, String> threadActivityLabels;
   final TextEditingController composer;
   final FocusNode composerFocus;
   final VoidCallback onSend;
@@ -2163,7 +2341,6 @@ class _WorkspaceConversation extends StatefulWidget {
   final ValueChanged<bool> onAlsoSendToMainChanged;
   final VoidCallback onOpenSettings;
   final VoidCallback onReload;
-  final bool sidePanelOpen;
   final Future<void> Function() onOpenFiles;
   final Future<void> Function(String name) onRenameConversation;
   final Future<void> Function() onDeleteConversation;
@@ -2216,9 +2393,12 @@ class _WorkspaceConversation extends StatefulWidget {
 
 class _WorkspaceConversationState extends State<_WorkspaceConversation> {
   final _scrollController = ScrollController();
+  final _searchController = TextEditingController();
   String? _lastMessageId;
   double? _lastViewportHeight;
   bool _scrollQueued = false;
+  bool _searchOpen = false;
+  String _searchQuery = '';
 
   Future<void> _editConversationPreprompt() async {
     final controller = TextEditingController(
@@ -2260,6 +2440,13 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
   @override
   void didUpdateWidget(covariant _WorkspaceConversation oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.section != widget.section ||
+        oldWidget.channelId != widget.channelId ||
+        oldWidget.directPeer != widget.directPeer) {
+      _searchController.clear();
+      _searchQuery = '';
+      _searchOpen = false;
+    }
     if (_lastMessageId != _latestMessageId) {
       _lastMessageId = _latestMessageId;
       _queueScrollToLatest();
@@ -2268,12 +2455,25 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
 
   @override
   void dispose() {
+    _searchController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
   String? get _latestMessageId =>
       widget.messages.isEmpty ? null : widget.messages.last.id;
+
+  List<WorkspaceMessage> get _visibleMessages {
+    final query = _searchQuery.trim().toLowerCase();
+    if (query.isEmpty) return widget.messages;
+    return widget.messages
+        .where(
+          (message) =>
+              message.body.toLowerCase().contains(query) ||
+              _memberLabel(message.senderPubkey).toLowerCase().contains(query),
+        )
+        .toList(growable: false);
+  }
 
   Future<void> _renameConversation() async {
     final controller = TextEditingController(text: widget.title);
@@ -2396,6 +2596,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
       );
     }
     final palette = Theme.of(context).extension<_WorkspacePalette>()!;
+    final visibleMessages = _visibleMessages;
+    final searching = _searchQuery.trim().isNotEmpty;
     return ColoredBox(
       color: palette.content,
       child: Column(
@@ -2403,95 +2605,133 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
           Container(
             color: palette.sidebar.withValues(alpha: 0.48),
             padding: const EdgeInsets.fromLTRB(24, 18, 20, 14),
-            child: Row(
+            child: Column(
               children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        widget.title,
-                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          fontWeight: FontWeight.bold,
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.title,
+                            style: Theme.of(context).textTheme.titleLarge
+                                ?.copyWith(fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '${widget.section == _WorkspaceSection.channel ? 'Channel' : 'Direct message'}${widget.agents.isEmpty ? '' : ' · ${widget.agents.length} agent${widget.agents.length == 1 ? '' : 's'}'}',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (widget.onManageAgents != null)
+                      IconButton(
+                        onPressed: widget.onManageAgents,
+                        icon: const Icon(Icons.person_add_alt_1_outlined),
+                        tooltip: 'Manage agents',
+                      ),
+                    IconButton(
+                      onPressed: () => setState(() {
+                        _searchOpen = !_searchOpen;
+                        if (!_searchOpen) {
+                          _searchController.clear();
+                          _searchQuery = '';
+                        }
+                      }),
+                      icon: Icon(
+                        _searchOpen ? Icons.search_off_outlined : Icons.search,
+                      ),
+                      tooltip: _searchOpen ? 'Close search' : 'Search messages',
+                    ),
+                    IconButton(
+                      onPressed: widget.onReload,
+                      icon: const Icon(Icons.arrow_upward_outlined),
+                      tooltip: 'Reload last messages',
+                    ),
+                    PopupMenuButton<String>(
+                      tooltip: 'Conversation actions',
+                      onSelected: (action) => unawaited(
+                        action == 'rename'
+                            ? _renameConversation()
+                            : _deleteConversation(),
+                      ),
+                      itemBuilder: (_) => const [
+                        PopupMenuItem(
+                          value: 'rename',
+                          child: Text('Rename conversation'),
                         ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        '${widget.section == _WorkspaceSection.channel ? 'Channel' : 'Direct message'}${widget.agents.isEmpty ? '' : ' · ${widget.agents.length} agent${widget.agents.length == 1 ? '' : 's'}'}',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
-                ),
-                if (widget.onManageAgents != null)
-                  IconButton(
-                    onPressed: widget.onManageAgents,
-                    icon: const Icon(Icons.person_add_alt_1_outlined),
-                    tooltip: 'Manage agents',
-                  ),
-                IconButton(
-                  onPressed: widget.onReload,
-                  icon: const Icon(Icons.arrow_upward_outlined),
-                  tooltip: 'Reload last messages',
-                ),
-                PopupMenuButton<String>(
-                  tooltip: 'Conversation actions',
-                  onSelected: (action) => unawaited(
-                    action == 'rename'
-                        ? _renameConversation()
-                        : _deleteConversation(),
-                  ),
-                  itemBuilder: (_) => const [
-                    PopupMenuItem(
-                      value: 'rename',
-                      child: Text('Rename conversation'),
+                        PopupMenuItem(
+                          value: 'delete',
+                          child: Text('Delete conversation'),
+                        ),
+                      ],
                     ),
-                    PopupMenuItem(
-                      value: 'delete',
-                      child: Text('Delete conversation'),
+                    if (widget.section == _WorkspaceSection.channel)
+                      IconButton(
+                        onPressed: () => unawaited(widget.onOpenFiles()),
+                        icon: const Icon(Icons.folder_open_outlined),
+                        tooltip: 'Browse repository files',
+                      ),
+                    IconButton(
+                      onPressed: _editConversationPreprompt,
+                      icon: const Icon(Icons.edit_note_outlined),
+                      tooltip: 'Edit agent brief',
                     ),
+                    if (widget.section == _WorkspaceSection.direct)
+                      _CallControl(
+                        phase:
+                            widget.callPeerPubkey == null ||
+                                widget.callPeerPubkey == widget.directPeer
+                            ? widget.callPhase
+                            : _CallPhase.idle,
+                        onStart: () => widget.onStartCall(widget.directPeer!),
+                        onAccept: widget.onAcceptCall,
+                        onReject: widget.onRejectCall,
+                        onHangup: widget.onHangupCall,
+                        mediaSource: widget.mediaSource,
+                        onMediaSourceChanged: widget.onMediaSourceChanged,
+                      ),
+                    if (widget.section == _WorkspaceSection.channel)
+                      _CallControl(
+                        phase:
+                            widget.groupCallChannelId == null ||
+                                widget.groupCallChannelId == widget.channelId
+                            ? widget.groupCallPhase
+                            : _CallPhase.idle,
+                        onStart: () => unawaited(
+                          widget.onStartChannelCall(widget.channelId!),
+                        ),
+                        onAccept: widget.onAcceptGroupCall,
+                        onReject: widget.onRejectGroupCall,
+                        onHangup: widget.onHangupGroupCall,
+                        mediaSource: widget.mediaSource,
+                        onMediaSourceChanged: widget.onMediaSourceChanged,
+                      ),
                   ],
                 ),
-                if (widget.section == _WorkspaceSection.channel)
-                  IconButton(
-                    onPressed: () => unawaited(widget.onOpenFiles()),
-                    icon: const Icon(Icons.folder_open_outlined),
-                    tooltip: 'Browse repository files',
+                if (_searchOpen) ...[
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _searchController,
+                    autofocus: true,
+                    onChanged: (value) => setState(() => _searchQuery = value),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      prefixIcon: const Icon(Icons.search),
+                      hintText: 'Search messages and people',
+                      suffixIcon: _searchQuery.isEmpty
+                          ? null
+                          : IconButton(
+                              tooltip: 'Clear search',
+                              onPressed: _searchController.clear,
+                              icon: const Icon(Icons.close),
+                            ),
+                      border: const OutlineInputBorder(),
+                    ),
                   ),
-                IconButton(
-                  onPressed: _editConversationPreprompt,
-                  icon: const Icon(Icons.edit_note_outlined),
-                  tooltip: 'Edit agent brief',
-                ),
-                if (widget.section == _WorkspaceSection.direct)
-                  _CallControl(
-                    phase:
-                        widget.callPeerPubkey == null ||
-                            widget.callPeerPubkey == widget.directPeer
-                        ? widget.callPhase
-                        : _CallPhase.idle,
-                    onStart: () => widget.onStartCall(widget.directPeer!),
-                    onAccept: widget.onAcceptCall,
-                    onReject: widget.onRejectCall,
-                    onHangup: widget.onHangupCall,
-                    mediaSource: widget.mediaSource,
-                    onMediaSourceChanged: widget.onMediaSourceChanged,
-                  ),
-                if (widget.section == _WorkspaceSection.channel)
-                  _CallControl(
-                    phase:
-                        widget.groupCallChannelId == null ||
-                            widget.groupCallChannelId == widget.channelId
-                        ? widget.groupCallPhase
-                        : _CallPhase.idle,
-                    onStart: () =>
-                        unawaited(widget.onStartChannelCall(widget.channelId!)),
-                    onAccept: widget.onAcceptGroupCall,
-                    onReject: widget.onRejectGroupCall,
-                    onHangup: widget.onHangupGroupCall,
-                    mediaSource: widget.mediaSource,
-                    onMediaSourceChanged: widget.onMediaSourceChanged,
-                  ),
+                ],
               ],
             ),
           ),
@@ -2503,10 +2743,15 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                   _lastViewportHeight = constraints.maxHeight;
                   _queueScrollToLatest();
                 }
+                if (searching && visibleMessages.isEmpty) {
+                  return const Center(
+                    child: Text('No messages or people match this search.'),
+                  );
+                }
                 return ListView.builder(
                   controller: _scrollController,
                   padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
-                  itemCount: widget.messages.length + 1,
+                  itemCount: visibleMessages.length + 1,
                   itemBuilder: (context, index) {
                     if (index == 0) {
                       if (widget.conversationPreprompt.isEmpty) {
@@ -2540,10 +2785,10 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                       );
                     }
                     index -= 1;
-                    final m = widget.messages[index];
+                    final m = visibleMessages[index];
                     final grouped = isWorkspaceMessageGroupedWithPrevious(
                       m,
-                      index == 0 ? null : widget.messages[index - 1],
+                      index == 0 ? null : visibleMessages[index - 1],
                     );
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 10),
@@ -2561,6 +2806,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                           threadReplyCount: widget.threadReplyCounts[m.id] ?? 0,
                           threadUnreadCount:
                               widget.threadUnreadCounts[m.id] ?? 0,
+                          threadActivityLabel:
+                              widget.threadActivityLabels[m.id],
                           onReact: (emoji) =>
                               unawaited(widget.onToggleReaction(m, emoji)),
                           onOpenAttachment: widget.onOpenAttachment,
@@ -2738,6 +2985,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
     required this.threadReplyCount,
     required this.threadUnreadCount,
     required this.onOpenAttachment,
+    this.threadActivityLabel,
     this.showThreadAction = true,
   });
   final WorkspaceMessage message;
@@ -2749,6 +2997,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
   final int threadReplyCount;
   final int threadUnreadCount;
   final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
+  final String? threadActivityLabel;
   final bool showThreadAction;
   @override
   State<_WorkspaceMessageRow> createState() => _WorkspaceMessageRowState();
@@ -2837,95 +3086,117 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
         ),
       ),
     );
-    final messageContent = Flexible(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: widget.isLocalSender
-            ? CrossAxisAlignment.end
-            : CrossAxisAlignment.start,
-        children: [
-          if (!widget.groupedWithPrevious && !widget.isLocalSender)
-            Row(
+    final compactMessage =
+        _messageText.runes.length <= 48 && !_messageText.contains('\n');
+    final messageContent = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: widget.isLocalSender
+          ? CrossAxisAlignment.end
+          : CrossAxisAlignment.start,
+      children: [
+        if (!widget.groupedWithPrevious && !widget.isLocalSender)
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                widget.authorName,
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              if (isAgent) ...[
+                const SizedBox(width: 6),
+                Text(
+                  'AGENT',
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.6,
+                    color: Theme.of(context).colorScheme.secondary,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        if (!widget.groupedWithPrevious && !widget.isLocalSender)
+          const SizedBox(height: 3),
+        if (_messageText.isNotEmpty)
+          _WorkspaceMessageBody(
+            text: _messageText,
+            mentions: widget.message.mentions,
+          ),
+        Align(
+          alignment: widget.isLocalSender
+              ? Alignment.centerRight
+              : Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  widget.authorName,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-                if (isAgent) ...[
-                  const SizedBox(width: 6),
-                  Text(
-                    'AGENT',
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      fontSize: 9,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 0.6,
-                      color: Theme.of(context).colorScheme.secondary,
+                _timestamp(context, grouped: true),
+                if (widget.threadActivityLabel case final label?) ...[
+                  const SizedBox(width: 4),
+                  Tooltip(
+                    message: label,
+                    child: Icon(
+                      Icons.more_horiz,
+                      size: 16,
+                      color: Theme.of(context).colorScheme.primary,
                     ),
                   ),
                 ],
               ],
             ),
-          if (!widget.groupedWithPrevious && !widget.isLocalSender)
-            const SizedBox(height: 3),
-          if (_messageText.isNotEmpty)
-            _WorkspaceMessageBody(
-              text: _messageText,
-              mentions: widget.message.mentions,
-            ),
-          Align(
-            alignment: widget.isLocalSender
-                ? Alignment.centerRight
-                : Alignment.centerLeft,
-            child: Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: _timestamp(context, grouped: true),
+          ),
+        ),
+        if (widget.message.reactions.isNotEmpty)
+          Wrap(
+            spacing: 4,
+            children: [
+              for (final emoji
+                  in widget.message.reactions
+                      .map((reaction) => reaction.emoji)
+                      .toSet())
+                ActionChip(
+                  visualDensity: VisualDensity.compact,
+                  label: Text(
+                    '$emoji ${widget.message.reactions.where((reaction) => reaction.emoji == emoji).length}',
+                  ),
+                  onPressed: () => widget.onReact(emoji),
+                ),
+            ],
+          ),
+        if (widget.threadReplyCount > 0)
+          TextButton.icon(
+            onPressed: widget.onThread,
+            icon: const Icon(Icons.forum_outlined, size: 16),
+            label: Text(
+              '${widget.threadReplyCount} ${widget.threadReplyCount == 1 ? 'reply' : 'replies'}${widget.threadUnreadCount > 0 ? ' · ${widget.threadUnreadCount} new' : ''}',
             ),
           ),
-          if (widget.message.reactions.isNotEmpty)
-            Wrap(
-              spacing: 4,
-              children: [
-                for (final emoji
-                    in widget.message.reactions
-                        .map((reaction) => reaction.emoji)
-                        .toSet())
-                  ActionChip(
-                    visualDensity: VisualDensity.compact,
-                    label: Text(
-                      '$emoji ${widget.message.reactions.where((reaction) => reaction.emoji == emoji).length}',
-                    ),
-                    onPressed: () => widget.onReact(emoji),
-                  ),
-              ],
-            ),
-          if (widget.threadReplyCount > 0)
-            TextButton.icon(
-              onPressed: widget.onThread,
-              icon: const Icon(Icons.forum_outlined, size: 16),
-              label: Text(
-                '${widget.threadReplyCount} ${widget.threadReplyCount == 1 ? 'reply' : 'replies'}${widget.threadUnreadCount > 0 ? ' · ${widget.threadUnreadCount} new' : ''}',
-              ),
-            ),
-          for (final attachment in widget.message.attachments)
-            TextButton.icon(
-              onPressed: () => unawaited(widget.onOpenAttachment(attachment)),
-              icon: const Icon(Icons.download_outlined, size: 18),
-              label: Text(attachment.name ?? 'Attachment'),
-            ),
-        ],
-      ),
+        for (final attachment in widget.message.attachments)
+          TextButton.icon(
+            onPressed: () => unawaited(widget.onOpenAttachment(attachment)),
+            icon: const Icon(Icons.download_outlined, size: 18),
+            label: Text(attachment.name ?? 'Attachment'),
+          ),
+      ],
     );
     final row = Row(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (widget.isLocalSender) ...[
-          messageContent,
+          if (compactMessage)
+            messageContent
+          else
+            Flexible(child: messageContent),
         ] else ...[
           widget.groupedWithPrevious ? const SizedBox(width: 36) : avatar,
           const SizedBox(width: 12),
-          messageContent,
+          if (compactMessage)
+            messageContent
+          else
+            Flexible(child: messageContent),
         ],
       ],
     );
@@ -2935,7 +3206,9 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
             ? Alignment.centerRight
             : Alignment.centerLeft,
         child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: constraints.maxWidth * 0.9),
+          constraints: BoxConstraints(
+            maxWidth: math.min(constraints.maxWidth * 0.9, 820),
+          ),
           child: MouseRegion(
             onEnter: (_) => setState(() => _hovered = true),
             onExit: (_) => setState(() => _hovered = false),
@@ -2943,24 +3216,20 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
               onLongPress: () => unawaited(_showMessageActions(context)),
               child: Stack(
                 children: [
-                  IntrinsicWidth(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 8,
-                      ),
-                      decoration: BoxDecoration(
-                        color: widget.isLocalSender
-                            ? Theme.of(context).colorScheme.primaryContainer
-                            : isAgent
-                            ? const Color(0xff12332d)
-                            : Theme.of(
-                                context,
-                              ).colorScheme.surfaceContainerHigh,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: row,
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
                     ),
+                    decoration: BoxDecoration(
+                      color: widget.isLocalSender
+                          ? Theme.of(context).colorScheme.primaryContainer
+                          : isAgent
+                          ? const Color(0xff12332d)
+                          : Theme.of(context).colorScheme.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: row,
                   ),
                   if (_hovered)
                     Positioned(
@@ -3044,10 +3313,62 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
   );
 }
 
-class _WorkspaceMessageBody extends StatelessWidget {
+class _WorkspaceMessageBody extends StatefulWidget {
   const _WorkspaceMessageBody({required this.text, required this.mentions});
   final String text;
   final List<WorkspaceMention> mentions;
+
+  @override
+  State<_WorkspaceMessageBody> createState() => _WorkspaceMessageBodyState();
+}
+
+class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
+  static const _collapsedLines = 20;
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final style = DefaultTextStyle.of(context).style;
+      final painter = TextPainter(
+        text: TextSpan(text: widget.text, style: style),
+        textDirection: Directionality.of(context),
+        maxLines: _collapsedLines,
+      )..layout(maxWidth: constraints.maxWidth);
+      final truncated = painter.didExceedMaxLines;
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _WorkspaceMessageText(
+            text: widget.text,
+            mentions: widget.mentions,
+            maxLines: truncated && !_expanded ? _collapsedLines : null,
+          ),
+          if (truncated)
+            TextButton(
+              onPressed: () => setState(() => _expanded = !_expanded),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                minimumSize: const Size(0, 32),
+              ),
+              child: Text(_expanded ? 'Hide' : 'Show all'),
+            ),
+        ],
+      );
+    },
+  );
+}
+
+class _WorkspaceMessageText extends StatelessWidget {
+  const _WorkspaceMessageText({
+    required this.text,
+    required this.mentions,
+    this.maxLines,
+  });
+  final String text;
+  final List<WorkspaceMention> mentions;
+  final int? maxLines;
 
   @override
   Widget build(BuildContext context) {
@@ -3066,7 +3387,11 @@ class _WorkspaceMessageBody extends StatelessWidget {
         '(?<!\\w)@(?:${labels.map(RegExp.escape).join('|')})(?![\\w-])',
     ];
     final matches = RegExp(patterns.join('|')).allMatches(text);
-    if (matches.isEmpty) return SelectableText(text);
+    if (matches.isEmpty) {
+      return maxLines == null
+          ? SelectableText(text)
+          : Text(text, maxLines: maxLines, overflow: TextOverflow.ellipsis);
+    }
     final style = DefaultTextStyle.of(context).style;
     final spans = <InlineSpan>[];
     var offset = 0;
@@ -3136,7 +3461,14 @@ class _WorkspaceMessageBody extends StatelessWidget {
       offset = match.end;
     }
     if (offset < text.length) spans.add(TextSpan(text: text.substring(offset)));
-    return SelectableText.rich(TextSpan(style: style, children: spans));
+    final span = TextSpan(style: style, children: spans);
+    return maxLines == null
+        ? SelectableText.rich(span)
+        : RichText(
+            text: span,
+            maxLines: maxLines,
+            overflow: TextOverflow.ellipsis,
+          );
   }
 }
 
@@ -3178,6 +3510,7 @@ class _WorkspaceContext extends StatelessWidget {
     required this.memberAliases,
     required this.memberNames,
     required this.agents,
+    required this.typingLabels,
   });
   final WorkspaceMessage? message;
   final List<WorkspaceMessage> replies;
@@ -3204,6 +3537,7 @@ class _WorkspaceContext extends StatelessWidget {
   final Map<String, String> memberAliases;
   final Map<String, String> memberNames;
   final List<WorkspaceAgent> agents;
+  final List<String> typingLabels;
 
   String _memberLabel(String pubkey) {
     if (pubkey.startsWith('agent:')) {
@@ -3312,6 +3646,14 @@ class _WorkspaceContext extends StatelessWidget {
                   ],
                 ),
               ),
+              if (typingLabels.isNotEmpty)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    typingLabels.join('\n'),
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
               CheckboxListTile(
                 contentPadding: EdgeInsets.zero,
                 value: alsoSendToMain,
@@ -3819,6 +4161,7 @@ class _AgentsPage extends StatefulWidget {
 
 class _AgentsPageState extends State<_AgentsPage> {
   String? _selectedAgentId;
+  Timer? _runtimeRefresh;
   static const _presets = [
     (
       'Builder',
@@ -3845,6 +4188,15 @@ class _AgentsPageState extends State<_AgentsPage> {
   void initState() {
     super.initState();
     unawaited(widget.onRequest({'action': 'list_agents'}));
+    _runtimeRefresh = Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(widget.onRequest({'action': 'list_agents'}));
+    });
+  }
+
+  @override
+  void dispose() {
+    _runtimeRefresh?.cancel();
+    super.dispose();
   }
 
   Future<void> _createPreset((String, String, IconData) preset) =>
@@ -4044,12 +4396,21 @@ class _AgentsPageState extends State<_AgentsPage> {
     ),
     title: Text(agent.name),
     subtitle: Text(
-      '${agent.role}\n${agent.sessionStatus == 'ready' ? 'OpenCode ready' : agent.sessionError ?? 'OpenCode provisioning failed'}\n${_profileSummary(agent)}',
-      maxLines: 4,
+      '${_availabilityLabel(agent)} · ${agent.scopeMemoryBytes == null ? 'No active scope' : _formatAgentBytes(agent.scopeMemoryBytes!)}\n${agent.role}\n${agent.sessionStatus == 'ready' ? 'OpenCode ready' : agent.sessionError ?? 'OpenCode provisioning failed'}',
+      maxLines: 3,
       overflow: TextOverflow.ellipsis,
     ),
     isThreeLine: true,
-    trailing: const Icon(Icons.chevron_right),
+    trailing: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          _availabilityIcon(agent),
+          color: _availabilityColor(context, agent),
+        ),
+        const Icon(Icons.chevron_right),
+      ],
+    ),
     onTap: () => setState(() => _selectedAgentId = agent.id),
   );
 
@@ -4099,17 +4460,8 @@ class _AgentsPageState extends State<_AgentsPage> {
                   Text(agent.role, style: theme.textTheme.titleMedium),
                   const SizedBox(height: 10),
                   Chip(
-                    avatar: Icon(
-                      agent.sessionStatus == 'ready'
-                          ? Icons.check_circle_outline
-                          : Icons.error_outline,
-                      size: 18,
-                    ),
-                    label: Text(
-                      agent.sessionStatus == 'ready'
-                          ? 'OpenCode ready'
-                          : 'Session unavailable',
-                    ),
+                    avatar: Icon(_availabilityIcon(agent), size: 18),
+                    label: Text(_availabilityLabel(agent)),
                   ),
                 ],
               ),
@@ -4126,6 +4478,33 @@ class _AgentsPageState extends State<_AgentsPage> {
           Text(agent.sessionError!, style: theme.textTheme.bodyMedium),
         ],
         const SizedBox(height: 28),
+        Text('Runtime', style: theme.textTheme.titleMedium),
+        const SizedBox(height: 8),
+        _agentDetailRow(
+          Icons.memory_outlined,
+          'Memory',
+          agent.scopeMemoryBytes == null
+              ? 'No active workload'
+              : _formatAgentBytes(agent.scopeMemoryBytes!),
+        ),
+        _agentDetailRow(
+          Icons.speed_outlined,
+          'CPU time',
+          agent.scopeCpuUsageNsec == null
+              ? 'Unavailable'
+              : _formatAgentCpuTime(agent.scopeCpuUsageNsec!),
+        ),
+        _agentDetailRow(
+          Icons.account_tree_outlined,
+          'Tasks',
+          agent.scopeTaskCount?.toString() ?? 'Unavailable',
+        ),
+        _agentDetailRow(
+          Icons.play_circle_outline,
+          'Work started',
+          _formatTimestamp(agent.scopeStartedAt),
+        ),
+        const SizedBox(height: 20),
         Text('Activity', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
         _agentDetailRow(
@@ -4238,6 +4617,66 @@ class _AgentsPageState extends State<_AgentsPage> {
     );
   }
 
+  String _availabilityLabel(WorkspaceAgent agent) {
+    switch (agent.availability) {
+      case 'busy':
+        return 'Working';
+      case 'stuck':
+        return 'Stuck';
+      case 'errored':
+        return 'Error';
+      case 'unavailable':
+        return 'Unavailable';
+      default:
+        return agent.sessionStatus == 'ready'
+            ? 'Available'
+            : 'Session unavailable';
+    }
+  }
+
+  IconData _availabilityIcon(WorkspaceAgent agent) {
+    switch (agent.availability) {
+      case 'busy':
+        return Icons.sync;
+      case 'stuck':
+        return Icons.hourglass_top_outlined;
+      case 'errored':
+      case 'unavailable':
+        return Icons.error_outline;
+      default:
+        return Icons.check_circle_outline;
+    }
+  }
+
+  Color _availabilityColor(BuildContext context, WorkspaceAgent agent) {
+    final colors = Theme.of(context).colorScheme;
+    switch (agent.availability) {
+      case 'busy':
+        return colors.primary;
+      case 'stuck':
+        return colors.tertiary;
+      case 'errored':
+      case 'unavailable':
+        return colors.error;
+      default:
+        return colors.secondary;
+    }
+  }
+
+  String _formatAgentBytes(int bytes) {
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(0)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
+
+  String _formatAgentCpuTime(int nanoseconds) {
+    final seconds = nanoseconds ~/ Duration.microsecondsPerSecond ~/ 1000;
+    if (seconds < 60) return '${seconds}s';
+    return '${seconds ~/ 60}m ${seconds % 60}s';
+  }
+
   Widget _agentDetailRow(IconData icon, String label, String value) => ListTile(
     contentPadding: EdgeInsets.zero,
     leading: Icon(icon),
@@ -4278,20 +4717,6 @@ class _AgentsPageState extends State<_AgentsPage> {
       return '${(value / 1000).toStringAsFixed(value % 1000 == 0 ? 0 : 1)}K';
     }
     return '${(value / 1000000).toStringAsFixed(value % 1000000 == 0 ? 0 : 1)}M';
-  }
-
-  String _profileSummary(WorkspaceAgent agent) {
-    final model =
-        agent.openCodeProviderId == null || agent.openCodeModelId == null
-        ? 'Model: worker default'
-        : 'Model: ${agent.openCodeProviderName ?? agent.openCodeProviderId} / ${agent.openCodeModelName ?? agent.openCodeModelId}';
-    final openCodeAgent = agent.openCodeAgent == null
-        ? 'Agent: worker default'
-        : 'Agent: ${agent.openCodeAgent}';
-    final workdir = agent.workdir == null
-        ? 'Working folder: worker default'
-        : 'Working folder: ${agent.workdir}';
-    return '$model · $openCodeAgent\n$workdir';
   }
 }
 
@@ -5153,11 +5578,64 @@ class _ClientDiagnosticsPage extends StatelessWidget {
   );
 }
 
-class _WorkerConsolePage extends StatelessWidget {
-  const _WorkerConsolePage({required this.data, required this.onRefresh});
+class _WorkerConsolePage extends StatefulWidget {
+  const _WorkerConsolePage({
+    required this.data,
+    required this.cache,
+    required this.onRequestRange,
+  });
 
   final Map<String, dynamic> data;
-  final Future<void> Function() onRefresh;
+  final Map<String, Map<String, dynamic>> cache;
+  final Future<void> Function(
+    String range,
+    void Function(Map<String, dynamic>? data, String? error) onResult,
+  )
+  onRequestRange;
+
+  @override
+  State<_WorkerConsolePage> createState() => _WorkerConsolePageState();
+}
+
+class _WorkerConsolePageState extends State<_WorkerConsolePage> {
+  late Map<String, dynamic> data;
+  late String _selectedRange;
+  bool _loadingRange = false;
+  bool _showAllInterfaces = false;
+
+  @override
+  void initState() {
+    super.initState();
+    data = widget.data;
+    _selectedRange = data['history_range']?.toString() ?? '24h';
+  }
+
+  Future<void> _selectRange(String range, {bool refresh = false}) async {
+    final cached = refresh ? null : widget.cache[range];
+    if (cached != null) {
+      setState(() {
+        data = cached;
+        _selectedRange = range;
+      });
+      return;
+    }
+    setState(() => _loadingRange = true);
+    await widget.onRequestRange(range, (result, error) {
+      if (!mounted) return;
+      setState(() {
+        _loadingRange = false;
+        if (result != null) {
+          data = result;
+          _selectedRange = range;
+        }
+      });
+      if (error != null) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error)));
+      }
+    });
+  }
 
   Map<String, dynamic> get _current =>
       (data['current'] as Map?)?.cast<String, dynamic>() ?? data;
@@ -5166,6 +5644,13 @@ class _WorkerConsolePage extends StatelessWidget {
       (_current[key] as Map?)?.cast<String, dynamic>() ?? const {};
 
   double _number(dynamic value) => value is num ? value.toDouble() : 0;
+
+  _ConsoleMetricStatus _statusForRatio(double value, double total) {
+    final ratio = total <= 0 ? 0.0 : value / total;
+    if (ratio >= 0.95) return _ConsoleMetricStatus.critical;
+    if (ratio >= 0.80) return _ConsoleMetricStatus.warning;
+    return _ConsoleMetricStatus.normal;
+  }
 
   String _bytes(dynamic value) {
     final bytes = _number(value);
@@ -5205,24 +5690,27 @@ class _WorkerConsolePage extends StatelessWidget {
         actions: [
           IconButton(
             tooltip: 'Refresh worker stats',
-            onPressed: () => unawaited(onRefresh()),
+            onPressed: _loadingRange
+                ? null
+                : () => unawaited(_selectRange(_selectedRange, refresh: true)),
             icon: const Icon(Icons.refresh_outlined),
           ),
         ],
       ),
       body: LayoutBuilder(
         builder: (context, constraints) {
-          final wide = constraints.maxWidth >= 1000;
-          final medium = constraints.maxWidth >= 680;
-          final gap = 12.0;
+          final wide = constraints.maxWidth >= 1400;
+          final medium = constraints.maxWidth >= 900;
+          const gap = 16.0;
+          final contentWidth =
+              (constraints.maxWidth > 1600 ? 1600.0 : constraints.maxWidth) -
+              48;
           final metricWidth = wide
-              ? (constraints.maxWidth - gap * 3) / 4
+              ? (contentWidth - gap * 3) / 4
               : medium
-              ? (constraints.maxWidth - gap) / 2
-              : constraints.maxWidth;
-          final chartWidth = wide
-              ? (constraints.maxWidth - gap * 2) / 3
-              : constraints.maxWidth;
+              ? (contentWidth - gap) / 2
+              : contentWidth;
+          final chartWidth = wide ? (contentWidth - gap * 2) / 3 : contentWidth;
           final cpuValues = history
               .map((sample) => _number(sample['cpu_percent']))
               .toList();
@@ -5252,154 +5740,212 @@ class _WorkerConsolePage extends StatelessWidget {
                 : 100.0 * _number(value['used_bytes']) / total;
           }).toList();
           return ListView(
-            padding: const EdgeInsets.all(12),
+            padding: EdgeInsets.zero,
             children: [
-              Row(
-                children: [
-                  Expanded(
+              Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 1600),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
                     child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          'Worker console',
-                          style: Theme.of(context).textTheme.titleLarge
-                              ?.copyWith(fontWeight: FontWeight.bold),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: Wrap(
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            spacing: 8,
+                            runSpacing: 6,
+                            children: [
+                              Text(
+                                sampledAt == 0
+                                    ? 'Waiting for worker metrics'
+                                    : 'Sampled ${DateTime.fromMillisecondsSinceEpoch(sampledAt * 1000).toLocal().toString().substring(11, 19)}',
+                                style: Theme.of(context).textTheme.labelSmall,
+                              ),
+                              for (final range in const [
+                                ('1h', '1 h'),
+                                ('24h', '24 h'),
+                                ('1w', '7 d'),
+                                ('all', 'All'),
+                              ])
+                                ChoiceChip(
+                                  label: Text(range.$2),
+                                  selected: _selectedRange == range.$1,
+                                  visualDensity: VisualDensity.compact,
+                                  labelStyle: Theme.of(
+                                    context,
+                                  ).textTheme.labelSmall,
+                                  onSelected: _loadingRange
+                                      ? null
+                                      : (_) =>
+                                            unawaited(_selectRange(range.$1)),
+                                ),
+                            ],
+                          ),
                         ),
-                        const SizedBox(height: 3),
-                        Text(
-                          sampledAt == 0
-                              ? 'Waiting for worker metrics'
-                              : 'Sampled ${DateTime.fromMillisecondsSinceEpoch(sampledAt * 1000).toLocal().toString().substring(11, 19)}',
-                          style: Theme.of(context).textTheme.labelMedium,
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: gap,
+                          runSpacing: gap,
+                          children: [
+                            SizedBox(
+                              width: metricWidth,
+                              height: 168,
+                              child: _ConsoleMetric(
+                                label: 'CPU',
+                                icon: Icons.memory_outlined,
+                                value: _number(_current['cpu_percent']),
+                                total: 100,
+                                detail:
+                                    '${_number(_current['cpu_percent']).toStringAsFixed(1)}%',
+                                footer:
+                                    'Load ${load.map((value) => value.toStringAsFixed(2)).join(' / ')}',
+                              ),
+                            ),
+                            SizedBox(
+                              width: metricWidth,
+                              height: 168,
+                              child: _ConsoleMetric(
+                                label: 'Memory',
+                                icon: Icons.dns_outlined,
+                                value: _number(memory['used_bytes']),
+                                total: _number(memory['total_bytes']),
+                                detail:
+                                    '${_bytes(memory['used_bytes'])} / ${_bytes(memory['total_bytes'])}',
+                              ),
+                            ),
+                            SizedBox(
+                              width: metricWidth,
+                              height: 168,
+                              child: _ConsoleMetric(
+                                label: 'Swap',
+                                icon: Icons.swap_horiz_outlined,
+                                value: _number(swap['used_bytes']),
+                                total: _number(swap['total_bytes']),
+                                detail:
+                                    '${_bytes(swap['used_bytes'])} / ${_bytes(swap['total_bytes'])}',
+                                status: _statusForRatio(
+                                  _number(swap['used_bytes']),
+                                  _number(swap['total_bytes']),
+                                ),
+                                footer:
+                                    '${_number(swap['total_bytes']) == 0 ? '0' : (100 * _number(swap['used_bytes']) / _number(swap['total_bytes'])).toStringAsFixed(0)}% used',
+                              ),
+                            ),
+                            SizedBox(
+                              width: metricWidth,
+                              height: 168,
+                              child: _ConsoleMetric(
+                                label: 'Disk ${filesystem['mount'] ?? '/'}',
+                                icon: Icons.storage_outlined,
+                                value: _number(filesystem['used_bytes']),
+                                total: _number(filesystem['total_bytes']),
+                                detail:
+                                    '${_bytes(filesystem['available_bytes'])} free of ${_bytes(filesystem['total_bytes'])}',
+                                accent: Theme.of(context).colorScheme.secondary,
+                              ),
+                            ),
+                          ],
                         ),
+                        const SizedBox(height: 16),
+                        Wrap(
+                          spacing: gap,
+                          runSpacing: gap,
+                          children: [
+                            SizedBox(
+                              width: chartWidth,
+                              child: SizedBox(
+                                height: 310,
+                                child: _ConsolePanel(
+                                  title: 'CPU usage',
+                                  subtitle: 'Last ${history.length} samples',
+                                  child: _HistoryLineChart(
+                                    values: cpuValues,
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                    primaryLabel: 'CPU',
+                                  ),
+                                ),
+                              ),
+                            ),
+                            SizedBox(
+                              width: chartWidth,
+                              child: SizedBox(
+                                height: 310,
+                                child: _ConsolePanel(
+                                  title: 'Memory and swap',
+                                  subtitle: 'Percent used',
+                                  child: _HistoryLineChart(
+                                    values: memoryValues,
+                                    secondaryValues: swapValues,
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                    secondaryColor: Theme.of(
+                                      context,
+                                    ).colorScheme.tertiary,
+                                    primaryLabel: 'Memory',
+                                    secondaryLabel: 'Swap',
+                                  ),
+                                ),
+                              ),
+                            ),
+                            SizedBox(
+                              width: chartWidth,
+                              child: SizedBox(
+                                height: 310,
+                                child: _ConsolePanel(
+                                  title: 'Disk usage',
+                                  subtitle: 'Percent used',
+                                  child: _HistoryLineChart(
+                                    values: diskValues,
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.secondary,
+                                    primaryLabel: 'Disk',
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        if (wide)
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                flex: 7,
+                                child: _networkPanel(context, networks),
+                              ),
+                              const SizedBox(width: 16),
+                              Expanded(
+                                flex: 5,
+                                child: _consoleSidePanel(
+                                  context,
+                                  disk,
+                                  temperatures,
+                                  _map('system'),
+                                ),
+                              ),
+                            ],
+                          )
+                        else ...[
+                          _networkPanel(context, networks),
+                          const SizedBox(height: 12),
+                          _consoleSidePanel(
+                            context,
+                            disk,
+                            temperatures,
+                            _map('system'),
+                          ),
+                        ],
                       ],
                     ),
                   ),
-                  IconButton.filledTonal(
-                    tooltip: 'Refresh worker stats',
-                    onPressed: () => unawaited(onRefresh()),
-                    icon: const Icon(Icons.refresh_outlined),
-                  ),
-                ],
+                ),
               ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: gap,
-                runSpacing: gap,
-                children: [
-                  SizedBox(
-                    width: metricWidth,
-                    child: _ConsoleMetric(
-                      label: 'CPU',
-                      icon: Icons.memory_outlined,
-                      value: _number(_current['cpu_percent']),
-                      total: 100,
-                      detail:
-                          '${_number(_current['cpu_percent']).toStringAsFixed(1)}%',
-                      footer:
-                          'Load ${load.map((value) => value.toStringAsFixed(2)).join(' / ')}',
-                    ),
-                  ),
-                  SizedBox(
-                    width: metricWidth,
-                    child: _ConsoleMetric(
-                      label: 'Memory',
-                      icon: Icons.dns_outlined,
-                      value: _number(memory['used_bytes']),
-                      total: _number(memory['total_bytes']),
-                      detail:
-                          '${_bytes(memory['used_bytes'])} / ${_bytes(memory['total_bytes'])}',
-                    ),
-                  ),
-                  SizedBox(
-                    width: metricWidth,
-                    child: _ConsoleMetric(
-                      label: 'Swap',
-                      icon: Icons.swap_horiz_outlined,
-                      value: _number(swap['used_bytes']),
-                      total: _number(swap['total_bytes']),
-                      detail:
-                          '${_bytes(swap['used_bytes'])} / ${_bytes(swap['total_bytes'])}',
-                      accent: Theme.of(context).colorScheme.tertiary,
-                    ),
-                  ),
-                  SizedBox(
-                    width: metricWidth,
-                    child: _ConsoleMetric(
-                      label: 'Disk ${filesystem['mount'] ?? '/'}',
-                      icon: Icons.storage_outlined,
-                      value: _number(filesystem['used_bytes']),
-                      total: _number(filesystem['total_bytes']),
-                      detail:
-                          '${_bytes(filesystem['available_bytes'])} free of ${_bytes(filesystem['total_bytes'])}',
-                      accent: Theme.of(context).colorScheme.secondary,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: gap,
-                runSpacing: gap,
-                children: [
-                  SizedBox(
-                    width: chartWidth,
-                    child: _ConsolePanel(
-                      title: 'CPU usage',
-                      subtitle: 'Last ${history.length} samples',
-                      child: _HistoryLineChart(
-                        label: '',
-                        values: cpuValues,
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
-                    ),
-                  ),
-                  SizedBox(
-                    width: chartWidth,
-                    child: _ConsolePanel(
-                      title: 'Memory and swap',
-                      subtitle: 'Percent used',
-                      child: _HistoryLineChart(
-                        label: '',
-                        values: memoryValues,
-                        secondaryValues: swapValues,
-                        color: Theme.of(context).colorScheme.primary,
-                        secondaryColor: Theme.of(context).colorScheme.tertiary,
-                      ),
-                    ),
-                  ),
-                  SizedBox(
-                    width: chartWidth,
-                    child: _ConsolePanel(
-                      title: 'Disk usage',
-                      subtitle: 'Percent used',
-                      child: _HistoryLineChart(
-                        label: '',
-                        values: diskValues,
-                        color: Theme.of(context).colorScheme.secondary,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              if (wide)
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(flex: 3, child: _networkPanel(context, networks)),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      flex: 2,
-                      child: _consoleSidePanel(context, disk, temperatures),
-                    ),
-                  ],
-                )
-              else ...[
-                _networkPanel(context, networks),
-                const SizedBox(height: 12),
-                _consoleSidePanel(context, disk, temperatures),
-              ],
             ],
           );
         },
@@ -5410,60 +5956,155 @@ class _WorkerConsolePage extends StatelessWidget {
   Widget _networkPanel(
     BuildContext context,
     List<Map<String, dynamic>> networks,
-  ) => _ConsolePanel(
-    title: 'Network interfaces',
-    subtitle: '${networks.length} reported',
-    child: networks.isEmpty
-        ? const Padding(
-            padding: EdgeInsets.symmetric(vertical: 20),
-            child: Text('No network interfaces reported.'),
-          )
-        : SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: DataTable(
-              headingRowHeight: 34,
-              dataRowMinHeight: 34,
-              dataRowMaxHeight: 34,
-              columns: const [
-                DataColumn(label: Text('Interface')),
-                DataColumn(label: Text('Status')),
-                DataColumn(label: Text('Received'), numeric: true),
-                DataColumn(label: Text('Sent'), numeric: true),
-              ],
-              rows: [
-                for (final network in networks)
-                  DataRow(
-                    cells: [
-                      DataCell(
-                        Text(network['name']?.toString() ?? 'interface'),
-                      ),
-                      const DataCell(
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.circle,
-                              size: 8,
-                              color: Color(0xff3fd5a5),
+  ) {
+    final ordered = [...networks]
+      ..sort(
+        (left, right) =>
+            (_number(right['received_bytes']) +
+                    _number(right['transmitted_bytes']))
+                .compareTo(
+                  _number(left['received_bytes']) +
+                      _number(left['transmitted_bytes']),
+                ),
+      );
+    final visible = _showAllInterfaces ? ordered : ordered.take(8).toList();
+    return _ConsolePanel(
+      title: 'Network interfaces',
+      subtitle: '${networks.length} reported',
+      child: networks.isEmpty
+          ? const Padding(
+              padding: EdgeInsets.symmetric(vertical: 20),
+              child: Text('No network interfaces reported.'),
+            )
+          : Column(
+              children: [
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: DataTable(
+                    headingRowHeight: 30,
+                    dataRowMinHeight: 30,
+                    dataRowMaxHeight: 30,
+                    columns: const [
+                      DataColumn(label: Text('Interface')),
+                      DataColumn(label: Text('Type')),
+                      DataColumn(label: Text('Status')),
+                      DataColumn(label: Text('Received'), numeric: true),
+                      DataColumn(label: Text('Sent'), numeric: true),
+                      DataColumn(label: Text('Activity'), numeric: true),
+                    ],
+                    rows: [
+                      for (final network in visible)
+                        DataRow(
+                          cells: [
+                            DataCell(
+                              Text(
+                                network['name']?.toString() ?? 'interface',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
                             ),
-                            SizedBox(width: 6),
-                            Text('Up'),
+                            DataCell(
+                              Text(
+                                _interfaceKind(
+                                  network['name']?.toString() ?? '',
+                                ),
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.onSurfaceVariant,
+                                    ),
+                              ),
+                            ),
+                            DataCell(
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.circle,
+                                    size: 6,
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                  ),
+                                  const SizedBox(width: 5),
+                                  Text(
+                                    'Up',
+                                    style: Theme.of(context).textTheme.bodySmall
+                                        ?.copyWith(
+                                          color: Theme.of(
+                                            context,
+                                          ).colorScheme.onSurfaceVariant,
+                                        ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            DataCell(
+                              _trafficValue(context, network['received_bytes']),
+                            ),
+                            DataCell(
+                              _trafficValue(
+                                context,
+                                network['transmitted_bytes'],
+                              ),
+                            ),
+                            DataCell(
+                              _trafficValue(
+                                context,
+                                _number(network['received_bytes']) +
+                                    _number(network['transmitted_bytes']),
+                              ),
+                            ),
                           ],
                         ),
-                      ),
-                      DataCell(Text(_bytes(network['received_bytes']))),
-                      DataCell(Text(_bytes(network['transmitted_bytes']))),
                     ],
+                  ),
+                ),
+                if (ordered.length > 10)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton(
+                      onPressed: () => setState(
+                        () => _showAllInterfaces = !_showAllInterfaces,
+                      ),
+                      child: Text(
+                        _showAllInterfaces
+                            ? 'Show fewer interfaces'
+                            : 'Show all interfaces (${ordered.length})',
+                      ),
+                    ),
                   ),
               ],
             ),
-          ),
+    );
+  }
+
+  String _interfaceKind(String name) {
+    if (name.startsWith('eth') || name.startsWith('en')) return 'Ethernet';
+    if (name.startsWith('wg')) return 'WireGuard';
+    if (name == 'docker0' || name.startsWith('br-')) return 'Bridge';
+    if (name.startsWith('veth')) return 'Virtual';
+    if (name.startsWith('can')) return 'CAN';
+    return 'Other';
+  }
+
+  Widget _trafficValue(BuildContext context, Object? value) => Align(
+    alignment: Alignment.centerRight,
+    child: Text(
+      _bytes(value),
+      textAlign: TextAlign.right,
+      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+        fontWeight: FontWeight.w600,
+        fontFeatures: const [FontFeature.tabularFigures()],
+      ),
+    ),
   );
 
   Widget _consoleSidePanel(
     BuildContext context,
     Map<String, dynamic> disk,
     List<Map<String, dynamic>> temperatures,
+    Map<String, dynamic> system,
   ) => Column(
     children: [
       _ConsolePanel(
@@ -5487,31 +6128,77 @@ class _WorkerConsolePage extends StatelessWidget {
           ],
         ),
       ),
-      const SizedBox(height: 12),
+      if (temperatures.isNotEmpty) ...[
+        const SizedBox(height: 12),
+        _ConsolePanel(
+          title: 'Sensors',
+          quiet: true,
+          child: Column(
+            children: [
+              for (final temperature in temperatures)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(temperature['label']?.toString() ?? 'Sensor'),
+                  trailing: Text(
+                    '${_number(temperature['celsius']).toStringAsFixed(1)} C',
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+      const SizedBox(height: 16),
       _ConsolePanel(
-        title: 'Sensors',
-        child: temperatures.isEmpty
-            ? const Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Text('No readable temperature sensors.'),
-              )
-            : Column(
-                children: [
-                  for (final temperature in temperatures)
-                    ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(temperature['label']?.toString() ?? 'Sensor'),
-                      trailing: Text(
-                        '${_number(temperature['celsius']).toStringAsFixed(1)} C',
-                      ),
-                    ),
-                ],
-              ),
+        title: 'System information',
+        quiet: true,
+        child: Column(
+          children: [
+            _systemInfoRow(
+              'Uptime',
+              _uptime(_number(_current['uptime_seconds']).toInt()),
+            ),
+            if (_knownSystemValue(system['hostname']))
+              _systemInfoRow('Hostname', system['hostname'].toString()),
+            if (_knownSystemValue(system['os_name']))
+              _systemInfoRow('OS', system['os_name'].toString()),
+            if (_knownSystemValue(system['architecture']))
+              _systemInfoRow('Architecture', system['architecture'].toString()),
+          ],
+        ),
       ),
     ],
   );
+
+  bool _knownSystemValue(Object? value) {
+    final text = value?.toString().trim();
+    return text != null && text.isNotEmpty && text.toLowerCase() != 'unknown';
+  }
+
+  Widget _systemInfoRow(String label, String value) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 3),
+    child: Row(
+      children: [
+        Expanded(child: Text(label)),
+        Text(
+          value,
+          style: const TextStyle(fontFeatures: [FontFeature.tabularFigures()]),
+        ),
+      ],
+    ),
+  );
+
+  String _uptime(int seconds) {
+    final days = seconds ~/ 86400;
+    final hours = seconds % 86400 ~/ 3600;
+    final minutes = seconds % 3600 ~/ 60;
+    return days > 0
+        ? '${days}d ${hours}h ${minutes}m'
+        : '${hours}h ${minutes}m';
+  }
 }
+
+enum _ConsoleMetricStatus { normal, warning, critical }
 
 class _ConsoleMetric extends StatelessWidget {
   const _ConsoleMetric({
@@ -5522,6 +6209,7 @@ class _ConsoleMetric extends StatelessWidget {
     required this.detail,
     this.footer,
     this.accent,
+    this.status = _ConsoleMetricStatus.normal,
   });
 
   final String label;
@@ -5531,20 +6219,36 @@ class _ConsoleMetric extends StatelessWidget {
   final String detail;
   final String? footer;
   final Color? accent;
+  final _ConsoleMetricStatus status;
 
   @override
   Widget build(BuildContext context) {
     final fraction = total <= 0 ? 0.0 : (value / total).clamp(0.0, 1.0);
-    final color = accent ?? Theme.of(context).colorScheme.primary;
+    final color = switch (status) {
+      _ConsoleMetricStatus.normal =>
+        accent ?? Theme.of(context).colorScheme.primary,
+      _ConsoleMetricStatus.warning => const Color(0xfff0b84b),
+      _ConsoleMetricStatus.critical => Theme.of(context).colorScheme.error,
+    };
+    final statusLabel = switch (status) {
+      _ConsoleMetricStatus.normal => null,
+      _ConsoleMetricStatus.warning => 'Warning',
+      _ConsoleMetricStatus.critical => 'Critical',
+    };
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.72),
+        color: status == _ConsoleMetricStatus.critical
+            ? color.withValues(alpha: 0.14)
+            : Theme.of(context).colorScheme.surface.withValues(alpha: 0.72),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: Theme.of(
-            context,
-          ).colorScheme.outlineVariant.withValues(alpha: 0.65),
+          color: status == _ConsoleMetricStatus.critical
+              ? color.withValues(alpha: 0.8)
+              : Theme.of(
+                  context,
+                ).colorScheme.outlineVariant.withValues(alpha: 0.65),
+          width: status == _ConsoleMetricStatus.critical ? 1.5 : 1,
         ),
       ),
       child: Column(
@@ -5562,16 +6266,45 @@ class _ConsoleMetric extends StatelessWidget {
                 child: Icon(icon, size: 19, color: color),
               ),
               const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  label,
-                  style: Theme.of(context).textTheme.labelLarge,
+              Text(
+                label,
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
               ),
-              Text(detail, style: Theme.of(context).textTheme.titleSmall),
+              const Spacer(),
+              if (statusLabel != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    statusLabel.toUpperCase(),
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ),
             ],
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 8),
+          Text(
+            detail,
+            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.5,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 10),
           ClipRRect(
             borderRadius: BorderRadius.circular(4),
             child: LinearProgressIndicator(
@@ -5585,7 +6318,12 @@ class _ConsoleMetric extends StatelessWidget {
           ),
           if (footer != null) ...[
             const SizedBox(height: 8),
-            Text(footer!, style: Theme.of(context).textTheme.labelSmall),
+            Text(
+              footer!,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
           ],
         ],
       ),
@@ -5598,23 +6336,31 @@ class _ConsolePanel extends StatelessWidget {
     required this.title,
     required this.child,
     this.subtitle,
+    this.quiet = false,
   });
 
   final String title;
   final String? subtitle;
   final Widget child;
+  final bool quiet;
 
   @override
   Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
     decoration: BoxDecoration(
-      color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.62),
+      color: quiet
+          ? Theme.of(
+              context,
+            ).colorScheme.surfaceContainerHigh.withValues(alpha: 0.3)
+          : Theme.of(context).colorScheme.surface.withValues(alpha: 0.74),
       borderRadius: BorderRadius.circular(12),
-      border: Border.all(
-        color: Theme.of(
-          context,
-        ).colorScheme.outlineVariant.withValues(alpha: 0.65),
-      ),
+      border: quiet
+          ? null
+          : Border.all(
+              color: Theme.of(
+                context,
+              ).colorScheme.outlineVariant.withValues(alpha: 0.55),
+            ),
     ),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -5670,18 +6416,20 @@ class _ConsoleValue extends StatelessWidget {
 
 class _HistoryLineChart extends StatelessWidget {
   const _HistoryLineChart({
-    required this.label,
     required this.values,
     required this.color,
+    required this.primaryLabel,
     this.secondaryValues,
     this.secondaryColor,
+    this.secondaryLabel,
   });
 
-  final String label;
   final List<double> values;
   final List<double>? secondaryValues;
   final Color color;
   final Color? secondaryColor;
+  final String primaryLabel;
+  final String? secondaryLabel;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -5689,24 +6437,108 @@ class _HistoryLineChart extends StatelessWidget {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (label.isNotEmpty) ...[
-          Text(label, style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 6),
-        ],
-        SizedBox(
-          height: 150,
-          width: double.infinity,
-          child: CustomPaint(
-            painter: _HistoryLinePainter(
-              values: values,
+        Row(
+          children: [
+            _ChartLegend(
+              label: primaryLabel,
+              value: _latest(values),
               color: color,
-              secondaryValues: secondaryValues,
-              secondaryColor: secondaryColor,
-              gridColor: Theme.of(context).colorScheme.outlineVariant,
             ),
+            if (secondaryValues != null &&
+                secondaryColor != null &&
+                secondaryLabel != null) ...[
+              const SizedBox(width: 12),
+              _ChartLegend(
+                label: secondaryLabel!,
+                value: _latest(secondaryValues!),
+                color: secondaryColor!,
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 166,
+          child: Row(
+            children: [
+              _ChartAxis(color: Theme.of(context).colorScheme.onSurfaceVariant),
+              const SizedBox(width: 8),
+              Expanded(
+                child: CustomPaint(
+                  painter: _HistoryLinePainter(
+                    values: values,
+                    color: color,
+                    secondaryValues: secondaryValues,
+                    secondaryColor: secondaryColor,
+                    gridColor: Theme.of(context).colorScheme.outlineVariant,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ],
+    ),
+  );
+
+  String _latest(List<double> samples) =>
+      samples.isEmpty ? '--' : '${samples.last.toStringAsFixed(1)}%';
+}
+
+class _ChartLegend extends StatelessWidget {
+  const _ChartLegend({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Container(
+        width: 8,
+        height: 8,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      ),
+      const SizedBox(width: 5),
+      Text(label, style: Theme.of(context).textTheme.labelSmall),
+      const SizedBox(width: 4),
+      Text(
+        value,
+        style: Theme.of(
+          context,
+        ).textTheme.labelSmall?.copyWith(fontWeight: FontWeight.bold),
+      ),
+    ],
+  );
+}
+
+class _ChartAxis extends StatelessWidget {
+  const _ChartAxis({required this.color});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: 26,
+    child: Column(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [_label('100%'), _label('50%'), _label('0%')],
+    ),
+  );
+
+  Widget _label(String value) => Text(
+    value,
+    style: TextStyle(
+      fontSize: 10,
+      color: color,
+      fontFeatures: const [FontFeature.tabularFigures()],
     ),
   );
 }
