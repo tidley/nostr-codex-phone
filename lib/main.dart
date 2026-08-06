@@ -55,7 +55,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.14+314';
+const _appVersion = '0.3.15+315';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -676,6 +676,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Timer? _workspaceFipsHeartbeatTicker;
   Timer? _workspaceFipsRetryTimer;
   int _workspaceFipsRetryAttempt = 0;
+  int _workspaceFipsSessionGeneration = 0;
+  int? _workspaceFipsSnapshotGeneration;
   final Map<String, int> _workspaceUnreadCounts = {};
   final Map<String, int> _workspaceThreadUnreadCounts = {};
   String? _workspaceOpenThreadKey;
@@ -1574,11 +1576,47 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _selectComputerServiceTarget(RepoTarget target) async {
+    if (_computerServiceTarget?.id == target.id) return;
+    await _saveWorkspaceCache();
+    _workspaceFipsSessionGeneration++;
+    _workspaceFipsRetryTimer?.cancel();
+    _workspaceFipsRetryAttempt = 0;
+    try {
+      await fipsWorkspaceSnapshotStop();
+    } catch (_) {
+      // The receive loop may already have closed the native session.
+    }
+    if (_connected || _connecting) await _disconnect(expand: false);
+    if (!mounted) return;
+    await _clearCall();
+    await _clearGroupCall();
+    if (!mounted) return;
     setState(() {
       _computerServiceTarget = target;
-      _status = 'Worker selected: ${target.displayName}';
+      _workspace.clear();
+      _workspaceCacheRestoredKey = null;
+      _workspaceUnreadCounts.clear();
+      _workspaceThreadUnreadCounts.clear();
+      _workspaceFocusedConversationKey = 'workspace';
+      _workspaceOpenThreadKey = null;
+      _workspaceInviteTimer?.cancel();
+      _workspaceInviteCode = null;
+      _workspaceMemberStatus = 'Not yet confirmed';
+      _workspaceVoicePending = false;
+      _workspaceVoiceResult.value = null;
+      _workspaceFileBrowser.value = null;
+      _workspaceFilePreview.value = null;
+      _pendingToolViews.clear();
+      _workspaceRevision.value++;
+      _status = 'Switching to ${target.displayName}...';
     });
     await _saveComputerServiceTarget();
+    await _restoreWorkspaceCache();
+    if (!mounted) return;
+    await _connectToTargetInBackground(target);
+    if (mounted && _connected && _connectedPeerPubkey == target.pubkey) {
+      await _sendWorkspaceRequest({'action': 'list'});
+    }
   }
 
   Future<void> _deleteComputerServiceTarget(RepoTarget target) async {
@@ -3675,6 +3713,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   String? get _workspaceCacheServicePubkey {
     final connected = _connectedPeerPubkey?.trim();
     if (connected != null && connected.isNotEmpty) return connected;
+    final selected = _computerServiceTarget?.pubkey.trim();
+    if (selected != null && selected.isNotEmpty) return selected;
     final configured = _peerPubkeyController.text.trim();
     return configured.isEmpty ? null : configured;
   }
@@ -4477,6 +4517,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             return true;
           }
           _workspaceFipsSnapshotInFlight = true;
+          _workspaceFipsSnapshotGeneration = _workspaceFipsSessionGeneration;
           _recordDiagnostic('FIPS workspace snapshot offer received');
           unawaited(_receiveWorkspaceSnapshotOverFips(capability));
           return true;
@@ -6918,7 +6959,12 @@ Return a concise catch-up summary of what happened after that point: completed w
 
     if (_showTeamWorkspace) {
       return _TeamWorkspace(
+        key: ValueKey(_computerServiceTarget?.id),
         sessions: _repoTargets,
+        spaces: _computerServiceTargets,
+        activeSpace: _computerServiceTarget,
+        onSwitchSpace: (target) =>
+            unawaited(_selectComputerServiceTarget(target)),
         onOpenSessions: () => setState(() => _showTeamWorkspace = false),
         onOpenSettings: () => unawaited(_openSettings()),
         diagnostics: _clientDiagnostics,
@@ -7266,7 +7312,11 @@ Return a concise catch-up summary of what happened after that point: completed w
       request = {...request, 'fips_snapshot': _workspaceFipsEnabled.value};
     }
     if (!await _ensureConnectedToParentService()) return;
-    await nostrSendQuery(query: jsonEncode({'workspace_request': request}));
+    await _sendWithAutoRecovery(
+      label: 'Workspace request',
+      sender: () =>
+          nostrSendQuery(query: jsonEncode({'workspace_request': request})),
+    );
   }
 
   String? _workspaceFipsCapabilityFromOffer(String action) {
@@ -7283,6 +7333,7 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _receiveWorkspaceSnapshotOverFips(String capability) async {
+    final sessionGeneration = _workspaceFipsSessionGeneration;
     var snapshotComplete = false;
     try {
       if (!_workspaceFipsEnabled.value) return;
@@ -7295,6 +7346,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       );
       var emptyReads = 0;
       while (mounted) {
+        if (!_workspaceFipsEnabled.value) return;
         final frame = await fipsWorkspaceSnapshotReceive(
           timeoutMs: BigInt.from(5000),
         );
@@ -7357,6 +7409,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         }
       }
     } catch (error) {
+      if (sessionGeneration != _workspaceFipsSessionGeneration) return;
       final fipsEnabled = _workspaceFipsEnabled.value;
       _setWorkspaceFipsConnectionState(
         fipsEnabled ? 'reconnecting' : 'disabled',
@@ -7378,11 +7431,15 @@ Return a concise catch-up summary of what happened after that point: completed w
       } catch (_) {
         // The worker can close after the final frame before Dart closes locally.
       }
-      _workspaceFipsSnapshotInFlight = false;
+      if (_workspaceFipsSnapshotGeneration == sessionGeneration) {
+        _workspaceFipsSnapshotInFlight = false;
+        _workspaceFipsSnapshotGeneration = null;
+      }
     }
   }
 
   void _setWorkspaceFipsConnectionState(String state) {
+    if (!_workspaceFipsEnabled.value && state != 'disabled') state = 'disabled';
     if (_workspaceFipsConnectionState == state) return;
     _workspaceFipsConnectionState = state;
     final previous = _workspaceFipsHeartbeat.value;
