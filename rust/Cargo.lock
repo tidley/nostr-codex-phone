@@ -3245,6 +3245,7 @@ dependencies = [
  "flutter_rust_bridge",
  "futures-util",
  "hound",
+ "libc",
  "nostr 0.45.0-alpha.1",
  "nostr-sdk 0.45.0-alpha.1",
  "ogg",

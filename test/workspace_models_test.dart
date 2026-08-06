@@ -273,6 +273,34 @@ void main() {
     expect(state.messages['channel-1']!.single.body, 'restored');
   });
 
+  test('workspace snapshot header keeps messages until its chunks arrive', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'message_created',
+          'messages': [
+            {
+              'id': 'existing',
+              'channel_id': 'workspace',
+              'sender_pubkey': 'member',
+              'body': 'Visible while refreshing',
+            },
+          ],
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'channels': [
+            {'id': 'workspace', 'name': 'Workspace'},
+          ],
+          'messages': [],
+        },
+      });
+
+    expect(state.messages['workspace']?.single.id, 'existing');
+  });
+
   test('workspace state applies a broadcast channel creation', () {
     final state = WorkspaceState();
 
@@ -614,7 +642,7 @@ void main() {
   );
 
   test(
-    'agent typing has an identity, matches both DM participants, and clears',
+    'agent activity has an identity, stage, matches both DM participants, and clears',
     () {
       final state = WorkspaceState()
         ..apply({
@@ -624,6 +652,7 @@ void main() {
               'sender_pubkey': 'agent:rev',
               'agent_id': 'rev',
               'agent_name': 'Rev',
+              'stage': 'Inspecting code.',
               'member_pubkey': 'alice',
               'peer_pubkey': 'bob',
               'expires_at': 200,
@@ -640,6 +669,7 @@ void main() {
         );
         expect(active.single.agentId, 'rev');
         expect(active.single.agentName, 'Rev');
+        expect(active.single.stage, 'Inspecting code.');
       }
 
       state.apply({

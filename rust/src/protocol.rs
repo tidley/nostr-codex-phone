@@ -307,6 +307,8 @@ pub struct WorkspaceTypingPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_pubkey: Option<String>,
@@ -1985,7 +1987,7 @@ mod tests {
     #[test]
     fn parses_agent_workspace_typing_identity_and_direct_scope() {
         let parsed = parse_wire_message(
-            r#"{"workspace_update":{"action":"typing","typing":{"sender_pubkey":"agent:rev","agent_id":"rev","agent_name":"Rev","member_pubkey":"alice","peer_pubkey":"bob","expires_at":200}}}"#,
+            r#"{"workspace_update":{"action":"typing","typing":{"sender_pubkey":"agent:rev","agent_id":"rev","agent_name":"Rev","stage":"Inspecting code.","member_pubkey":"alice","peer_pubkey":"bob","expires_at":200}}}"#,
         )
         .unwrap();
         let WireMessage::WorkspaceUpdate { workspace_update } = parsed else {
@@ -1994,6 +1996,7 @@ mod tests {
         let typing = workspace_update.typing.unwrap();
         assert_eq!(typing.agent_id.as_deref(), Some("rev"));
         assert_eq!(typing.agent_name.as_deref(), Some("Rev"));
+        assert_eq!(typing.stage.as_deref(), Some("Inspecting code."));
         assert_eq!(typing.member_pubkey.as_deref(), Some("alice"));
         assert_eq!(typing.peer_pubkey.as_deref(), Some("bob"));
     }

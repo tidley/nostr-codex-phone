@@ -7,6 +7,17 @@ source_worker="$repo_root/rust/target/release/nostr-codex-server"
 target_worker="${NOSTR_CODEX_WORKER:-$worker_root/.nostr-codex/nostr-codex-worker-linux-x64}"
 service="${NOSTR_CODEX_SERVICE:-nostr-codex-server.service}"
 
+# Non-interactive shells often omit the user-session bus environment. Deploying
+# must restart the service, so never replace the live binary without that bus.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+if [[ ! -S "$XDG_RUNTIME_DIR/bus" ]]; then
+  echo "Cannot reach the user systemd bus at $XDG_RUNTIME_DIR/bus." >&2
+  echo "Manual intervention required: run this script from the worker user's desktop session." >&2
+  echo "That session must export XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS before deployment." >&2
+  exit 1
+fi
+
 if [[ ! -x "$source_worker" ]]; then
   echo "Missing release worker: $source_worker" >&2
   echo "Run: cargo build --release --manifest-path rust/Cargo.toml --bin nostr-codex-server" >&2

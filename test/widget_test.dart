@@ -123,10 +123,7 @@ void main() {
       ),
     );
 
-    expect(
-      find.text('Enter to send. Shift+Enter for new line.'),
-      findsNWidgets(2),
-    );
+    expect(find.text('Enter to send. Shift+Enter for new line.'), findsNothing);
     await tester.enterText(find.byType(TextField).at(0), 'Main message');
     await tester.pump();
     expect(mainFocus.hasFocus, isTrue);
@@ -192,7 +189,7 @@ void main() {
     );
 
     expect(find.byTooltip('Transcribing voice'), findsOneWidget);
-    expect(find.text('Transcribing voice...'), findsOneWidget);
+    expect(find.text('Transcribing voice...'), findsNothing);
     expect(controller.text, 'Draft stays here');
     expect(sends, 0);
 
@@ -333,7 +330,7 @@ void main() {
         ),
       );
 
-      expect(find.text('Enter for new line'), findsOneWidget);
+      expect(find.text('Enter for new line'), findsNothing);
       final sendButton = find.ancestor(
         of: find.byIcon(Icons.send),
         matching: find.byType(IconButton),
