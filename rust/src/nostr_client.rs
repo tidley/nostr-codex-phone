@@ -78,7 +78,6 @@ impl NostrMessenger {
                 .with_context(|| format!("failed to add relay `{relay}`"))?;
         }
 
-        let mut notifications = client.notifications();
         client.connect().await;
 
         let subscription = Filter::new()
@@ -86,41 +85,54 @@ impl NostrMessenger {
             .pubkey(keys.public_key())
             .limit(0);
         client
-            .subscribe(subscription)
+            .subscribe(subscription.clone())
             .await
             .context("failed to subscribe to GiftWrap DMs")?;
 
         let (tx, rx) = mpsc::channel(128);
         let listener_keys = keys.clone();
         let listener_receive_peers = receive_peers.clone();
+        let listener_client = client.clone();
+        let listener_subscription = subscription.clone();
         let listener = tokio::spawn(async move {
             let mut seen_event_ids = SeenEventIds::new(4096);
+            loop {
+                let mut notifications = listener_client.notifications();
+                while let Some(notification) = notifications.next().await {
+                    let ClientNotification::Event { event, .. } = notification else {
+                        continue;
+                    };
 
-            while let Some(notification) = notifications.next().await {
-                let ClientNotification::Event { event, .. } = notification else {
-                    continue;
-                };
+                    if event.kind != Kind::GiftWrap {
+                        continue;
+                    }
 
-                if event.kind != Kind::GiftWrap {
-                    continue;
+                    if !seen_event_ids.insert(event.id.to_hex()) {
+                        continue;
+                    }
+
+                    match decode_gift_wrap(&listener_keys, &listener_receive_peers, &event) {
+                        Ok(Some(message)) => match tx.try_send(message) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Closed(_)) => return,
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    "dropping GiftWrap DM because the inbound queue is full"
+                                );
+                            }
+                        },
+                        Ok(None) => {}
+                        Err(err) => tracing::warn!("failed to process GiftWrap DM: {err:#}"),
+                    }
                 }
-
-                if !seen_event_ids.insert(event.id.to_hex()) {
-                    continue;
-                }
-
-                match decode_gift_wrap(&listener_keys, &listener_receive_peers, &event) {
-                    Ok(Some(message)) => match tx.try_send(message) {
-                        Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Closed(_)) => break,
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            tracing::warn!(
-                                "dropping GiftWrap DM because the inbound queue is full"
-                            );
-                        }
-                    },
-                    Ok(None) => {}
-                    Err(err) => tracing::warn!("failed to process GiftWrap DM: {err:#}"),
+                tracing::warn!("Nostr notification stream stopped; resubscribing");
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if let Err(err) = listener_client
+                    .subscribe(listener_subscription.clone())
+                    .await
+                {
+                    tracing::warn!("failed to resubscribe to GiftWrap DMs: {err:#}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         });

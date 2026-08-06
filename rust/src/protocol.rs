@@ -316,6 +316,8 @@ pub struct WorkspaceTypingPayload {
     pub member_pubkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_pubkey: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     pub expires_at: i64,
 }
 
@@ -325,6 +327,10 @@ fn default_agent_session_status() -> String {
 
 fn default_restart_agent_session() -> bool {
     true
+}
+
+fn default_agent_availability() -> String {
+    "unavailable".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,6 +364,18 @@ pub struct WorkspaceAgentPayload {
     pub session_status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_error: Option<String>,
+    /// Current worker-side availability: available, busy, stuck, errored, or unavailable.
+    #[serde(default = "default_agent_availability")]
+    pub availability: String,
+    /// Best-effort metrics for the active OpenCode systemd scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_cpu_usage_nsec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_task_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_started_at: Option<i64>,
     #[serde(default)]
     pub instance_id: String,
     pub created_by: String,

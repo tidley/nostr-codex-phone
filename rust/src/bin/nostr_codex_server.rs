@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -52,6 +53,18 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 use tracing::{error, info, warn};
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AgentScopeMetrics {
+    active_state: String,
+    memory_bytes: Option<u64>,
+    cpu_usage_nsec: Option<u64>,
+    task_count: Option<u64>,
+    started_at: Option<i64>,
+}
+
+static AGENT_SCOPE_METRICS: once_cell::sync::Lazy<StdMutex<HashMap<String, AgentScopeMetrics>>> =
+    once_cell::sync::Lazy::new(|| StdMutex::new(HashMap::new()));
+
 const WORKER_STATE_DIR: &str = ".nostr-codex";
 const WORKER_REGISTRY_FILE: &str = "workers.json";
 const WORKER_LOCK_FILE: &str = "worker.lock";
@@ -59,10 +72,15 @@ const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(45);
 const CODEX_STATUS_MIN_INTERVAL: Duration = Duration::from_secs(8);
 const WORKSPACE_VOICE_DEDUPE_CAPACITY: usize = 256;
 const WORKSPACE_HISTORY_REQUEST_STEP: usize = 5;
+const WORKSPACE_TRANSFER_CHUNK_SIZE: usize = 64;
+const WORKSPACE_SNAPSHOT_MESSAGE_LIMIT: usize = 20;
 const WORKSPACE_HISTORY_REQUEST_MAX: usize = 50;
 const WORKSPACE_HISTORY_REQUEST_ATTEMPTS: usize = 3;
 const WORKSPACE_AGENT_QUEUE_CAPACITY: usize = 16;
 const SYSTEM_STATUS_HISTORY_MAX_BYTES: usize = 10 * 1024 * 1024;
+const SYSTEM_STATUS_SAMPLE_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const AGENT_SCOPE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+const AGENT_SCOPE_STUCK_AFTER: Duration = Duration::from_secs(15 * 60);
 // SHA-256 input is the UTF-8 bytes of this domain, a zero byte, then the pairing secret.
 const PAIRING_CONFIRMATION_DOMAIN: &str = "nostr-codex/first-owner-confirmation/v1";
 
@@ -902,6 +920,16 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         config.codex_config.clone(),
     );
     flush_workspace_notification_outbox(&config.workspace, config.messenger.as_ref()).await;
+    start_system_status_collector(
+        worker_state_path(&config.codex_config.working_dir, "system-status.jsonl"),
+        config.control.clone(),
+    );
+    if env::var("OPENCODE_SYSTEMD_SCOPE")
+        .ok()
+        .is_some_and(|value| !is_falsey_env(&value))
+    {
+        start_agent_scope_metrics_collector(config.control.clone());
+    }
 
     loop {
         let message = tokio::select! {
@@ -959,22 +987,14 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                             }),
                         )
                         .await;
-                    match workspace_snapshot(&config.workspace, &message.sender_pubkey_hex) {
-                        Ok(snapshot) => {
-                            if let Err(err) = config
-                                .messenger
-                                .send_wire_to_pubkey(
-                                    &message.sender_pubkey_hex,
-                                    WireMessage::workspace_update(snapshot),
-                                )
-                                .await
-                            {
-                                warn!("failed to send redeemed member workspace snapshot: {err:#}");
-                            }
-                        }
-                        Err(err) => {
-                            warn!("failed to build redeemed member workspace snapshot: {err:#}")
-                        }
+                    if let Err(err) = send_workspace_snapshot(
+                        &config.workspace,
+                        config.messenger.as_ref(),
+                        &message.sender_pubkey_hex,
+                    )
+                    .await
+                    {
+                        warn!("failed to send redeemed member workspace snapshot: {err:#}");
                     }
                 }
                 Ok(false) => {
@@ -1172,6 +1192,155 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     }
 }
 
+fn start_system_status_collector(history_path: PathBuf, control: RuntimeControl) {
+    tokio::spawn(async move {
+        let mut samples = interval(SYSTEM_STATUS_SAMPLE_INTERVAL);
+        samples.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = control.shutdown_notify.notified() => {
+                    if control.is_shutdown_requested() {
+                        return;
+                    }
+                }
+                _ = samples.tick() => {
+                    match tokio::task::spawn_blocking(collect_system_status_sample).await {
+                        Ok(sample) => append_system_status_sample(&history_path, &sample),
+                        Err(err) => warn!("system status collector stopped: {err}"),
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn start_agent_scope_metrics_collector(control: RuntimeControl) {
+    tokio::spawn(async move {
+        let mut samples = interval(AGENT_SCOPE_SAMPLE_INTERVAL);
+        samples.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = control.shutdown_notify.notified() => {
+                    if control.is_shutdown_requested() {
+                        return;
+                    }
+                }
+                _ = samples.tick() => {
+                    match tokio::task::spawn_blocking(collect_agent_scope_metrics).await {
+                        Ok(metrics) => {
+                            if let Ok(mut cached) = AGENT_SCOPE_METRICS.lock() {
+                                *cached = metrics;
+                            }
+                        }
+                        Err(err) => warn!("agent scope metrics collector stopped: {err}"),
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn collect_agent_scope_metrics() -> HashMap<String, AgentScopeMetrics> {
+    let units = match StdCommand::new("systemctl")
+        .args([
+            "--user",
+            "list-units",
+            "--all",
+            "--type=scope",
+            "--no-legend",
+            "--plain",
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .filter(|unit| unit.starts_with("nostr-codex-agent-") && unit.ends_with(".scope"))
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        _ => return HashMap::new(),
+    };
+    if units.is_empty() {
+        return HashMap::new();
+    }
+
+    let output = match StdCommand::new("systemctl")
+        .args(["--user", "show", "--property=Description,ActiveState,MemoryCurrent,CPUUsageNSec,TasksCurrent,ActiveEnterTimestampMonotonic"])
+        .args(&units)
+        .output()
+    {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).into_owned(),
+        _ => return HashMap::new(),
+    };
+    let boot_time = linux_boot_time();
+    output
+        .split("\n\n")
+        .filter_map(|unit| parse_agent_scope_metrics(unit, boot_time))
+        .collect()
+}
+
+fn parse_agent_scope_metrics(
+    unit: &str,
+    boot_time: Option<i64>,
+) -> Option<(String, AgentScopeMetrics)> {
+    let values = unit
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .collect::<HashMap<_, _>>();
+    let session_id = opencode_session_from_description(values.get("Description")?)?;
+    let started_at = values
+        .get("ActiveEnterTimestampMonotonic")
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|micros| i64::try_from(micros / 1_000_000).ok())
+        .zip(boot_time)
+        .map(|(seconds, boot_time)| boot_time.saturating_add(seconds));
+    Some((
+        session_id.to_string(),
+        AgentScopeMetrics {
+            active_state: values
+                .get("ActiveState")
+                .copied()
+                .unwrap_or_default()
+                .to_string(),
+            memory_bytes: values
+                .get("MemoryCurrent")
+                .and_then(|value| value.parse().ok()),
+            cpu_usage_nsec: values
+                .get("CPUUsageNSec")
+                .and_then(|value| value.parse().ok()),
+            task_count: values
+                .get("TasksCurrent")
+                .and_then(|value| value.parse().ok()),
+            started_at,
+        },
+    ))
+}
+
+fn opencode_session_from_description(description: &str) -> Option<&str> {
+    let mut words = description.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "--session" {
+            return words.next().filter(|session| {
+                session.starts_with("ses_")
+                    && session.len() <= 128
+                    && session[4..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric())
+            });
+        }
+    }
+    None
+}
+
+fn linux_boot_time() -> Option<i64> {
+    fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .parse()
+        .ok()
+}
+
 async fn queue_workspace_update(
     workspace: &WorkspaceStore,
     recipients: impl IntoIterator<Item = String>,
@@ -1184,21 +1353,32 @@ async fn queue_workspace_update(
     Ok(())
 }
 
-async fn flush_workspace_notification_outbox(workspace: &WorkspaceStore, messenger: &NostrMessenger) {
+async fn flush_workspace_notification_outbox(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+) {
     for notification in workspace.pending_notifications().unwrap_or_default() {
         let Ok(wire) = parse_wire_message(&notification.payload) else {
-            warn!(id = notification.id, "discarding malformed workspace notification outbox entry");
+            warn!(
+                id = notification.id,
+                "discarding malformed workspace notification outbox entry"
+            );
             let _ = workspace.delivered_notification(notification.id);
             continue;
         };
         let mut delivered = false;
         for attempt in 0..3 {
-            match messenger.send_wire_to_pubkey(&notification.recipient, wire.clone()).await {
+            match messenger
+                .send_wire_to_pubkey(&notification.recipient, wire.clone())
+                .await
+            {
                 Ok(_) => {
                     delivered = true;
                     break;
                 }
-                Err(err) if attempt == 2 => warn!(id = notification.id, recipient = %notification.recipient, "workspace notification remains pending: {err:#}"),
+                Err(err) if attempt == 2 => {
+                    warn!(id = notification.id, recipient = %notification.recipient, "workspace notification remains pending: {err:#}")
+                }
                 Err(_) => sleep(Duration::from_millis(100 * (1 << attempt))).await,
             }
         }
@@ -1383,6 +1563,7 @@ async fn process_workspace_request(
                     recipient_pubkey: request.recipient_pubkey.clone(),
                     member_pubkey: None,
                     peer_pubkey: None,
+                    parent_id: request.parent_id.clone(),
                     expires_at,
                 }),
             };
@@ -1642,7 +1823,14 @@ async fn process_workspace_request(
             // A direct message is only delivered to its two participants.
             queue_workspace_update(
                 workspace,
-                [sender.to_string(), request.recipient_pubkey.as_deref().unwrap_or_default().to_string()],
+                [
+                    sender.to_string(),
+                    request
+                        .recipient_pubkey
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_string(),
+                ],
                 &update,
             )
             .await?;
@@ -1959,7 +2147,7 @@ async fn send_workspace_snapshot(
     let mut snapshot = workspace_snapshot(workspace, sender)?;
     let messages = std::mem::take(&mut snapshot.messages);
     let transfer_id = generate_pairing_secret();
-    let total_chunks = messages.chunks(16).len() + 1;
+    let total_chunks = messages.chunks(WORKSPACE_TRANSFER_CHUNK_SIZE).len() + 1;
     snapshot.action = history_transfer_action(&transfer_id, 0, total_chunks, "snapshot");
     let payload = WireMessage::workspace_update(snapshot.clone()).to_json()?;
     info!(
@@ -1974,9 +2162,14 @@ async fn send_workspace_snapshot(
         .send_wire_to_pubkey(sender, WireMessage::workspace_update(snapshot))
         .await?;
 
-    for (index, messages) in messages.chunks(16).enumerate() {
+    for (index, messages) in messages.chunks(WORKSPACE_TRANSFER_CHUNK_SIZE).enumerate() {
         let update = WorkspaceUpdate {
-            action: history_transfer_action(&transfer_id, index + 1, total_chunks, "snapshot_messages"),
+            action: history_transfer_action(
+                &transfer_id,
+                index + 1,
+                total_chunks,
+                "snapshot_messages",
+            ),
             channels: vec![],
             members: vec![],
             messages: messages.to_vec(),
@@ -2004,7 +2197,7 @@ async fn send_channel_history(
         .map(message_payload)
         .collect::<Vec<_>>();
     let transfer_id = generate_pairing_secret();
-    let total_chunks = messages.chunks(16).len() + 1;
+    let total_chunks = messages.chunks(WORKSPACE_TRANSFER_CHUNK_SIZE).len() + 1;
     info!(
         channel_id,
         count = messages.len(),
@@ -2033,12 +2226,17 @@ async fn send_channel_history(
     messenger
         .send_wire_to_pubkey(sender, WireMessage::workspace_update(header))
         .await?;
-    for (index, chunk) in messages.chunks(16).enumerate() {
+    for (index, chunk) in messages.chunks(WORKSPACE_TRANSFER_CHUNK_SIZE).enumerate() {
         messenger
             .send_wire_to_pubkey(
                 sender,
                 WireMessage::workspace_update(WorkspaceUpdate {
-                    action: history_transfer_action(&transfer_id, index + 1, total_chunks, "channel_messages"),
+                    action: history_transfer_action(
+                        &transfer_id,
+                        index + 1,
+                        total_chunks,
+                        "channel_messages",
+                    ),
                     channels: vec![],
                     members: vec![],
                     messages: chunk.to_vec(),
@@ -2055,7 +2253,12 @@ async fn send_channel_history(
 
 // A transfer envelope keeps chunked history identifiable across relay reordering.
 // The receiving client applies it only after all sequence numbers are present.
-fn history_transfer_action(transfer_id: &str, sequence: usize, total: usize, action: &str) -> String {
+fn history_transfer_action(
+    transfer_id: &str,
+    sequence: usize,
+    total: usize,
+    action: &str,
+) -> String {
     format!("history_transfer:v1:{transfer_id}:{sequence}:{total}:{action}")
 }
 
@@ -2086,6 +2289,11 @@ fn workspace_snapshot(workspace: &WorkspaceStore, member: &str) -> Result<Worksp
         messages: workspace
             .snapshot_messages(member)?
             .into_iter()
+            .rev()
+            .take(WORKSPACE_SNAPSHOT_MESSAGE_LIMIT)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
             .map(message_payload)
             .collect(),
         typing: None,
@@ -2113,12 +2321,7 @@ async fn broadcast_workspace_snapshots(
     messenger: &NostrMessenger,
 ) -> Result<()> {
     for member in workspace.members()? {
-        messenger
-            .send_wire_to_pubkey(
-                &member.pubkey,
-                WireMessage::workspace_update(workspace_snapshot(workspace, &member.pubkey)?),
-            )
-            .await?;
+        send_workspace_snapshot(workspace, messenger, &member.pubkey).await?;
     }
     Ok(())
 }
@@ -2130,6 +2333,7 @@ async fn send_agent_typing(
     channel_id: Option<&str>,
     member: Option<&str>,
     peer: Option<&str>,
+    parent_id: Option<&str>,
     stage: Option<&str>,
     expires_in: Option<Duration>,
 ) -> Result<()> {
@@ -2159,6 +2363,7 @@ async fn send_agent_typing(
             recipient_pubkey: None,
             member_pubkey: member.map(str::to_string),
             peer_pubkey: peer.map(str::to_string),
+            parent_id: parent_id.map(str::to_string),
             expires_at,
         }),
     };
@@ -2195,6 +2400,7 @@ async fn run_workspace_agent_with_typing(
     channel_id: Option<&str>,
     member: Option<&str>,
     peer: Option<&str>,
+    parent_id: Option<&str>,
     body: &str,
     config: &CodexConfig,
     session_id: &str,
@@ -2207,6 +2413,7 @@ async fn run_workspace_agent_with_typing(
         channel_id,
         member,
         peer,
+        parent_id,
         None,
         Some(TYPING_LEASE),
     )
@@ -2228,14 +2435,14 @@ async fn run_workspace_agent_with_typing(
         tokio::select! {
             result = &mut run => break result,
             _ = renew.tick() => {
-                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, None, Some(TYPING_LEASE)).await {
+                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, None, Some(TYPING_LEASE)).await {
                     warn!(agent = %agent.id, "failed to refresh agent typing state: {err:#}");
                 }
             }
         }
     };
     if let Err(err) = send_agent_typing(
-        workspace, messenger, agent, channel_id, member, peer, None, None,
+        workspace, messenger, agent, channel_id, member, peer, parent_id, None, None,
     )
     .await
     {
@@ -2297,6 +2504,11 @@ fn message_payload(message: WorkspaceMessage) -> WorkspaceMessagePayload {
 fn agent_payload(
     agent: rust_lib_nostr_codex_phone::workspace::WorkspaceAgent,
 ) -> WorkspaceAgentPayload {
+    let scope_metrics = agent
+        .opencode_session_id
+        .as_deref()
+        .and_then(agent_scope_metrics);
+    let availability = agent_availability(&agent, scope_metrics.as_ref());
     WorkspaceAgentPayload {
         id: agent.id,
         name: agent.name,
@@ -2314,6 +2526,19 @@ fn agent_payload(
         opencode_session_id: agent.opencode_session_id,
         session_status: agent.session_status,
         session_error: agent.session_error,
+        availability,
+        scope_memory_bytes: scope_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.memory_bytes),
+        scope_cpu_usage_nsec: scope_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.cpu_usage_nsec),
+        scope_task_count: scope_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.task_count),
+        scope_started_at: scope_metrics
+            .as_ref()
+            .and_then(|metrics| metrics.started_at),
         instance_id: agent.instance_id,
         created_by: agent.created_by,
         created_at: agent.created_at,
@@ -2321,6 +2546,41 @@ fn agent_payload(
         input_tokens: agent.input_tokens,
         output_tokens: agent.output_tokens,
     }
+}
+
+fn agent_scope_metrics(session_id: &str) -> Option<AgentScopeMetrics> {
+    AGENT_SCOPE_METRICS
+        .lock()
+        .ok()
+        .and_then(|metrics| metrics.get(session_id).cloned())
+}
+
+fn agent_availability(agent: &WorkspaceAgent, scope: Option<&AgentScopeMetrics>) -> String {
+    if agent.session_status == "failed" || agent.session_error.is_some() {
+        return "errored".to_string();
+    }
+    if agent.session_status != "ready" || agent.opencode_session_id.is_none() {
+        return "unavailable".to_string();
+    }
+    let Some(scope) = scope else {
+        return "available".to_string();
+    };
+    if scope.active_state == "failed" {
+        return "errored".to_string();
+    }
+    if scope.active_state == "active" {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        if scope.started_at.is_some_and(|started_at| {
+            now.saturating_sub(started_at) >= AGENT_SCOPE_STUCK_AFTER.as_secs() as i64
+        }) {
+            return "stuck".to_string();
+        }
+        return "busy".to_string();
+    }
+    "available".to_string()
 }
 
 fn resolve_agent_runtime(
@@ -2774,6 +3034,7 @@ async fn route_conversation_agents(
             channel_id,
             member,
             peer,
+            parent_id,
             &scoped_body,
             &agent_config,
             &active_session_id,
@@ -2839,6 +3100,7 @@ async fn route_conversation_agents(
                     channel_id,
                     member,
                     peer,
+                    parent_id,
                     &scoped_body,
                     &agent_config,
                     &active_session_id,
@@ -2875,6 +3137,7 @@ async fn route_conversation_agents(
                 channel_id,
                 member,
                 peer,
+                parent_id,
                 &prompt,
                 &agent_config,
                 &active_session_id,
@@ -5529,10 +5792,9 @@ fn structured_tool_result(
         "system_status" => worker_system_status_data(
             workdir,
             object
-                .get("history_seconds")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(60)
-                .clamp(10, 3600),
+                .get("history_range")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("24h"),
         ),
         _ => serde_json::json!({
             "text": handle_tool_request(memory, peer_pubkey, request, workdir)
@@ -5548,7 +5810,7 @@ fn structured_tool_result(
     })
 }
 
-fn worker_system_status_data(workdir: &Path, history_seconds: u64) -> serde_json::Value {
+fn collect_system_status_sample() -> serde_json::Value {
     let sampled_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -5581,22 +5843,155 @@ fn worker_system_status_data(workdir: &Path, history_seconds: u64) -> serde_json
         "networks": read_networks(),
         "temperatures": read_temperatures(),
         "battery": read_battery_status(),
+        "system": system_information(),
     });
-    let history_path = worker_state_path(workdir, "system-status.jsonl");
-    let history = append_and_read_system_status_history(&history_path, &sample, history_seconds);
-    serde_json::json!({"current": sample, "history": history})
+    sample
 }
 
-fn append_and_read_system_status_history(
-    path: &Path,
-    sample: &serde_json::Value,
-    history_seconds: u64,
+fn system_information() -> serde_json::Value {
+    let os_name = fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                line.strip_prefix("PRETTY_NAME=")
+                    .map(|value| value.trim_matches('"').to_string())
+            })
+        })
+        .unwrap_or_else(|| "Linux".to_string());
+    serde_json::json!({
+        "hostname": fs::read_to_string("/proc/sys/kernel/hostname").ok().map(|value| value.trim().to_string()),
+        "os_name": os_name,
+        "kernel_version": fs::read_to_string("/proc/sys/kernel/osrelease").ok().map(|value| value.trim().to_string()),
+        "architecture": std::env::consts::ARCH,
+    })
+}
+
+fn worker_system_status_data(workdir: &Path, history_range: &str) -> serde_json::Value {
+    let history = read_system_status_history(&worker_state_path(workdir, "system-status.jsonl"));
+    let current = history
+        .last()
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let range = SystemStatusHistoryRange::parse(history_range);
+    serde_json::json!({
+        "current": current,
+        "history": range.select(history),
+        "history_range": range.name(),
+    })
+}
+
+#[derive(Clone, Copy)]
+enum SystemStatusHistoryRange {
+    OneHour,
+    Day,
+    Week,
+    All,
+}
+
+impl SystemStatusHistoryRange {
+    fn parse(value: &str) -> Self {
+        match value {
+            "1h" => Self::OneHour,
+            "1w" => Self::Week,
+            "all" => Self::All,
+            _ => Self::Day,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::OneHour => "1h",
+            Self::Day => "24h",
+            Self::Week => "1w",
+            Self::All => "all",
+        }
+    }
+
+    fn select(self, history: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        let seconds = match self {
+            Self::OneHour => Some(60 * 60),
+            Self::Day => Some(24 * 60 * 60),
+            Self::Week => Some(7 * 24 * 60 * 60),
+            Self::All => None,
+        };
+        let latest = history
+            .last()
+            .and_then(|entry| entry.get("sampled_at"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        let entries = history
+            .into_iter()
+            .filter(|entry| {
+                seconds.is_none_or(|window| {
+                    entry
+                        .get("sampled_at")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some_and(|timestamp| latest.saturating_sub(timestamp) <= window)
+                })
+            })
+            .collect::<Vec<_>>();
+        let maximum_points = match self {
+            Self::OneHour => 6,
+            Self::Day => 24 * 6,
+            Self::Week => 7 * 24,
+            // Gift-wrapped Nostr messages have a practical size limit. Keep
+            // all-history charts useful without making their result undeliverable.
+            Self::All => 192,
+        };
+        downsample_system_status_history(entries, maximum_points)
+            .iter()
+            .map(compact_system_status_history_entry)
+            .collect()
+    }
+}
+
+fn compact_system_status_history_entry(sample: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "sampled_at": sample.get("sampled_at"),
+        "cpu_percent": sample.get("cpu_percent"),
+        "memory": {
+            "used_bytes": sample.pointer("/memory/used_bytes"),
+            "total_bytes": sample.pointer("/memory/total_bytes"),
+        },
+        "swap": {
+            "used_bytes": sample.pointer("/swap/used_bytes"),
+            "total_bytes": sample.pointer("/swap/total_bytes"),
+        },
+        "filesystem": {
+            "used_bytes": sample.pointer("/filesystem/used_bytes"),
+            "total_bytes": sample.pointer("/filesystem/total_bytes"),
+        },
+    })
+}
+
+fn downsample_system_status_history(
+    history: Vec<serde_json::Value>,
+    maximum_points: usize,
 ) -> Vec<serde_json::Value> {
+    if history.len() <= maximum_points {
+        return history;
+    }
+    let bucket_size = history.len().div_ceil(maximum_points);
+    history
+        .chunks(bucket_size)
+        .filter_map(|bucket| bucket.last().cloned())
+        .collect()
+}
+
+fn read_system_status_history(path: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect()
+}
+
+fn append_system_status_sample(path: &Path, sample: &serde_json::Value) {
     let line = match serde_json::to_string(sample) {
         Ok(line) => line,
         Err(err) => {
             warn!("failed to serialize system status sample: {err}");
-            return vec![sample.clone()];
+            return;
         }
     };
     let mut contents = fs::read_to_string(path).unwrap_or_default();
@@ -5619,20 +6014,6 @@ fn append_and_read_system_status_history(
     if let Err(err) = fs::write(path, &contents) {
         warn!(path = %path.display(), "failed to save system status history: {err}");
     }
-    let sampled_at = sample
-        .get("sampled_at")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_default();
-    contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|entry| {
-            entry
-                .get("sampled_at")
-                .and_then(serde_json::Value::as_u64)
-                .is_some_and(|timestamp| sampled_at.saturating_sub(timestamp) <= history_seconds)
-        })
-        .collect()
 }
 
 fn read_cpu_counters() -> Option<(u64, u64)> {
@@ -7456,6 +7837,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_active_scope_metrics_from_an_opencode_session_description() {
+        let metrics = parse_agent_scope_metrics(
+            "Description=opencode run --format json --session ses_abc123\nActiveState=active\nMemoryCurrent=1048576\nCPUUsageNSec=9000\nTasksCurrent=7\nActiveEnterTimestampMonotonic=12000000\n",
+            Some(1_700_000_000),
+        )
+        .unwrap();
+
+        assert_eq!(metrics.0, "ses_abc123");
+        assert_eq!(
+            metrics.1,
+            AgentScopeMetrics {
+                active_state: "active".to_string(),
+                memory_bytes: Some(1_048_576),
+                cpu_usage_nsec: Some(9_000),
+                task_count: Some(7),
+                started_at: Some(1_700_000_012),
+            }
+        );
+    }
+
+    #[test]
+    fn ignores_scope_without_a_valid_opencode_session() {
+        assert!(parse_agent_scope_metrics(
+            "Description=opencode run --format json --session invalid\nActiveState=active\n",
+            Some(1_700_000_000),
+        )
+        .is_none());
+    }
+
+    #[test]
     fn workspace_agent_turn_queue_is_bounded_and_nonblocking() {
         let (sender, _receiver) = mpsc::channel(WORKSPACE_AGENT_QUEUE_CAPACITY);
         for index in 0..WORKSPACE_AGENT_QUEUE_CAPACITY {
@@ -7712,6 +8123,30 @@ mod tests {
         assert_eq!(result.data["path"], "README.md");
         assert_eq!(result.data["line_count"], 2);
         assert_eq!(result.data["content"], "first\nsecond\n");
+    }
+
+    #[test]
+    fn compacts_system_status_history_for_delivery() {
+        let sample = serde_json::json!({
+            "sampled_at": 100,
+            "cpu_percent": 12.5,
+            "memory": {"used_bytes": 10, "total_bytes": 20},
+            "swap": {"used_bytes": 2, "total_bytes": 4},
+            "filesystem": {"used_bytes": 30, "total_bytes": 40},
+            "networks": [{"name": "eth0", "received_bytes": 999}],
+            "temperatures": [{"name": "cpu", "celsius": 55}],
+        });
+
+        assert_eq!(
+            compact_system_status_history_entry(&sample),
+            serde_json::json!({
+                "sampled_at": 100,
+                "cpu_percent": 12.5,
+                "memory": {"used_bytes": 10, "total_bytes": 20},
+                "swap": {"used_bytes": 2, "total_bytes": 4},
+                "filesystem": {"used_bytes": 30, "total_bytes": 40},
+            })
+        );
     }
 
     #[test]

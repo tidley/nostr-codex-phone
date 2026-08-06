@@ -301,6 +301,86 @@ void main() {
     expect(state.messages['workspace']?.single.id, 'existing');
   });
 
+  test(
+    'workspace snapshot keeps cached history when it is intentionally bounded',
+    () {
+      final state = WorkspaceState()
+        ..apply({
+          'workspace_update': {
+            'action': 'message_created',
+            'messages': [
+              {
+                'id': 'older-message',
+                'channel_id': 'workspace',
+                'sender_pubkey': 'member',
+                'body': 'Stored locally',
+                'created_at': 1,
+              },
+            ],
+          },
+        })
+        ..apply({
+          'workspace_update': {
+            'action': 'snapshot',
+            'channels': [
+              {'id': 'workspace', 'name': 'Workspace'},
+            ],
+            'messages': [
+              {
+                'id': 'newer-message',
+                'channel_id': 'workspace',
+                'sender_pubkey': 'member',
+                'body': 'Received from worker',
+                'created_at': 2,
+              },
+            ],
+          },
+        }, preserveMessagesOnSnapshot: true);
+
+      expect(state.messages['workspace']!.map((message) => message.id), [
+        'older-message',
+        'newer-message',
+      ]);
+    },
+  );
+
+  test('workspace snapshot JSON round-trips durable message fields', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'channels': [
+            {'id': 'workspace', 'name': 'Workspace'},
+          ],
+          'members': [
+            {'pubkey': 'member', 'display_name': 'Member'},
+          ],
+          'messages': [
+            {
+              'id': 'message-1',
+              'channel_id': 'workspace',
+              'sender_pubkey': 'member',
+              'body': 'Durable',
+              'mentions': [
+                {'kind': 'member', 'id': 'member', 'label': 'Member'},
+              ],
+              'reactions': [
+                {'emoji': '👍', 'sender_pubkey': 'member'},
+              ],
+              'created_at': 1,
+            },
+          ],
+        },
+      });
+
+    final restored = WorkspaceState()
+      ..apply({'workspace_update': state.toSnapshotJson()});
+    final message = restored.messages['workspace']!.single;
+    expect(restored.memberNames['member'], 'Member');
+    expect(message.mentions.single.label, 'Member');
+    expect(message.reactions.single.emoji, '👍');
+  });
+
   test('workspace state applies a broadcast channel creation', () {
     final state = WorkspaceState();
 
@@ -640,6 +720,58 @@ void main() {
       );
     },
   );
+
+  test('workspace typing is scoped to its thread', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'typing',
+          'typing': {
+            'sender_pubkey': 'agent:rev',
+            'agent_id': 'rev',
+            'channel_id': 'engineering',
+            'parent_id': 'thread-root',
+            'expires_at': 200,
+          },
+        },
+      });
+
+    expect(
+      state.activeTyping(
+        channelId: 'engineering',
+        ownPubkey: 'you',
+        peerPubkey: null,
+        nowSeconds: 199,
+      ),
+      isEmpty,
+    );
+    expect(
+      state
+          .activeTyping(
+            channelId: 'engineering',
+            ownPubkey: 'you',
+            peerPubkey: null,
+            parentId: 'thread-root',
+            nowSeconds: 199,
+          )
+          .single
+          .agentId,
+      'rev',
+    );
+    expect(
+      state
+          .activeTyping(
+            channelId: 'engineering',
+            ownPubkey: 'you',
+            peerPubkey: null,
+            includeThreadTyping: true,
+            nowSeconds: 199,
+          )
+          .single
+          .agentId,
+      'rev',
+    );
+  });
 
   test(
     'agent activity has an identity, stage, matches both DM participants, and clears',

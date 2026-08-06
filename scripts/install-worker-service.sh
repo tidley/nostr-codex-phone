@@ -34,6 +34,13 @@ unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 unit="$unit_dir/nostr-codex-server.service"
 mkdir -p "$unit_dir"
 
+cat >"$unit_dir/agent-workloads.slice" <<'UNIT'
+[Slice]
+MemoryHigh=12G
+MemoryMax=14G
+TasksMax=infinity
+UNIT
+
 cat >"$unit" <<UNIT
 [Unit]
 Description=Nostr Codex phone bridge
@@ -47,6 +54,8 @@ Environment=AGENT_BACKEND=opencode
 Environment=AGENT_WORKDIR=$root
 Environment=OPENCODE_BIN=$opencode_bin
 Environment=OPENCODE_AGENT=build
+Environment=OPENCODE_SYSTEMD_SCOPE=1
+Environment=OPENCODE_MAX_CONCURRENT_RUNS=10
 EnvironmentFile=-$env_file
 Environment=NOSTR_CODEX_ENV_FILE=$env_file
 Environment=PATH=$PATH
