@@ -229,6 +229,9 @@ pub struct WorkspaceRequest {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub also_send_to_main: bool,
+    /// Client supports FIPS reliable-stream workspace snapshot delivery.
+    #[serde(default)]
+    pub fips_snapshot: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reaction: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
