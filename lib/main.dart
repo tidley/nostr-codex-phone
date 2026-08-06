@@ -55,7 +55,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.13+313';
+const _appVersion = '0.3.14+314';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -669,6 +669,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   String? _workspaceCacheRestoredKey;
   bool _workspaceFipsSnapshotInFlight = false;
   String _workspaceFipsConnectionState = 'disconnected';
+  final _workspaceFipsEnabled = ValueNotifier(true);
   final _workspaceFipsHeartbeat = ValueNotifier<_WorkspaceFipsHeartbeat>(
     const _WorkspaceFipsHeartbeat(),
   );
@@ -929,6 +930,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _workspaceFileBrowser.dispose();
     _workspaceFilePreview.dispose();
     _clientDiagnostics.dispose();
+    _workspaceFipsEnabled.dispose();
     _workspaceFipsHeartbeat.dispose();
     _workspaceVoiceResult.dispose();
     _queryController.dispose();
@@ -1842,6 +1844,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     String payload, {
     required String source,
   }) async {
+    if (parseWorkspaceInviteCode(payload) != null) {
+      await _redeemWorkspaceInvite(payload);
+      return;
+    }
     final scannedTarget = _repoTargetFromQrPayload(payload);
     final target = scannedTarget == null
         ? null
@@ -4457,6 +4463,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             ? null
             : _workspaceFipsCapabilityFromOffer(action);
         if (capability != null) {
+          if (!_workspaceFipsEnabled.value) {
+            _recordDiagnostic(
+              'Ignored FIPS workspace snapshot offer: disabled',
+            );
+            unawaited(_sendWorkspaceRequest({'action': 'list_fallback'}));
+            return true;
+          }
           if (_workspaceFipsSnapshotInFlight) {
             _recordDiagnostic(
               'Ignored duplicate FIPS workspace snapshot offer',
@@ -6911,11 +6924,12 @@ Return a concise catch-up summary of what happened after that point: completed w
         diagnostics: _clientDiagnostics,
         onOpenDiagnostics: () => Navigator.of(context).push<void>(
           MaterialPageRoute(
-            builder: (_) =>
-                _ClientDiagnosticsPage(
-                  diagnostics: _clientDiagnostics,
-                  fipsHeartbeat: _workspaceFipsHeartbeat,
-                ),
+            builder: (_) => _ClientDiagnosticsPage(
+              diagnostics: _clientDiagnostics,
+              fipsEnabled: _workspaceFipsEnabled,
+              fipsHeartbeat: _workspaceFipsHeartbeat,
+              onFipsEnabledChanged: _setWorkspaceFipsEnabled,
+            ),
           ),
         ),
         onOpenWorkerConsole: () => unawaited(_openWorkerConsole()),
@@ -7249,7 +7263,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       request = {'action': 'list'};
     }
     if (request['action'] == 'list') {
-      request = {...request, 'fips_snapshot': true};
+      request = {...request, 'fips_snapshot': _workspaceFipsEnabled.value};
     }
     if (!await _ensureConnectedToParentService()) return;
     await nostrSendQuery(query: jsonEncode({'workspace_request': request}));
@@ -7271,6 +7285,7 @@ Return a concise catch-up summary of what happened after that point: completed w
   Future<void> _receiveWorkspaceSnapshotOverFips(String capability) async {
     var snapshotComplete = false;
     try {
+      if (!_workspaceFipsEnabled.value) return;
       _setWorkspaceFipsConnectionState('connecting');
       await fipsWorkspaceSnapshotStop();
       await fipsWorkspaceSnapshotConnect(
@@ -7342,16 +7357,21 @@ Return a concise catch-up summary of what happened after that point: completed w
         }
       }
     } catch (error) {
-      _setWorkspaceFipsConnectionState('reconnecting');
-      _recordDiagnostic(
-        'FIPS workspace ${snapshotComplete ? 'session' : 'bootstrap'} failed, using Nostr: $error',
+      final fipsEnabled = _workspaceFipsEnabled.value;
+      _setWorkspaceFipsConnectionState(
+        fipsEnabled ? 'reconnecting' : 'disabled',
       );
+      if (fipsEnabled) {
+        _recordDiagnostic(
+          'FIPS workspace ${snapshotComplete ? 'session' : 'bootstrap'} failed, using Nostr: $error',
+        );
+      }
       try {
         await _sendWorkspaceRequest({'action': 'list_fallback'});
       } catch (fallbackError) {
         _recordDiagnostic('Nostr workspace fallback failed: $fallbackError');
       }
-      _scheduleWorkspaceFipsRetry();
+      if (fipsEnabled) _scheduleWorkspaceFipsRetry();
     } finally {
       try {
         await fipsWorkspaceSnapshotStop();
@@ -7410,7 +7430,37 @@ Return a concise catch-up summary of what happened after that point: completed w
     );
   }
 
+  void _setWorkspaceFipsEnabled(bool enabled) {
+    if (_workspaceFipsEnabled.value == enabled) return;
+    _workspaceFipsEnabled.value = enabled;
+    _workspaceFipsRetryTimer?.cancel();
+    _workspaceFipsRetryAttempt = 0;
+    if (enabled) {
+      _setWorkspaceFipsConnectionState('disconnected');
+      _recordDiagnostic('FIPS workspace transport enabled');
+      unawaited(_sendWorkspaceRequest({'action': 'list'}));
+      return;
+    }
+    _setWorkspaceFipsConnectionState('disabled');
+    _recordDiagnostic('FIPS workspace transport disabled; using Nostr');
+    unawaited(_stopWorkspaceFipsAndFallback());
+  }
+
+  Future<void> _stopWorkspaceFipsAndFallback() async {
+    try {
+      await fipsWorkspaceSnapshotStop();
+    } catch (_) {
+      // A failed bootstrap can already have closed the native session.
+    }
+    try {
+      await _sendWorkspaceRequest({'action': 'list_fallback'});
+    } catch (error) {
+      _recordDiagnostic('Nostr workspace fallback failed: $error');
+    }
+  }
+
   void _scheduleWorkspaceFipsRetry() {
+    if (!_workspaceFipsEnabled.value) return;
     _workspaceFipsRetryTimer?.cancel();
     final delaySeconds = (10 * (1 << _workspaceFipsRetryAttempt)).clamp(
       10,

@@ -5559,6 +5559,8 @@ class _WorkspaceAccessPage extends StatelessWidget {
             child: QrImageView(
               data: inviteCode!,
               size: 220,
+              backgroundColor: Colors.white,
+              padding: const EdgeInsets.all(12),
               errorCorrectionLevel: QrErrorCorrectLevel.M,
             ),
           ),
@@ -5652,11 +5654,15 @@ class _ToolTextPage extends StatelessWidget {
 class _ClientDiagnosticsPage extends StatelessWidget {
   const _ClientDiagnosticsPage({
     required this.diagnostics,
+    required this.fipsEnabled,
     required this.fipsHeartbeat,
+    required this.onFipsEnabledChanged,
   });
 
   final ValueNotifier<List<String>> diagnostics;
+  final ValueNotifier<bool> fipsEnabled;
   final ValueNotifier<_WorkspaceFipsHeartbeat> fipsHeartbeat;
+  final ValueChanged<bool> onFipsEnabledChanged;
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -5679,6 +5685,20 @@ class _ClientDiagnosticsPage extends StatelessWidget {
     ),
     body: Column(
       children: [
+        ValueListenableBuilder<bool>(
+          valueListenable: fipsEnabled,
+          builder: (context, enabled, _) => SwitchListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+            title: const Text('Use FIPS workspace transport'),
+            subtitle: Text(
+              enabled
+                  ? 'Direct connection with Nostr fallback'
+                  : 'Nostr messages only',
+            ),
+            value: enabled,
+            onChanged: onFipsEnabledChanged,
+          ),
+        ),
         ValueListenableBuilder<_WorkspaceFipsHeartbeat>(
           valueListenable: fipsHeartbeat,
           builder: (context, heartbeat, _) {
