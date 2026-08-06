@@ -49,7 +49,7 @@ use rust_lib_nostr_codex_phone::workspace::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex, Notify};
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{interval, sleep, MissedTickBehavior};
 use tracing::{error, info, warn};
 
 const WORKER_STATE_DIR: &str = ".nostr-codex";
@@ -901,6 +901,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         Arc::clone(&config.messenger),
         config.codex_config.clone(),
     );
+    flush_workspace_notification_outbox(&config.workspace, config.messenger.as_ref()).await;
 
     loop {
         let message = tokio::select! {
@@ -1058,7 +1059,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             )
             .await
             {
-                Ok(()) => {
+                Ok(_) => {
                     if let Some(key) = workspace_voice_key {
                         workspace_voice_deduper.insert(key);
                     }
@@ -1167,6 +1168,44 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             } else {
                 session_workers.insert(worker_key, sender);
             }
+        }
+    }
+}
+
+async fn queue_workspace_update(
+    workspace: &WorkspaceStore,
+    recipients: impl IntoIterator<Item = String>,
+    update: &WorkspaceUpdate,
+) -> Result<()> {
+    let payload = WireMessage::workspace_update(update.clone()).to_json()?;
+    for recipient in recipients {
+        workspace.queue_notification(&recipient, &payload)?;
+    }
+    Ok(())
+}
+
+async fn flush_workspace_notification_outbox(workspace: &WorkspaceStore, messenger: &NostrMessenger) {
+    for notification in workspace.pending_notifications().unwrap_or_default() {
+        let Ok(wire) = parse_wire_message(&notification.payload) else {
+            warn!(id = notification.id, "discarding malformed workspace notification outbox entry");
+            let _ = workspace.delivered_notification(notification.id);
+            continue;
+        };
+        let mut delivered = false;
+        for attempt in 0..3 {
+            match messenger.send_wire_to_pubkey(&notification.recipient, wire.clone()).await {
+                Ok(_) => {
+                    delivered = true;
+                    break;
+                }
+                Err(err) if attempt == 2 => warn!(id = notification.id, recipient = %notification.recipient, "workspace notification remains pending: {err:#}"),
+                Err(_) => sleep(Duration::from_millis(100 * (1 << attempt))).await,
+            }
+        }
+        if delivered {
+            let _ = workspace.delivered_notification(notification.id);
+        } else {
+            let _ = workspace.failed_notification_attempt(notification.id);
         }
     }
 }
@@ -1561,9 +1600,13 @@ async fn process_workspace_request(
                 conversation_preprompts: vec![],
                 typing: None,
             };
-            if let Err(err) = broadcast_workspace_update(workspace, messenger, &update).await {
-                warn!(message = %message_id, "persisted workspace message notification failed: {err:#}");
-            }
+            queue_workspace_update(
+                workspace,
+                workspace.members()?.into_iter().map(|member| member.pubkey),
+                &update,
+            )
+            .await?;
+            flush_workspace_notification_outbox(workspace, messenger).await;
             enqueue_conversation_agents(
                 workspace,
                 agent_queues,
@@ -1597,17 +1640,13 @@ async fn process_workspace_request(
                 typing: None,
             };
             // A direct message is only delivered to its two participants.
-            for member in [
-                sender,
-                request.recipient_pubkey.as_deref().unwrap_or_default(),
-            ] {
-                if let Err(err) = messenger
-                    .send_wire_to_pubkey(member, WireMessage::workspace_update(update.clone()))
-                    .await
-                {
-                    warn!(message = %message_id, recipient = %member, "persisted workspace direct-message notification failed: {err:#}");
-                }
-            }
+            queue_workspace_update(
+                workspace,
+                [sender.to_string(), request.recipient_pubkey.as_deref().unwrap_or_default().to_string()],
+                &update,
+            )
+            .await?;
+            flush_workspace_notification_outbox(workspace, messenger).await;
             enqueue_conversation_agents(
                 workspace,
                 agent_queues,
@@ -1919,6 +1958,9 @@ async fn send_workspace_snapshot(
 ) -> Result<()> {
     let mut snapshot = workspace_snapshot(workspace, sender)?;
     let messages = std::mem::take(&mut snapshot.messages);
+    let transfer_id = generate_pairing_secret();
+    let total_chunks = messages.chunks(16).len() + 1;
+    snapshot.action = history_transfer_action(&transfer_id, 0, total_chunks, "snapshot");
     let payload = WireMessage::workspace_update(snapshot.clone()).to_json()?;
     info!(
         channels = snapshot.channels.len(),
@@ -1932,9 +1974,9 @@ async fn send_workspace_snapshot(
         .send_wire_to_pubkey(sender, WireMessage::workspace_update(snapshot))
         .await?;
 
-    for messages in messages.chunks(16) {
+    for (index, messages) in messages.chunks(16).enumerate() {
         let update = WorkspaceUpdate {
-            action: "snapshot_messages".to_string(),
+            action: history_transfer_action(&transfer_id, index + 1, total_chunks, "snapshot_messages"),
             channels: vec![],
             members: vec![],
             messages: messages.to_vec(),
@@ -1961,9 +2003,15 @@ async fn send_channel_history(
         .into_iter()
         .map(message_payload)
         .collect::<Vec<_>>();
-    info!(channel_id, count = messages.len(), "sending channel history");
+    let transfer_id = generate_pairing_secret();
+    let total_chunks = messages.chunks(16).len() + 1;
+    info!(
+        channel_id,
+        count = messages.len(),
+        "sending channel history"
+    );
     let header = WorkspaceUpdate {
-        action: "channel_messages".to_string(),
+        action: history_transfer_action(&transfer_id, 0, total_chunks, "channel_messages"),
         channels: vec![],
         members: vec![],
         messages: vec![],
@@ -1985,12 +2033,12 @@ async fn send_channel_history(
     messenger
         .send_wire_to_pubkey(sender, WireMessage::workspace_update(header))
         .await?;
-    for chunk in messages.chunks(16) {
+    for (index, chunk) in messages.chunks(16).enumerate() {
         messenger
             .send_wire_to_pubkey(
                 sender,
                 WireMessage::workspace_update(WorkspaceUpdate {
-                    action: "channel_messages".to_string(),
+                    action: history_transfer_action(&transfer_id, index + 1, total_chunks, "channel_messages"),
                     channels: vec![],
                     members: vec![],
                     messages: chunk.to_vec(),
@@ -2003,6 +2051,12 @@ async fn send_channel_history(
             .await?;
     }
     Ok(())
+}
+
+// A transfer envelope keeps chunked history identifiable across relay reordering.
+// The receiving client applies it only after all sequence numbers are present.
+fn history_transfer_action(transfer_id: &str, sequence: usize, total: usize, action: &str) -> String {
+    format!("history_transfer:v1:{transfer_id}:{sequence}:{total}:{action}")
 }
 
 fn workspace_snapshot(workspace: &WorkspaceStore, member: &str) -> Result<WorkspaceUpdate> {
@@ -2804,6 +2858,7 @@ async fn route_conversation_agents(
                 continue;
             }
         };
+        let mut history_follow_up_failed = false;
         for _ in 0..WORKSPACE_HISTORY_REQUEST_ATTEMPTS {
             let Some(message_count) = workspace_history_request_count(&result.response) else {
                 break;
@@ -2827,12 +2882,20 @@ async fn route_conversation_agents(
             .await
             {
                 Ok(next) if !next.response.trim().is_empty() => result = next,
-                Ok(_) => break,
+                Ok(_) => {
+                    history_follow_up_failed = true;
+                    break;
+                }
                 Err(err) => {
                     warn!(agent = %agent.id, "workspace history request failed: {err:#}");
+                    history_follow_up_failed = true;
                     break;
                 }
             }
+        }
+        // A history request is an internal control response, never a message to show in the thread.
+        if history_follow_up_failed || workspace_history_request_count(&result.response).is_some() {
+            continue;
         }
         if let Some(usage) = result.token_usage {
             let updated = workspace.record_agent_token_usage(
@@ -2856,6 +2919,7 @@ async fn route_conversation_agents(
             )
             .await?;
         }
+        let also_send_to_main = parent_id.is_none();
         let message = match channel_id {
             Some(channel_id) => workspace.add_channel_message_with_main(
                 &format!("agent:{}", agent.id),
@@ -2864,7 +2928,7 @@ async fn route_conversation_agents(
                 &[],
                 &[],
                 parent_id,
-                true,
+                also_send_to_main,
             )?,
             None => workspace.add_direct_message_with_main(
                 &format!("agent:{}", agent.id),
@@ -2873,7 +2937,7 @@ async fn route_conversation_agents(
                 &[],
                 &[],
                 parent_id,
-                true,
+                also_send_to_main,
             )?,
         };
         let update = WorkspaceUpdate {

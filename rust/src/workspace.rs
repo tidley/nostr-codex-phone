@@ -93,6 +93,14 @@ pub struct WorkspaceStore {
     conn: Connection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceNotification {
+    pub id: i64,
+    pub recipient: String,
+    pub payload: String,
+    pub attempts: i64,
+}
+
 impl WorkspaceStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -104,7 +112,8 @@ impl WorkspaceStore {
                CREATE TABLE IF NOT EXISTS workspace_channels (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
                  CREATE TABLE IF NOT EXISTS workspace_messages (id TEXT PRIMARY KEY, channel_id TEXT, recipient_pubkey TEXT, sender_pubkey TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', mentions_json TEXT NOT NULL DEFAULT '[]', parent_id TEXT, also_send_to_main INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
                    CHECK ((channel_id IS NOT NULL) != (recipient_pubkey IS NOT NULL)));
-                 CREATE TABLE IF NOT EXISTS workspace_message_reactions (message_id TEXT NOT NULL REFERENCES workspace_messages(id), emoji TEXT NOT NULL, sender_pubkey TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (message_id, emoji, sender_pubkey));
+                  CREATE TABLE IF NOT EXISTS workspace_message_reactions (message_id TEXT NOT NULL REFERENCES workspace_messages(id), emoji TEXT NOT NULL, sender_pubkey TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (message_id, emoji, sender_pubkey));
+                  CREATE TABLE IF NOT EXISTS workspace_notification_outbox (id INTEGER PRIMARY KEY, recipient TEXT NOT NULL, payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
                  CREATE TABLE IF NOT EXISTS workspace_agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, traits TEXT NOT NULL DEFAULT '', skills_json TEXT NOT NULL DEFAULT '[]', preset TEXT, opencode_provider_id TEXT, opencode_provider_name TEXT, opencode_model_id TEXT, opencode_model_name TEXT, opencode_agent TEXT, workdir TEXT, restart_on_failure INTEGER NOT NULL DEFAULT 1, opencode_session_id TEXT, session_status TEXT NOT NULL DEFAULT 'failed', session_error TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, initialized_at INTEGER, input_tokens INTEGER, output_tokens INTEGER);
                 CREATE TABLE IF NOT EXISTS workspace_agent_instances (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES workspace_agents(id), opencode_session_id TEXT, created_at INTEGER NOT NULL);
                  CREATE TABLE IF NOT EXISTS workspace_conversation_agents (agent_id TEXT NOT NULL REFERENCES workspace_agents(id), channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT,
@@ -250,6 +259,30 @@ impl WorkspaceStore {
             "INSERT OR IGNORE INTO workspace_members (pubkey, joined_at) VALUES (?1, ?2)",
             params![pubkey, now()],
         )?;
+        Ok(())
+    }
+
+    pub fn queue_notification(&self, recipient: &str, payload: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO workspace_notification_outbox (recipient, payload, created_at) VALUES (?1, ?2, ?3)",
+            params![required("notification recipient", recipient)?, payload, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn pending_notifications(&self) -> Result<Vec<WorkspaceNotification>> {
+        Ok(self.conn.prepare("SELECT id, recipient, payload, attempts FROM workspace_notification_outbox ORDER BY id")?
+            .query_map([], |row| Ok(WorkspaceNotification { id: row.get(0)?, recipient: row.get(1)?, payload: row.get(2)?, attempts: row.get(3)? }))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn delivered_notification(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM workspace_notification_outbox WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn failed_notification_attempt(&self, id: i64) -> Result<()> {
+        self.conn.execute("UPDATE workspace_notification_outbox SET attempts = attempts + 1 WHERE id = ?1", [id])?;
         Ok(())
     }
 

@@ -643,6 +643,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Future<void> _callSendChain = Future.value();
   final WorkspaceState _workspace = WorkspaceState();
   final Map<String, int> _workspaceUnreadCounts = {};
+  final Map<String, int> _workspaceThreadUnreadCounts = {};
+  String? _workspaceOpenThreadKey;
   final ValueNotifier<int> _workspaceRevision = ValueNotifier(0);
   final _workspaceVoiceResult = ValueNotifier<_WorkspaceVoiceResult?>(null);
   bool _workspaceVoicePending = false;
@@ -4338,6 +4340,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               final conversationKey = _workspace.conversationKeyForMessage(
                 workspaceMessage,
               );
+              if (workspaceMessage.parentId != null &&
+                  isWorkspaceAgentSender(workspaceMessage.senderPubkey)) {
+                final threadKey =
+                    '$conversationKey:${workspaceMessage.parentId}';
+                if (_workspaceOpenThreadKey != threadKey) {
+                  _workspaceThreadUnreadCounts[threadKey] =
+                      (_workspaceThreadUnreadCounts[threadKey] ?? 0) + 1;
+                }
+              }
               final focused =
                   _showTeamWorkspace &&
                   conversationKey == _workspaceFocusedConversationKey;
@@ -6745,6 +6756,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         memberStatus: _workspaceMemberStatus,
         workspace: _workspace,
         unreadCounts: _workspaceUnreadCounts,
+        threadUnreadCounts: _workspaceThreadUnreadCounts,
         ownPubkey: _ownPubkeyHex ?? '',
         localSenderIds: {_ownPubkey ?? '', _ownPubkeyHex ?? ''},
         displayName: _workspaceDisplayName,
@@ -6766,6 +6778,12 @@ Return a concise catch-up summary of what happened after that point: completed w
           _workspaceFocusedConversationKey = conversationKey;
           _workspaceUnreadCounts.remove(conversationKey);
         }),
+        onOpenThread: (conversationKey, parentId) => setState(() {
+          final threadKey = '$conversationKey:$parentId';
+          _workspaceOpenThreadKey = threadKey;
+          _workspaceThreadUnreadCounts.remove(threadKey);
+        }),
+        onCloseThread: () => setState(() => _workspaceOpenThreadKey = null),
         onRequest: _sendWorkspaceRequest,
         onLoadFolderChoices: _requestRepoChoices,
         onTyping: _sendWorkspaceTyping,
