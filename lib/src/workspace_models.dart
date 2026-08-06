@@ -18,6 +18,47 @@ Map<String, String> decodeWorkspaceMemberAliases(String? raw) {
   }
 }
 
+class _WorkspaceHistoryTransfer {
+  _WorkspaceHistoryTransfer(this.total);
+
+  final int total;
+  final Map<int, Map<String, dynamic>> chunks = {};
+}
+
+class _WorkspaceHistoryTransferAction {
+  const _WorkspaceHistoryTransferAction(
+    this.id,
+    this.sequence,
+    this.total,
+    this.action,
+  );
+
+  final String id;
+  final int sequence;
+  final int total;
+  final String action;
+}
+
+_WorkspaceHistoryTransferAction? _historyTransferAction(String? value) {
+  if (value == null) return null;
+  final parts = value.split(':');
+  if (parts.length != 6 || parts[0] != 'history_transfer' || parts[1] != 'v1') {
+    return null;
+  }
+  final sequence = int.tryParse(parts[3]);
+  final total = int.tryParse(parts[4]);
+  if (parts[2].isEmpty ||
+      sequence == null ||
+      total == null ||
+      sequence < 0 ||
+      sequence >= total ||
+      total < 1 ||
+      parts[5].isEmpty) {
+    return null;
+  }
+  return _WorkspaceHistoryTransferAction(parts[2], sequence, total, parts[5]);
+}
+
 bool isWorkspaceAgentSender(String senderPubkey) =>
     senderPubkey.trim().toLowerCase().startsWith('agent:');
 
@@ -426,6 +467,7 @@ class WorkspaceState {
   List<WorkspaceConversationAgent> conversationAgents = [];
   List<WorkspaceConversationPreprompt> conversationPreprompts = [];
   final Map<String, WorkspaceTyping> typing = {};
+  final Map<String, _WorkspaceHistoryTransfer> _historyTransfers = {};
 
   List<WorkspaceMessage> apply(
     Map<String, dynamic> raw, {
@@ -434,6 +476,29 @@ class WorkspaceState {
     final update = raw['workspace_update'];
     if (update is! Map) return const [];
     final data = Map<String, dynamic>.from(update);
+    final transfer = _historyTransferAction(data['action']?.toString());
+    if (transfer != null) {
+      final pending = _historyTransfers.putIfAbsent(
+        transfer.id,
+        () => _WorkspaceHistoryTransfer(transfer.total),
+      );
+      if (pending.total != transfer.total) return const [];
+      pending.chunks.putIfAbsent(transfer.sequence, () => data);
+      if (pending.chunks.length != pending.total) return const [];
+      _historyTransfers.remove(transfer.id);
+      final added = <WorkspaceMessage>[];
+      for (var sequence = 0; sequence < pending.total; sequence++) {
+        final chunk = pending.chunks[sequence];
+        if (chunk == null) return const [];
+        chunk['action'] = _historyTransferAction(
+          chunk['action']?.toString(),
+        )!.action;
+        added.addAll(
+          apply({'workspace_update': chunk}, localSenderIds: localSenderIds),
+        );
+      }
+      return added;
+    }
     final addedMessages = <WorkspaceMessage>[];
     final isSnapshot = data['action'] == 'snapshot';
     final isSnapshotHeaderWithoutMessages =
