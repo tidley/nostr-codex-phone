@@ -554,7 +554,11 @@ class _WorkspacePanelState {
 
 class _TeamWorkspace extends StatefulWidget {
   const _TeamWorkspace({
+    super.key,
     required this.sessions,
+    required this.spaces,
+    required this.activeSpace,
+    required this.onSwitchSpace,
     required this.onOpenSessions,
     required this.onOpenSettings,
     required this.diagnostics,
@@ -610,6 +614,9 @@ class _TeamWorkspace extends StatefulWidget {
   });
 
   final List<RepoTarget> sessions;
+  final List<RepoTarget> spaces;
+  final RepoTarget? activeSpace;
+  final ValueChanged<RepoTarget> onSwitchSpace;
   final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
   final ValueNotifier<List<String>> diagnostics;
@@ -709,6 +716,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   bool _alsoSendToMain = false;
   bool _filesSelected = false;
   bool _filesFullWindow = false;
+  bool _threadFullWindow = false;
   int _agentsPageRevision = 0;
   double _sidebarWidth = 280;
   double _threadPaneWidth = 340;
@@ -1236,6 +1244,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _alsoSendToMain = nextPanelState?.alsoSendToMain ?? false;
       _filesSelected = nextPanelState?.filesSelected ?? false;
       _filesFullWindow = false;
+      _threadFullWindow = false;
       _restoreMainDraft(nextKey);
       _restoreThreadDraft();
     });
@@ -1273,6 +1282,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       selected: _section == _WorkspaceSection.channel ? _active : null,
       direct: _section == _WorkspaceSection.direct ? _active : null,
       sessions: widget.sessions,
+      spaces: widget.spaces,
+      activeSpace: widget.activeSpace,
+      onSwitchSpace: widget.onSwitchSpace,
       channels: widget.workspace.channels,
       members: widget.workspace.directPeers(widget.ownPubkey),
       ownPubkey: widget.ownPubkey,
@@ -1355,6 +1367,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           _saveThreadDraft();
           _thread = null;
           _alsoSendToMain = false;
+          _threadFullWindow = false;
         });
         widget.onCloseThread();
       },
@@ -1484,6 +1497,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           _saveThreadDraft();
           _thread = null;
           _alsoSendToMain = false;
+          _threadFullWindow = false;
         });
         widget.onCloseThread();
       },
@@ -1500,6 +1514,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       memberNames: widget.memberNames,
       agents: _activeAgents,
       typingLabels: _typingLabels(threadTyping),
+      fullWindow: _threadFullWindow,
+      onToggleFullWindow: () =>
+          setState(() => _threadFullWindow = !_threadFullWindow),
     );
     final conversationKey = _conversationKey;
     final fileBrowser = widget.fileBrowser.value;
@@ -1528,7 +1545,10 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                     fileBrowser.directory,
                     path,
                   ),
-            onFullWindow: () => setState(() => _filesFullWindow = true),
+            onFullWindow: () => setState(() {
+              _threadFullWindow = false;
+              _filesFullWindow = true;
+            }),
             onCloseFullWindow: () => setState(() => _filesFullWindow = false),
             onClosePreview: () => widget.filePreview.value = null,
             fullWindow: _filesFullWindow,
@@ -1536,15 +1556,30 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final showSidePane =
         _thread != null || (_filesSelected && filesPane != null);
     final showFiles = _filesSelected && filesPane != null;
+    final fullSidePane = _filesFullWindow || _threadFullWindow;
+    final maxSidePaneWidth = (MediaQuery.sizeOf(context).width - 280).clamp(
+      _threadPaneMinWidth,
+      _threadPaneMaxWidth,
+    );
+    final sidePaneWidth = _threadPaneWidth.clamp(
+      _threadPaneMinWidth,
+      maxSidePaneWidth,
+    );
     // A phone cannot accommodate a conversation and its detail pane side by
     // side. Show the detail as the complete working surface instead.
-    final showPhoneDetail = !medium && showSidePane && !_filesFullWindow;
+    final showPhoneDetail = !medium && showSidePane && !fullSidePane;
     final sidePane = _WorkspaceSidePanel(
       thread: _thread != null ? contextPane : null,
       files: filesPane,
       showFiles: showFiles,
-      onShowThread: () => setState(() => _filesSelected = false),
-      onShowFiles: () => setState(() => _filesSelected = true),
+      onShowThread: () => setState(() {
+        _filesSelected = false;
+        _filesFullWindow = false;
+      }),
+      onShowFiles: () => setState(() {
+        _filesSelected = true;
+        _threadFullWindow = false;
+      }),
     );
 
     return Scaffold(
@@ -1579,36 +1614,33 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
               ),
             if (wide) const VerticalDivider(width: 1),
             Expanded(
-              child: _filesFullWindow && filesPane != null
-                  ? filesPane
+              child: fullSidePane
+                  ? sidePane
                   : showPhoneDetail
                   ? sidePane
                   : conversation,
             ),
-            if (showSidePane && medium && !_filesFullWindow) ...[
-              if (wide)
-                ThreadPaneResizeHandle(
-                  onResize: (delta) => setState(() {
-                    _threadPaneWidth = (_threadPaneWidth + delta).clamp(
-                      _threadPaneMinWidth,
-                      _threadPaneMaxWidth,
+            if (showSidePane && medium && !fullSidePane) ...[
+              ThreadPaneResizeHandle(
+                onResize: (delta) => setState(() {
+                  _threadPaneWidth = (_threadPaneWidth + delta).clamp(
+                    _threadPaneMinWidth,
+                    maxSidePaneWidth,
+                  );
+                  final key = _conversationKey;
+                  if (key != null) {
+                    _panelStates[key] = _WorkspacePanelState(
+                      threadId: _thread?.id,
+                      width: _threadPaneWidth,
+                      alsoSendToMain: _alsoSendToMain,
+                      filesSelected: _filesSelected,
+                      fileBrowser: widget.fileBrowser.value,
+                      filePreview: widget.filePreview.value,
                     );
-                    final key = _conversationKey;
-                    if (key != null) {
-                      _panelStates[key] = _WorkspacePanelState(
-                        threadId: _thread?.id,
-                        width: _threadPaneWidth,
-                        alsoSendToMain: _alsoSendToMain,
-                        filesSelected: _filesSelected,
-                        fileBrowser: widget.fileBrowser.value,
-                        filePreview: widget.filePreview.value,
-                      );
-                    }
-                  }),
-                )
-              else
-                const VerticalDivider(width: 1),
-              SizedBox(width: wide ? _threadPaneWidth : 300, child: sidePane),
+                  }
+                }),
+              ),
+              SizedBox(width: sidePaneWidth, child: sidePane),
             ],
           ],
         ),
@@ -1956,6 +1988,9 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.selected,
     required this.direct,
     required this.sessions,
+    required this.spaces,
+    required this.activeSpace,
+    required this.onSwitchSpace,
     required this.channels,
     required this.members,
     required this.ownPubkey,
@@ -1977,6 +2012,9 @@ class _WorkspaceSidebar extends StatelessWidget {
   final String? selected;
   final String? direct;
   final List<RepoTarget> sessions;
+  final List<RepoTarget> spaces;
+  final RepoTarget? activeSpace;
+  final ValueChanged<RepoTarget> onSwitchSpace;
   final List<WorkspaceChannel> channels;
   final List<String> members;
   final String ownPubkey;
@@ -2049,31 +2087,51 @@ class _WorkspaceSidebar extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    CircleAvatar(
-                      backgroundColor: Colors.white,
-                      backgroundImage: const AssetImage(
-                        'assets/branding/ribbet.png',
-                      ),
-                    ),
-                    const SizedBox(width: 10),
                     Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Ribbit',
-                            style: Theme.of(context).textTheme.titleMedium
-                                ?.copyWith(fontWeight: FontWeight.bold),
-                          ),
-                          Text(
-                            'TEAM WORKSPACE',
-                            style: TextStyle(
-                              fontSize: 10,
-                              letterSpacing: 1.1,
-                              color: palette.label,
+                      child: PopupMenuButton<String>(
+                        tooltip: 'Switch workspace',
+                        onSelected: (value) {
+                          if (value == 'join') {
+                            onSettings();
+                            return;
+                          }
+                          final matches = spaces.where(
+                            (space) => 'space:${space.id}' == value,
+                          );
+                          if (matches.isNotEmpty) onSwitchSpace(matches.first);
+                        },
+                        itemBuilder: (context) => [
+                          for (final space in spaces)
+                            CheckedPopupMenuItem(
+                              value: 'space:${space.id}',
+                              checked: space.id == activeSpace?.id,
+                              child: Text(space.displayName),
+                            ),
+                          if (spaces.isNotEmpty) const PopupMenuDivider(),
+                          const PopupMenuItem(
+                            value: 'join',
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(Icons.group_add_outlined),
+                              title: Text('Join space'),
                             ),
                           ),
                         ],
+                        child: Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                activeSpace?.displayName ?? 'Select workspace',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            Icon(Icons.expand_more, color: palette.label),
+                          ],
+                        ),
                       ),
                     ),
                     IconButton(
@@ -3588,6 +3646,8 @@ class _WorkspaceContext extends StatelessWidget {
     required this.memberNames,
     required this.agents,
     required this.typingLabels,
+    required this.fullWindow,
+    required this.onToggleFullWindow,
   });
   final WorkspaceMessage? message;
   final List<WorkspaceMessage> replies;
@@ -3615,6 +3675,8 @@ class _WorkspaceContext extends StatelessWidget {
   final Map<String, String> memberNames;
   final List<WorkspaceAgent> agents;
   final List<String> typingLabels;
+  final bool fullWindow;
+  final VoidCallback onToggleFullWindow;
 
   String _memberLabel(String pubkey) {
     if (pubkey.startsWith('agent:')) {
@@ -3691,7 +3753,20 @@ class _WorkspaceContext extends StatelessWidget {
                       ),
                     ),
                   ),
-                  IconButton(onPressed: onClose, icon: const Icon(Icons.close)),
+                  IconButton(
+                    tooltip: fullWindow
+                        ? 'Return to conversation'
+                        : 'Open thread full-window',
+                    onPressed: onToggleFullWindow,
+                    icon: Icon(
+                      fullWindow ? Icons.close_fullscreen : Icons.open_in_full,
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Close thread',
+                    onPressed: onClose,
+                    icon: const Icon(Icons.close),
+                  ),
                 ],
               ),
               const Divider(),
@@ -5687,7 +5762,7 @@ class _ClientDiagnosticsPage extends StatelessWidget {
       children: [
         ValueListenableBuilder<bool>(
           valueListenable: fipsEnabled,
-          builder: (context, enabled, _) => SwitchListTile(
+          builder: (context, enabled, _) => ListTile(
             contentPadding: const EdgeInsets.symmetric(horizontal: 16),
             title: const Text('Use FIPS workspace transport'),
             subtitle: Text(
@@ -5695,8 +5770,7 @@ class _ClientDiagnosticsPage extends StatelessWidget {
                   ? 'Direct connection with Nostr fallback'
                   : 'Nostr messages only',
             ),
-            value: enabled,
-            onChanged: onFipsEnabledChanged,
+            trailing: Switch(value: enabled, onChanged: onFipsEnabledChanged),
           ),
         ),
         ValueListenableBuilder<_WorkspaceFipsHeartbeat>(

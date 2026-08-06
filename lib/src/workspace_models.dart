@@ -579,6 +579,18 @@ class WorkspaceState {
   final Map<String, WorkspaceTyping> typing = {};
   final Map<String, _WorkspaceHistoryTransfer> _historyTransfers = {};
 
+  void clear() {
+    channels = [];
+    members = [];
+    memberNames.clear();
+    messages.clear();
+    agents = [];
+    conversationAgents = [];
+    conversationPreprompts = [];
+    typing.clear();
+    _historyTransfers.clear();
+  }
+
   Map<String, Object> toSnapshotJson() => {
     'action': 'snapshot',
     'channels': channels

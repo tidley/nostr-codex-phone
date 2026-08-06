@@ -4909,7 +4909,7 @@ fn process_is_running(_pid: u32) -> bool {
 
 #[cfg(target_os = "linux")]
 fn worker_lock_process_matches(path: &Path, pid: u32) -> bool {
-    let Some(workdir) = path.parent() else {
+    let Some(workdir) = path.parent().and_then(Path::parent) else {
         return false;
     };
     let process_dir = Path::new("/proc").join(pid.to_string());
