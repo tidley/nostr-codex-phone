@@ -934,16 +934,11 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     );
     flush_workspace_notification_outbox(&config.workspace, config.messenger.as_ref()).await;
     let capabilities = Arc::new(Mutex::new(HashMap::new()));
-    let (fips_snapshots, fips_snapshots_rx) = mpsc::channel(8);
     tokio::task::spawn_local(run_workspace_fips_acceptor(
         config.fips_secret_key.clone(),
         config.relays.clone(),
         Arc::clone(&capabilities),
-        fips_snapshots,
-    ));
-    tokio::task::spawn_local(run_workspace_fips_session_actor(
         config.workspace_path.clone(),
-        fips_snapshots_rx,
     ));
     start_system_status_collector(
         worker_state_path(&config.codex_config.working_dir, "system-status.jsonl"),
@@ -2258,7 +2253,7 @@ async fn run_workspace_fips_acceptor(
     secret_key: String,
     relays: Vec<String>,
     capabilities: Arc<Mutex<HashMap<String, (String, Instant)>>>,
-    snapshots: mpsc::Sender<WorkspaceFipsSnapshotRequest>,
+    workspace_path: PathBuf,
 ) {
     loop {
         let identity = match Identity::from_secret_str(secret_key.trim()) {
@@ -2311,19 +2306,18 @@ async fn run_workspace_fips_acceptor(
             let _ = session.stop().await;
             continue;
         };
-        if snapshots
-            .send(WorkspaceFipsSnapshotRequest { member, session })
-            .await
-            .is_err()
-        {
-            return;
-        }
+        // Each peer gets its own actor. A live heartbeat from one workspace
+        // member must not prevent other members from receiving their snapshot.
+        tokio::task::spawn_local(run_workspace_fips_session(
+            workspace_path.clone(),
+            WorkspaceFipsSnapshotRequest { member, session },
+        ));
     }
 }
 
-async fn run_workspace_fips_session_actor(
+async fn run_workspace_fips_session(
     workspace_path: PathBuf,
-    mut requests: mpsc::Receiver<WorkspaceFipsSnapshotRequest>,
+    mut request: WorkspaceFipsSnapshotRequest,
 ) {
     // SQLite connections are not shareable across tasks; the session actor owns
     // a second connection to the same durable workspace database.
@@ -2334,13 +2328,11 @@ async fn run_workspace_fips_session_actor(
             return;
         }
     };
-    while let Some(mut request) = requests.recv().await {
-        if let Err(error) = serve_workspace_fips_session(&workspace, &mut request).await {
-            warn!("FIPS workspace session ended: {error:#}");
-        }
-        if let Err(error) = request.session.stop().await {
-            warn!("failed to stop FIPS workspace session: {error:#}");
-        }
+    if let Err(error) = serve_workspace_fips_session(&workspace, &mut request).await {
+        warn!(member = %request.member, "FIPS workspace session ended: {error:#}");
+    }
+    if let Err(error) = request.session.stop().await {
+        warn!(member = %request.member, "failed to stop FIPS workspace session: {error:#}");
     }
 }
 
