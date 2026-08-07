@@ -55,7 +55,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.15+315';
+const _appVersion = '0.3.18+318';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
