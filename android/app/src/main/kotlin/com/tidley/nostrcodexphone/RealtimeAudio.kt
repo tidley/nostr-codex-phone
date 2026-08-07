@@ -112,6 +112,8 @@ class RealtimeAudio(
         capturing = true
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        @Suppress("DEPRECATION")
+        audioManager.isSpeakerphoneOn = true
         try {
             audioRecord.startRecording()
         } catch (exception: IllegalStateException) {
@@ -169,6 +171,8 @@ class RealtimeAudio(
         }
         audioRecord.release()
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        @Suppress("DEPRECATION")
+        audioManager.isSpeakerphoneOn = false
         audioManager.mode = AudioManager.MODE_NORMAL
         val thread = captureThread
         captureThread = null
@@ -220,7 +224,7 @@ class RealtimeAudio(
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .build(),
             )
-            .setBufferSizeInBytes(max(minBufferSize, frameBytes * 4))
+            .setBufferSizeInBytes(max(minBufferSize, frameBytes * 12))
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
             .also { it.play() }

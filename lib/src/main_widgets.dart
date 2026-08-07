@@ -690,6 +690,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   static const _sidebarMaxWidth = 360.0;
   static const _threadPaneMinWidth = 220.0;
   static const _threadPaneMaxWidth = 1100.0;
+  static const _conversationMinWidth = 360.0;
   final _composer = TextEditingController();
   final _composerFocus = FocusNode();
   final _selectedComposerMentions = <WorkspaceMention>[];
@@ -699,6 +700,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   final _conversationDrafts = <String, _WorkspaceDraft>{};
   final _threadDrafts = <String, _WorkspaceDraft>{};
   final _panelStates = <String, _WorkspacePanelState>{};
+  final _conversationWidgetKey = GlobalKey<_WorkspaceConversationState>();
   final _voiceRecorder = AudioRecorder();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   bool _voiceRecording = false;
@@ -1313,8 +1315,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         _closeDrawer();
         unawaited(_startDirectMessage(context));
       },
+      onConversationActions: () => unawaited(
+        _conversationWidgetKey.currentState?._showConversationActions(),
+      ),
     );
     final conversation = _WorkspaceConversation(
+      key: _conversationWidgetKey,
       title: _title,
       section: _section,
       channelId: _section == _WorkspaceSection.channel ? _active : null,
@@ -1557,17 +1563,28 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         _thread != null || (_filesSelected && filesPane != null);
     final showFiles = _filesSelected && filesPane != null;
     final fullSidePane = _filesFullWindow || _threadFullWindow;
-    final maxSidePaneWidth = (MediaQuery.sizeOf(context).width - 280).clamp(
-      _threadPaneMinWidth,
-      _threadPaneMaxWidth,
-    );
+    final windowWidth = MediaQuery.sizeOf(context).width;
+    final persistentChromeWidth = wide ? _sidebarWidth + 7 : 0;
+    final canShowInlineSidePane =
+        showSidePane &&
+        medium &&
+        !fullSidePane &&
+        windowWidth >=
+            persistentChromeWidth +
+                _conversationMinWidth +
+                _threadPaneMinWidth +
+                10;
+    final maxSidePaneWidth =
+        (windowWidth - persistentChromeWidth - _conversationMinWidth - 10)
+            .clamp(_threadPaneMinWidth, _threadPaneMaxWidth);
     final sidePaneWidth = _threadPaneWidth.clamp(
       _threadPaneMinWidth,
       maxSidePaneWidth,
     );
-    // A phone cannot accommodate a conversation and its detail pane side by
-    // side. Show the detail as the complete working surface instead.
-    final showPhoneDetail = !medium && showSidePane && !fullSidePane;
+    // Keep the active conversation readable. On a narrow window the detail
+    // pane replaces it instead of squeezing both panes into unusable columns.
+    final showSingleSidePane =
+        showSidePane && !fullSidePane && !canShowInlineSidePane;
     final sidePane = _WorkspaceSidePanel(
       thread: _thread != null ? contextPane : null,
       files: filesPane,
@@ -1616,11 +1633,11 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             Expanded(
               child: fullSidePane
                   ? sidePane
-                  : showPhoneDetail
+                  : showSingleSidePane
                   ? sidePane
                   : conversation,
             ),
-            if (showSidePane && medium && !fullSidePane) ...[
+            if (canShowInlineSidePane) ...[
               ThreadPaneResizeHandle(
                 onResize: (delta) => setState(() {
                   _threadPaneWidth = (_threadPaneWidth + delta).clamp(
@@ -2007,6 +2024,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.onRefresh,
     required this.onCreateChannel,
     required this.onCreateDirect,
+    required this.onConversationActions,
   });
   final _WorkspaceSection section;
   final String? selected;
@@ -2031,6 +2049,7 @@ class _WorkspaceSidebar extends StatelessWidget {
   final VoidCallback onRefresh;
   final VoidCallback onCreateChannel;
   final VoidCallback onCreateDirect;
+  final VoidCallback onConversationActions;
 
   @override
   Widget build(BuildContext context) {
@@ -2048,6 +2067,7 @@ class _WorkspaceSidebar extends StatelessWidget {
       int unreadCount = 0,
       String? count,
       String? activity,
+      Widget? action,
     }) => ListTile(
       dense: true,
       selected: selected,
@@ -2065,16 +2085,18 @@ class _WorkspaceSidebar extends StatelessWidget {
                 color: Theme.of(context).colorScheme.primary,
               ),
             ),
-      trailing: unreadCount > 0
-          ? Semantics(
-              label: '$unreadCount unread messages',
-              child: ExcludeSemantics(
-                child: Badge(label: Text('$unreadCount')),
-              ),
-            )
-          : count == null
-          ? null
-          : Text(count, style: Theme.of(context).textTheme.labelSmall),
+      trailing:
+          action ??
+          (unreadCount > 0
+              ? Semantics(
+                  label: '$unreadCount unread messages',
+                  child: ExcludeSemantics(
+                    child: Badge(label: Text('$unreadCount')),
+                  ),
+                )
+              : count == null
+              ? null
+              : Text(count, style: Theme.of(context).textTheme.labelSmall)),
       onTap: onTap,
     );
     return ColoredBox(
@@ -2175,6 +2197,14 @@ class _WorkspaceSidebar extends StatelessWidget {
                     selected: selected == channel.id,
                     unreadCount: unreadCounts[channel.id] ?? 0,
                     activity: activityLabels[channel.id],
+                    action: selected == channel.id
+                        ? IconButton(
+                            onPressed: onConversationActions,
+                            icon: const Icon(Icons.more_vert, size: 18),
+                            tooltip: 'Conversation actions',
+                            visualDensity: VisualDensity.compact,
+                          )
+                        : null,
                     onTap: () =>
                         onSelect(_WorkspaceSection.channel, channel.id),
                   ),
@@ -2219,6 +2249,14 @@ class _WorkspaceSidebar extends StatelessWidget {
                           ownPubkey,
                           member,
                         )],
+                    action: direct == member
+                        ? IconButton(
+                            onPressed: onConversationActions,
+                            icon: const Icon(Icons.more_vert, size: 18),
+                            tooltip: 'Conversation actions',
+                            visualDensity: VisualDensity.compact,
+                          )
+                        : null,
                     onTap: () => onSelect(_WorkspaceSection.direct, member),
                   ),
                 const SizedBox(height: 18),
@@ -2302,6 +2340,7 @@ class _WorkspaceSidebar extends StatelessWidget {
 
 class _WorkspaceConversation extends StatefulWidget {
   const _WorkspaceConversation({
+    super.key,
     required this.title,
     required this.section,
     required this.channelId,
@@ -2581,6 +2620,40 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     if (confirmed == true) await widget.onDeleteConversation();
   }
 
+  Future<void> _showConversationActions() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('Rename conversation'),
+              onTap: () => Navigator.pop(context, 'rename'),
+            ),
+            ListTile(
+              leading: Icon(
+                Icons.delete_outline,
+                color: Theme.of(context).colorScheme.error,
+              ),
+              title: Text(
+                'Delete conversation',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+              onTap: () => Navigator.pop(context, 'delete'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    if (action == 'rename') {
+      await _renameConversation();
+    } else {
+      await _deleteConversation();
+    }
+  }
+
   void _queueScrollToLatest() {
     if (_scrollQueued) return;
     _scrollQueued = true;
@@ -2673,6 +2746,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                         children: [
                           Text(
                             widget.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                             style: Theme.of(context).textTheme.titleLarge
                                 ?.copyWith(fontWeight: FontWeight.bold),
                           ),
@@ -2707,24 +2782,6 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                       onPressed: widget.onReload,
                       icon: const Icon(Icons.arrow_upward_outlined),
                       tooltip: 'Reload last messages',
-                    ),
-                    PopupMenuButton<String>(
-                      tooltip: 'Conversation actions',
-                      onSelected: (action) => unawaited(
-                        action == 'rename'
-                            ? _renameConversation()
-                            : _deleteConversation(),
-                      ),
-                      itemBuilder: (_) => const [
-                        PopupMenuItem(
-                          value: 'rename',
-                          child: Text('Rename conversation'),
-                        ),
-                        PopupMenuItem(
-                          value: 'delete',
-                          child: Text('Delete conversation'),
-                        ),
-                      ],
                     ),
                     if (widget.section == _WorkspaceSection.channel)
                       IconButton(
@@ -5758,81 +5815,268 @@ class _ClientDiagnosticsPage extends StatelessWidget {
         ),
       ],
     ),
-    body: Column(
-      children: [
-        ValueListenableBuilder<bool>(
-          valueListenable: fipsEnabled,
-          builder: (context, enabled, _) => ListTile(
-            contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-            title: const Text('Use FIPS workspace transport'),
-            subtitle: Text(
-              enabled
-                  ? 'Direct connection with Nostr fallback'
-                  : 'Nostr messages only',
+    body: ValueListenableBuilder<_WorkspaceFipsHeartbeat>(
+      valueListenable: fipsHeartbeat,
+      builder: (context, heartbeat, _) => ValueListenableBuilder<List<String>>(
+        valueListenable: diagnostics,
+        builder: (context, entries, _) {
+          final theme = Theme.of(context);
+          final now = DateTime.now();
+          final liveFor = heartbeat.connectedAt == null
+              ? null
+              : now.difference(heartbeat.connectedAt!);
+          final lastHeartbeat = heartbeat.lastHeartbeatAt == null
+              ? null
+              : now.difference(heartbeat.lastHeartbeatAt!);
+          final active = heartbeat.connectionState == 'active';
+          final stateColor = active
+              ? const Color(0xff35d6a0)
+              : heartbeat.connectionState == 'disabled'
+              ? theme.colorScheme.onSurfaceVariant
+              : heartbeat.connectionState == 'reconnecting'
+              ? const Color(0xffffb547)
+              : theme.colorScheme.error;
+          final stateLabel = switch (heartbeat.connectionState) {
+            'active' => 'Connected',
+            'connected' => 'Connected',
+            'connecting' => 'Connecting',
+            'reconnecting' => 'Reconnecting',
+            'disabled' => 'Nostr only',
+            _ => 'Disconnected',
+          };
+          Widget section(String label) => Padding(
+            padding: const EdgeInsets.only(top: 24, bottom: 8),
+            child: Text(
+              label,
+              style: theme.textTheme.labelLarge?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                fontWeight: FontWeight.w700,
+              ),
             ),
-            trailing: Switch(value: enabled, onChanged: onFipsEnabledChanged),
-          ),
-        ),
-        ValueListenableBuilder<_WorkspaceFipsHeartbeat>(
-          valueListenable: fipsHeartbeat,
-          builder: (context, heartbeat, _) {
-            final now = DateTime.now();
-            final liveFor = heartbeat.connectedAt == null
-                ? null
-                : now.difference(heartbeat.connectedAt!);
-            final lastHeartbeat = heartbeat.lastHeartbeatAt == null
-                ? null
-                : now.difference(heartbeat.lastHeartbeatAt!);
-            return Container(
-              width: double.infinity,
-              margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'FIPS link: ${heartbeat.connectionState}',
-                    style: Theme.of(context).textTheme.titleSmall,
+          );
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+            children: [
+              section('Connection settings'),
+              ValueListenableBuilder<bool>(
+                valueListenable: fipsEnabled,
+                builder: (context, enabled, _) => ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  title: const Text('Use FIPS transport'),
+                  subtitle: Text(
+                    enabled
+                        ? 'Direct connection with Nostr fallback'
+                        : 'Nostr messages only',
                   ),
-                  if (liveFor != null)
-                    Text(
-                      'Live ${_formatFipsDuration(liveFor)} · '
-                      '${heartbeat.count} heartbeat${heartbeat.count == 1 ? '' : 's'}',
-                    ),
-                  if (lastHeartbeat != null)
-                    Text(
-                      'Last heartbeat ${_formatFipsDuration(lastHeartbeat)} ago',
-                    ),
-                ],
+                  trailing: Switch(
+                    value: enabled,
+                    onChanged: onFipsEnabledChanged,
+                  ),
+                ),
               ),
-            );
-          },
-        ),
+              section('Current status'),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          width: 10,
+                          height: 10,
+                          decoration: BoxDecoration(
+                            color: stateColor,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 9),
+                        Text(
+                          stateLabel,
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const Spacer(),
+                        Text(
+                          active ? 'Healthy' : 'Monitoring',
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: stateColor,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    _DiagnosticStat(
+                      label: 'Duration',
+                      value: liveFor == null
+                          ? 'Not connected'
+                          : _formatFipsDuration(liveFor),
+                    ),
+                    _DiagnosticStat(
+                      label: 'Heartbeat',
+                      value: lastHeartbeat == null
+                          ? 'Waiting'
+                          : '${_formatFipsDuration(lastHeartbeat)} ago',
+                    ),
+                    _DiagnosticStat(
+                      label: 'Heartbeats',
+                      value: '${heartbeat.count}',
+                    ),
+                    _DiagnosticStat(
+                      label: 'Transport',
+                      value: active ? 'FIPS' : 'Nostr',
+                    ),
+                    _DiagnosticStat(label: 'Fallback', value: 'Nostr enabled'),
+                  ],
+                ),
+              ),
+              section('Recent events'),
+              if (entries.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 24),
+                  child: Text(
+                    'No connection events yet.',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                )
+              else
+                for (final entry in entries.reversed.take(80))
+                  _DiagnosticEvent(entry: entry),
+            ],
+          );
+        },
+      ),
+    ),
+  );
+}
+
+class _DiagnosticStat extends StatelessWidget {
+  const _DiagnosticStat({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 2),
+    child: Row(
+      children: [
         Expanded(
-          child: ValueListenableBuilder<List<String>>(
-            valueListenable: diagnostics,
-            builder: (context, entries, _) => entries.isEmpty
-                ? const Center(
-                    child: Text('No client errors or timeouts recorded.'),
-                  )
-                : ListView.separated(
-                    padding: const EdgeInsets.all(16),
-                    itemCount: entries.length,
-                    separatorBuilder: (_, _) => const Divider(height: 12),
-                    itemBuilder: (_, index) => SelectableText(
-                      entries[index],
-                      style: const TextStyle(fontFamily: 'monospace'),
-                    ),
-                  ),
+          child: Text(
+            label,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
           ),
         ),
+        Text(value, style: Theme.of(context).textTheme.bodySmall),
       ],
     ),
   );
+}
+
+class _DiagnosticEvent extends StatelessWidget {
+  const _DiagnosticEvent({required this.entry});
+
+  final String entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final match = RegExp(r'^(\d{2}:\d{2}:\d{2})\s{2}(.*)$').firstMatch(entry);
+    final timestamp = match?.group(1) ?? '';
+    final rawMessage = match?.group(2) ?? entry;
+    final message = _diagnosticSummary(rawMessage);
+    final lower = rawMessage.toLowerCase();
+    final theme = Theme.of(context);
+    final primary =
+        lower.contains('connection:') ||
+        lower.contains('failed') ||
+        lower.contains('timed out');
+    final (
+      icon,
+      color,
+    ) = lower.contains('failed') || lower.contains('timed out')
+        ? (Icons.error_outline, theme.colorScheme.error)
+        : lower.contains('fallback')
+        ? (Icons.warning_amber_outlined, const Color(0xffff8b45))
+        : lower.contains('retrying') || lower.contains('reconnecting')
+        ? (Icons.refresh, const Color(0xffffb547))
+        : lower.contains('snapshot')
+        ? (Icons.south, theme.colorScheme.primary)
+        : lower.contains('connected') ||
+              lower.contains('active') ||
+              lower.contains('heartbeat')
+        ? (Icons.check_circle_outline, const Color(0xff35d6a0))
+        : lower.contains('disabled') || lower.contains('disconnected')
+        ? (Icons.pause_circle_outline, theme.colorScheme.onSurfaceVariant)
+        : (Icons.info_outline, theme.colorScheme.onSurfaceVariant);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(
+          alpha: 0.42,
+        ),
+        borderRadius: BorderRadius.circular(9),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: 10),
+          if (timestamp.isNotEmpty) ...[
+            Text(
+              timestamp,
+              style: theme.textTheme.labelSmall?.copyWith(
+                fontFamily: 'monospace',
+                fontSize: 10,
+                color: theme.colorScheme.onSurfaceVariant.withValues(
+                  alpha: 0.72,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+          ],
+          Expanded(
+            child: SelectableText(
+              message,
+              style: primary
+                  ? theme.textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    )
+                  : theme.textTheme.bodyMedium,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _diagnosticSummary(String message) {
+  const prefix = 'FIPS workspace ';
+  final value = message.startsWith(prefix)
+      ? message.substring(prefix.length)
+      : message;
+  return switch (value) {
+    'connection: active' => 'Connection active',
+    'connection: connected' => 'Connected',
+    'connection: connecting' => 'Connecting',
+    'connection: reconnecting' => 'Reconnecting',
+    'connection: disconnected' => 'Disconnected',
+    'connection: disabled' => 'FIPS disabled',
+    'snapshot offer received' => 'Snapshot offer received',
+    'snapshot requested' => 'Snapshot requested',
+    _ => value,
+  };
 }
 
 String _formatFipsDuration(Duration duration) {

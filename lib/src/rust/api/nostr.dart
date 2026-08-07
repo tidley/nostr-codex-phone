@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `active_session`, `build_fips_call_session`, `clean_relays`, `fips_call_receive_media`, `fips_call_status`, `fips_group_call_receive_media`, `group_call_key`, `key_pair_from_keys`, `new`, `queue`, `take`
+// These functions are ignored because they are not marked as `pub`: `active_session`, `build_fips_call_session`, `clean_relays`, `fips_call_receive_media`, `fips_call_status`, `fips_group_call_receive_media`, `group_call_key`, `key_pair_from_keys`, `new`, `queue`, `take`, `validate_control_frame`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RealtimeAudioPipeline`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
@@ -94,6 +94,18 @@ Future<Uint8List?> fipsCallReceiveDatagram({required BigInt timeoutMs}) =>
     RustLib.instance.api.crateApiNostrFipsCallReceiveDatagram(
       timeoutMs: timeoutMs,
     );
+
+/// Sends one bounded UTF-8 control frame on QUIC's reliable ordered stream.
+/// Call setup remains Nostr-signaled because this stream exists only after the
+/// peer-to-peer session is connected.
+Future<void> fipsCallSendControl({required String frame}) =>
+    RustLib.instance.api.crateApiNostrFipsCallSendControl(frame: frame);
+
+/// Receives one control frame from QUIC's reliable ordered stream.
+Future<String?> fipsCallReceiveControl({required BigInt timeoutMs}) => RustLib
+    .instance
+    .api
+    .crateApiNostrFipsCallReceiveControl(timeoutMs: timeoutMs);
 
 Future<void> fipsCallSendRealtimeAudio({
   required BridgeRealtimeAudioPacket packet,
@@ -203,6 +215,29 @@ Future<Uint8List?> fipsGroupCallReceiveRealtimePcm({
   required String peerNpub,
   required BigInt timeoutMs,
 }) => RustLib.instance.api.crateApiNostrFipsGroupCallReceiveRealtimePcm(
+  callId: callId,
+  peerNpub: peerNpub,
+  timeoutMs: timeoutMs,
+);
+
+/// Sends one bounded UTF-8 control frame to a group-call peer over its
+/// reliable QUIC stream.
+Future<void> fipsGroupCallSendControl({
+  required String callId,
+  required String peerNpub,
+  required String frame,
+}) => RustLib.instance.api.crateApiNostrFipsGroupCallSendControl(
+  callId: callId,
+  peerNpub: peerNpub,
+  frame: frame,
+);
+
+/// Receives one control frame from a group-call peer's reliable QUIC stream.
+Future<String?> fipsGroupCallReceiveControl({
+  required String callId,
+  required String peerNpub,
+  required BigInt timeoutMs,
+}) => RustLib.instance.api.crateApiNostrFipsGroupCallReceiveControl(
   callId: callId,
   peerNpub: peerNpub,
   timeoutMs: timeoutMs,

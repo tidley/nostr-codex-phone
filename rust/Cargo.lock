@@ -1161,7 +1161,7 @@ checksum = "9844ddc3a6e533d62bba727eb6c28b5d360921d5175e9ff0f1e621a5c590a4d5"
 [[package]]
 name = "fips"
 version = "0.4.0-dev"
-source = "git+https://github.com/tidley/fips.git?rev=d9139ca853b16efc33f3ff3d2559314e2dea73d6#d9139ca853b16efc33f3ff3d2559314e2dea73d6"
+source = "git+https://github.com/tidley/fips.git?rev=b518e0a41b953cedd2a15f408ffaaecd5a946831#b518e0a41b953cedd2a15f408ffaaecd5a946831"
 dependencies = [
  "base64",
  "bech32",
@@ -1204,7 +1204,7 @@ dependencies = [
 [[package]]
 name = "fips-mobile"
 version = "0.4.0-dev"
-source = "git+https://github.com/tidley/fips.git?rev=d9139ca853b16efc33f3ff3d2559314e2dea73d6#d9139ca853b16efc33f3ff3d2559314e2dea73d6"
+source = "git+https://github.com/tidley/fips.git?rev=b518e0a41b953cedd2a15f408ffaaecd5a946831#b518e0a41b953cedd2a15f408ffaaecd5a946831"
 dependencies = [
  "fips",
  "thiserror 2.0.18",

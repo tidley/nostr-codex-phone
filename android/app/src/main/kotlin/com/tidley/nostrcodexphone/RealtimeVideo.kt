@@ -66,9 +66,9 @@ class RealtimeVideo(
             "switchCapture" -> {
                 val source = call.argument<String>("source")
                 if (source != "camera" && source != "screen") error(result, "invalid_source", "source must be camera or screen.")
-                else { stopCapture(); handler.post { startCapture(source, result) } }
+                else stopCapture { startCapture(source, result) }
             }
-            "stopCapture" -> { stopCapture(); success(result) }
+            "stopCapture" -> stopCapture { success(result) }
             "createRenderer" -> success(result, createRenderer())
             "releaseRenderer" -> {
                 call.argument<Number>("textureId")?.toLong()?.let { releaseRenderer(it) }
@@ -134,29 +134,53 @@ class RealtimeVideo(
                     it.start()
                 }
                 encoder = codec
-                if (source == "screen") openScreen() else openCamera()
-                drainEncoder()
-                emitSuccess()
+                if (source == "screen") {
+                    if (openScreen()) startEncoder(result)
+                    else failStart(result, "screen_capture_failed", "Could not create screen capture.")
+                } else {
+                    openCamera(
+                        onReady = { startEncoder(result) },
+                        onFailure = { code, message -> failStart(result, code, message) },
+                    )
+                }
             } catch (error: Exception) {
-                stopCapture()
-                emitError("video_capture_failed", error.message)
+                failStart(result, "video_capture_failed", error.message)
             }
         }
+    }
+
+    private fun startEncoder(result: MethodChannel.Result) {
+        drainEncoder()
         success(result)
     }
 
-    private fun openScreen() {
-        val surface = encoderSurface ?: return
+    private fun failStart(result: MethodChannel.Result, code: String, message: String?) {
+        stopCapture { error(result, code, message) }
+    }
+
+    private fun openScreen(): Boolean {
+        val surface = encoderSurface ?: return false
         val metrics = context.resources.displayMetrics
         virtualDisplay = projection?.createVirtualDisplay(
             "CodeCallScreen", width, height, metrics.densityDpi,
             android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             surface, null, handler,
-        ) ?: run { emitError("screen_capture_failed", "Could not create screen capture."); null }
+        )
+        return virtualDisplay != null
     }
 
     @SuppressLint("MissingPermission")
-    private fun openCamera() {
+    private fun openCamera(
+        onReady: () -> Unit,
+        onFailure: (String, String) -> Unit,
+    ) {
+        var started = false
+        var startupResolved = false
+        fun failStartup(code: String, message: String) {
+            if (startupResolved) return
+            startupResolved = true
+            onFailure(code, message)
+        }
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val cameraId = manager.cameraIdList.firstOrNull { id ->
             manager.getCameraCharacteristics(id).get(android.hardware.camera2.CameraCharacteristics.LENS_FACING) ==
@@ -165,21 +189,49 @@ class RealtimeVideo(
         manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(device: CameraDevice) {
                 camera = device
-                val surface = encoderSurface ?: return
+                val surface = encoderSurface ?: run {
+                    device.close()
+                    failStartup("camera_start_failed", "Camera encoder surface is unavailable.")
+                    return
+                }
                 device.createCaptureSession(listOf(surface), object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
-                        cameraSession = session
-                        session.setRepeatingRequest(device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                            addTarget(surface)
-                            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-                        }.build(), null, handler)
+                        try {
+                            session.setRepeatingRequest(device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                                addTarget(surface)
+                                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                            }.build(), null, handler)
+                            cameraSession = session
+                            started = true
+                            startupResolved = true
+                            onReady()
+                        } catch (error: Exception) {
+                            session.close()
+                            failStartup("camera_start_failed", error.message ?: "Camera could not start recording.")
+                        }
                     }
-                    override fun onConfigureFailed(session: CameraCaptureSession) { emitError("camera_config_failed", "Camera video session failed.") }
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        session.close()
+                        failStartup("camera_config_failed", "Camera video session failed.")
+                    }
                 }, handler)
             }
-            override fun onDisconnected(device: CameraDevice) { device.close() }
-            override fun onError(device: CameraDevice, error: Int) { device.close(); emitError("camera_open_failed", "Camera error $error") }
+            override fun onDisconnected(device: CameraDevice) {
+                device.close()
+                if (started) captureFailed("camera_disconnected", "Camera was disconnected.")
+                else failStartup("camera_disconnected", "Camera was disconnected.")
+            }
+            override fun onError(device: CameraDevice, error: Int) {
+                device.close()
+                if (started) captureFailed("camera_open_failed", "Camera error $error")
+                else failStartup("camera_open_failed", "Camera error $error")
+            }
         }, handler)
+    }
+
+    private fun captureFailed(code: String, message: String) {
+        stopCapture()
+        emitError(code, message)
     }
 
     private fun drainEncoder() {
@@ -214,7 +266,7 @@ class RealtimeVideo(
         }
     }
 
-    private fun stopCapture() {
+    private fun stopCapture(onStopped: (() -> Unit)? = null) {
         handler.post {
             cameraSession?.close(); cameraSession = null
             camera?.close(); camera = null
@@ -224,6 +276,7 @@ class RealtimeVideo(
             encoder?.stop(); encoder?.release(); encoder = null
             encoderSurface?.release(); encoderSurface = null
             codecConfig = ByteArray(0)
+            onStopped?.let { callback -> main { callback() } }
         }
     }
 
@@ -290,8 +343,10 @@ class RealtimeVideo(
 
     companion object {
         private const val mime = "video/avc"
+        // 640x480 is a baseline Camera2 recording size, including on older tablets
+        // that reject the previous 640x360 encoder surface.
         private const val width = 640
-        private const val height = 360
+        private const val height = 480
         private const val frameRate = 10
         private const val bitRate = 500_000
         private const val videoVersion = 2
