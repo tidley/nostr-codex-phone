@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use fips_mobile::{FipsMobileQuicSession, FipsMobileQuicSessionConfig, Identity};
+use fips_mobile::{Config, FipsMobileClient, FipsMobileConfig};
 use futures_util::FutureExt;
 use nostr_sdk::prelude::{Keys, PublicKey, ToBech32};
 use qrcode::{Color, QrCode};
@@ -82,6 +82,9 @@ const WORKSPACE_FIPS_CAPABILITY_TTL: Duration = Duration::from_secs(90);
 const WORKSPACE_FIPS_PROTOCOL_VERSION: u8 = 1;
 const WORKSPACE_FIPS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const WORKSPACE_FIPS_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+const WORKSPACE_FIPS_SERVICE_PORT: u16 = 49_160;
+const WORKSPACE_FIPS_FRAME_BYTES: usize = 800;
+const WORKSPACE_FIPS_FRAME_HEADER_BYTES: usize = 13;
 const WORKSPACE_AGENT_QUEUE_CAPACITY: usize = 16;
 const SYSTEM_STATUS_HISTORY_MAX_BYTES: usize = 10 * 1024 * 1024;
 const SYSTEM_STATUS_SAMPLE_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -208,9 +211,75 @@ struct WorkerRuntimeConfig {
     workspace_path: PathBuf,
 }
 
-struct WorkspaceFipsSnapshotRequest {
-    member: String,
-    session: FipsMobileQuicSession,
+#[derive(Default)]
+struct WorkspaceFrameAssembler {
+    frame_id: Option<u64>,
+    chunk_count: u16,
+    chunks: Vec<Option<Vec<u8>>>,
+}
+
+struct WorkspaceFipsPeer {
+    npub: String,
+    last_pong: Instant,
+}
+
+impl WorkspaceFrameAssembler {
+    fn push(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
+        if packet.len() < WORKSPACE_FIPS_FRAME_HEADER_BYTES || packet[0] != 1 {
+            bail!("workspace FIPS service frame is invalid");
+        }
+        let frame_id = u64::from_be_bytes(packet[1..9].try_into().unwrap());
+        let chunk_index = u16::from_be_bytes(packet[9..11].try_into().unwrap());
+        let chunk_count = u16::from_be_bytes(packet[11..13].try_into().unwrap());
+        if chunk_count == 0 || chunk_index >= chunk_count {
+            bail!("workspace FIPS service frame chunk is invalid");
+        }
+        if self.frame_id != Some(frame_id) {
+            self.frame_id = Some(frame_id);
+            self.chunk_count = chunk_count;
+            self.chunks = vec![None; usize::from(chunk_count)];
+        }
+        if self.chunk_count != chunk_count {
+            bail!("workspace FIPS service frame chunk count changed");
+        }
+        self.chunks[usize::from(chunk_index)] =
+            Some(packet[WORKSPACE_FIPS_FRAME_HEADER_BYTES..].to_vec());
+        if self.chunks.iter().any(Option::is_none) {
+            return Ok(None);
+        }
+        let payload = self
+            .chunks
+            .iter()
+            .flatten()
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
+        self.frame_id = None;
+        self.chunks.clear();
+        Ok(Some(payload))
+    }
+}
+
+fn workspace_service_frames(frame_id: u64, payload: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let chunks = if payload.is_empty() {
+        vec![&[][..]]
+    } else {
+        payload.chunks(WORKSPACE_FIPS_FRAME_BYTES).collect()
+    };
+    let chunk_count = chunks.len();
+    let chunk_count = u16::try_from(chunk_count).context("workspace FIPS payload is too large")?;
+    Ok(chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut packet = Vec::with_capacity(WORKSPACE_FIPS_FRAME_HEADER_BYTES + chunk.len());
+            packet.push(1);
+            packet.extend_from_slice(&frame_id.to_be_bytes());
+            packet.extend_from_slice(&u16::try_from(index).unwrap().to_be_bytes());
+            packet.extend_from_slice(&chunk_count.to_be_bytes());
+            packet.extend_from_slice(chunk);
+            packet
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2255,120 +2324,150 @@ async fn run_workspace_fips_acceptor(
     capabilities: Arc<Mutex<HashMap<String, (String, Instant)>>>,
     workspace_path: PathBuf,
 ) {
-    loop {
-        let identity = match Identity::from_secret_str(secret_key.trim()) {
-            Ok(identity) => identity,
-            Err(error) => {
-                error!("cannot start FIPS workspace transport: {error}");
-                return;
-            }
-        };
-        let mut config = FipsMobileQuicSessionConfig::default();
-        config.discovery.advert_relays = relays.clone();
-        config.discovery.dm_relays = relays.clone();
-        let mut session = FipsMobileQuicSession::new(identity, config);
-        if let Err(error) = session.start_accept().await {
-            warn!("FIPS workspace advert failed: {error}");
-            sleep(Duration::from_secs(2)).await;
-            continue;
-        }
-        if let Err(error) = session.accept().await {
-            warn!("FIPS workspace accept failed: {error}");
-            let _ = session.stop().await;
-            continue;
-        }
-        info!("FIPS workspace peer connected; awaiting capability");
-        let capability =
-            match tokio::time::timeout(Duration::from_secs(10), session.receive()).await {
-                Ok(Ok(frame)) => frame,
-                Ok(Err(error)) => {
-                    warn!("FIPS workspace capability receive failed: {error}");
-                    let _ = session.stop().await;
-                    continue;
-                }
-                Err(_) => {
-                    warn!("FIPS workspace peer did not prove a capability");
-                    let _ = session.stop().await;
-                    continue;
-                }
-            };
-        let member = match String::from_utf8(capability) {
-            Ok(capability) => {
-                let mut capabilities = capabilities.lock().await;
-                let now = Instant::now();
-                capabilities.retain(|_, (_, expires_at)| *expires_at > now);
-                capabilities.remove(&capability).map(|(member, _)| member)
-            }
-            Err(_) => None,
-        };
-        let Some(member) = member else {
-            warn!("rejected FIPS workspace peer without a valid capability");
-            let _ = session.stop().await;
-            continue;
-        };
-        // Each peer gets its own actor. A live heartbeat from one workspace
-        // member must not prevent other members from receiving their snapshot.
-        tokio::task::spawn_local(run_workspace_fips_session(
-            workspace_path.clone(),
-            WorkspaceFipsSnapshotRequest { member, session },
-        ));
-    }
-}
-
-async fn run_workspace_fips_session(
-    workspace_path: PathBuf,
-    mut request: WorkspaceFipsSnapshotRequest,
-) {
-    // SQLite connections are not shareable across tasks; the session actor owns
-    // a second connection to the same durable workspace database.
-    let workspace = match WorkspaceStore::open(&workspace_path) {
-        Ok(workspace) => workspace,
+    let mut client = match build_workspace_fips_client(&secret_key, &relays).await {
+        Ok(client) => client,
         Err(error) => {
-            error!("cannot start FIPS workspace session actor: {error:#}");
+            error!("cannot start shared FIPS workspace transport: {error:#}");
             return;
         }
     };
-    if let Err(error) = serve_workspace_fips_session(&workspace, &mut request).await {
-        warn!(member = %request.member, "FIPS workspace session ended: {error:#}");
-    }
-    if let Err(error) = request.session.stop().await {
-        warn!(member = %request.member, "failed to stop FIPS workspace session: {error:#}");
+    let workspace = match WorkspaceStore::open(&workspace_path) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            error!("cannot open FIPS workspace database: {error:#}");
+            let _ = client.stop().await;
+            return;
+        }
+    };
+    let mut assemblers = HashMap::new();
+    let mut peers = HashMap::<String, WorkspaceFipsPeer>::new();
+    let mut frame_id = 0u64;
+    let mut heartbeat = interval(WORKSPACE_FIPS_HEARTBEAT_INTERVAL);
+    loop {
+        tokio::select! {
+            packet = client.recv_service_packet() => {
+                let Some(packet) = packet else {
+                    error!("shared FIPS workspace service transport closed");
+                    return;
+                };
+                if packet.src_port != WORKSPACE_FIPS_SERVICE_PORT || packet.dst_port != WORKSPACE_FIPS_SERVICE_PORT {
+                    continue;
+                }
+                let source = packet.src_addr.to_string();
+                let frame = match assemblers.entry(source.clone()).or_insert_with(WorkspaceFrameAssembler::default).push(&packet.payload) {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        warn!("rejected invalid FIPS workspace frame: {error:#}");
+                        assemblers.remove(&source);
+                        continue;
+                    }
+                };
+                if let Some(peer) = peers.get_mut(&source) {
+                    match serde_json::from_slice::<WorkspaceFipsEnvelope>(&frame) {
+                        Ok(response) if response.version == WORKSPACE_FIPS_PROTOCOL_VERSION && response.kind == "pong" => {
+                            peer.last_pong = Instant::now();
+                        }
+                        _ => warn!("rejected unexpected FIPS workspace peer frame"),
+                    }
+                    continue;
+                }
+                let member = match String::from_utf8(frame) {
+                    Ok(capability) => {
+                        let mut capabilities = capabilities.lock().await;
+                        let now = Instant::now();
+                        capabilities.retain(|_, (_, expires_at)| *expires_at > now);
+                        capabilities.remove(&capability).map(|(member, _)| member)
+                    }
+                    Err(_) => None,
+                };
+                let Some(member) = member else {
+                    warn!("rejected FIPS workspace peer without a valid capability");
+                    continue;
+                };
+                if !workspace.is_member(&member).unwrap_or(false) {
+                    warn!(member, "rejected FIPS workspace capability for non-member");
+                    continue;
+                }
+                let peer_npub = match PublicKey::parse(&member) {
+                    Ok(key) => match key.to_bech32() {
+                        Ok(npub) => npub,
+                        Err(error) => {
+                            warn!(member, "cannot derive FIPS workspace peer identity: {error:#}");
+                            continue;
+                        }
+                    },
+                    Err(error) => {
+                        warn!(member, "cannot parse FIPS workspace peer identity: {error:#}");
+                        continue;
+                    }
+                };
+                peers.insert(source, WorkspaceFipsPeer { npub: peer_npub.clone(), last_pong: Instant::now() });
+                if let Err(error) = send_workspace_fips_envelope(&client, &peer_npub, &mut frame_id, "hello", None).await {
+                    warn!(member, "failed to send FIPS workspace hello: {error:#}");
+                    continue;
+                }
+                match workspace_snapshot_frames(&workspace, &member) {
+                    Ok(frames) => {
+                        info!(member, frames = frames.len(), "sending workspace snapshot over shared FIPS transport");
+                        for update in frames {
+                            let frame = match WireMessage::workspace_update(update).to_json() {
+                                Ok(frame) => frame,
+                                Err(error) => {
+                                    warn!(member, "cannot encode FIPS workspace snapshot frame: {error:#}");
+                                    break;
+                                }
+                            };
+                            if let Err(error) = send_workspace_fips_envelope(&client, &peer_npub, &mut frame_id, "snapshot", Some(frame)).await {
+                                warn!(member, "failed to send FIPS workspace snapshot frame: {error:#}");
+                                break;
+                            }
+                        }
+                    }
+                    Err(error) => warn!(member, "cannot build FIPS workspace snapshot: {error:#}"),
+                }
+            }
+            _ = heartbeat.tick() => {
+                // Peers can only answer after a ping. Keep them through the
+                // next 20-second interval plus its 10-second response window.
+                peers.retain(|_, peer| {
+                    peer.last_pong.elapsed()
+                        < WORKSPACE_FIPS_HEARTBEAT_INTERVAL + WORKSPACE_FIPS_HEARTBEAT_TIMEOUT
+                });
+                for peer in peers.values() {
+                    if let Err(error) = send_workspace_fips_envelope(&client, &peer.npub, &mut frame_id, "ping", None).await {
+                        warn!(peer_npub = %peer.npub, "failed to send FIPS workspace heartbeat: {error:#}");
+                    }
+                }
+            }
+        }
     }
 }
 
-async fn serve_workspace_fips_session(
-    workspace: &WorkspaceStore,
-    request: &mut WorkspaceFipsSnapshotRequest,
-) -> Result<()> {
-    // The capability was issued only after Nostr membership verification; still
-    // recheck persisted membership immediately before exposing a snapshot.
-    if !workspace.is_member(&request.member)? {
-        bail!("FIPS capability member is no longer in the workspace");
-    }
-    send_workspace_fips_envelope(&mut request.session, "hello", None).await?;
-    let frames = workspace_snapshot_frames(workspace, &request.member)?;
-    info!(member = %request.member, frames = frames.len(), "sending workspace snapshot over FIPS");
-    for update in frames {
-        let frame = WireMessage::workspace_update(update).to_json()?;
-        send_workspace_fips_envelope(&mut request.session, "snapshot", Some(frame)).await?;
-    }
-    info!(member = %request.member, "FIPS workspace snapshot complete; keeping session open");
-
-    loop {
-        sleep(WORKSPACE_FIPS_HEARTBEAT_INTERVAL).await;
-        send_workspace_fips_envelope(&mut request.session, "ping", None).await?;
-        let response = tokio::time::timeout(
-            WORKSPACE_FIPS_HEARTBEAT_TIMEOUT,
-            request.session.receive(),
-        )
-        .await
-        .map_err(|_| anyhow!("FIPS workspace heartbeat timed out"))??;
-        let response: WorkspaceFipsEnvelope = serde_json::from_slice(&response)
-            .context("FIPS workspace heartbeat frame is invalid")?;
-        if response.version != WORKSPACE_FIPS_PROTOCOL_VERSION || response.kind != "pong" {
-            bail!("unexpected FIPS workspace heartbeat response");
-        }
-    }
+async fn build_workspace_fips_client(
+    secret_key: &str,
+    relays: &[String],
+) -> Result<FipsMobileClient> {
+    let mut config = Config::default();
+    config.node.identity.nsec = Some(secret_key.trim().to_string());
+    config.node.identity.persistent = false;
+    config.tun.enabled = false;
+    config.dns.enabled = false;
+    config.node.control.enabled = false;
+    config.node.discovery.nostr.enabled = true;
+    config.node.discovery.nostr.advertise = true;
+    config.node.discovery.nostr.advert_relays = relays.to_vec();
+    config.node.discovery.nostr.dm_relays = relays.to_vec();
+    // Keep the default STUN set and advertise same-LAN candidates for local peers.
+    config.node.discovery.nostr.share_local_candidates = true;
+    // FipsMobileClient supplies an ephemeral Nostr-advertised UDP transport
+    // when the embedded config has no explicit transport.
+    Ok(FipsMobileClient::start(FipsMobileConfig {
+        config,
+        response_port: WORKSPACE_FIPS_SERVICE_PORT,
+        queue_depth: 256,
+    })
+    .await?)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2381,7 +2480,9 @@ struct WorkspaceFipsEnvelope {
 }
 
 async fn send_workspace_fips_envelope(
-    session: &mut FipsMobileQuicSession,
+    client: &FipsMobileClient,
+    peer_npub: &str,
+    frame_id: &mut u64,
     kind: &str,
     frame: Option<String>,
 ) -> Result<()> {
@@ -2390,7 +2491,18 @@ async fn send_workspace_fips_envelope(
         kind: kind.to_string(),
         frame,
     };
-    session.send(serde_json::to_vec(&envelope)?.as_slice()).await?;
+    *frame_id = frame_id.wrapping_add(1);
+    for packet in workspace_service_frames(*frame_id, &serde_json::to_vec(&envelope)?)? {
+        client
+            .send_service_frame_to_npub(
+                peer_npub,
+                WORKSPACE_FIPS_SERVICE_PORT,
+                WORKSPACE_FIPS_SERVICE_PORT,
+                packet,
+                Duration::from_secs(20),
+            )
+            .await?;
+    }
     Ok(())
 }
 

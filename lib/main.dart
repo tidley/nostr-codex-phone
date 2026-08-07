@@ -475,6 +475,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _ttsRateStorageKey = 'tts_rate';
   static const _ttsPitchStorageKey = 'tts_pitch';
   static const _ttsVolumeStorageKey = 'tts_volume';
+  static const _autoSpeakStorageKey = 'auto_speak_enabled';
   static const _workingAnimationStorageKey = 'working_animation_style';
   static const _workingAnimationSpeedStorageKey = 'working_animation_speed';
   static const _recordingWaveformSensitivityStorageKey =
@@ -499,6 +500,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _recentSessionIdsStorageKey = 'recent_session_ids_v1';
   static const _workspaceDisplayNameStorageKey = 'workspace_display_name';
   static const _workspaceMemberAliasesStorageKey = 'workspace_member_aliases';
+  static const _workspaceFipsEnabledStorageKey = 'workspace_fips_enabled';
   static const _profileStorageKeys = <String>[
     _secretKeyStorageKey,
     _peerPubkeyStorageKey,
@@ -514,6 +516,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _ttsRateStorageKey,
     _ttsPitchStorageKey,
     _ttsVolumeStorageKey,
+    _autoSpeakStorageKey,
     _workingAnimationStorageKey,
     _workingAnimationSpeedStorageKey,
     _recordingWaveformSensitivityStorageKey,
@@ -534,6 +537,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _recentSessionIdsStorageKey,
     _workspaceDisplayNameStorageKey,
     _workspaceMemberAliasesStorageKey,
+    _workspaceFipsEnabledStorageKey,
   ];
   static const _recentMessagesWindow = Duration(days: 4);
   static const _maxConversationMessages = 200;
@@ -675,6 +679,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   );
   Timer? _workspaceFipsHeartbeatTicker;
   Timer? _workspaceFipsRetryTimer;
+  Timer? _workspaceFipsOfferTimer;
   int _workspaceFipsRetryAttempt = 0;
   int _workspaceFipsSessionGeneration = 0;
   int? _workspaceFipsSnapshotGeneration;
@@ -912,6 +917,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _conversationHistorySaveTimer?.cancel();
     _workspaceCacheSaveTimer?.cancel();
     _workspaceFipsRetryTimer?.cancel();
+    _workspaceFipsOfferTimer?.cancel();
     _workspaceFipsHeartbeatTicker?.cancel();
     _workspaceInviteTimer?.cancel();
     unawaited(_saveWorkspaceCache());
@@ -979,6 +985,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final ttsRate = await _storage.read(key: _ttsRateStorageKey);
     final ttsPitch = await _storage.read(key: _ttsPitchStorageKey);
     final ttsVolume = await _storage.read(key: _ttsVolumeStorageKey);
+    final autoSpeak = await _storage.read(key: _autoSpeakStorageKey);
     final workingAnimation = await _storage.read(
       key: _workingAnimationStorageKey,
     );
@@ -1030,6 +1037,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final workspaceMemberAliases = await _storage.read(
       key: _workspaceMemberAliasesStorageKey,
     );
+    final workspaceFipsEnabled = await _storage.read(
+      key: _workspaceFipsEnabledStorageKey,
+    );
 
     final migratedRelays = relays?.replaceAll(',', '\n') ?? defaultRelays;
     final targets = _decodeRepoTargets(repoTargets);
@@ -1071,6 +1081,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _ttsRate = _storedDouble(ttsRate, _ttsRate, 0.1, 1.0);
       _ttsPitch = _storedDouble(ttsPitch, _ttsPitch, 0.5, 2.0);
       _ttsVolume = _storedDouble(ttsVolume, _ttsVolume, 0.0, 1.0);
+      _autoSpeak = _storedBool(autoSpeak, true);
       _workingAnimationStyle = WorkingAnimationStyle.fromStorage(
         workingAnimation,
       );
@@ -1134,6 +1145,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _workspaceMemberAliases = decodeWorkspaceMemberAliases(
         workspaceMemberAliases,
       );
+      _workspaceFipsEnabled.value = _storedBool(workspaceFipsEnabled, true);
       _loadingSettings = false;
     });
     await _loadConversationHistoryForActiveSession();
@@ -1221,6 +1233,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       );
     }
     await _saveTtsSettings();
+    await _storage.write(
+      key: _autoSpeakStorageKey,
+      value: _autoSpeak.toString(),
+    );
     await _saveWorkingAnimationStyle();
     await _saveRecordingWaveformSettings();
     await _saveHapticFeedbackEnabled();
@@ -3204,6 +3220,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onAutoSpeakChanged: (value) {
               if (value) _clearAutoSpeakSuppression();
               setState(() => _autoSpeak = value);
+              unawaited(
+                _storage.write(
+                  key: _autoSpeakStorageKey,
+                  value: value.toString(),
+                ),
+              );
               if (!value) unawaited(_stopSpeaking());
             },
             onWorkingAnimationChanged: _setWorkingAnimationStyle,
@@ -4503,6 +4525,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             ? null
             : _workspaceFipsCapabilityFromOffer(action);
         if (capability != null) {
+          _workspaceFipsOfferTimer?.cancel();
           if (!_workspaceFipsEnabled.value) {
             _recordDiagnostic(
               'Ignored FIPS workspace snapshot offer: disabled',
@@ -7317,6 +7340,9 @@ Return a concise catch-up summary of what happened after that point: completed w
       sender: () =>
           nostrSendQuery(query: jsonEncode({'workspace_request': request})),
     );
+    if (request['action'] == 'list' && _workspaceFipsEnabled.value) {
+      _awaitWorkspaceFipsOffer();
+    }
   }
 
   String? _workspaceFipsCapabilityFromOffer(String action) {
@@ -7344,20 +7370,23 @@ Return a concise catch-up summary of what happened after that point: completed w
         peerNpub: _connectedPeerPubkey ?? _peerPubkeyController.text.trim(),
         capability: capability,
       );
-      var emptyReads = 0;
+      var lastFrameAt = DateTime.now();
       while (mounted) {
         if (!_workspaceFipsEnabled.value) return;
         final frame = await fipsWorkspaceSnapshotReceive(
           timeoutMs: BigInt.from(5000),
         );
         if (frame == null) {
-          emptyReads += 1;
-          if (emptyReads >= 7) {
+          if (DateTime.now().difference(lastFrameAt) >=
+              const Duration(seconds: 45)) {
             throw TimeoutException('FIPS workspace heartbeat timed out');
           }
+          // Native receive may return immediately when the stream is idle.
+          // Yield so a lack of queued frames cannot consume the timeout at CPU speed.
+          await Future<void>.delayed(const Duration(seconds: 1));
           continue;
         }
-        emptyReads = 0;
+        lastFrameAt = DateTime.now();
         final envelope = jsonDecode(frame) as Map<String, dynamic>;
         if (envelope['version'] != 1 || envelope['type'] is! String) {
           throw const FormatException('FIPS workspace envelope is invalid');
@@ -7398,6 +7427,7 @@ Return a concise catch-up summary of what happened after that point: completed w
             if (_isFinalWorkspaceSnapshotFrame(decoded)) {
               snapshotComplete = true;
               _workspaceFipsRetryTimer?.cancel();
+              _workspaceFipsOfferTimer?.cancel();
               _workspaceFipsRetryAttempt = 0;
               _setWorkspaceFipsConnectionState('active');
             }
@@ -7490,7 +7520,14 @@ Return a concise catch-up summary of what happened after that point: completed w
   void _setWorkspaceFipsEnabled(bool enabled) {
     if (_workspaceFipsEnabled.value == enabled) return;
     _workspaceFipsEnabled.value = enabled;
+    unawaited(
+      _storage.write(
+        key: _workspaceFipsEnabledStorageKey,
+        value: enabled.toString(),
+      ),
+    );
     _workspaceFipsRetryTimer?.cancel();
+    _workspaceFipsOfferTimer?.cancel();
     _workspaceFipsRetryAttempt = 0;
     if (enabled) {
       _setWorkspaceFipsConnectionState('disconnected');
@@ -7514,6 +7551,26 @@ Return a concise catch-up summary of what happened after that point: completed w
     } catch (error) {
       _recordDiagnostic('Nostr workspace fallback failed: $error');
     }
+  }
+
+  void _awaitWorkspaceFipsOffer() {
+    if (_workspaceFipsSnapshotInFlight ||
+        _workspaceFipsConnectionState == 'active' ||
+        (_workspaceFipsOfferTimer?.isActive ?? false)) {
+      return;
+    }
+    _workspaceFipsOfferTimer?.cancel();
+    _recordDiagnostic('FIPS workspace snapshot requested');
+    _workspaceFipsOfferTimer = Timer(const Duration(seconds: 15), () {
+      if (!_workspaceFipsEnabled.value ||
+          _workspaceFipsSnapshotInFlight ||
+          _workspaceFipsConnectionState == 'active') {
+        return;
+      }
+      _recordDiagnostic('FIPS workspace offer timed out; using Nostr');
+      unawaited(_stopWorkspaceFipsAndFallback());
+      _scheduleWorkspaceFipsRetry();
+    });
   }
 
   void _scheduleWorkspaceFipsRetry() {
@@ -7728,6 +7785,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         await _activateGroupCallAudio(call);
       } else {
         unawaited(_receiveGroupCallAudio(call, peer));
+        unawaited(_receiveGroupCallControl(call, peer));
         if ((Platform.isAndroid || Platform.isLinux) && _callVideoStarted) {
           final texture = await _realtimeVideo.createRenderer();
           _videoTextures[peer] = texture;
@@ -7754,28 +7812,45 @@ Return a concise catch-up summary of what happened after that point: completed w
       (pcm) => _sendGroupCallAudioFrames(call, pcm),
       onError: (Object error) => _showError('Call microphone failed: $error'),
     );
-    await _realtimeAudio.startCapture();
-    if (!mounted || _groupCall != call) return;
+    try {
+      await _realtimeAudio.startCapture();
+    } catch (_) {
+      await _callCaptureSubscription?.cancel();
+      _callCaptureSubscription = null;
+      rethrow;
+    }
+    if (!mounted || _groupCall != call) {
+      await _realtimeAudio.stopCapture();
+      await _callCaptureSubscription?.cancel();
+      _callCaptureSubscription = null;
+      return;
+    }
     setState(() {
       call.phase = _CallPhase.active;
       _callAudioStarted = true;
     });
     for (final peer in call.connectedPeers) {
       unawaited(_receiveGroupCallAudio(call, peer));
+      unawaited(_receiveGroupCallControl(call, peer));
     }
   }
 
   void _sendGroupCallAudioFrames(_GroupCallState call, Uint8List pcm) {
     if (_groupCall != call || call.phase != _CallPhase.active) return;
-    _callSendChain = _callSendChain.then((_) async {
-      for (final peer in call.connectedPeers) {
-        await fipsGroupCallSendRealtimePcm(
-          callId: call.callId,
-          peerNpub: peer,
-          pcm: pcm,
-        );
-      }
-    });
+    _callSendChain = _callSendChain.then(
+      (_) async {
+        for (final peer in call.connectedPeers) {
+          await fipsGroupCallSendRealtimePcm(
+            callId: call.callId,
+            peerNpub: peer,
+            pcm: pcm,
+          );
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('Channel call audio send failed: $error');
+      },
+    );
   }
 
   Future<void> _receiveGroupCallAudio(_GroupCallState call, String peer) async {
@@ -7784,7 +7859,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         final pcm = await fipsGroupCallReceiveRealtimePcm(
           callId: call.callId,
           peerNpub: peer,
-          timeoutMs: BigInt.from(10),
+          timeoutMs: BigInt.from(50),
         );
         if (pcm != null && pcm.isNotEmpty && _groupCall == call) {
           unawaited(_realtimeAudio.playPcm(pcm));
@@ -7796,6 +7871,28 @@ Return a concise catch-up summary of what happened after that point: completed w
         }
         return;
       }
+    }
+  }
+
+  Future<void> _receiveGroupCallControl(
+    _GroupCallState call,
+    String peer,
+  ) async {
+    while (mounted && _groupCall == call && call.phase == _CallPhase.active) {
+      try {
+        final frame = await fipsGroupCallReceiveControl(
+          callId: call.callId,
+          peerNpub: peer,
+          timeoutMs: BigInt.one,
+        );
+        if (_isHangupControl(frame, call.callId)) {
+          await _clearGroupCall();
+          return;
+        }
+      } catch (_) {
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
     }
   }
 
@@ -7817,7 +7914,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       _callVideoCaptureSubscription = _realtimeVideo.frames.listen(
         (fragment) =>
             _sendGroupCallVideoFragment(call, fragment, videoSendEpoch),
-        onError: (Object error) => _showError('Call camera failed: $error'),
+        onError: (Object error) => unawaited(_handleCallVideoFailure(error)),
       );
       await _realtimeVideo.startCapture(source);
       _callVideoStarted = true;
@@ -7869,7 +7966,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         final fragment = await fipsGroupCallReceiveRealtimeVideo(
           callId: call.callId,
           peerNpub: peer,
-          timeoutMs: BigInt.from(10),
+          timeoutMs: BigInt.from(50),
         );
         if (fragment != null && _videoTextures[peer] == texture) {
           await _realtimeVideo.pushFragment(texture, fragment);
@@ -7884,6 +7981,17 @@ Return a concise catch-up summary of what happened after that point: completed w
     _dismissIncomingCallOverlay();
     final call = _groupCall;
     if (call != null) {
+      for (final peer in call.connectedPeers) {
+        try {
+          await fipsGroupCallSendControl(
+            callId: call.callId,
+            peerNpub: peer,
+            frame: _hangupControlFrame(call.callId),
+          );
+        } catch (_) {
+          // Nostr signaling below reaches peers without an active QUIC session.
+        }
+      }
       try {
         await _sendGroupCallControl('group_call_hangup', call);
       } catch (_) {}
@@ -7981,6 +8089,13 @@ Return a concise catch-up summary of what happened after that point: completed w
     final callId = _callId;
     final peerPubkey = _callPeerPubkey;
     if (callId != null && peerPubkey != null) {
+      if (_callPhase == _CallPhase.active) {
+        try {
+          await fipsCallSendControl(frame: _hangupControlFrame(callId));
+        } catch (_) {
+          // Relay signaling below remains the fallback for a lost QUIC session.
+        }
+      }
       try {
         await _sendCallControl('call_hangup', peerPubkey, callId);
       } catch (_) {
@@ -7988,6 +8103,19 @@ Return a concise catch-up summary of what happened after that point: completed w
       }
     }
     await _clearCall();
+  }
+
+  String _hangupControlFrame(String callId) =>
+      jsonEncode({'type': 'hangup', 'call_id': callId});
+
+  bool _isHangupControl(String? frame, String callId) {
+    if (frame == null) return false;
+    try {
+      final control = jsonDecode(frame) as Map<String, dynamic>;
+      return control['type'] == 'hangup' && control['call_id'] == callId;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _clearCall() async {
@@ -8042,11 +8170,17 @@ Return a concise catch-up summary of what happened after that point: completed w
       _callAudioStarted = true;
     });
     unawaited(_receiveCallAudio(callId));
+    unawaited(_receiveCallControl(callId));
   }
 
   void _sendCallAudioFrames(Uint8List pcm) {
     if (_callPhase != _CallPhase.active) return;
-    _callSendChain = _callSendChain.then((_) => _sendCallFrame(pcm));
+    _callSendChain = _callSendChain.then(
+      (_) => _sendCallFrame(pcm),
+      onError: (Object error, StackTrace stackTrace) {
+        debugPrint('Call audio send failed: $error');
+      },
+    );
   }
 
   Future<void> _sendCallFrame(Uint8List pcm) async {
@@ -8061,7 +8195,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     while (mounted && _callPhase == _CallPhase.active && _callId == callId) {
       try {
         final pcm = await fipsCallReceiveRealtimePcm(
-          timeoutMs: BigInt.from(10),
+          timeoutMs: BigInt.from(50),
         );
         if (pcm != null && pcm.isNotEmpty && _callId == callId) {
           unawaited(_realtimeAudio.playPcm(pcm));
@@ -8073,6 +8207,21 @@ Return a concise catch-up summary of what happened after that point: completed w
         }
         return;
       }
+    }
+  }
+
+  Future<void> _receiveCallControl(String callId) async {
+    while (mounted && _callPhase == _CallPhase.active && _callId == callId) {
+      try {
+        final frame = await fipsCallReceiveControl(timeoutMs: BigInt.one);
+        if (_isHangupControl(frame, callId)) {
+          await _clearCall();
+          return;
+        }
+      } catch (_) {
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 50));
     }
   }
 
@@ -8140,7 +8289,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       _showVideoOverlay();
       _callVideoCaptureSubscription = _realtimeVideo.frames.listen(
         (fragment) => _sendCallVideoFragment(fragment, callId, videoSendEpoch),
-        onError: (Object error) => _showError('Call camera failed: $error'),
+        onError: (Object error) => unawaited(_handleCallVideoFailure(error)),
       );
       await _realtimeVideo.startCapture(source);
       _callVideoStarted = true;
@@ -8180,7 +8329,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     while (mounted && _callId == callId && _callPhase == _CallPhase.active) {
       try {
         final fragment = await fipsCallReceiveRealtimeVideo(
-          timeoutMs: BigInt.from(10),
+          timeoutMs: BigInt.from(50),
         );
         if (fragment != null && _videoTextures[peer] == texture) {
           await _realtimeVideo.pushFragment(texture, fragment);
@@ -8289,7 +8438,14 @@ Return a concise catch-up summary of what happened after that point: completed w
       _callVideoStarted = false;
       await _realtimeVideo.stopCapture();
     }
-    if (mounted) _callMediaSource = _CallMediaSource.audioOnly;
+    if (mounted) {
+      setState(() => _callMediaSource = _CallMediaSource.audioOnly);
+    }
+  }
+
+  Future<void> _handleCallVideoFailure(Object error) async {
+    if (mounted) _showError('Video unavailable: $error');
+    await _stopCallVideo();
   }
 
   Future<List<_OpenCodeModelChoice>> _loadOpenCodeModels() async {

@@ -3,7 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use fips_mobile::{FipsMobileQuicSession, FipsMobileQuicSessionConfig, Identity};
+use fips_mobile::{
+    Config, FipsMobileClient, FipsMobileConfig, FipsMobileQuicSession, FipsMobileQuicSessionConfig,
+    Identity,
+};
 use nostr_sdk::prelude::*;
 use once_cell::sync::Lazy;
 use tokio::sync::{oneshot, Mutex};
@@ -19,9 +22,9 @@ use crate::realtime_video::RealtimeVideoFragment;
 
 static SESSION: Lazy<Mutex<Option<Arc<NostrMessenger>>>> = Lazy::new(|| Mutex::new(None));
 static CALL_SESSION: Lazy<Mutex<Option<FipsMobileQuicSession>>> = Lazy::new(|| Mutex::new(None));
-// Workspace transfer uses its own reliable stream. It must never share the
-// call session, whose datagrams are consumed by realtime media.
-static WORKSPACE_SNAPSHOT_SESSION: Lazy<Mutex<Option<FipsMobileQuicSession>>> =
+// Workspace frames use one embedded FIPS node, separate from the QUIC call
+// session whose datagrams are consumed by realtime media.
+static WORKSPACE_SNAPSHOT_CLIENT: Lazy<Mutex<Option<WorkspaceSnapshotClient>>> =
     Lazy::new(|| Mutex::new(None));
 static CALL_ACCEPT_CANCEL: Lazy<Mutex<Option<oneshot::Sender<()>>>> =
     Lazy::new(|| Mutex::new(None));
@@ -32,6 +35,84 @@ static GROUP_CALL_AUDIO: Lazy<Mutex<HashMap<String, RealtimeAudioPipeline>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static GROUP_CALL_ACCEPT_CANCEL: Lazy<Mutex<HashMap<String, oneshot::Sender<()>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+const WORKSPACE_FIPS_SERVICE_PORT: u16 = 49_160;
+const WORKSPACE_FIPS_FRAME_BYTES: usize = 800;
+const WORKSPACE_FIPS_FRAME_HEADER_BYTES: usize = 13;
+
+struct WorkspaceSnapshotClient {
+    client: FipsMobileClient,
+    peer_npub: String,
+    next_frame_id: u64,
+    assembler: WorkspaceFrameAssembler,
+}
+
+#[derive(Default)]
+struct WorkspaceFrameAssembler {
+    frame_id: Option<u64>,
+    chunk_count: u16,
+    chunks: Vec<Option<Vec<u8>>>,
+}
+
+impl WorkspaceFrameAssembler {
+    fn push(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
+        if packet.len() < WORKSPACE_FIPS_FRAME_HEADER_BYTES || packet[0] != 1 {
+            return Err(anyhow!("workspace FIPS service frame is invalid"));
+        }
+        let frame_id = u64::from_be_bytes(packet[1..9].try_into().unwrap());
+        let chunk_index = u16::from_be_bytes(packet[9..11].try_into().unwrap());
+        let chunk_count = u16::from_be_bytes(packet[11..13].try_into().unwrap());
+        if chunk_count == 0 || chunk_index >= chunk_count {
+            return Err(anyhow!("workspace FIPS service frame chunk is invalid"));
+        }
+        if self.frame_id != Some(frame_id) {
+            self.frame_id = Some(frame_id);
+            self.chunk_count = chunk_count;
+            self.chunks = vec![None; usize::from(chunk_count)];
+        }
+        if self.chunk_count != chunk_count {
+            return Err(anyhow!("workspace FIPS service frame chunk count changed"));
+        }
+        self.chunks[usize::from(chunk_index)] =
+            Some(packet[WORKSPACE_FIPS_FRAME_HEADER_BYTES..].to_vec());
+        if self.chunks.iter().any(Option::is_none) {
+            return Ok(None);
+        }
+        let payload = self
+            .chunks
+            .iter()
+            .flatten()
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
+        self.frame_id = None;
+        self.chunks.clear();
+        Ok(Some(payload))
+    }
+}
+
+fn workspace_service_frames(frame_id: u64, payload: &[u8]) -> Result<Vec<Vec<u8>>> {
+    let chunks = if payload.is_empty() {
+        vec![&[][..]]
+    } else {
+        payload.chunks(WORKSPACE_FIPS_FRAME_BYTES).collect()
+    };
+    let chunk_count = chunks.len();
+    let chunk_count =
+        u16::try_from(chunk_count).map_err(|_| anyhow!("workspace FIPS payload is too large"))?;
+    Ok(chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut packet = Vec::with_capacity(WORKSPACE_FIPS_FRAME_HEADER_BYTES + chunk.len());
+            packet.push(1);
+            packet.extend_from_slice(&frame_id.to_be_bytes());
+            packet.extend_from_slice(&u16::try_from(index).unwrap().to_be_bytes());
+            packet.extend_from_slice(&chunk_count.to_be_bytes());
+            packet.extend_from_slice(chunk);
+            packet
+        })
+        .collect())
+}
 
 struct RealtimeAudioPipeline {
     encoder: RealtimeAudioEncoder,
@@ -406,6 +487,42 @@ pub async fn fips_call_receive_datagram(timeout_ms: u64) -> Result<Option<Vec<u8
     }
 }
 
+/// Sends one bounded UTF-8 control frame on QUIC's reliable ordered stream.
+/// Call setup remains Nostr-signaled because this stream exists only after the
+/// peer-to-peer session is connected.
+pub async fn fips_call_send_control(frame: String) -> Result<()> {
+    validate_control_frame(&frame)?;
+    let mut session = CALL_SESSION.lock().await;
+    let session = session
+        .as_mut()
+        .ok_or_else(|| anyhow!("FIPS call is not active"))?;
+    session.send(frame.as_bytes()).await?;
+    Ok(())
+}
+
+/// Receives one control frame from QUIC's reliable ordered stream.
+pub async fn fips_call_receive_control(timeout_ms: u64) -> Result<Option<String>> {
+    let mut session = CALL_SESSION.lock().await;
+    let session = session
+        .as_mut()
+        .ok_or_else(|| anyhow!("FIPS call is not active"))?;
+    match tokio::time::timeout(
+        // The session mutex also protects datagram sends. Bound this receive so
+        // reliable control traffic cannot interrupt realtime media for long.
+        Duration::from_millis(timeout_ms.clamp(1, 50)),
+        session.receive(),
+    )
+    .await
+    {
+        Ok(result) => {
+            let frame = String::from_utf8(result?)?;
+            validate_control_frame(&frame)?;
+            Ok(Some(frame))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 pub async fn fips_call_send_realtime_audio(packet: BridgeRealtimeAudioPacket) -> Result<()> {
     fips_call_send_datagram(RealtimeAudioPacket::from(packet).encode()?).await
 }
@@ -507,44 +624,83 @@ pub async fn fips_workspace_snapshot_connect(
     if capability.len() < 32 {
         return Err(anyhow!("workspace FIPS capability is invalid"));
     }
-    let mut session = build_fips_call_session(config)?;
     let peer_npub = PublicKey::parse(peer_npub.trim())?.to_bech32()?;
-    session.connect(&peer_npub).await?;
-    session.send(capability.as_bytes()).await?;
-    *WORKSPACE_SNAPSHOT_SESSION.lock().await = Some(session);
+    let mut client = WorkspaceSnapshotClient {
+        client: build_workspace_fips_client(config).await?,
+        peer_npub,
+        next_frame_id: 0,
+        assembler: WorkspaceFrameAssembler::default(),
+    };
+    workspace_snapshot_send_frame(&mut client, capability.into_bytes()).await?;
+    *WORKSPACE_SNAPSHOT_CLIENT.lock().await = Some(client);
     Ok(())
 }
 
-/// Receive one JSON workspace frame from the reliable FIPS stream.
+/// Receive one JSON workspace frame from the shared FIPS service transport.
 pub async fn fips_workspace_snapshot_receive(timeout_ms: u64) -> Result<Option<String>> {
-    let mut session = WORKSPACE_SNAPSHOT_SESSION.lock().await;
-    let session = session
+    let mut transport = WORKSPACE_SNAPSHOT_CLIENT.lock().await;
+    let transport = transport
         .as_mut()
         .ok_or_else(|| anyhow!("FIPS workspace transport is not active"))?;
-    match tokio::time::timeout(
-        Duration::from_millis(timeout_ms.clamp(1, 5_000)),
-        session.receive(),
-    )
-    .await
-    {
-        Ok(result) => String::from_utf8(result?).map(Some).map_err(Into::into),
-        Err(_) => Ok(None),
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.clamp(1, 5_000));
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        let packet = match tokio::time::timeout(
+            deadline - now,
+            transport.client.recv_service_packet(),
+        )
+        .await
+        {
+            Ok(Some(packet)) => packet,
+            Ok(None) => return Err(anyhow!("FIPS workspace service transport closed")),
+            Err(_) => return Ok(None),
+        };
+        if packet.src_port != WORKSPACE_FIPS_SERVICE_PORT
+            || packet.dst_port != WORKSPACE_FIPS_SERVICE_PORT
+        {
+            continue;
+        }
+        if let Some(frame) = transport.assembler.push(&packet.payload)? {
+            return String::from_utf8(frame).map(Some).map_err(Into::into);
+        }
     }
 }
 
 /// Send one JSON workspace control frame over the dedicated reliable stream.
 pub async fn fips_workspace_snapshot_send(frame: String) -> Result<()> {
-    let mut session = WORKSPACE_SNAPSHOT_SESSION.lock().await;
-    let session = session
+    let mut transport = WORKSPACE_SNAPSHOT_CLIENT.lock().await;
+    let transport = transport
         .as_mut()
         .ok_or_else(|| anyhow!("FIPS workspace transport is not active"))?;
-    session.send(frame.as_bytes()).await?;
-    Ok(())
+    workspace_snapshot_send_frame(transport, frame.into_bytes()).await
 }
 
 pub async fn fips_workspace_snapshot_stop() -> Result<()> {
-    if let Some(mut session) = WORKSPACE_SNAPSHOT_SESSION.lock().await.take() {
-        session.stop().await?;
+    if let Some(transport) = WORKSPACE_SNAPSHOT_CLIENT.lock().await.take() {
+        transport.client.stop().await?;
+    }
+    Ok(())
+}
+
+async fn workspace_snapshot_send_frame(
+    transport: &mut WorkspaceSnapshotClient,
+    payload: Vec<u8>,
+) -> Result<()> {
+    transport.next_frame_id = transport.next_frame_id.wrapping_add(1);
+    for packet in workspace_service_frames(transport.next_frame_id, &payload)? {
+        transport
+            .client
+            .send_service_frame_to_npub(
+                &transport.peer_npub,
+                WORKSPACE_FIPS_SERVICE_PORT,
+                WORKSPACE_FIPS_SERVICE_PORT,
+                packet,
+                Duration::from_secs(20),
+            )
+            .await?;
     }
     Ok(())
 }
@@ -663,6 +819,49 @@ pub async fn fips_group_call_receive_realtime_pcm(
         .push(packet)
 }
 
+/// Sends one bounded UTF-8 control frame to a group-call peer over its
+/// reliable QUIC stream.
+pub async fn fips_group_call_send_control(
+    call_id: String,
+    peer_npub: String,
+    frame: String,
+) -> Result<()> {
+    validate_control_frame(&frame)?;
+    let key = group_call_key(&call_id, &peer_npub)?;
+    let mut sessions = GROUP_CALL_SESSIONS.lock().await;
+    let session = sessions
+        .get_mut(&key)
+        .ok_or_else(|| anyhow!("FIPS group call is not active"))?;
+    session.send(frame.as_bytes()).await?;
+    Ok(())
+}
+
+/// Receives one control frame from a group-call peer's reliable QUIC stream.
+pub async fn fips_group_call_receive_control(
+    call_id: String,
+    peer_npub: String,
+    timeout_ms: u64,
+) -> Result<Option<String>> {
+    let key = group_call_key(&call_id, &peer_npub)?;
+    let mut sessions = GROUP_CALL_SESSIONS.lock().await;
+    let session = sessions
+        .get_mut(&key)
+        .ok_or_else(|| anyhow!("FIPS group call is not active"))?;
+    match tokio::time::timeout(
+        Duration::from_millis(timeout_ms.clamp(1, 5_000)),
+        session.receive(),
+    )
+    .await
+    {
+        Ok(result) => {
+            let frame = String::from_utf8(result?)?;
+            validate_control_frame(&frame)?;
+            Ok(Some(frame))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 pub async fn fips_group_call_send_realtime_video(
     call_id: String,
     peer_npub: String,
@@ -756,9 +955,18 @@ fn group_call_key(call_id: &str, peer_npub: &str) -> Result<String> {
     ))
 }
 
+fn validate_control_frame(frame: &str) -> Result<()> {
+    if frame.is_empty() || frame.len() > 16 * 1024 {
+        return Err(anyhow!("control frame must contain 1 to 16384 bytes"));
+    }
+    Ok(())
+}
+
 fn build_fips_call_session(config: BridgeFipsCallConfig) -> Result<FipsMobileQuicSession> {
     let identity = Identity::from_secret_str(config.secret_key.trim())?;
     let mut session_config = FipsMobileQuicSessionConfig::default();
+    // Prefer a direct LAN path over NAT hairpin traversal for trusted peers.
+    session_config.discovery.share_local_candidates = true;
     let relays = clean_relays(config.relays);
     if !relays.is_empty() {
         session_config.discovery.advert_relays = relays.clone();
@@ -769,6 +977,35 @@ fn build_fips_call_session(config: BridgeFipsCallConfig) -> Result<FipsMobileQui
         session_config.discovery.stun_servers = stun_servers;
     }
     Ok(FipsMobileQuicSession::new(identity, session_config))
+}
+
+async fn build_workspace_fips_client(config: BridgeFipsCallConfig) -> Result<FipsMobileClient> {
+    let mut fips_config = Config::default();
+    fips_config.node.identity.nsec = Some(config.secret_key.trim().to_string());
+    fips_config.node.identity.persistent = false;
+    fips_config.tun.enabled = false;
+    fips_config.dns.enabled = false;
+    fips_config.node.control.enabled = false;
+    fips_config.node.discovery.nostr.enabled = true;
+    fips_config.node.discovery.nostr.advertise = true;
+    fips_config.node.discovery.nostr.share_local_candidates = true;
+    let relays = clean_relays(config.relays);
+    if !relays.is_empty() {
+        fips_config.node.discovery.nostr.advert_relays = relays.clone();
+        fips_config.node.discovery.nostr.dm_relays = relays;
+    }
+    let stun_servers = clean_relays(config.stun_servers);
+    if !stun_servers.is_empty() {
+        fips_config.node.discovery.nostr.stun_servers = stun_servers;
+    }
+    // FipsMobileClient supplies an ephemeral Nostr-advertised UDP transport
+    // when the embedded config has no explicit transport.
+    Ok(FipsMobileClient::start(FipsMobileConfig {
+        config: fips_config,
+        response_port: WORKSPACE_FIPS_SERVICE_PORT,
+        queue_depth: 128,
+    })
+    .await?)
 }
 
 fn fips_call_status(session: &FipsMobileQuicSession) -> BridgeFipsCallStatus {
@@ -832,21 +1069,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_transport_does_not_use_the_call_slot() {
+    async fn stopping_workspace_transport_does_not_use_the_call_slot() {
         *CALL_SESSION.lock().await = Some(FipsMobileQuicSession::new(
             Identity::generate(),
             FipsMobileQuicSessionConfig::default(),
         ));
-        *WORKSPACE_SNAPSHOT_SESSION.lock().await = Some(FipsMobileQuicSession::new(
-            Identity::generate(),
-            FipsMobileQuicSessionConfig::default(),
-        ));
-
-        fips_workspace_snapshot_stop().await.unwrap();
-
-        assert!(WORKSPACE_SNAPSHOT_SESSION.lock().await.is_none());
         assert!(CALL_SESSION.lock().await.is_some());
         fips_call_stop().await.unwrap();
+    }
+
+    #[test]
+    fn workspace_service_frames_round_trip() {
+        let payload = vec![7; WORKSPACE_FIPS_FRAME_BYTES * 2 + 1];
+        let frames = workspace_service_frames(42, &payload).unwrap();
+        let mut assembler = WorkspaceFrameAssembler::default();
+        assert!(assembler.push(&frames[1]).unwrap().is_none());
+        assert!(assembler.push(&frames[0]).unwrap().is_none());
+        assert_eq!(assembler.push(&frames[2]).unwrap(), Some(payload));
+    }
+
+    #[test]
+    fn control_frames_are_bounded() {
+        assert!(validate_control_frame("{\"type\":\"hangup\"}").is_ok());
+        assert!(validate_control_frame("").is_err());
+        assert!(validate_control_frame(&"x".repeat(16 * 1024 + 1)).is_err());
     }
 }
 
