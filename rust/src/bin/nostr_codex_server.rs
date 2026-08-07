@@ -85,6 +85,11 @@ const WORKSPACE_FIPS_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKSPACE_FIPS_SERVICE_PORT: u16 = 49_160;
 const WORKSPACE_FIPS_FRAME_BYTES: usize = 800;
 const WORKSPACE_FIPS_FRAME_HEADER_BYTES: usize = 13;
+const WORKSPACE_FIPS_MAX_CHUNKS: u16 = 128;
+const WORKSPACE_FIPS_MAX_PAYLOAD_BYTES: usize =
+    WORKSPACE_FIPS_FRAME_BYTES * WORKSPACE_FIPS_MAX_CHUNKS as usize;
+const WORKSPACE_FIPS_ROUTE_CAPACITY: usize = 128;
+const WORKSPACE_FIPS_ASSEMBLER_CAPACITY: usize = 256;
 const WORKSPACE_AGENT_QUEUE_CAPACITY: usize = 16;
 const SYSTEM_STATUS_HISTORY_MAX_BYTES: usize = 10 * 1024 * 1024;
 const SYSTEM_STATUS_SAMPLE_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -214,25 +219,35 @@ struct WorkerRuntimeConfig {
 #[derive(Default)]
 struct WorkspaceFrameAssembler {
     frame_id: Option<u64>,
+    last_completed_frame_id: u64,
     chunk_count: u16,
     chunks: Vec<Option<Vec<u8>>>,
 }
 
 struct WorkspaceFipsPeer {
+    member: String,
     npub: String,
     last_pong: Instant,
+    last_message_id: u64,
 }
 
 impl WorkspaceFrameAssembler {
     fn push(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
-        if packet.len() < WORKSPACE_FIPS_FRAME_HEADER_BYTES || packet[0] != 1 {
+        if packet.len() < WORKSPACE_FIPS_FRAME_HEADER_BYTES
+            || packet.len() > WORKSPACE_FIPS_FRAME_HEADER_BYTES + WORKSPACE_FIPS_FRAME_BYTES
+            || packet[0] != 1
+        {
             bail!("workspace FIPS service frame is invalid");
         }
         let frame_id = u64::from_be_bytes(packet[1..9].try_into().unwrap());
         let chunk_index = u16::from_be_bytes(packet[9..11].try_into().unwrap());
         let chunk_count = u16::from_be_bytes(packet[11..13].try_into().unwrap());
-        if chunk_count == 0 || chunk_index >= chunk_count {
+        if chunk_count == 0 || chunk_count > WORKSPACE_FIPS_MAX_CHUNKS || chunk_index >= chunk_count
+        {
             bail!("workspace FIPS service frame chunk is invalid");
+        }
+        if self.frame_id != Some(frame_id) && frame_id <= self.last_completed_frame_id {
+            bail!("workspace FIPS service frame was replayed");
         }
         if self.frame_id != Some(frame_id) {
             self.frame_id = Some(frame_id);
@@ -247,19 +262,26 @@ impl WorkspaceFrameAssembler {
         if self.chunks.iter().any(Option::is_none) {
             return Ok(None);
         }
-        let payload = self
+        let payload: Vec<u8> = self
             .chunks
             .iter()
             .flatten()
             .flat_map(|chunk| chunk.iter().copied())
             .collect();
+        if payload.len() > WORKSPACE_FIPS_MAX_PAYLOAD_BYTES {
+            bail!("workspace FIPS payload is too large");
+        }
         self.frame_id = None;
+        self.last_completed_frame_id = frame_id;
         self.chunks.clear();
         Ok(Some(payload))
     }
 }
 
 fn workspace_service_frames(frame_id: u64, payload: &[u8]) -> Result<Vec<Vec<u8>>> {
+    if payload.len() > WORKSPACE_FIPS_MAX_PAYLOAD_BYTES {
+        bail!("workspace FIPS payload is too large");
+    }
     let chunks = if payload.is_empty() {
         vec![&[][..]]
     } else {
@@ -1003,11 +1025,15 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     );
     flush_workspace_notification_outbox(&config.workspace, config.messenger.as_ref()).await;
     let capabilities = Arc::new(Mutex::new(HashMap::new()));
+    // The FIPS acceptor owns its socket, while this bounded queue feeds proven
+    // application envelopes through the same authorization and dispatch path as DMs.
+    let (fips_incoming, mut fips_messages) = mpsc::channel(128);
     tokio::task::spawn_local(run_workspace_fips_acceptor(
         config.fips_secret_key.clone(),
         config.relays.clone(),
         Arc::clone(&capabilities),
         config.workspace_path.clone(),
+        fips_incoming,
     ));
     start_system_status_collector(
         worker_state_path(&config.codex_config.working_dir, "system-status.jsonl"),
@@ -1023,6 +1049,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     loop {
         let message = tokio::select! {
             message = config.messenger.next_message(Duration::from_secs(3600)) => message?,
+            message = fips_messages.recv() => message,
             _ = config.control.shutdown_notify.notified() => {
                 if config.control.is_shutdown_requested() {
                     info!("runtime shutdown requested");
@@ -2323,6 +2350,7 @@ async fn run_workspace_fips_acceptor(
     relays: Vec<String>,
     capabilities: Arc<Mutex<HashMap<String, (String, Instant)>>>,
     workspace_path: PathBuf,
+    incoming: mpsc::Sender<IncomingMessage>,
 ) {
     let mut client = match build_workspace_fips_client(&secret_key, &relays).await {
         Ok(client) => client,
@@ -2354,6 +2382,12 @@ async fn run_workspace_fips_acceptor(
                     continue;
                 }
                 let source = packet.src_addr.to_string();
+                if !assemblers.contains_key(&source)
+                    && assemblers.len() >= WORKSPACE_FIPS_ASSEMBLER_CAPACITY
+                {
+                    warn!("dropped FIPS workspace frame because the assembler registry is full");
+                    continue;
+                }
                 let frame = match assemblers.entry(source.clone()).or_insert_with(WorkspaceFrameAssembler::default).push(&packet.payload) {
                     Ok(Some(frame)) => frame,
                     Ok(None) => continue,
@@ -2364,11 +2398,46 @@ async fn run_workspace_fips_acceptor(
                     }
                 };
                 if let Some(peer) = peers.get_mut(&source) {
-                    match serde_json::from_slice::<WorkspaceFipsEnvelope>(&frame) {
-                        Ok(response) if response.version == WORKSPACE_FIPS_PROTOCOL_VERSION && response.kind == "pong" => {
-                            peer.last_pong = Instant::now();
+                    let envelope = match serde_json::from_slice::<WorkspaceFipsEnvelope>(&frame) {
+                        Ok(envelope) if envelope.version == WORKSPACE_FIPS_PROTOCOL_VERSION => envelope,
+                        _ => {
+                            warn!("rejected invalid FIPS workspace peer envelope");
+                            continue;
                         }
-                        _ => warn!("rejected unexpected FIPS workspace peer frame"),
+                    };
+                    match envelope.kind.as_str() {
+                        "pong" => peer.last_pong = Instant::now(),
+                        "app" => {
+                            let Some(message_id) = envelope.message_id else {
+                                warn!(member = %peer.member, "rejected FIPS app envelope without a message id");
+                                continue;
+                            };
+                            if message_id <= peer.last_message_id {
+                                warn!(member = %peer.member, message_id, "rejected replayed FIPS app envelope");
+                                continue;
+                            }
+                            let Some(frame) = envelope.frame else {
+                                warn!(member = %peer.member, "rejected FIPS app envelope without a wire message");
+                                continue;
+                            };
+                            if parse_wire_message(&frame).is_err() {
+                                warn!(member = %peer.member, "rejected invalid FIPS wire message");
+                                continue;
+                            }
+                            peer.last_message_id = message_id;
+                            let message = IncomingMessage {
+                                sender_pubkey: peer.npub.clone(),
+                                sender_pubkey_hex: peer.member.clone(),
+                                kind: "fips_app".to_string(),
+                                text: frame.clone(),
+                                raw_json: frame,
+                                event_id: format!("fips:{}:{message_id}", peer.member),
+                            };
+                            if incoming.try_send(message).is_err() {
+                                warn!(member = %peer.member, "dropped FIPS app envelope because worker dispatch queue is full");
+                            }
+                        }
+                        _ => warn!(member = %peer.member, kind = %envelope.kind, "rejected unexpected FIPS workspace peer envelope"),
                     }
                     continue;
                 }
@@ -2385,6 +2454,10 @@ async fn run_workspace_fips_acceptor(
                     warn!("rejected FIPS workspace peer without a valid capability");
                     continue;
                 };
+                if peers.len() >= WORKSPACE_FIPS_ROUTE_CAPACITY {
+                    warn!(member, "rejected FIPS workspace peer because the route registry is full");
+                    continue;
+                }
                 if !workspace.is_member(&member).unwrap_or(false) {
                     warn!(member, "rejected FIPS workspace capability for non-member");
                     continue;
@@ -2402,7 +2475,12 @@ async fn run_workspace_fips_acceptor(
                         continue;
                     }
                 };
-                peers.insert(source, WorkspaceFipsPeer { npub: peer_npub.clone(), last_pong: Instant::now() });
+                peers.insert(source, WorkspaceFipsPeer {
+                    member: member.clone(),
+                    npub: peer_npub.clone(),
+                    last_pong: Instant::now(),
+                    last_message_id: 0,
+                });
                 if let Err(error) = send_workspace_fips_envelope(&client, &peer_npub, &mut frame_id, "hello", None).await {
                     warn!(member, "failed to send FIPS workspace hello: {error:#}");
                     continue;
@@ -2476,6 +2554,8 @@ struct WorkspaceFipsEnvelope {
     #[serde(rename = "type")]
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     frame: Option<String>,
 }
 
@@ -2489,6 +2569,7 @@ async fn send_workspace_fips_envelope(
     let envelope = WorkspaceFipsEnvelope {
         version: WORKSPACE_FIPS_PROTOCOL_VERSION,
         kind: kind.to_string(),
+        message_id: None,
         frame,
     };
     *frame_id = frame_id.wrapping_add(1);

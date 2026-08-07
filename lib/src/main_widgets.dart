@@ -5783,7 +5783,7 @@ class _ToolTextPage extends StatelessWidget {
   }
 }
 
-class _ClientDiagnosticsPage extends StatelessWidget {
+class _ClientDiagnosticsPage extends StatefulWidget {
   const _ClientDiagnosticsPage({
     required this.diagnostics,
     required this.fipsEnabled,
@@ -5797,6 +5797,13 @@ class _ClientDiagnosticsPage extends StatelessWidget {
   final ValueChanged<bool> onFipsEnabledChanged;
 
   @override
+  State<_ClientDiagnosticsPage> createState() => _ClientDiagnosticsPageState();
+}
+
+class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
+  _DiagnosticFilter _filter = _DiagnosticFilter.all;
+
+  @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
       title: const Text('Client diagnostics'),
@@ -5804,24 +5811,30 @@ class _ClientDiagnosticsPage extends StatelessWidget {
         IconButton(
           tooltip: 'Copy diagnostics',
           onPressed: () => Clipboard.setData(
-            ClipboardData(text: diagnostics.value.join('\n')),
+            ClipboardData(text: widget.diagnostics.value.join('\n')),
           ),
           icon: const Icon(Icons.copy_outlined),
         ),
         IconButton(
           tooltip: 'Clear diagnostics',
-          onPressed: () => diagnostics.value = const [],
+          onPressed: () => widget.diagnostics.value = const [],
           icon: const Icon(Icons.delete_outline),
         ),
       ],
     ),
     body: ValueListenableBuilder<_WorkspaceFipsHeartbeat>(
-      valueListenable: fipsHeartbeat,
+      valueListenable: widget.fipsHeartbeat,
       builder: (context, heartbeat, _) => ValueListenableBuilder<List<String>>(
-        valueListenable: diagnostics,
+        valueListenable: widget.diagnostics,
         builder: (context, entries, _) {
           final theme = Theme.of(context);
           final now = DateTime.now();
+          final events = _groupDiagnosticEvents(entries);
+          final visibleEvents = events
+              .where((event) => _filter.includes(event.category))
+              .toList();
+          final warnings = events.where((event) => event.isWarning).length;
+          final errors = events.where((event) => event.isError).length;
           final liveFor = heartbeat.connectedAt == null
               ? null
               : now.difference(heartbeat.connectedAt!);
@@ -5844,22 +5857,41 @@ class _ClientDiagnosticsPage extends StatelessWidget {
             'disabled' => 'Nostr only',
             _ => 'Disconnected',
           };
-          Widget section(String label) => Padding(
+          Widget section(String label, {String? trailing}) => Padding(
             padding: const EdgeInsets.only(top: 24, bottom: 8),
-            child: Text(
-              label,
-              style: theme.textTheme.labelLarge?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                fontWeight: FontWeight.w700,
-              ),
+            child: Row(
+              children: [
+                Text(
+                  label,
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                if (trailing != null) ...[
+                  const Spacer(),
+                  Text(
+                    trailing,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ],
             ),
           );
+          final lifecycle = switch (heartbeat.connectionState) {
+            'active' => 3,
+            'connected' => 2,
+            'connecting' || 'reconnecting' => 1,
+            _ => 0,
+          };
           return ListView(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
             children: [
               section('Connection settings'),
               ValueListenableBuilder<bool>(
-                valueListenable: fipsEnabled,
+                valueListenable: widget.fipsEnabled,
                 builder: (context, enabled, _) => ListTile(
                   contentPadding: const EdgeInsets.symmetric(horizontal: 4),
                   title: const Text('Use FIPS transport'),
@@ -5870,13 +5902,13 @@ class _ClientDiagnosticsPage extends StatelessWidget {
                   ),
                   trailing: Switch(
                     value: enabled,
-                    onChanged: onFipsEnabledChanged,
+                    onChanged: widget.onFipsEnabledChanged,
                   ),
                 ),
               ),
               section('Current status'),
               Container(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 13),
                 decoration: BoxDecoration(
                   color: theme.colorScheme.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(14),
@@ -5886,12 +5918,19 @@ class _ClientDiagnosticsPage extends StatelessWidget {
                   children: [
                     Row(
                       children: [
-                        Container(
-                          width: 10,
-                          height: 10,
-                          decoration: BoxDecoration(
-                            color: stateColor,
-                            shape: BoxShape.circle,
+                        TweenAnimationBuilder<double>(
+                          tween: Tween(begin: 0.65, end: active ? 1 : 0.8),
+                          duration: const Duration(milliseconds: 750),
+                          curve: Curves.easeOutCubic,
+                          builder: (context, opacity, child) =>
+                              Opacity(opacity: opacity, child: child),
+                          child: Container(
+                            width: 9,
+                            height: 9,
+                            decoration: BoxDecoration(
+                              color: stateColor,
+                              shape: BoxShape.circle,
+                            ),
                           ),
                         ),
                         const SizedBox(width: 9),
@@ -5903,7 +5942,7 @@ class _ClientDiagnosticsPage extends StatelessWidget {
                         ),
                         const Spacer(),
                         Text(
-                          active ? 'Healthy' : 'Monitoring',
+                          active ? 'Live' : 'Monitoring',
                           style: theme.textTheme.labelMedium?.copyWith(
                             color: stateColor,
                             fontWeight: FontWeight.w700,
@@ -5911,45 +5950,93 @@ class _ClientDiagnosticsPage extends StatelessWidget {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 10),
-                    _DiagnosticStat(
-                      label: 'Duration',
-                      value: liveFor == null
-                          ? 'Not connected'
-                          : _formatFipsDuration(liveFor),
+                    const SizedBox(height: 11),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            children: [
+                              _DiagnosticStat(
+                                label: 'Duration',
+                                value: liveFor == null
+                                    ? 'Not connected'
+                                    : _formatFipsDuration(liveFor),
+                              ),
+                              const SizedBox(height: 6),
+                              _DiagnosticStat(
+                                label: 'Heartbeat',
+                                value: lastHeartbeat == null
+                                    ? 'Waiting'
+                                    : '${_formatFipsDuration(lastHeartbeat)} ago',
+                              ),
+                              const SizedBox(height: 6),
+                              _DiagnosticStat(
+                                label: 'Heartbeats',
+                                value: '${heartbeat.count}',
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 24),
+                        Expanded(
+                          child: Column(
+                            children: [
+                              _DiagnosticStat(
+                                label: 'Transport',
+                                value: active ? 'FIPS' : 'Nostr',
+                              ),
+                              const SizedBox(height: 6),
+                              const _DiagnosticStat(
+                                label: 'Fallback',
+                                value: 'Nostr enabled',
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
-                    _DiagnosticStat(
-                      label: 'Heartbeat',
-                      value: lastHeartbeat == null
-                          ? 'Waiting'
-                          : '${_formatFipsDuration(lastHeartbeat)} ago',
-                    ),
-                    _DiagnosticStat(
-                      label: 'Heartbeats',
-                      value: '${heartbeat.count}',
-                    ),
-                    _DiagnosticStat(
-                      label: 'Transport',
-                      value: active ? 'FIPS' : 'Nostr',
-                    ),
-                    _DiagnosticStat(label: 'Fallback', value: 'Nostr enabled'),
                   ],
                 ),
               ),
-              section('Recent events'),
-              if (entries.isEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: _DiagnosticTimeline(stage: lifecycle, color: stateColor),
+              ),
+              section(
+                'Recent events',
+                trailing:
+                    '${events.length} total · $warnings warnings · $errors errors',
+              ),
+              Wrap(
+                spacing: 7,
+                runSpacing: 7,
+                children: _DiagnosticFilter.values
+                    .map(
+                      (filter) => ChoiceChip(
+                        label: Text(filter.label),
+                        selected: _filter == filter,
+                        onSelected: (_) => setState(() => _filter = filter),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    )
+                    .toList(),
+              ),
+              if (visibleEvents.isEmpty)
                 Padding(
                   padding: const EdgeInsets.only(top: 24),
                   child: Text(
-                    'No connection events yet.',
+                    entries.isEmpty
+                        ? 'No connection events yet.'
+                        : 'No events match this filter.',
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
                 )
               else
-                for (final entry in entries.reversed.take(80))
-                  _DiagnosticEvent(entry: entry),
+                for (final event in visibleEvents)
+                  _DiagnosticEvent(event: event),
             ],
           );
         },
@@ -5965,76 +6052,80 @@ class _DiagnosticStat extends StatelessWidget {
   final String value;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 2),
-    child: Row(
-      children: [
-        Expanded(
-          child: Text(
-            label,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
+  Widget build(BuildContext context) => Row(
+    children: [
+      Flexible(
+        fit: FlexFit.tight,
+        child: Text(
+          label,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
         ),
-        Text(value, style: Theme.of(context).textTheme.bodySmall),
-      ],
-    ),
+      ),
+      Flexible(
+        child: Text(
+          value,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(
+            context,
+          ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+        ),
+      ),
+    ],
   );
 }
 
 class _DiagnosticEvent extends StatelessWidget {
-  const _DiagnosticEvent({required this.entry});
+  const _DiagnosticEvent({required this.event});
 
-  final String entry;
+  final _DiagnosticEventData event;
 
   @override
   Widget build(BuildContext context) {
-    final match = RegExp(r'^(\d{2}:\d{2}:\d{2})\s{2}(.*)$').firstMatch(entry);
-    final timestamp = match?.group(1) ?? '';
-    final rawMessage = match?.group(2) ?? entry;
-    final message = _diagnosticSummary(rawMessage);
-    final lower = rawMessage.toLowerCase();
     final theme = Theme.of(context);
-    final primary =
-        lower.contains('connection:') ||
-        lower.contains('failed') ||
-        lower.contains('timed out');
-    final (
-      icon,
-      color,
-    ) = lower.contains('failed') || lower.contains('timed out')
-        ? (Icons.error_outline, theme.colorScheme.error)
-        : lower.contains('fallback')
-        ? (Icons.warning_amber_outlined, const Color(0xffff8b45))
-        : lower.contains('retrying') || lower.contains('reconnecting')
-        ? (Icons.refresh, const Color(0xffffb547))
-        : lower.contains('snapshot')
-        ? (Icons.south, theme.colorScheme.primary)
-        : lower.contains('connected') ||
-              lower.contains('active') ||
-              lower.contains('heartbeat')
-        ? (Icons.check_circle_outline, const Color(0xff35d6a0))
-        : lower.contains('disabled') || lower.contains('disconnected')
-        ? (Icons.pause_circle_outline, theme.colorScheme.onSurfaceVariant)
-        : (Icons.info_outline, theme.colorScheme.onSurfaceVariant);
+    final color = event.isError
+        ? theme.colorScheme.error
+        : event.isWarning
+        ? const Color(0xffffb547)
+        : event.category == _DiagnosticCategory.connection
+        ? const Color(0xff35d6a0)
+        : event.category == _DiagnosticCategory.snapshot
+        ? theme.colorScheme.primary
+        : theme.colorScheme.onSurfaceVariant;
+    final icon = event.isError
+        ? Icons.error_outline
+        : event.isWarning
+        ? Icons.warning_amber_rounded
+        : event.category == _DiagnosticCategory.connection
+        ? Icons.check_circle_outline
+        : event.category == _DiagnosticCategory.snapshot
+        ? Icons.downloading_outlined
+        : Icons.info_outline;
     return Container(
       margin: const EdgeInsets.only(bottom: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      padding: const EdgeInsets.fromLTRB(10, 9, 10, 9),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest.withValues(
-          alpha: 0.42,
-        ),
+        color:
+            (event.isError
+                    ? theme.colorScheme.error
+                    : event.isWarning
+                    ? const Color(0xffffb547)
+                    : theme.colorScheme.surfaceContainerHighest)
+                .withValues(
+                  alpha: event.isError || event.isWarning ? 0.12 : 0.42,
+                ),
         borderRadius: BorderRadius.circular(9),
+        border: Border(left: BorderSide(color: color, width: 1)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(icon, size: 18, color: color),
           const SizedBox(width: 10),
-          if (timestamp.isNotEmpty) ...[
+          if (event.timestamp.isNotEmpty) ...[
             Text(
-              timestamp,
+              event.timestamp,
               style: theme.textTheme.labelSmall?.copyWith(
                 fontFamily: 'monospace',
                 fontSize: 10,
@@ -6046,19 +6137,291 @@ class _DiagnosticEvent extends StatelessWidget {
             const SizedBox(width: 10),
           ],
           Expanded(
-            child: SelectableText(
-              message,
-              style: primary
-                  ? theme.textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    )
-                  : theme.textTheme.bodyMedium,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SelectableText(
+                  event.count > 1
+                      ? '${event.title} (${event.count})'
+                      : event.title,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight:
+                        event.isError ||
+                            event.isWarning ||
+                            event.category == _DiagnosticCategory.connection
+                        ? FontWeight.w700
+                        : FontWeight.w500,
+                  ),
+                ),
+                if (event.detail != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    event.detail!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
         ],
       ),
     );
   }
+}
+
+enum _DiagnosticFilter {
+  all,
+  connection,
+  snapshots,
+  transport,
+  warnings,
+  errors,
+}
+
+extension on _DiagnosticFilter {
+  String get label => switch (this) {
+    _DiagnosticFilter.all => 'All',
+    _DiagnosticFilter.connection => 'Connection',
+    _DiagnosticFilter.snapshots => 'Snapshots',
+    _DiagnosticFilter.transport => 'Transport',
+    _DiagnosticFilter.warnings => 'Warnings',
+    _DiagnosticFilter.errors => 'Errors',
+  };
+
+  bool includes(_DiagnosticCategory category) => switch (this) {
+    _DiagnosticFilter.all => true,
+    _DiagnosticFilter.connection => category == _DiagnosticCategory.connection,
+    _DiagnosticFilter.snapshots => category == _DiagnosticCategory.snapshot,
+    _DiagnosticFilter.transport => category == _DiagnosticCategory.transport,
+    _DiagnosticFilter.warnings => category == _DiagnosticCategory.warning,
+    _DiagnosticFilter.errors => category == _DiagnosticCategory.error,
+  };
+}
+
+enum _DiagnosticCategory {
+  connection,
+  snapshot,
+  transport,
+  warning,
+  error,
+  info,
+}
+
+class _DiagnosticEventData {
+  const _DiagnosticEventData({
+    required this.timestamp,
+    required this.category,
+    required this.title,
+    this.detail,
+    this.count = 1,
+  });
+
+  final String timestamp;
+  final _DiagnosticCategory category;
+  final String title;
+  final String? detail;
+  final int count;
+
+  bool get isWarning => category == _DiagnosticCategory.warning;
+  bool get isError => category == _DiagnosticCategory.error;
+
+  _DiagnosticEventData copyWith({String? title, String? detail, int? count}) =>
+      _DiagnosticEventData(
+        timestamp: timestamp,
+        category: category,
+        title: title ?? this.title,
+        detail: detail ?? this.detail,
+        count: count ?? this.count,
+      );
+}
+
+List<_DiagnosticEventData> _groupDiagnosticEvents(List<String> entries) {
+  final grouped = <_DiagnosticEventData>[];
+  for (final entry in entries.reversed.take(80)) {
+    final event = _diagnosticEvent(entry);
+    if (event.category == _DiagnosticCategory.snapshot &&
+        grouped.isNotEmpty &&
+        grouped.last.category == _DiagnosticCategory.snapshot) {
+      final previous = grouped.removeLast();
+      grouped.add(
+        previous.copyWith(
+          title: 'Snapshot exchange',
+          detail: event.title,
+          count: previous.count + 1,
+        ),
+      );
+      continue;
+    }
+    grouped.add(event);
+  }
+  return grouped;
+}
+
+_DiagnosticEventData _diagnosticEvent(String entry) {
+  final match = RegExp(r'^(\d{2}:\d{2}:\d{2})\s{2}(.*)$').firstMatch(entry);
+  final timestamp = match?.group(1) ?? '';
+  final raw = match?.group(2) ?? entry;
+  final value = _diagnosticSummary(raw);
+  final lower = raw.toLowerCase();
+
+  if (lower.contains('failed') || lower.contains('timed out')) {
+    final heartbeat = lower.contains('heartbeat');
+    return _DiagnosticEventData(
+      timestamp: timestamp,
+      category: _DiagnosticCategory.error,
+      title: 'Session failed',
+      detail: heartbeat
+          ? 'Heartbeat timed out. Switched to Nostr fallback.'
+          : 'Switched to Nostr fallback.',
+    );
+  }
+  if (lower.contains('fallback') ||
+      lower.contains('retrying') ||
+      lower.contains('reconnecting')) {
+    return _DiagnosticEventData(
+      timestamp: timestamp,
+      category: _DiagnosticCategory.warning,
+      title: lower.contains('reconnecting') ? 'Reconnecting' : 'Retrying',
+      detail: lower.contains('fallback')
+          ? 'Using Nostr fallback.'
+          : lower.contains(' in ')
+          ? value
+          : 'Snapshot exchange is retrying.',
+    );
+  }
+  if (lower.contains('connection:') ||
+      lower == 'connected' ||
+      lower == 'disconnected') {
+    return _DiagnosticEventData(
+      timestamp: timestamp,
+      category: _DiagnosticCategory.connection,
+      title: value.replaceFirst('Connection ', ''),
+    );
+  }
+  if (lower.contains('snapshot')) {
+    return _DiagnosticEventData(
+      timestamp: timestamp,
+      category: _DiagnosticCategory.snapshot,
+      title: value.replaceFirst('Snapshot ', ''),
+    );
+  }
+  if (lower.contains('fips') || lower.contains('nostr')) {
+    return _DiagnosticEventData(
+      timestamp: timestamp,
+      category: _DiagnosticCategory.transport,
+      title: value,
+    );
+  }
+  return _DiagnosticEventData(
+    timestamp: timestamp,
+    category: _DiagnosticCategory.info,
+    title: value,
+  );
+}
+
+class _DiagnosticTimeline extends StatelessWidget {
+  const _DiagnosticTimeline({required this.stage, required this.color});
+
+  final int stage;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        _DiagnosticTimelineStep(
+          label: 'Connected',
+          complete: stage >= 1,
+          active: stage == 1,
+          color: color,
+        ),
+        _DiagnosticTimelineLine(complete: stage >= 2, color: color),
+        _DiagnosticTimelineStep(
+          label: 'Snapshot',
+          complete: stage >= 2,
+          active: stage == 2,
+          color: color,
+        ),
+        _DiagnosticTimelineLine(complete: stage >= 3, color: color),
+        _DiagnosticTimelineStep(
+          label: 'Active',
+          complete: stage >= 3,
+          active: stage == 3,
+          color: color,
+        ),
+      ],
+    );
+  }
+}
+
+class _DiagnosticTimelineLine extends StatelessWidget {
+  const _DiagnosticTimelineLine({required this.complete, required this.color});
+
+  final bool complete;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Expanded(
+    child: AnimatedContainer(
+      duration: const Duration(milliseconds: 280),
+      height: 1,
+      margin: const EdgeInsets.only(bottom: 20),
+      color: complete ? color : Theme.of(context).colorScheme.outlineVariant,
+    ),
+  );
+}
+
+class _DiagnosticTimelineStep extends StatelessWidget {
+  const _DiagnosticTimelineStep({
+    required this.label,
+    required this.complete,
+    required this.active,
+    required this.color,
+  });
+
+  final String label;
+  final bool complete;
+  final bool active;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      AnimatedContainer(
+        duration: const Duration(milliseconds: 280),
+        width: 20,
+        height: 20,
+        decoration: BoxDecoration(
+          color: complete
+              ? color
+              : Theme.of(context).colorScheme.surfaceContainerHighest,
+          shape: BoxShape.circle,
+        ),
+        child: Icon(
+          complete
+              ? (active ? Icons.circle : Icons.check)
+              : Icons.circle_outlined,
+          size: active ? 9 : 13,
+          color: complete
+              ? Theme.of(context).colorScheme.onPrimary
+              : Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+      const SizedBox(height: 5),
+      Text(
+        label,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+          color: complete
+              ? Theme.of(context).colorScheme.onSurface
+              : Theme.of(context).colorScheme.onSurfaceVariant,
+          fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+        ),
+      ),
+    ],
+  );
 }
 
 String _diagnosticSummary(String message) {
