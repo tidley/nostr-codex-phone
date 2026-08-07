@@ -13,6 +13,7 @@ pub const MAX_OPUS_PAYLOAD_BYTES: usize =
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const FRAME_SAMPLES: usize = 960;
 pub const FRAME_BYTES: usize = FRAME_SAMPLES * 2;
+const OPUS_BITRATE_BPS: i32 = 16_000;
 const JITTER_BUFFER_PACKETS: usize = 3;
 const JITTER_BUFFER_MAX_PACKETS: usize = 8;
 
@@ -26,7 +27,7 @@ pub struct RealtimeAudioEncoder {
 impl RealtimeAudioEncoder {
     pub fn new() -> Result<Self> {
         let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip)?;
-        encoder.set_bitrate(Bitrate::Bits(24_000))?;
+        encoder.set_bitrate(Bitrate::Bits(OPUS_BITRATE_BPS))?;
         Ok(Self {
             encoder,
             sequence: 0,
