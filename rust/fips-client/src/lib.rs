@@ -1,7 +1,7 @@
 use anyhow::Result;
 use fips_mobile::{
     Config, FipsMobileClient, FipsMobileConfig, FipsMobileQuicSession, FipsMobileQuicSessionConfig,
-    Identity,
+    FipsMobileQuicSessionStatus, Identity,
 };
 
 /// Connection settings shared by mobile, desktop, and server-side FIPS clients.
@@ -68,6 +68,55 @@ impl FipsClientConfig {
     }
 }
 
+/// A persistent, reliable, framed QUIC stream for blob transfer.
+pub struct FipsBlobSession {
+    session: FipsMobileQuicSession,
+}
+
+impl FipsBlobSession {
+    pub fn new(config: &FipsClientConfig) -> Result<Self> {
+        Ok(Self {
+            session: config.quic_session()?,
+        })
+    }
+
+    pub async fn connect(&mut self, peer_npub: impl Into<String>) -> Result<()> {
+        self.session.connect(peer_npub).await?;
+        Ok(())
+    }
+
+    /// Publishes this worker's advert before [`Self::accept`] waits for a peer.
+    pub async fn start_accept(&mut self) -> Result<()> {
+        self.session.start_accept().await?;
+        Ok(())
+    }
+
+    pub async fn accept(&mut self) -> Result<()> {
+        self.session.accept().await?;
+        Ok(())
+    }
+
+    /// Sends one length-delimited blob payload on the reliable stream.
+    pub async fn send(&mut self, payload: &[u8]) -> Result<()> {
+        self.session.send(payload).await?;
+        Ok(())
+    }
+
+    /// Receives one length-delimited blob payload from the reliable stream.
+    pub async fn receive(&mut self) -> Result<Vec<u8>> {
+        Ok(self.session.receive().await?)
+    }
+
+    pub async fn stop(&mut self) -> Result<()> {
+        self.session.stop().await?;
+        Ok(())
+    }
+
+    pub fn status(&self) -> FipsMobileQuicSessionStatus {
+        self.session.status()
+    }
+}
+
 pub fn call_status(session: &FipsMobileQuicSession) -> FipsCallStatus {
     FipsCallStatus {
         state: format!("{:?}", session.status()).to_lowercase(),
@@ -99,6 +148,21 @@ mod tests {
                 "stun:stun.example:3478".to_string(),
             ]),
             vec!["wss://relay.example", "stun:stun.example:3478"],
+        );
+    }
+
+    #[test]
+    fn blob_session_starts_idle_without_network_access() {
+        let config = FipsClientConfig {
+            secret_key: "0000000000000000000000000000000000000000000000000000000000000001"
+                .to_string(),
+            relays: vec![],
+            stun_servers: vec![],
+        };
+
+        assert_eq!(
+            FipsBlobSession::new(&config).unwrap().status(),
+            FipsMobileQuicSessionStatus::Idle
         );
     }
 }
