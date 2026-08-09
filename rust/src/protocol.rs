@@ -1404,7 +1404,7 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
         {
             Ok(())
         }
-        "create_agent"
+        "create_agent" | "create_conversation_agent"
             if request
                 .agent_name
                 .as_deref()
@@ -1412,7 +1412,16 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
                 && request
                     .agent_role
                     .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty()) =>
+                    .is_some_and(|value| !value.trim().is_empty())
+                && (request
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || request.action == "create_agent"
+                    || request
+                        .recipient_pubkey
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty())) =>
         {
             Ok(())
         }
@@ -2130,6 +2139,16 @@ mod tests {
             workspace_update.conversation_agents[0].folder_scope,
             ["/work/apps"]
         );
+    }
+
+    #[test]
+    fn parses_conversation_scoped_agent_creation() {
+        let request = parse_wire_message(r#"{"workspace_request":{"action":"create_conversation_agent","channel_id":"channel-1","agent_name":"Scout","agent_role":"Researcher","folder_scope":["/work/apps"]}}"#).unwrap();
+        let WireMessage::WorkspaceRequest { workspace_request } = request else {
+            panic!("expected workspace request");
+        };
+        assert_eq!(workspace_request.action, "create_conversation_agent");
+        assert_eq!(workspace_request.folder_scope, ["/work/apps"]);
     }
 
     #[test]

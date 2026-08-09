@@ -1269,6 +1269,23 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     _reloadActiveMessages();
   }
 
+  void _openConversationActions(_WorkspaceSection section, String id) {
+    if (_section == section && _active == id) {
+      unawaited(
+        _conversationWidgetKey.currentState?._showConversationActions(),
+      );
+      return;
+    }
+    _select(section, id);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(
+          _conversationWidgetKey.currentState?._showConversationActions(),
+        );
+      }
+    });
+  }
+
   void _closeDrawer() => _scaffoldKey.currentState?.closeDrawer();
 
   @override
@@ -1315,9 +1332,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         _closeDrawer();
         unawaited(_startDirectMessage(context));
       },
-      onConversationActions: () => unawaited(
-        _conversationWidgetKey.currentState?._showConversationActions(),
-      ),
+      onConversationActions: _openConversationActions,
     );
     final conversation = _WorkspaceConversation(
       key: _conversationWidgetKey,
@@ -1808,60 +1823,266 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   }
 
   Future<void> _manageAgents(BuildContext context) async {
-    final attached = _activeAgents.map((agent) => agent.id).toSet();
-    await showModalBottomSheet<void>(
+    final isChannel = _section == _WorkspaceSection.channel;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => _ConversationAgentsPage(
+          title: _title,
+          workspace: widget.workspace,
+          workspaceRevision: widget.workspaceRevision,
+          channelId: isChannel ? _active : null,
+          ownPubkey: widget.ownPubkey,
+          peerPubkey: isChannel ? null : _active,
+          onRequest: widget.onRequest,
+          onLoadFolders: widget.onLoadFolderChoices,
+        ),
+      ),
+    );
+  }
+}
+
+class _ConversationAgentsPage extends StatelessWidget {
+  const _ConversationAgentsPage({
+    required this.title,
+    required this.workspace,
+    required this.workspaceRevision,
+    required this.channelId,
+    required this.ownPubkey,
+    required this.peerPubkey,
+    required this.onRequest,
+    required this.onLoadFolders,
+  });
+
+  final String title;
+  final WorkspaceState workspace;
+  final ValueListenable<int> workspaceRevision;
+  final String? channelId;
+  final String ownPubkey;
+  final String? peerPubkey;
+  final Future<void> Function(Map<String, Object?> request) onRequest;
+  final Future<List<RepoChoice>> Function() onLoadFolders;
+
+  bool _matches(WorkspaceConversationAgent membership) {
+    if (membership.channelId != null) return membership.channelId == channelId;
+    final participants = [ownPubkey, peerPubkey ?? '']..sort();
+    return channelId == null &&
+        membership.memberPubkey == participants[0] &&
+        membership.peerPubkey == participants[1];
+  }
+
+  Map<String, Object?> _request(String action, String agentId) => {
+    'action': action,
+    'agent_id': agentId,
+    if (channelId != null) 'channel_id': channelId,
+    if (channelId == null) 'recipient_pubkey': peerPubkey,
+  };
+
+  Future<void> _add(BuildContext context) async {
+    final attached = workspace.conversationAgents
+        .where(_matches)
+        .map((membership) => membership.agentId)
+        .toSet();
+    final agent = await showModalBottomSheet<WorkspaceAgent>(
       context: context,
       builder: (context) => SafeArea(
         child: ListView(
           shrinkWrap: true,
           children: [
-            const ListTile(title: Text('Conversation agents')),
-            for (final agent in widget.workspace.agents)
-              CheckboxListTile(
-                value: attached.contains(agent.id),
+            const ListTile(title: Text('Add agent')),
+            for (final agent in workspace.agents)
+              ListTile(
+                enabled: !attached.contains(agent.id),
                 title: Text(agent.name),
-                subtitle: Text(
-                  agent.openCodeSessionId == null
-                      ? 'No OpenCode session attached'
-                      : agent.role,
-                ),
-                onChanged: (_) async {
-                  final navigator = Navigator.of(context);
-                  final action = attached.contains(agent.id)
-                      ? 'remove_conversation_agent'
-                      : 'add_conversation_agent';
-                  final folderScope = action == 'add_conversation_agent'
-                      ? await showDialog<List<String>>(
-                          context: context,
-                          builder: (_) => _FolderScopeDialog(
-                            onLoadChoices: widget.onLoadFolderChoices,
-                          ),
-                        )
-                      : null;
-                  if (action == 'add_conversation_agent' &&
-                      folderScope == null) {
-                    return;
-                  }
-                  if (!mounted) return;
-                  unawaited(
-                    widget.onRequest({
-                      'action': action,
-                      'agent_id': agent.id,
-                      'folder_scope': ?folderScope,
-                      if (_section == _WorkspaceSection.channel)
-                        'channel_id': _active,
-                      if (_section == _WorkspaceSection.direct)
-                        'recipient_pubkey': _active,
-                    }),
-                  );
-                  navigator.pop();
-                },
+                subtitle: Text(agent.role),
+                trailing: attached.contains(agent.id)
+                    ? const Text('Added')
+                    : const Icon(Icons.add),
+                onTap: attached.contains(agent.id)
+                    ? null
+                    : () => Navigator.pop(context, agent),
               ),
           ],
         ),
       ),
     );
+    if (agent == null || !context.mounted) return;
+    final folders = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => _FolderScopeDialog(onLoadChoices: onLoadFolders),
+    );
+    if (folders == null) return;
+    await onRequest({
+      ..._request('add_conversation_agent', agent.id),
+      'folder_scope': folders,
+    });
   }
+
+  Future<void> _editFolder(
+    BuildContext context,
+    WorkspaceConversationAgent membership,
+  ) async {
+    final folders = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => _FolderScopeDialog(
+        initialSelected: membership.folderScope,
+        onLoadChoices: onLoadFolders,
+      ),
+    );
+    if (folders != null) {
+      await onRequest({
+        ..._request('add_conversation_agent', membership.agentId),
+        'folder_scope': folders,
+      });
+    }
+  }
+
+  Future<void> _create(BuildContext context) async {
+    final profile = await showDialog<Map<String, Object?>>(
+      context: context,
+      builder: (_) => _AgentEditorDialog(
+        onLoadOpenCodeModels: () async => const [],
+        initialFolderChoices: const [],
+        onLoadFolders: (_) => onLoadFolders(),
+      ),
+    );
+    if (profile == null || !context.mounted) return;
+    final folders = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => _FolderScopeDialog(onLoadChoices: onLoadFolders),
+    );
+    if (folders == null) return;
+    await onRequest(
+      {
+        ...profile,
+        ..._request('create_conversation_agent', ''),
+        'folder_scope': folders,
+      }..remove('agent_id'),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('Conversation agents'),
+      actions: [
+        IconButton(
+          tooltip: 'Create agent',
+          onPressed: () => _create(context),
+          icon: const Icon(Icons.add_circle_outline),
+        ),
+      ],
+    ),
+    floatingActionButton: FloatingActionButton.extended(
+      onPressed: () => _add(context),
+      icon: const Icon(Icons.add),
+      label: const Text('Add agent'),
+    ),
+    body: ValueListenableBuilder<int>(
+      valueListenable: workspaceRevision,
+      builder: (context, _, _) {
+        final memberships = workspace.conversationAgents
+            .where(_matches)
+            .toList();
+        final agents = <WorkspaceAgent>[
+          for (final membership in memberships)
+            for (final agent in workspace.agents)
+              if (agent.id == membership.agentId) agent,
+        ];
+        return ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            Text(
+              title,
+              style: Theme.of(
+                context,
+              ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Only agents assigned to this conversation can respond here.',
+            ),
+            const SizedBox(height: 24),
+            if (agents.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 48),
+                child: Center(
+                  child: Text('No agents are assigned to this conversation.'),
+                ),
+              ),
+            for (final agent in agents)
+              _conversationAgentCard(
+                context,
+                agent,
+                memberships.firstWhere(
+                  (membership) => membership.agentId == agent.id,
+                ),
+              ),
+          ],
+        );
+      },
+    ),
+  );
+
+  Widget _conversationAgentCard(
+    BuildContext context,
+    WorkspaceAgent agent,
+    WorkspaceConversationAgent membership,
+  ) => Card(
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const CircleAvatar(child: Icon(Icons.smart_toy_outlined)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  agent.name,
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+              IconButton(
+                tooltip: 'Remove agent',
+                onPressed: () =>
+                    onRequest(_request('remove_conversation_agent', agent.id)),
+                icon: const Icon(Icons.remove_circle_outline),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text('Role: ${agent.role}'),
+          if (agent.traits.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text('Traits: ${agent.traits}'),
+          ],
+          if (agent.skills.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 6,
+              children: [
+                for (final skill in agent.skills) Chip(label: Text(skill)),
+              ],
+            ),
+          ],
+          const SizedBox(height: 10),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.folder_outlined),
+            title: const Text('Working folder'),
+            subtitle: Text(
+              membership.folderScope.isEmpty
+                  ? 'Not configured'
+                  : membership.folderScope.join(', '),
+            ),
+            trailing: const Icon(Icons.edit_outlined),
+            onTap: () => _editFolder(context, membership),
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 class _FolderScopeDialog extends StatefulWidget {
@@ -1879,11 +2100,11 @@ class _FolderScopeDialog extends StatefulWidget {
 
 class _FolderScopeDialogState extends State<_FolderScopeDialog> {
   late final Future<List<RepoChoice>> _choices = widget.onLoadChoices();
-  late final _selected = widget.initialSelected.toSet();
+  late final _selected = widget.initialSelected.take(1).toSet();
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Folder access'),
+    title: const Text('Working folder'),
     content: SizedBox(
       width: 460,
       child: FutureBuilder<List<RepoChoice>>(
@@ -1905,7 +2126,7 @@ class _FolderScopeDialogState extends State<_FolderScopeDialog> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                'Select folders. Each folder includes all repositories in its subfolders.',
+                'Select the folder where this conversation agent can work.',
               ),
               const SizedBox(height: 12),
               SizedBox(
@@ -1921,10 +2142,9 @@ class _FolderScopeDialogState extends State<_FolderScopeDialog> {
                           folder.isGitRepo ? 'Repository folder' : 'Folder',
                         ),
                         onChanged: (selected) => setState(() {
+                          _selected.clear();
                           if (selected == true) {
                             _selected.add(folder.path);
-                          } else {
-                            _selected.remove(folder.path);
                           }
                         }),
                       ),
@@ -1944,8 +2164,8 @@ class _FolderScopeDialogState extends State<_FolderScopeDialog> {
       FilledButton(
         onPressed: _selected.isEmpty
             ? null
-            : () => Navigator.pop(context, _selected.toList()..sort()),
-        child: const Text('Grant access'),
+            : () => Navigator.pop(context, _selected.toList()),
+        child: const Text('Save folder'),
       ),
     ],
   );
@@ -2049,7 +2269,7 @@ class _WorkspaceSidebar extends StatelessWidget {
   final VoidCallback onRefresh;
   final VoidCallback onCreateChannel;
   final VoidCallback onCreateDirect;
-  final VoidCallback onConversationActions;
+  final void Function(_WorkspaceSection, String) onConversationActions;
 
   @override
   Widget build(BuildContext context) {
@@ -2068,37 +2288,51 @@ class _WorkspaceSidebar extends StatelessWidget {
       String? count,
       String? activity,
       Widget? action,
-    }) => ListTile(
-      dense: true,
-      selected: selected,
-      selectedTileColor: palette.selected,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      leading: Icon(icon, size: 19),
-      title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: activity == null
-          ? null
-          : Text(
-              activity,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: Theme.of(context).colorScheme.primary,
+    }) {
+      Widget listItem({bool showAction = false}) => ListTile(
+        dense: true,
+        selected: selected,
+        selectedTileColor: palette.selected,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        leading: Icon(icon, size: 19),
+        title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: activity == null
+            ? null
+            : Text(
+                activity,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: Theme.of(context).colorScheme.primary,
+                ),
               ),
-            ),
-      trailing:
-          action ??
-          (unreadCount > 0
-              ? Semantics(
-                  label: '$unreadCount unread messages',
-                  child: ExcludeSemantics(
-                    child: Badge(label: Text('$unreadCount')),
-                  ),
-                )
-              : count == null
-              ? null
-              : Text(count, style: Theme.of(context).textTheme.labelSmall)),
-      onTap: onTap,
-    );
+        trailing: showAction
+            ? action
+            : (unreadCount > 0
+                  ? Semantics(
+                      label: '$unreadCount unread messages',
+                      child: ExcludeSemantics(
+                        child: Badge(label: Text('$unreadCount')),
+                      ),
+                    )
+                  : count == null
+                  ? null
+                  : Text(count, style: Theme.of(context).textTheme.labelSmall)),
+        onTap: onTap,
+      );
+      if (action == null) return listItem();
+      var hovered = false;
+      return StatefulBuilder(
+        builder: (context, setState) {
+          return MouseRegion(
+            onEnter: (_) => setState(() => hovered = true),
+            onExit: (_) => setState(() => hovered = false),
+            child: listItem(showAction: selected || hovered),
+          );
+        },
+      );
+    }
+
     return ColoredBox(
       color: palette.sidebar,
       child: Column(
@@ -2197,14 +2431,15 @@ class _WorkspaceSidebar extends StatelessWidget {
                     selected: selected == channel.id,
                     unreadCount: unreadCounts[channel.id] ?? 0,
                     activity: activityLabels[channel.id],
-                    action: selected == channel.id
-                        ? IconButton(
-                            onPressed: onConversationActions,
-                            icon: const Icon(Icons.more_vert, size: 18),
-                            tooltip: 'Conversation actions',
-                            visualDensity: VisualDensity.compact,
-                          )
-                        : null,
+                    action: IconButton(
+                      onPressed: () => onConversationActions(
+                        _WorkspaceSection.channel,
+                        channel.id,
+                      ),
+                      icon: const Icon(Icons.more_vert, size: 18),
+                      tooltip: 'Conversation actions',
+                      visualDensity: VisualDensity.compact,
+                    ),
                     onTap: () =>
                         onSelect(_WorkspaceSection.channel, channel.id),
                   ),
@@ -2249,14 +2484,15 @@ class _WorkspaceSidebar extends StatelessWidget {
                           ownPubkey,
                           member,
                         )],
-                    action: direct == member
-                        ? IconButton(
-                            onPressed: onConversationActions,
-                            icon: const Icon(Icons.more_vert, size: 18),
-                            tooltip: 'Conversation actions',
-                            visualDensity: VisualDensity.compact,
-                          )
-                        : null,
+                    action: IconButton(
+                      onPressed: () => onConversationActions(
+                        _WorkspaceSection.direct,
+                        member,
+                      ),
+                      icon: const Icon(Icons.more_vert, size: 18),
+                      tooltip: 'Conversation actions',
+                      visualDensity: VisualDensity.compact,
+                    ),
                     onTap: () => onSelect(_WorkspaceSection.direct, member),
                   ),
                 const SizedBox(height: 18),
@@ -5921,8 +6157,11 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
             'connecting' || 'reconnecting' => 1,
             _ => 0,
           };
+          final contentWidth = ((MediaQuery.sizeOf(context).width - 960) / 2)
+              .clamp(16.0, double.infinity)
+              .toDouble();
           return ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+            padding: EdgeInsets.fromLTRB(contentWidth, 8, contentWidth, 24),
             children: [
               section('Connection settings'),
               ValueListenableBuilder<bool>(
@@ -5941,9 +6180,9 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                   ),
                 ),
               ),
-              section('Current status'),
               Container(
-                padding: const EdgeInsets.fromLTRB(14, 12, 14, 13),
+                margin: const EdgeInsets.only(top: 14),
+                padding: const EdgeInsets.fromLTRB(14, 11, 14, 10),
                 decoration: BoxDecoration(
                   color: theme.colorScheme.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(14),
@@ -5985,7 +6224,7 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 11),
+                    const SizedBox(height: 9),
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -5998,14 +6237,14 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                                     ? 'Not connected'
                                     : _formatFipsDuration(liveFor),
                               ),
-                              const SizedBox(height: 6),
+                              const SizedBox(height: 4),
                               _DiagnosticStat(
                                 label: 'Heartbeat',
                                 value: lastHeartbeat == null
                                     ? 'Waiting'
                                     : '${_formatFipsDuration(lastHeartbeat)} ago',
                               ),
-                              const SizedBox(height: 6),
+                              const SizedBox(height: 4),
                               _DiagnosticStat(
                                 label: 'Heartbeats',
                                 value: '${heartbeat.count}',
@@ -6013,7 +6252,7 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                             ],
                           ),
                         ),
-                        const SizedBox(width: 24),
+                        const SizedBox(width: 20),
                         Expanded(
                           child: Column(
                             children: [
@@ -6031,12 +6270,14 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                         ),
                       ],
                     ),
+                    const SizedBox(height: 10),
+                    _DiagnosticTimeline(
+                      stage: lifecycle,
+                      color: stateColor,
+                      connecting: heartbeat.connectionState == 'connecting',
+                    ),
                   ],
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: _DiagnosticTimeline(stage: lifecycle, color: stateColor),
               ),
               section(
                 'Recent events',
@@ -6052,7 +6293,13 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                         label: Text(filter.label),
                         selected: _filter == filter,
                         onSelected: (_) => setState(() => _filter = filter),
-                        visualDensity: VisualDensity.compact,
+                        visualDensity: const VisualDensity(
+                          horizontal: -3,
+                          vertical: -3,
+                        ),
+                        side: BorderSide.none,
+                        selectedColor: theme.colorScheme.primaryContainer,
+                        backgroundColor: theme.colorScheme.surfaceContainerLow,
                       ),
                     )
                     .toList(),
@@ -6070,8 +6317,15 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                   ),
                 )
               else
-                for (final event in visibleEvents)
-                  _DiagnosticEvent(event: event),
+                for (var index = 0; index < visibleEvents.length; index++)
+                  _DiagnosticEvent(
+                    key: ValueKey(
+                      '${visibleEvents[index].timestamp}:${visibleEvents[index].raw}',
+                    ),
+                    event: visibleEvents[index],
+                    isLast: index == visibleEvents.length - 1,
+                    isNewest: index == 0,
+                  ),
             ],
           );
         },
@@ -6088,9 +6342,10 @@ class _DiagnosticStat extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
     children: [
-      Flexible(
-        fit: FlexFit.tight,
+      SizedBox(
+        width: 78,
         child: Text(
           label,
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -6098,7 +6353,8 @@ class _DiagnosticStat extends StatelessWidget {
           ),
         ),
       ),
-      Flexible(
+      const SizedBox(width: 8),
+      Expanded(
         child: Text(
           value,
           overflow: TextOverflow.ellipsis,
@@ -6111,14 +6367,49 @@ class _DiagnosticStat extends StatelessWidget {
   );
 }
 
-class _DiagnosticEvent extends StatelessWidget {
-  const _DiagnosticEvent({required this.event});
+class _DiagnosticEvent extends StatefulWidget {
+  const _DiagnosticEvent({
+    super.key,
+    required this.event,
+    required this.isLast,
+    required this.isNewest,
+  });
 
   final _DiagnosticEventData event;
+  final bool isLast;
+  final bool isNewest;
+
+  @override
+  State<_DiagnosticEvent> createState() => _DiagnosticEventState();
+}
+
+class _DiagnosticEventState extends State<_DiagnosticEvent> {
+  var _expanded = false;
+  var _highlightNewest = true;
+  Timer? _highlightTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.isNewest) {
+      _highlightTimer = Timer(const Duration(milliseconds: 2400), () {
+        if (mounted) setState(() => _highlightNewest = false);
+      });
+    } else {
+      _highlightNewest = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _highlightTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final event = widget.event;
     final color = event.isError
         ? theme.colorScheme.error
         : event.isWarning
@@ -6137,70 +6428,120 @@ class _DiagnosticEvent extends StatelessWidget {
         : event.category == _DiagnosticCategory.snapshot
         ? Icons.downloading_outlined
         : Icons.info_outline;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 4),
-      padding: const EdgeInsets.fromLTRB(10, 9, 10, 9),
-      decoration: BoxDecoration(
-        color:
-            (event.isError
-                    ? theme.colorScheme.error
-                    : event.isWarning
-                    ? const Color(0xffffb547)
-                    : theme.colorScheme.surfaceContainerHighest)
-                .withValues(
-                  alpha: event.isError || event.isWarning ? 0.12 : 0.42,
-                ),
-        borderRadius: BorderRadius.circular(9),
-        border: Border(left: BorderSide(color: color, width: 1)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 18, color: color),
-          const SizedBox(width: 10),
-          if (event.timestamp.isNotEmpty) ...[
-            Text(
-              event.timestamp,
-              style: theme.textTheme.labelSmall?.copyWith(
-                fontFamily: 'monospace',
-                fontSize: 10,
-                color: theme.colorScheme.onSurfaceVariant.withValues(
-                  alpha: 0.72,
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-          ],
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                SelectableText(
-                  event.count > 1
-                      ? '${event.title} (${event.count})'
-                      : event.title,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight:
-                        event.isError ||
-                            event.isWarning ||
-                            event.category == _DiagnosticCategory.connection
-                        ? FontWeight.w700
-                        : FontWeight.w500,
-                  ),
-                ),
-                if (event.detail != null) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    event.detail!,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
+    return Semantics(
+      button: true,
+      expanded: _expanded,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => setState(() => _expanded = !_expanded),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          margin: const EdgeInsets.only(bottom: 2),
+          padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 4),
+          decoration: BoxDecoration(
+            color: _highlightNewest
+                ? color.withValues(alpha: 0.055)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                width: 64,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: Text(
+                    event.timestamp,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      fontFamily: 'monospace',
+                      fontSize: 10,
+                      color: theme.colorScheme.onSurfaceVariant.withValues(
+                        alpha: 0.72,
+                      ),
                     ),
                   ),
-                ],
-              ],
-            ),
+                ),
+              ),
+              SizedBox(
+                width: 27,
+                child: Column(
+                  children: [
+                    Icon(icon, size: 17, color: color),
+                    if (!widget.isLast)
+                      Expanded(
+                        child: Container(
+                          width: 1,
+                          margin: const EdgeInsets.symmetric(vertical: 4),
+                          color: theme.colorScheme.outlineVariant,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            event.count > 1
+                                ? '${event.title} (${event.count})'
+                                : event.title,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: color,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          event.metadata,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                        const SizedBox(width: 2),
+                        Icon(
+                          _expanded ? Icons.expand_less : Icons.expand_more,
+                          size: 18,
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ],
+                    ),
+                    if (event.detail != null) ...[
+                      const SizedBox(height: 1),
+                      Text(
+                        event.detail!,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                    if (_expanded) ...[
+                      const SizedBox(height: 7),
+                      Text(
+                        'Details',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      SelectableText(
+                        event.raw,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -6249,6 +6590,7 @@ class _DiagnosticEventData {
     required this.timestamp,
     required this.category,
     required this.title,
+    required this.raw,
     this.detail,
     this.count = 1,
   });
@@ -6256,17 +6598,27 @@ class _DiagnosticEventData {
   final String timestamp;
   final _DiagnosticCategory category;
   final String title;
+  final String raw;
   final String? detail;
   final int count;
 
   bool get isWarning => category == _DiagnosticCategory.warning;
   bool get isError => category == _DiagnosticCategory.error;
 
+  String get metadata => switch (category) {
+    _DiagnosticCategory.snapshot when count > 1 => '$count events',
+    _DiagnosticCategory.warning => 'Nostr fallback',
+    _DiagnosticCategory.error => 'Review',
+    _DiagnosticCategory.connection => 'FIPS',
+    _ => '',
+  };
+
   _DiagnosticEventData copyWith({String? title, String? detail, int? count}) =>
       _DiagnosticEventData(
         timestamp: timestamp,
         category: category,
         title: title ?? this.title,
+        raw: raw,
         detail: detail ?? this.detail,
         count: count ?? this.count,
       );
@@ -6307,6 +6659,7 @@ _DiagnosticEventData _diagnosticEvent(String entry) {
       timestamp: timestamp,
       category: _DiagnosticCategory.error,
       title: 'Session failed',
+      raw: raw,
       detail: heartbeat
           ? 'Heartbeat timed out. Switched to Nostr fallback.'
           : 'Switched to Nostr fallback.',
@@ -6318,7 +6671,12 @@ _DiagnosticEventData _diagnosticEvent(String entry) {
     return _DiagnosticEventData(
       timestamp: timestamp,
       category: _DiagnosticCategory.warning,
-      title: lower.contains('reconnecting') ? 'Reconnecting' : 'Retrying',
+      title: lower.contains('fallback')
+          ? 'Fallback activated'
+          : lower.contains('reconnecting')
+          ? 'Retrying connection'
+          : 'Retrying snapshot',
+      raw: raw,
       detail: lower.contains('fallback')
           ? 'Using Nostr fallback.'
           : lower.contains(' in ')
@@ -6333,13 +6691,15 @@ _DiagnosticEventData _diagnosticEvent(String entry) {
       timestamp: timestamp,
       category: _DiagnosticCategory.connection,
       title: value.replaceFirst('Connection ', ''),
+      raw: raw,
     );
   }
   if (lower.contains('snapshot')) {
     return _DiagnosticEventData(
       timestamp: timestamp,
       category: _DiagnosticCategory.snapshot,
-      title: value.replaceFirst('Snapshot ', ''),
+      title: value,
+      raw: raw,
     );
   }
   if (lower.contains('fips') || lower.contains('nostr')) {
@@ -6347,27 +6707,34 @@ _DiagnosticEventData _diagnosticEvent(String entry) {
       timestamp: timestamp,
       category: _DiagnosticCategory.transport,
       title: value,
+      raw: raw,
     );
   }
   return _DiagnosticEventData(
     timestamp: timestamp,
     category: _DiagnosticCategory.info,
     title: value,
+    raw: raw,
   );
 }
 
 class _DiagnosticTimeline extends StatelessWidget {
-  const _DiagnosticTimeline({required this.stage, required this.color});
+  const _DiagnosticTimeline({
+    required this.stage,
+    required this.color,
+    required this.connecting,
+  });
 
   final int stage;
   final Color color;
+  final bool connecting;
 
   @override
   Widget build(BuildContext context) {
     return Row(
       children: [
         _DiagnosticTimelineStep(
-          label: 'Connected',
+          label: connecting ? 'Connecting' : 'Connected',
           complete: stage >= 1,
           active: stage == 1,
           color: color,
