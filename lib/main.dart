@@ -4549,6 +4549,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
         final update = decoded['workspace_update'];
         final action = update is Map ? update['action']?.toString() : null;
+        if (action == 'list_fallback') {
+          // This is transport control, never a visible workspace update.
+          return true;
+        }
         final capability = action == null
             ? null
             : _workspaceFipsCapabilityFromOffer(action);

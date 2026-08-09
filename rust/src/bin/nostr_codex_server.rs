@@ -54,7 +54,7 @@ use rust_lib_nostr_codex_phone::workspace::{
     WorkspaceConversationPreprompt, WorkspaceMessage, WorkspaceStore,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 use tracing::{error, info, warn};
 
@@ -77,14 +77,19 @@ const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(45);
 const CODEX_STATUS_MIN_INTERVAL: Duration = Duration::from_secs(8);
 const WORKSPACE_VOICE_DEDUPE_CAPACITY: usize = 256;
 const WORKSPACE_HISTORY_REQUEST_STEP: usize = 5;
-const WORKSPACE_TRANSFER_CHUNK_SIZE: usize = 64;
+// Gift-wrapped Nostr messages limit plaintext to 65,535 bytes. Leave room for
+// transfer metadata and future payload fields rather than batching by count.
+const NOSTR_WORKSPACE_TRANSFER_MAX_BYTES: usize = 60 * 1024;
+const WORKSPACE_FIPS_TRANSFER_CHUNK_SIZE: usize = 64;
 const WORKSPACE_SNAPSHOT_MESSAGE_LIMIT: usize = 20;
 const WORKSPACE_HISTORY_REQUEST_MAX: usize = 50;
 const WORKSPACE_HISTORY_REQUEST_ATTEMPTS: usize = 3;
 const WORKSPACE_FIPS_CAPABILITY_BYTES: usize = 32;
 const WORKSPACE_FIPS_CAPABILITY_TTL: Duration = Duration::from_secs(90);
 const WORKSPACE_FIPS_PROTOCOL_VERSION: u8 = 1;
-const WORKSPACE_FIPS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+// FIPS removes idle links after 30 seconds. A 5-second application heartbeat
+// leaves room for scheduling and packet delay without making the route stale.
+const WORKSPACE_FIPS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const WORKSPACE_FIPS_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKSPACE_FIPS_SERVICE_PORT: u16 = 49_160;
 const WORKSPACE_FIPS_ROUTE_CAPACITY: usize = 128;
@@ -232,6 +237,7 @@ struct WorkspaceOutbound {
 struct WorkspaceFipsOutbound {
     member: String,
     wire: WireMessage,
+    delivered: oneshot::Sender<Result<()>>,
 }
 
 // Peer workers outlive the dispatcher iteration that admitted their FIPS
@@ -247,14 +253,18 @@ impl WorkspaceOutbound {
         wire: WireMessage,
     ) -> Result<()> {
         if self.fips_routes.lock().await.contains_key(member) {
+            let (delivered, receipt) = oneshot::channel();
             self.fips_outgoing
                 .send(WorkspaceFipsOutbound {
                     member: member.to_string(),
                     wire,
+                    delivered,
                 })
                 .await
                 .map_err(|_| anyhow!("shared FIPS workspace outbound queue stopped"))?;
-            return Ok(());
+            return receipt
+                .await
+                .map_err(|_| anyhow!("shared FIPS workspace outbound receipt dropped"))?;
         }
         messenger
             .send_wire_to_pubkey(member, wire)
@@ -2116,9 +2126,21 @@ async fn process_workspace_request(
                 typing: None,
             }
         }
-        "create_agent" => {
-            let profile = workspace_agent_profile_from_request(&request, codex_config)?;
-            let agent_config = codex_config_for_workspace_agent(codex_config, &profile)?;
+        "create_agent" | "create_conversation_agent" => {
+            let conversation_scoped = request.action == "create_conversation_agent";
+            let mut profile = workspace_agent_profile_from_request(&request, codex_config)?;
+            let folder_scope = conversation_scoped
+                .then(|| canonical_conversation_folder_scope(&request.folder_scope, codex_config))
+                .transpose()?;
+            // Conversation-created agents never retain a global workdir. Their
+            // membership folder is the directory used for session provisioning.
+            if conversation_scoped {
+                profile.workdir = None;
+            }
+            let mut agent_config = codex_config_for_workspace_agent(codex_config, &profile)?;
+            if let Some(folder) = folder_scope.as_ref().and_then(|scope| scope.first()) {
+                agent_config.working_dir = PathBuf::from(folder);
+            }
             let (session_id, session_status, session_error) =
                 provision_workspace_agent_session(&agent_config).await;
             let agent = workspace.create_agent_with_profile(
@@ -2133,13 +2155,31 @@ async fn process_workspace_request(
                 session_error.as_deref(),
                 sender,
             )?;
+            if let Some(folder_scope) = folder_scope {
+                let channel_id = request.channel_id.as_deref();
+                workspace.add_conversation_agent(
+                    &agent.id,
+                    channel_id,
+                    channel_id.is_none().then_some(sender),
+                    request.recipient_pubkey.as_deref(),
+                    &folder_scope,
+                )?;
+            }
             let update = WorkspaceUpdate {
                 action: "agent_created".to_string(),
                 channels: vec![],
                 members: vec![],
                 messages: vec![],
                 agents: vec![agent_payload(agent)],
-                conversation_agents: vec![],
+                conversation_agents: if conversation_scoped {
+                    workspace
+                        .conversation_agents()?
+                        .into_iter()
+                        .map(conversation_agent_payload)
+                        .collect()
+                } else {
+                    vec![]
+                },
                 conversation_preprompts: vec![],
                 typing: None,
             };
@@ -2299,7 +2339,9 @@ async fn send_workspace_snapshot(
     let mut snapshot = workspace_snapshot(workspace, sender)?;
     let messages = std::mem::take(&mut snapshot.messages);
     let transfer_id = generate_pairing_secret();
-    let total_chunks = messages.chunks(WORKSPACE_TRANSFER_CHUNK_SIZE).len() + 1;
+    let message_chunks =
+        nostr_workspace_message_chunks(&messages, &transfer_id, "snapshot_messages")?;
+    let total_chunks = message_chunks.len() + 1;
     snapshot.action = history_transfer_action(&transfer_id, 0, total_chunks, "snapshot");
     let payload = WireMessage::workspace_update(snapshot.clone()).to_json()?;
     info!(
@@ -2314,7 +2356,7 @@ async fn send_workspace_snapshot(
         .send(messenger, sender, WireMessage::workspace_update(snapshot))
         .await?;
 
-    for (index, messages) in messages.chunks(WORKSPACE_TRANSFER_CHUNK_SIZE).enumerate() {
+    for (index, messages) in message_chunks.into_iter().enumerate() {
         let update = WorkspaceUpdate {
             action: history_transfer_action(
                 &transfer_id,
@@ -2324,7 +2366,7 @@ async fn send_workspace_snapshot(
             ),
             channels: vec![],
             members: vec![],
-            messages: messages.to_vec(),
+            messages,
             agents: vec![],
             conversation_agents: vec![],
             conversation_preprompts: vec![],
@@ -2537,26 +2579,26 @@ async fn run_workspace_fips_acceptor(
                     error!("shared FIPS workspace outbound queue closed");
                     return;
                 };
-                let Some(peer) = peers.values_mut().find(|peer| peer.member == outbound.member) else {
-                    warn!(member = %outbound.member, "dropped workspace FIPS outbound message for a disconnected peer");
-                    continue;
+                let result = match peers.values_mut().find(|peer| peer.member == outbound.member) {
+                    Some(peer) => match outbound.wire.to_json() {
+                        Ok(frame) => send_workspace_fips_app(
+                            &client,
+                            &peer.npub,
+                            &mut frame_id,
+                            &mut peer.next_message_id,
+                            frame,
+                        ).await,
+                        Err(error) => Err(error.into()),
+                    },
+                    None => Err(anyhow!("FIPS workspace peer is disconnected")),
                 };
-                let frame = match outbound.wire.to_json() {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        warn!(member = %peer.member, "cannot encode workspace FIPS outbound message: {error:#}");
-                        continue;
-                    }
-                };
-                if let Err(error) = send_workspace_fips_app(
-                    &client,
-                    &peer.npub,
-                    &mut frame_id,
-                    &mut peer.next_message_id,
-                    frame,
-                ).await {
-                    warn!(member = %peer.member, "failed to send workspace FIPS outbound message: {error:#}");
+                if let Err(error) = &result {
+                    warn!(member = %outbound.member, "failed to send workspace FIPS outbound message: {error:#}");
+                    // The next outbox attempt must use Nostr, not queue another
+                    // packet for the peer that just proved unavailable.
+                    routes.lock().await.remove(&outbound.member);
                 }
+                let _ = outbound.delivered.send(result);
             }
             _ = heartbeat.tick() => {
                 // Peers can only answer after a ping. Keep them through the
@@ -2654,10 +2696,13 @@ fn workspace_snapshot_frames(
     let mut snapshot = workspace_snapshot(workspace, sender)?;
     let messages = std::mem::take(&mut snapshot.messages);
     let transfer_id = generate_pairing_secret();
-    let total_chunks = messages.chunks(WORKSPACE_TRANSFER_CHUNK_SIZE).len() + 1;
+    let total_chunks = messages.chunks(WORKSPACE_FIPS_TRANSFER_CHUNK_SIZE).len() + 1;
     snapshot.action = history_transfer_action(&transfer_id, 0, total_chunks, "snapshot");
     let mut frames = vec![snapshot];
-    for (index, messages) in messages.chunks(WORKSPACE_TRANSFER_CHUNK_SIZE).enumerate() {
+    for (index, messages) in messages
+        .chunks(WORKSPACE_FIPS_TRANSFER_CHUNK_SIZE)
+        .enumerate()
+    {
         frames.push(WorkspaceUpdate {
             action: history_transfer_action(
                 &transfer_id,
@@ -2689,7 +2734,9 @@ async fn send_channel_history(
         .map(message_payload)
         .collect::<Vec<_>>();
     let transfer_id = generate_pairing_secret();
-    let total_chunks = messages.chunks(WORKSPACE_TRANSFER_CHUNK_SIZE).len() + 1;
+    let message_chunks =
+        nostr_workspace_message_chunks(&messages, &transfer_id, "channel_messages")?;
+    let total_chunks = message_chunks.len() + 1;
     info!(
         channel_id,
         count = messages.len(),
@@ -2718,7 +2765,7 @@ async fn send_channel_history(
     messenger
         .send_wire_to_pubkey(sender, WireMessage::workspace_update(header))
         .await?;
-    for (index, chunk) in messages.chunks(WORKSPACE_TRANSFER_CHUNK_SIZE).enumerate() {
+    for (index, chunk) in message_chunks.into_iter().enumerate() {
         messenger
             .send_wire_to_pubkey(
                 sender,
@@ -2731,7 +2778,7 @@ async fn send_channel_history(
                     ),
                     channels: vec![],
                     members: vec![],
-                    messages: chunk.to_vec(),
+                    messages: chunk,
                     agents: vec![],
                     conversation_agents: vec![],
                     conversation_preprompts: vec![],
@@ -2741,6 +2788,63 @@ async fn send_channel_history(
             .await?;
     }
     Ok(())
+}
+
+fn nostr_workspace_message_chunks(
+    messages: &[WorkspaceMessagePayload],
+    transfer_id: &str,
+    action: &str,
+) -> Result<Vec<Vec<WorkspaceMessagePayload>>> {
+    let mut chunks = Vec::new();
+    let mut chunk = Vec::new();
+    // Use maximum-width sequence fields while budgeting, so final transfer
+    // metadata cannot make a valid chunk exceed the NIP-44 plaintext limit.
+    let transfer_action = history_transfer_action(transfer_id, usize::MAX, usize::MAX, action);
+    for message in messages {
+        chunk.push(message.clone());
+        let update = WorkspaceUpdate {
+            action: transfer_action.clone(),
+            channels: vec![],
+            members: vec![],
+            messages: chunk.clone(),
+            agents: vec![],
+            conversation_agents: vec![],
+            conversation_preprompts: vec![],
+            typing: None,
+        };
+        if WireMessage::workspace_update(update).to_json()?.len()
+            <= NOSTR_WORKSPACE_TRANSFER_MAX_BYTES
+        {
+            continue;
+        }
+        let message = chunk.pop().expect("chunk contains the just-added message");
+        if chunk.is_empty() {
+            bail!("workspace message is too large for Nostr fallback");
+        }
+        chunks.push(std::mem::take(&mut chunk));
+        chunk.push(message);
+        let single_message = WorkspaceUpdate {
+            action: transfer_action.clone(),
+            channels: vec![],
+            members: vec![],
+            messages: chunk.clone(),
+            agents: vec![],
+            conversation_agents: vec![],
+            conversation_preprompts: vec![],
+            typing: None,
+        };
+        if WireMessage::workspace_update(single_message)
+            .to_json()?
+            .len()
+            > NOSTR_WORKSPACE_TRANSFER_MAX_BYTES
+        {
+            bail!("workspace message is too large for Nostr fallback");
+        }
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    Ok(chunks)
 }
 
 // A transfer envelope keeps chunked history identifiable across relay reordering.
@@ -3513,13 +3617,6 @@ async fn route_conversation_agents(
             warn!(agent = %agent.id, status = %agent.session_status, "workspace agent is not ready to respond");
             continue;
         };
-        let agent_config = match codex_config_for_workspace_agent_record(codex_config, &agent) {
-            Ok(config) => config,
-            Err(err) => {
-                warn!(agent = %agent.id, "workspace agent configuration is invalid: {err:#}");
-                continue;
-            }
-        };
         let folder_scope = memberships
             .iter()
             .find(|membership| {
@@ -3535,6 +3632,19 @@ async fn route_conversation_agents(
             })
             .map(|membership| membership.folder_scope.as_slice())
             .unwrap_or_default();
+        let mut agent_config = match codex_config_for_workspace_agent_record(codex_config, &agent) {
+            Ok(config) => config,
+            Err(err) => {
+                warn!(agent = %agent.id, "workspace agent configuration is invalid: {err:#}");
+                continue;
+            }
+        };
+        // A membership's folder scope owns the execution directory. An agent's
+        // saved workdir is only a profile default and must not escape this
+        // conversation when the same agent is assigned elsewhere.
+        if let Some(working_folder) = folder_scope.first() {
+            agent_config.working_dir = PathBuf::from(working_folder);
+        }
         let preprompt = preprompts
             .iter()
             .find(|preprompt| match channel_id {
