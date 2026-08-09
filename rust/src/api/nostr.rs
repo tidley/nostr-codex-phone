@@ -3,13 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use fips_client::{call_status, clean_endpoints, FipsClientConfig};
 use fips_mobile::{
-    Config, FipsMobileClient, FipsMobileConfig, FipsMobileQuicSession, FipsMobileQuicSessionConfig,
-    Identity,
+    fips_application_service_frames, FipsApplicationEnvelope, FipsApplicationFrameAssembler,
+    FipsMobileClient, FipsMobileQuicSession,
 };
 use nostr_sdk::prelude::*;
 use once_cell::sync::Lazy;
-use serde::Serialize;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::blossom::{download_attachment, upload_audio, BlossomUploadConfig};
@@ -38,11 +38,6 @@ static GROUP_CALL_ACCEPT_CANCEL: Lazy<Mutex<HashMap<String, oneshot::Sender<()>>
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 const WORKSPACE_FIPS_SERVICE_PORT: u16 = 49_160;
-const WORKSPACE_FIPS_FRAME_BYTES: usize = 800;
-const WORKSPACE_FIPS_FRAME_HEADER_BYTES: usize = 13;
-const WORKSPACE_FIPS_MAX_CHUNKS: u16 = 128;
-const WORKSPACE_FIPS_MAX_PAYLOAD_BYTES: usize =
-    WORKSPACE_FIPS_FRAME_BYTES * WORKSPACE_FIPS_MAX_CHUNKS as usize;
 
 // This client carries both the legacy snapshot envelopes and future app envelopes.
 // The public snapshot bridge names remain stable for the current Flutter client.
@@ -50,98 +45,17 @@ struct WorkspaceFipsClient {
     client: FipsMobileClient,
     peer_npub: String,
     next_frame_id: u64,
-    assembler: WorkspaceFrameAssembler,
+    assembler: FipsApplicationFrameAssembler,
 }
 
-#[derive(Serialize)]
-struct WorkspaceFipsAppEnvelope<'a> {
-    version: u8,
-    #[serde(rename = "type")]
-    kind: &'static str,
-    message_id: u64,
-    frame: &'a str,
-}
-
+/// Legacy Flutter DTO retained for generated-binding compatibility. Transport
+/// assembly uses [`FipsApplicationFrameAssembler`] from `fips-mobile`.
 #[derive(Default)]
-struct WorkspaceFrameAssembler {
-    frame_id: Option<u64>,
-    last_completed_frame_id: u64,
-    chunk_count: u16,
-    chunks: Vec<Option<Vec<u8>>>,
-}
-
-impl WorkspaceFrameAssembler {
-    fn push(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
-        if packet.len() < WORKSPACE_FIPS_FRAME_HEADER_BYTES
-            || packet.len() > WORKSPACE_FIPS_FRAME_HEADER_BYTES + WORKSPACE_FIPS_FRAME_BYTES
-            || packet[0] != 1
-        {
-            return Err(anyhow!("workspace FIPS service frame is invalid"));
-        }
-        let frame_id = u64::from_be_bytes(packet[1..9].try_into().unwrap());
-        let chunk_index = u16::from_be_bytes(packet[9..11].try_into().unwrap());
-        let chunk_count = u16::from_be_bytes(packet[11..13].try_into().unwrap());
-        if chunk_count == 0 || chunk_count > WORKSPACE_FIPS_MAX_CHUNKS || chunk_index >= chunk_count
-        {
-            return Err(anyhow!("workspace FIPS service frame chunk is invalid"));
-        }
-        if self.frame_id != Some(frame_id) && frame_id <= self.last_completed_frame_id {
-            return Err(anyhow!("workspace FIPS service frame was replayed"));
-        }
-        if self.frame_id != Some(frame_id) {
-            self.frame_id = Some(frame_id);
-            self.chunk_count = chunk_count;
-            self.chunks = vec![None; usize::from(chunk_count)];
-        }
-        if self.chunk_count != chunk_count {
-            return Err(anyhow!("workspace FIPS service frame chunk count changed"));
-        }
-        self.chunks[usize::from(chunk_index)] =
-            Some(packet[WORKSPACE_FIPS_FRAME_HEADER_BYTES..].to_vec());
-        if self.chunks.iter().any(Option::is_none) {
-            return Ok(None);
-        }
-        let payload: Vec<u8> = self
-            .chunks
-            .iter()
-            .flatten()
-            .flat_map(|chunk| chunk.iter().copied())
-            .collect();
-        if payload.len() > WORKSPACE_FIPS_MAX_PAYLOAD_BYTES {
-            return Err(anyhow!("workspace FIPS payload is too large"));
-        }
-        self.frame_id = None;
-        self.last_completed_frame_id = frame_id;
-        self.chunks.clear();
-        Ok(Some(payload))
-    }
-}
-
-fn workspace_service_frames(frame_id: u64, payload: &[u8]) -> Result<Vec<Vec<u8>>> {
-    if payload.len() > WORKSPACE_FIPS_MAX_PAYLOAD_BYTES {
-        return Err(anyhow!("workspace FIPS payload is too large"));
-    }
-    let chunks = if payload.is_empty() {
-        vec![&[][..]]
-    } else {
-        payload.chunks(WORKSPACE_FIPS_FRAME_BYTES).collect()
-    };
-    let chunk_count = chunks.len();
-    let chunk_count =
-        u16::try_from(chunk_count).map_err(|_| anyhow!("workspace FIPS payload is too large"))?;
-    Ok(chunks
-        .into_iter()
-        .enumerate()
-        .map(|(index, chunk)| {
-            let mut packet = Vec::with_capacity(WORKSPACE_FIPS_FRAME_HEADER_BYTES + chunk.len());
-            packet.push(1);
-            packet.extend_from_slice(&frame_id.to_be_bytes());
-            packet.extend_from_slice(&u16::try_from(index).unwrap().to_be_bytes());
-            packet.extend_from_slice(&chunk_count.to_be_bytes());
-            packet.extend_from_slice(chunk);
-            packet
-        })
-        .collect())
+pub struct WorkspaceFrameAssembler {
+    pub frame_id: Option<u64>,
+    pub last_completed_frame_id: u64,
+    pub chunk_count: u16,
+    pub chunks: Vec<Option<Vec<u8>>>,
 }
 
 struct RealtimeAudioPipeline {
@@ -294,7 +208,7 @@ pub fn nostr_public_key(secret_key: String) -> Result<BridgeKeyPair> {
 }
 
 pub async fn nostr_start(config: BridgeNostrConfig) -> Result<BridgeSessionStatus> {
-    let relays = clean_relays(config.relays);
+    let relays = clean_endpoints(&config.relays);
     let old = {
         let mut session = SESSION.lock().await;
         session.take()
@@ -659,7 +573,7 @@ pub async fn fips_workspace_snapshot_connect(
         client: build_workspace_fips_client(config).await?,
         peer_npub,
         next_frame_id: 0,
-        assembler: WorkspaceFrameAssembler::default(),
+        assembler: FipsApplicationFrameAssembler::default(),
     };
     workspace_snapshot_send_frame(&mut client, capability.into_bytes()).await?;
     *WORKSPACE_SNAPSHOT_CLIENT.lock().await = Some(client);
@@ -724,12 +638,7 @@ fn workspace_fips_app_envelope(frame: &str, message_id: u64) -> Result<Vec<u8>> 
         return Err(anyhow!("FIPS workspace app message id must be positive"));
     }
     parse_wire_message(frame)?;
-    Ok(serde_json::to_vec(&WorkspaceFipsAppEnvelope {
-        version: 1,
-        kind: "app",
-        message_id,
-        frame,
-    })?)
+    Ok(FipsApplicationEnvelope::app(message_id, frame.to_string())?.encode()?)
 }
 
 pub async fn fips_workspace_snapshot_stop() -> Result<()> {
@@ -744,7 +653,7 @@ async fn workspace_snapshot_send_frame(
     payload: Vec<u8>,
 ) -> Result<()> {
     transport.next_frame_id = transport.next_frame_id.wrapping_add(1);
-    for packet in workspace_service_frames(transport.next_frame_id, &payload)? {
+    for packet in fips_application_service_frames(transport.next_frame_id, &payload)? {
         transport
             .client
             .send_service_frame_to_npub(
@@ -1017,56 +926,20 @@ fn validate_control_frame(frame: &str) -> Result<()> {
 }
 
 fn build_fips_call_session(config: BridgeFipsCallConfig) -> Result<FipsMobileQuicSession> {
-    let identity = Identity::from_secret_str(config.secret_key.trim())?;
-    let mut session_config = FipsMobileQuicSessionConfig::default();
-    let relays = clean_relays(config.relays);
-    if !relays.is_empty() {
-        session_config.discovery.advert_relays = relays.clone();
-        session_config.discovery.dm_relays = relays;
-    }
-    let stun_servers = clean_relays(config.stun_servers);
-    if !stun_servers.is_empty() {
-        session_config.discovery.stun_servers = stun_servers;
-    }
-    Ok(FipsMobileQuicSession::new(identity, session_config))
+    FipsClientConfig::from(config).quic_session()
 }
 
 async fn build_workspace_fips_client(config: BridgeFipsCallConfig) -> Result<FipsMobileClient> {
-    let mut fips_config = Config::default();
-    fips_config.node.identity.nsec = Some(config.secret_key.trim().to_string());
-    fips_config.node.identity.persistent = false;
-    fips_config.tun.enabled = false;
-    fips_config.dns.enabled = false;
-    fips_config.node.control.enabled = false;
-    fips_config.node.discovery.nostr.enabled = true;
-    fips_config.node.discovery.nostr.advertise = true;
-    fips_config.node.discovery.nostr.share_local_candidates = true;
-    let relays = clean_relays(config.relays);
-    if !relays.is_empty() {
-        fips_config.node.discovery.nostr.advert_relays = relays.clone();
-        fips_config.node.discovery.nostr.dm_relays = relays;
-    }
-    let stun_servers = clean_relays(config.stun_servers);
-    if !stun_servers.is_empty() {
-        fips_config.node.discovery.nostr.stun_servers = stun_servers;
-    }
-    // FipsMobileClient supplies an ephemeral Nostr-advertised UDP transport
-    // when the embedded config has no explicit transport.
-    Ok(FipsMobileClient::start(FipsMobileConfig {
-        config: fips_config,
-        response_port: WORKSPACE_FIPS_SERVICE_PORT,
-        queue_depth: 128,
-    })
-    .await?)
+    FipsClientConfig::from(config)
+        .application_client(WORKSPACE_FIPS_SERVICE_PORT, 128)
+        .await
 }
 
 fn fips_call_status(session: &FipsMobileQuicSession) -> BridgeFipsCallStatus {
+    let status = call_status(session);
     BridgeFipsCallStatus {
-        state: format!("{:?}", session.status()).to_lowercase(),
-        max_datagram_bytes: session
-            .max_datagram_size()
-            .ok()
-            .and_then(|size| u32::try_from(size).ok()),
+        state: status.state,
+        max_datagram_bytes: status.max_datagram_bytes,
     }
 }
 
@@ -1086,17 +959,20 @@ fn key_pair_from_keys(keys: Keys) -> Result<BridgeKeyPair> {
     })
 }
 
-fn clean_relays(relays: Vec<String>) -> Vec<String> {
-    relays
-        .into_iter()
-        .map(|relay| relay.trim().to_string())
-        .filter(|relay| !relay.is_empty())
-        .collect()
+impl From<BridgeFipsCallConfig> for FipsClientConfig {
+    fn from(value: BridgeFipsCallConfig) -> Self {
+        Self {
+            secret_key: value.secret_key,
+            relays: value.relays,
+            stun_servers: value.stun_servers,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fips_mobile::{FipsMobileQuicSessionConfig, Identity};
 
     #[tokio::test]
     async fn stopping_a_call_cancels_pending_acceptance() {
@@ -1128,27 +1004,6 @@ mod tests {
         ));
         assert!(CALL_SESSION.lock().await.is_some());
         fips_call_stop().await.unwrap();
-    }
-
-    #[test]
-    fn workspace_service_frames_round_trip() {
-        let payload = vec![7; WORKSPACE_FIPS_FRAME_BYTES * 2 + 1];
-        let frames = workspace_service_frames(42, &payload).unwrap();
-        let mut assembler = WorkspaceFrameAssembler::default();
-        assert!(assembler.push(&frames[1]).unwrap().is_none());
-        assert!(assembler.push(&frames[0]).unwrap().is_none());
-        assert_eq!(assembler.push(&frames[2]).unwrap(), Some(payload));
-    }
-
-    #[test]
-    fn workspace_service_frames_reject_replays_and_oversized_packets() {
-        let frames = workspace_service_frames(1, b"frame").unwrap();
-        let mut assembler = WorkspaceFrameAssembler::default();
-        assert_eq!(assembler.push(&frames[0]).unwrap(), Some(b"frame".to_vec()));
-        assert!(assembler.push(&frames[0]).is_err());
-        let mut oversized = frames[0].clone();
-        oversized.extend(std::iter::repeat_n(0, WORKSPACE_FIPS_FRAME_BYTES));
-        assert!(WorkspaceFrameAssembler::default().push(&oversized).is_err());
     }
 
     #[test]

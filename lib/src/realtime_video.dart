@@ -28,10 +28,15 @@ class RealtimeVideo {
       (await _methods.invokeMethod<num>('createRenderer'))!.toInt();
   Future<void> releaseRenderer(int textureId) =>
       _methods.invokeMethod<void>('releaseRenderer', {'textureId': textureId});
-  Future<void> pushFragment(int textureId, Uint8List fragment) =>
-      _methods.invokeMethod<void>('pushFragment', {
+
+  /// Returns true when a fragment loss requires the sender to emit a keyframe.
+  Future<bool> pushFragment(int textureId, Uint8List fragment) async =>
+      await _methods.invokeMethod<bool>('pushFragment', {
         'textureId': textureId,
         'fragment': fragment,
-      });
+      }) ??
+      false;
+  Future<void> requestKeyFrame() =>
+      _methods.invokeMethod<void>('requestKeyFrame');
   Future<void> dispose() => _methods.invokeMethod<void>('dispose');
 }

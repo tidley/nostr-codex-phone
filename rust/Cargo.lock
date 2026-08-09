@@ -1161,7 +1161,7 @@ checksum = "9844ddc3a6e533d62bba727eb6c28b5d360921d5175e9ff0f1e621a5c590a4d5"
 [[package]]
 name = "fips"
 version = "0.4.0-dev"
-source = "git+https://github.com/tidley/fips.git?rev=b518e0a41b953cedd2a15f408ffaaecd5a946831#b518e0a41b953cedd2a15f408ffaaecd5a946831"
+source = "git+https://github.com/tidley/fips.git?rev=531d890a77401aaca53e2769d0dfe204387bc4a9#531d890a77401aaca53e2769d0dfe204387bc4a9"
 dependencies = [
  "base64",
  "bech32",
@@ -1202,11 +1202,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fips-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fips-mobile",
+]
+
+[[package]]
 name = "fips-mobile"
 version = "0.4.0-dev"
-source = "git+https://github.com/tidley/fips.git?rev=b518e0a41b953cedd2a15f408ffaaecd5a946831#b518e0a41b953cedd2a15f408ffaaecd5a946831"
+source = "git+https://github.com/tidley/fips.git?rev=531d890a77401aaca53e2769d0dfe204387bc4a9#531d890a77401aaca53e2769d0dfe204387bc4a9"
 dependencies = [
  "fips",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -3241,6 +3251,7 @@ dependencies = [
  "anyhow",
  "base64",
  "chacha20poly1305",
+ "fips-client",
  "fips-mobile",
  "flutter_rust_bridge",
  "futures-util",

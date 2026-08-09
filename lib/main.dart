@@ -27,6 +27,7 @@ import 'package:crew/src/repo_choice.dart';
 import 'package:crew/src/repo_target.dart';
 import 'package:crew/src/realtime_audio.dart';
 import 'package:crew/src/realtime_video.dart';
+import 'package:crew/src/video_call_control.dart';
 import 'package:crew/src/settings_storage.dart';
 import 'package:crew/src/media_models.dart';
 import 'package:crew/src/text_utils.dart';
@@ -55,7 +56,7 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.18+318';
+const _appVersion = '0.3.19+319';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
 
@@ -683,6 +684,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   int _workspaceFipsRetryAttempt = 0;
   int _workspaceFipsSessionGeneration = 0;
   int? _workspaceFipsSnapshotGeneration;
+  int _workspaceFipsNextMessageId = 0;
+  int _workspaceFipsLastReceivedMessageId = 0;
+  // App envelopes are ordered, but keep a small local replay window as the
+  // native transport can reconnect while an old service packet is in flight.
+  final Set<int> _workspaceFipsReceivedMessageIds = <int>{};
   final Map<String, int> _workspaceUnreadCounts = {};
   final Map<String, int> _workspaceThreadUnreadCounts = {};
   String? _workspaceOpenThreadKey;
@@ -4410,6 +4416,28 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
   }
 
+  /// Uses the authenticated FIPS application route after bootstrap. Nostr stays
+  /// available for discovery and when that UDP route cannot carry a request.
+  Future<String> _sendQueryPreferFips(String query) async {
+    if (_workspaceFipsConnectionState == 'active') {
+      final messageId = ++_workspaceFipsNextMessageId;
+      try {
+        await fipsWorkspaceSendWire(
+          frame: query,
+          messageId: BigInt.from(messageId),
+        );
+        return 'fips:out:$messageId';
+      } catch (error) {
+        _recordDiagnostic(
+          'FIPS application send failed; recovering with Nostr: $error',
+        );
+        _setWorkspaceFipsConnectionState('reconnecting');
+        _scheduleWorkspaceFipsRetry();
+      }
+    }
+    return nostrSendQuery(query: query);
+  }
+
   void _startPolling() {
     if (_polling) return;
     _polling = true;
@@ -5192,7 +5220,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       final eventId = await _sendWithAutoRecovery(
         label: 'query send',
         sender: () =>
-            nostrSendQuery(query: _buildQueryPayload(query, target: target)),
+            _sendQueryPreferFips(_buildQueryPayload(query, target: target)),
       );
       if (!mounted) return;
       setState(() {
@@ -5259,7 +5287,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       );
       await _sendWithAutoRecovery(
         label: 'cancel request',
-        sender: () => nostrSendQuery(query: payload),
+        sender: () => _sendQueryPreferFips(payload),
       );
       if (!mounted) return;
       setState(() => _status = 'Cancel requested');
@@ -5289,8 +5317,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       setState(() => _status = 'Stopping current task...');
       await _sendWithAutoRecovery(
         label: 'stop task request',
-        sender: () => nostrSendQuery(
-          query: jsonEncode(_withActiveRoute({'cancel_request': true})),
+        sender: () => _sendQueryPreferFips(
+          jsonEncode(_withActiveRoute({'cancel_request': true})),
         ),
       );
       if (mounted) setState(() => _status = 'Stop requested');
@@ -5333,7 +5361,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     try {
       await _sendWithAutoRecovery(
         label: '$label request',
-        sender: () => nostrSendQuery(query: payload),
+        sender: () => _sendQueryPreferFips(payload),
       );
       if (!mounted) return;
       setState(() {
@@ -5603,7 +5631,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       final eventId = await _sendWithAutoRecovery(
         label: 'catch-up request',
         sender: () =>
-            nostrSendQuery(query: _buildQueryPayload(prompt, target: target)),
+            _sendQueryPreferFips(_buildQueryPayload(prompt, target: target)),
       );
       if (!mounted) return;
       setState(() {
@@ -5707,7 +5735,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     try {
       await _sendWithAutoRecovery(
         label: 'spawn session request',
-        sender: () => nostrSendQuery(query: payload),
+        sender: () => _sendQueryPreferFips(payload),
       );
       if (!mounted) return false;
       setState(() => _status = sentStatus);
@@ -5750,7 +5778,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       });
       await _sendWithAutoRecovery(
         label: 'repo folder list request',
-        sender: () => nostrSendQuery(query: payload),
+        sender: () => _sendQueryPreferFips(payload),
       );
       if (mounted) setState(() => _status = 'Waiting for repo folders...');
       return await completer.future.timeout(
@@ -5821,7 +5849,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       );
       final eventId = await _sendWithAutoRecovery(
         label: 'attachment send',
-        sender: () => nostrSendQuery(query: analysisQuery),
+        sender: () => _sendQueryPreferFips(analysisQuery),
       );
       if (!mounted) return;
       setState(() {
@@ -6101,7 +6129,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       final eventId = await _sendWithAutoRecovery(
         label: 'resend query',
         sender: () =>
-            nostrSendQuery(query: _buildQueryPayload(query, target: target)),
+            _sendQueryPreferFips(_buildQueryPayload(query, target: target)),
       );
       if (!mounted) return;
       setState(() {
@@ -6146,8 +6174,8 @@ Return a concise catch-up summary of what happened after that point: completed w
       }
       final eventId = await _sendWithAutoRecovery(
         label: 'resend voice note',
-        sender: () => nostrSendQuery(
-          query: _buildMediaBundlePayload(
+        sender: () => _sendQueryPreferFips(
+          _buildMediaBundlePayload(
             attachment: audio,
             caption: '',
             target: target,
@@ -6406,8 +6434,8 @@ Return a concise catch-up summary of what happened after that point: completed w
 
       final eventId = await _sendWithAutoRecovery(
         label: 'voice note send',
-        sender: () => nostrSendQuery(
-          query: _buildMediaBundlePayload(
+        sender: () => _sendQueryPreferFips(
+          _buildMediaBundlePayload(
             attachment: audio,
             caption: '',
             target: sendTarget,
@@ -7310,8 +7338,8 @@ Return a concise catch-up summary of what happened after that point: completed w
     try {
       await _sendWithAutoRecovery(
         label: 'workspace invite request',
-        sender: () => nostrSendQuery(
-          query: jsonEncode({
+        sender: () => _sendQueryPreferFips(
+          jsonEncode({
             'create_invite': {'expires_in_seconds': 900},
           }),
         ),
@@ -7332,7 +7360,30 @@ Return a concise catch-up summary of what happened after that point: completed w
       request = {'action': 'list'};
     }
     if (request['action'] == 'list') {
-      request = {...request, 'fips_snapshot': _workspaceFipsEnabled.value};
+      // A live FIPS session receives its refresh directly. Only Nostr bootstrap
+      // requests need a capability offer that creates or replaces the session.
+      request = {
+        ...request,
+        'fips_snapshot':
+            _workspaceFipsEnabled.value &&
+            _workspaceFipsConnectionState != 'active',
+      };
+    }
+    final bootstrap = request['action'] == 'list_fallback';
+    if (!bootstrap && _workspaceFipsConnectionState == 'active') {
+      try {
+        await fipsWorkspaceSendWire(
+          frame: jsonEncode({'workspace_request': request}),
+          messageId: BigInt.from(++_workspaceFipsNextMessageId),
+        );
+        return;
+      } catch (error) {
+        _recordDiagnostic(
+          'FIPS workspace send failed; recovering with Nostr: $error',
+        );
+        _setWorkspaceFipsConnectionState('reconnecting');
+        _scheduleWorkspaceFipsRetry();
+      }
     }
     if (!await _ensureConnectedToParentService()) return;
     await _sendWithAutoRecovery(
@@ -7370,6 +7421,8 @@ Return a concise catch-up summary of what happened after that point: completed w
         peerNpub: _connectedPeerPubkey ?? _peerPubkeyController.text.trim(),
         capability: capability,
       );
+      _workspaceFipsReceivedMessageIds.clear();
+      _workspaceFipsLastReceivedMessageId = 0;
       var lastFrameAt = DateTime.now();
       while (mounted) {
         if (!_workspaceFipsEnabled.value) return;
@@ -7403,10 +7456,11 @@ Return a concise catch-up summary of what happened after that point: completed w
             _setWorkspaceFipsConnectionState('active');
             continue;
           case 'snapshot':
+          case 'update':
             final snapshotFrame = envelope['frame'];
             if (snapshotFrame is! String) {
               throw const FormatException(
-                'FIPS workspace snapshot frame is invalid',
+                'FIPS workspace update frame is invalid',
               );
             }
             final decoded = jsonDecode(snapshotFrame) as Map<String, dynamic>;
@@ -7431,6 +7485,38 @@ Return a concise catch-up summary of what happened after that point: completed w
               _workspaceFipsRetryAttempt = 0;
               _setWorkspaceFipsConnectionState('active');
             }
+            continue;
+          case 'app':
+            final messageId = envelope['message_id'];
+            final wireFrame = envelope['frame'];
+            if (messageId is! int || messageId <= 0 || wireFrame is! String) {
+              throw const FormatException(
+                'FIPS workspace app envelope is invalid',
+              );
+            }
+            if (messageId <= _workspaceFipsLastReceivedMessageId ||
+                !_workspaceFipsReceivedMessageIds.add(messageId)) {
+              _recordDiagnostic(
+                'Ignored duplicate FIPS workspace app message $messageId',
+              );
+              continue;
+            }
+            _workspaceFipsLastReceivedMessageId = messageId;
+            if (_workspaceFipsReceivedMessageIds.length > 4096) {
+              // IDs are strictly increasing, so retaining only the newest ID
+              // is sufficient after a normal long-lived session.
+              _workspaceFipsReceivedMessageIds
+                ..clear()
+                ..add(messageId);
+            }
+            final message = _fipsWireMessage(wireFrame, messageId);
+            if (message == null) {
+              throw const FormatException(
+                'FIPS workspace app wire message is invalid',
+              );
+            }
+            _receiveMessage(message);
+            _setWorkspaceFipsConnectionState('active');
             continue;
           default:
             throw FormatException(
@@ -7465,6 +7551,59 @@ Return a concise catch-up summary of what happened after that point: completed w
         _workspaceFipsSnapshotInFlight = false;
         _workspaceFipsSnapshotGeneration = null;
       }
+    }
+  }
+
+  BridgeIncomingMessage? _fipsWireMessage(String frame, int messageId) {
+    try {
+      final decoded = jsonDecode(frame);
+      if (decoded is! Map) return null;
+      final wire = Map<String, dynamic>.from(decoded);
+      final kind = wire.containsKey('response')
+          ? 'response'
+          : wire.length == 1
+          ? wire.keys.single
+          : null;
+      if (kind == null) return null;
+      final textField = switch (kind) {
+        'query' => 'query',
+        'transcript' => 'transcript',
+        'status' => 'status',
+        'response' => 'response',
+        'error' => 'error',
+        'workspace_request' => 'workspace_request',
+        'workspace_update' => 'workspace_update',
+        'call_invite' || 'call_answer' || 'call_hangup' => kind,
+        'group_call_invite' ||
+        'group_call_answer' ||
+        'group_call_hangup' => kind,
+        _ => kind,
+      };
+      final value = wire[textField];
+      final text = value is String
+          ? value
+          : value is Map &&
+                (kind.startsWith('call_') || kind.startsWith('group_call_'))
+          ? value['call_id']?.toString() ?? ''
+          : value is Map && kind == 'workspace_update'
+          ? value['action']?.toString() ?? ''
+          : value is Map && kind == 'workspace_request'
+          ? value['action']?.toString() ?? ''
+          : value == null
+          ? ''
+          : jsonEncode(value);
+      final peer = _connectedPeerPubkey ?? _peerPubkeyController.text.trim();
+      if (peer.isEmpty) return null;
+      return BridgeIncomingMessage(
+        senderPubkey: peer,
+        senderPubkeyHex: peer,
+        kind: kind,
+        text: text,
+        rawJson: frame,
+        eventId: 'fips:$peer:$messageId',
+      );
+    } catch (_) {
+      return null;
     }
   }
 
@@ -7889,6 +8028,9 @@ Return a concise catch-up summary of what happened after that point: completed w
           await _clearGroupCall();
           return;
         }
+        if (isVideoKeyFrameRequest(frame, call.callId)) {
+          await _realtimeVideo.requestKeyFrame();
+        }
       } catch (_) {
         return;
       }
@@ -7969,7 +8111,17 @@ Return a concise catch-up summary of what happened after that point: completed w
           timeoutMs: BigInt.from(50),
         );
         if (fragment != null && _videoTextures[peer] == texture) {
-          await _realtimeVideo.pushFragment(texture, fragment);
+          final needsKeyFrame = await _realtimeVideo.pushFragment(
+            texture,
+            fragment,
+          );
+          if (needsKeyFrame) {
+            await fipsGroupCallSendControl(
+              callId: call.callId,
+              peerNpub: peer,
+              frame: videoKeyFrameRequest(call.callId),
+            );
+          }
         }
       } catch (_) {
         return;
@@ -8218,6 +8370,9 @@ Return a concise catch-up summary of what happened after that point: completed w
           await _clearCall();
           return;
         }
+        if (isVideoKeyFrameRequest(frame, callId)) {
+          await _realtimeVideo.requestKeyFrame();
+        }
       } catch (_) {
         return;
       }
@@ -8332,7 +8487,13 @@ Return a concise catch-up summary of what happened after that point: completed w
           timeoutMs: BigInt.from(50),
         );
         if (fragment != null && _videoTextures[peer] == texture) {
-          await _realtimeVideo.pushFragment(texture, fragment);
+          final needsKeyFrame = await _realtimeVideo.pushFragment(
+            texture,
+            fragment,
+          );
+          if (needsKeyFrame) {
+            await fipsCallSendControl(frame: videoKeyFrameRequest(callId));
+          }
         }
       } catch (_) {
         return;
@@ -8459,8 +8620,8 @@ Return a concise catch-up summary of what happened after that point: completed w
     try {
       await _sendWithAutoRecovery(
         label: 'OpenCode model list request',
-        sender: () => nostrSendQuery(
-          query: jsonEncode({
+        sender: () => _sendQueryPreferFips(
+          jsonEncode({
             'tool_request': 'model_list',
             'request_id': requestId,
             'opencode_model_list_request': true,

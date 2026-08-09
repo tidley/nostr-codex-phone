@@ -18,6 +18,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.Bundle
 import android.util.DisplayMetrics
 import android.view.Surface
 import androidx.core.content.ContextCompat
@@ -78,7 +79,13 @@ class RealtimeVideo(
                 val id = call.argument<Number>("textureId")?.toLong()
                 val fragment = call.argument<ByteArray>("fragment")
                 if (id == null || fragment == null) error(result, "invalid_fragment", "textureId and fragment are required.")
-                else { renderers[id]?.push(fragment); success(result) }
+                else success(result, renderers[id]?.push(fragment) ?: false)
+            }
+            "requestKeyFrame" -> handler.post {
+                encoder?.setParameters(Bundle().apply {
+                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                })
+                success(result)
             }
             "dispose" -> { dispose(); success(result) }
             else -> main { result.notImplemented() }
@@ -127,7 +134,8 @@ class RealtimeVideo(
                     it.configure(MediaFormat.createVideoFormat(mime, width, height).apply {
                         setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                         setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
-                        setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
+                        // Static screen content needs fewer encoded frames than a camera.
+                        setInteger(MediaFormat.KEY_FRAME_RATE, if (source == "screen") screenFrameRate else cameraFrameRate)
                         setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
                     }, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                     encoderSurface = it.createInputSurface()
@@ -317,13 +325,27 @@ class RealtimeVideo(
         private var sequence = -1
         private var expectedFragment = 0
         private var frame = java.io.ByteArrayOutputStream()
+        private var waitingForKeyFrame = true
+        private var keyFrameRequestPending = false
 
-        fun push(fragment: ByteArray) {
-            if (fragment.size <= headerBytes || fragment[0].toInt() != videoVersion) return
+        fun push(fragment: ByteArray): Boolean {
+            if (fragment.size <= headerBytes || fragment[0].toInt() != videoVersion) return false
             val sequence = ((fragment[2].toInt() and 0xff) shl 8) or (fragment[3].toInt() and 0xff)
             val part = ((fragment[4].toInt() and 0xff) shl 8) or (fragment[5].toInt() and 0xff)
-            if (sequence != this.sequence) { this.sequence = sequence; expectedFragment = 0; frame.reset() }
-            if (part != expectedFragment) { frame.reset(); expectedFragment = 0; return }
+            val isKeyFrame = fragment[1].toInt() and keyFrameFlag != 0
+            if (sequence != this.sequence) {
+                if (frame.size() > 0) waitingForKeyFrame = true
+                this.sequence = sequence; expectedFragment = 0; frame.reset()
+            }
+            if (waitingForKeyFrame) {
+                if (!isKeyFrame) return requestKeyFrame()
+                waitingForKeyFrame = false
+                keyFrameRequestPending = false
+            }
+            if (part != expectedFragment) {
+                frame.reset(); expectedFragment = 0; waitingForKeyFrame = true
+                return requestKeyFrame()
+            }
             frame.write(fragment, headerBytes, fragment.size - headerBytes); expectedFragment++
             if (fragment[1].toInt() and endOfFrameFlag != 0) {
                 val index = codec.dequeueInputBuffer(0)
@@ -335,6 +357,12 @@ class RealtimeVideo(
                 while (true) { val output = codec.dequeueOutputBuffer(info, 0); if (output < 0) break; codec.releaseOutputBuffer(output, true) }
                 frame.reset(); expectedFragment = 0
             }
+            return false
+        }
+        private fun requestKeyFrame(): Boolean {
+            if (keyFrameRequestPending) return false
+            keyFrameRequestPending = true
+            return true
         }
         fun release() { codec.stop(); codec.release(); surface.release(); entry.release() }
     }
@@ -347,8 +375,9 @@ class RealtimeVideo(
         // that reject the previous 640x360 encoder surface.
         private const val width = 640
         private const val height = 480
-        private const val frameRate = 10
-        private const val bitRate = 500_000
+        private const val cameraFrameRate = 10
+        private const val screenFrameRate = 5
+        private const val bitRate = 350_000
         private const val videoVersion = 2
         private const val headerBytes = 10
         // Leave room below QUIC's 1200-byte minimum datagram size for transport

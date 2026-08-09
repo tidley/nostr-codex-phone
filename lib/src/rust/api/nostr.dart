@@ -6,8 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `active_session`, `build_fips_call_session`, `clean_relays`, `fips_call_receive_media`, `fips_call_status`, `fips_group_call_receive_media`, `group_call_key`, `key_pair_from_keys`, `new`, `queue`, `take`, `validate_control_frame`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RealtimeAudioPipeline`
+// These functions are ignored because they are not marked as `pub`: `active_session`, `build_fips_call_session`, `build_workspace_fips_client`, `clean_relays`, `fips_call_receive_media`, `fips_call_status`, `fips_group_call_receive_media`, `group_call_key`, `key_pair_from_keys`, `new`, `push`, `queue`, `take`, `validate_control_frame`, `workspace_fips_app_envelope`, `workspace_service_frames`, `workspace_snapshot_send_frame`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RealtimeAudioPipeline`, `WorkspaceFipsAppEnvelope`, `WorkspaceFipsClient`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 List<String> nostrDefaultRelays() =>
@@ -157,7 +157,7 @@ Future<void> fipsWorkspaceSnapshotConnect({
   capability: capability,
 );
 
-/// Receive one JSON workspace frame from the reliable FIPS stream.
+/// Receive one JSON workspace frame from the shared FIPS service transport.
 Future<String?> fipsWorkspaceSnapshotReceive({required BigInt timeoutMs}) =>
     RustLib.instance.api.crateApiNostrFipsWorkspaceSnapshotReceive(
       timeoutMs: timeoutMs,
@@ -166,6 +166,16 @@ Future<String?> fipsWorkspaceSnapshotReceive({required BigInt timeoutMs}) =>
 /// Send one JSON workspace control frame over the dedicated reliable stream.
 Future<void> fipsWorkspaceSnapshotSend({required String frame}) =>
     RustLib.instance.api.crateApiNostrFipsWorkspaceSnapshotSend(frame: frame);
+
+/// Send one application envelope on the persistent workspace FIPS service.
+/// The snapshot bridge remains available for legacy hello/ping/pong traffic.
+Future<void> fipsWorkspaceSendWire({
+  required String frame,
+  required BigInt messageId,
+}) => RustLib.instance.api.crateApiNostrFipsWorkspaceSendWire(
+  frame: frame,
+  messageId: messageId,
+);
 
 Future<void> fipsWorkspaceSnapshotStop() =>
     RustLib.instance.api.crateApiNostrFipsWorkspaceSnapshotStop();
@@ -601,4 +611,38 @@ class BridgeSessionStatus {
           publicKeyHex == other.publicKeyHex &&
           peerPubkey == other.peerPubkey &&
           relayCount == other.relayCount;
+}
+
+class WorkspaceFrameAssembler {
+  final BigInt? frameId;
+  final BigInt lastCompletedFrameId;
+  final int chunkCount;
+  final List<Uint8List?> chunks;
+
+  const WorkspaceFrameAssembler({
+    this.frameId,
+    required this.lastCompletedFrameId,
+    required this.chunkCount,
+    required this.chunks,
+  });
+
+  static Future<WorkspaceFrameAssembler> default_() =>
+      RustLib.instance.api.crateApiNostrWorkspaceFrameAssemblerDefault();
+
+  @override
+  int get hashCode =>
+      frameId.hashCode ^
+      lastCompletedFrameId.hashCode ^
+      chunkCount.hashCode ^
+      chunks.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WorkspaceFrameAssembler &&
+          runtimeType == other.runtimeType &&
+          frameId == other.frameId &&
+          lastCompletedFrameId == other.lastCompletedFrameId &&
+          chunkCount == other.chunkCount &&
+          chunks == other.chunks;
 }
