@@ -1,0 +1,10 @@
+[package]
+name = "fips-client"
+version = "0.1.0"
+edition = "2021"
+description = "Shared FIPS transport configuration for Nostr clients"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+fips-mobile = { git = "https://github.com/tidley/fips.git", rev = "531d890a77401aaca53e2769d0dfe204387bc4a9", default-features = false, features = ["nostr-discovery"] }

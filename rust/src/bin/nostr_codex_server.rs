@@ -13,7 +13,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use fips_mobile::{Config, FipsMobileClient, FipsMobileConfig};
+use fips_client::FipsClientConfig;
+use fips_mobile::{
+    fips_application_service_frames, FipsApplicationEnvelope, FipsApplicationFrameAssembler,
+    FipsMobileClient,
+};
 use futures_util::FutureExt;
 use nostr_sdk::prelude::{Keys, PublicKey, ToBech32};
 use qrcode::{Color, QrCode};
@@ -83,11 +87,6 @@ const WORKSPACE_FIPS_PROTOCOL_VERSION: u8 = 1;
 const WORKSPACE_FIPS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const WORKSPACE_FIPS_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKSPACE_FIPS_SERVICE_PORT: u16 = 49_160;
-const WORKSPACE_FIPS_FRAME_BYTES: usize = 800;
-const WORKSPACE_FIPS_FRAME_HEADER_BYTES: usize = 13;
-const WORKSPACE_FIPS_MAX_CHUNKS: u16 = 128;
-const WORKSPACE_FIPS_MAX_PAYLOAD_BYTES: usize =
-    WORKSPACE_FIPS_FRAME_BYTES * WORKSPACE_FIPS_MAX_CHUNKS as usize;
 const WORKSPACE_FIPS_ROUTE_CAPACITY: usize = 128;
 const WORKSPACE_FIPS_ASSEMBLER_CAPACITY: usize = 256;
 const WORKSPACE_AGENT_QUEUE_CAPACITY: usize = 16;
@@ -216,92 +215,71 @@ struct WorkerRuntimeConfig {
     workspace_path: PathBuf,
 }
 
-#[derive(Default)]
-struct WorkspaceFrameAssembler {
-    frame_id: Option<u64>,
-    last_completed_frame_id: u64,
-    chunk_count: u16,
-    chunks: Vec<Option<Vec<u8>>>,
-}
-
 struct WorkspaceFipsPeer {
     member: String,
     npub: String,
     last_pong: Instant,
     last_message_id: u64,
+    next_message_id: u64,
 }
 
-impl WorkspaceFrameAssembler {
-    fn push(&mut self, packet: &[u8]) -> Result<Option<Vec<u8>>> {
-        if packet.len() < WORKSPACE_FIPS_FRAME_HEADER_BYTES
-            || packet.len() > WORKSPACE_FIPS_FRAME_HEADER_BYTES + WORKSPACE_FIPS_FRAME_BYTES
-            || packet[0] != 1
-        {
-            bail!("workspace FIPS service frame is invalid");
+#[derive(Clone)]
+struct WorkspaceOutbound {
+    fips_routes: Arc<Mutex<HashMap<String, String>>>,
+    fips_outgoing: mpsc::Sender<WorkspaceFipsOutbound>,
+}
+
+struct WorkspaceFipsOutbound {
+    member: String,
+    wire: WireMessage,
+}
+
+// Peer workers outlive the dispatcher iteration that admitted their FIPS
+// frame, so they share this runtime's authenticated FIPS route registry.
+static WORKSPACE_OUTBOUND: once_cell::sync::Lazy<StdMutex<Option<WorkspaceOutbound>>> =
+    once_cell::sync::Lazy::new(|| StdMutex::new(None));
+
+impl WorkspaceOutbound {
+    async fn send(
+        &self,
+        messenger: &NostrMessenger,
+        member: &str,
+        wire: WireMessage,
+    ) -> Result<()> {
+        if self.fips_routes.lock().await.contains_key(member) {
+            self.fips_outgoing
+                .send(WorkspaceFipsOutbound {
+                    member: member.to_string(),
+                    wire,
+                })
+                .await
+                .map_err(|_| anyhow!("shared FIPS workspace outbound queue stopped"))?;
+            return Ok(());
         }
-        let frame_id = u64::from_be_bytes(packet[1..9].try_into().unwrap());
-        let chunk_index = u16::from_be_bytes(packet[9..11].try_into().unwrap());
-        let chunk_count = u16::from_be_bytes(packet[11..13].try_into().unwrap());
-        if chunk_count == 0 || chunk_count > WORKSPACE_FIPS_MAX_CHUNKS || chunk_index >= chunk_count
-        {
-            bail!("workspace FIPS service frame chunk is invalid");
-        }
-        if self.frame_id != Some(frame_id) && frame_id <= self.last_completed_frame_id {
-            bail!("workspace FIPS service frame was replayed");
-        }
-        if self.frame_id != Some(frame_id) {
-            self.frame_id = Some(frame_id);
-            self.chunk_count = chunk_count;
-            self.chunks = vec![None; usize::from(chunk_count)];
-        }
-        if self.chunk_count != chunk_count {
-            bail!("workspace FIPS service frame chunk count changed");
-        }
-        self.chunks[usize::from(chunk_index)] =
-            Some(packet[WORKSPACE_FIPS_FRAME_HEADER_BYTES..].to_vec());
-        if self.chunks.iter().any(Option::is_none) {
-            return Ok(None);
-        }
-        let payload: Vec<u8> = self
-            .chunks
-            .iter()
-            .flatten()
-            .flat_map(|chunk| chunk.iter().copied())
-            .collect();
-        if payload.len() > WORKSPACE_FIPS_MAX_PAYLOAD_BYTES {
-            bail!("workspace FIPS payload is too large");
-        }
-        self.frame_id = None;
-        self.last_completed_frame_id = frame_id;
-        self.chunks.clear();
-        Ok(Some(payload))
+        messenger
+            .send_wire_to_pubkey(member, wire)
+            .await
+            .map(|_| ())
     }
 }
 
-fn workspace_service_frames(frame_id: u64, payload: &[u8]) -> Result<Vec<Vec<u8>>> {
-    if payload.len() > WORKSPACE_FIPS_MAX_PAYLOAD_BYTES {
-        bail!("workspace FIPS payload is too large");
-    }
-    let chunks = if payload.is_empty() {
-        vec![&[][..]]
+async fn send_application_wire(
+    messenger: &NostrMessenger,
+    member: &str,
+    wire: WireMessage,
+) -> Result<()> {
+    let outbound = WORKSPACE_OUTBOUND
+        .lock()
+        .expect("workspace outbound registry lock poisoned")
+        .clone();
+    if let Some(outbound) = outbound {
+        outbound.send(messenger, member, wire).await
     } else {
-        payload.chunks(WORKSPACE_FIPS_FRAME_BYTES).collect()
-    };
-    let chunk_count = chunks.len();
-    let chunk_count = u16::try_from(chunk_count).context("workspace FIPS payload is too large")?;
-    Ok(chunks
-        .into_iter()
-        .enumerate()
-        .map(|(index, chunk)| {
-            let mut packet = Vec::with_capacity(WORKSPACE_FIPS_FRAME_HEADER_BYTES + chunk.len());
-            packet.push(1);
-            packet.extend_from_slice(&frame_id.to_be_bytes());
-            packet.extend_from_slice(&u16::try_from(index).unwrap().to_be_bytes());
-            packet.extend_from_slice(&chunk_count.to_be_bytes());
-            packet.extend_from_slice(chunk);
-            packet
-        })
-        .collect())
+        messenger
+            .send_wire_to_pubkey(member, wire)
+            .await
+            .map(|_| ())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -350,6 +328,7 @@ struct WorkspaceAgentQueues {
     turn_locks: HashMap<String, Arc<Mutex<()>>>,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
+    outbound: WorkspaceOutbound,
     codex_config: CodexConfig,
 }
 
@@ -357,6 +336,7 @@ impl WorkspaceAgentQueues {
     fn new(
         workspace_path: PathBuf,
         messenger: Arc<NostrMessenger>,
+        outbound: WorkspaceOutbound,
         codex_config: CodexConfig,
     ) -> Self {
         Self {
@@ -364,6 +344,7 @@ impl WorkspaceAgentQueues {
             turn_locks: HashMap::new(),
             workspace_path,
             messenger,
+            outbound,
             codex_config,
         }
     }
@@ -392,6 +373,7 @@ impl WorkspaceAgentQueues {
                 turn_lock,
                 self.workspace_path.clone(),
                 Arc::clone(&self.messenger),
+                self.outbound.clone(),
                 self.codex_config.clone(),
             ));
             sender
@@ -1018,12 +1000,27 @@ async fn main() -> Result<()> {
 async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     let mut session_workers = HashMap::<String, mpsc::Sender<IncomingMessage>>::new();
     let mut workspace_voice_deduper = WorkspaceVoiceDeduper::new();
+    let fips_routes = Arc::new(Mutex::new(HashMap::new()));
+    let (fips_outgoing, fips_outbound_messages) = mpsc::channel(128);
+    let workspace_outbound = WorkspaceOutbound {
+        fips_routes: Arc::clone(&fips_routes),
+        fips_outgoing,
+    };
+    *WORKSPACE_OUTBOUND
+        .lock()
+        .expect("workspace outbound registry lock poisoned") = Some(workspace_outbound.clone());
     let mut workspace_agent_queues = WorkspaceAgentQueues::new(
         config.workspace_path.clone(),
         Arc::clone(&config.messenger),
+        workspace_outbound.clone(),
         config.codex_config.clone(),
     );
-    flush_workspace_notification_outbox(&config.workspace, config.messenger.as_ref()).await;
+    flush_workspace_notification_outbox(
+        &config.workspace,
+        config.messenger.as_ref(),
+        &workspace_outbound,
+    )
+    .await;
     let capabilities = Arc::new(Mutex::new(HashMap::new()));
     // The FIPS acceptor owns its socket, while this bounded queue feeds proven
     // application envelopes through the same authorization and dispatch path as DMs.
@@ -1034,6 +1031,8 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         Arc::clone(&capabilities),
         config.workspace_path.clone(),
         fips_incoming,
+        fips_routes,
+        fips_outbound_messages,
     ));
     start_system_status_collector(
         worker_state_path(&config.codex_config.working_dir, "system-status.jsonl"),
@@ -1106,6 +1105,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                     if let Err(err) = send_workspace_snapshot(
                         &config.workspace,
                         config.messenger.as_ref(),
+                        &workspace_outbound,
                         &message.sender_pubkey_hex,
                     )
                     .await
@@ -1185,6 +1185,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             match process_workspace_request(
                 &config.workspace,
                 config.messenger.as_ref(),
+                &workspace_outbound,
                 &message.sender_pubkey_hex,
                 &message.event_id,
                 request,
@@ -1473,6 +1474,7 @@ async fn queue_workspace_update(
 async fn flush_workspace_notification_outbox(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
 ) {
     for notification in workspace.pending_notifications().unwrap_or_default() {
         let Ok(wire) = parse_wire_message(&notification.payload) else {
@@ -1485,8 +1487,8 @@ async fn flush_workspace_notification_outbox(
         };
         let mut delivered = false;
         for attempt in 0..3 {
-            match messenger
-                .send_wire_to_pubkey(&notification.recipient, wire.clone())
+            match outbound
+                .send(messenger, &notification.recipient, wire.clone())
                 .await
             {
                 Ok(_) => {
@@ -1647,6 +1649,7 @@ fn legacy_message_replays_workspace_voice(
 async fn process_workspace_request(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
     sender: &str,
     event_id: &str,
     request: WorkspaceRequest,
@@ -1711,7 +1714,7 @@ async fn process_workspace_request(
         }
         "list" => {
             if !request.fips_snapshot {
-                send_workspace_snapshot(workspace, messenger, sender).await?;
+                send_workspace_snapshot(workspace, messenger, outbound, sender).await?;
                 return Ok(());
             }
             let capability = issue_workspace_fips_capability(fips_capabilities, sender).await;
@@ -1735,7 +1738,7 @@ async fn process_workspace_request(
             return Ok(());
         }
         "list_fallback" => {
-            send_workspace_snapshot(workspace, messenger, sender).await?;
+            send_workspace_snapshot(workspace, messenger, outbound, sender).await?;
             return Ok(());
         }
         "create_channel" => {
@@ -1751,7 +1754,7 @@ async fn process_workspace_request(
                 conversation_preprompts: vec![],
                 typing: None,
             };
-            broadcast_workspace_update(workspace, messenger, &update).await?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
         "rename_channel" => {
@@ -1762,6 +1765,7 @@ async fn process_workspace_request(
             broadcast_workspace_update(
                 workspace,
                 messenger,
+                outbound,
                 &WorkspaceUpdate {
                     action: "channel_renamed".to_string(),
                     channels: vec![channel_payload(channel)],
@@ -1778,7 +1782,7 @@ async fn process_workspace_request(
         }
         "delete_channel" => {
             workspace.delete_channel(request.channel_id.as_deref().unwrap_or_default())?;
-            broadcast_workspace_snapshots(workspace, messenger).await?;
+            broadcast_workspace_snapshots(workspace, messenger, outbound).await?;
             return Ok(());
         }
         "delete_direct_conversation" => {
@@ -1786,7 +1790,7 @@ async fn process_workspace_request(
                 sender,
                 request.recipient_pubkey.as_deref().unwrap_or_default(),
             )?;
-            broadcast_workspace_snapshots(workspace, messenger).await?;
+            broadcast_workspace_snapshots(workspace, messenger, outbound).await?;
             return Ok(());
         }
         "set_profile" => {
@@ -1804,7 +1808,7 @@ async fn process_workspace_request(
                 conversation_preprompts: vec![],
                 typing: None,
             };
-            broadcast_workspace_update(workspace, messenger, &update).await?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
         "set_conversation_preprompt" => {
@@ -1830,7 +1834,7 @@ async fn process_workspace_request(
                     .collect(),
                 typing: None,
             };
-            broadcast_workspace_update(workspace, messenger, &update).await?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
         "list_channel_messages" => {
@@ -1930,7 +1934,7 @@ async fn process_workspace_request(
                 &update,
             )
             .await?;
-            flush_workspace_notification_outbox(workspace, messenger).await;
+            flush_workspace_notification_outbox(workspace, messenger, outbound).await;
             enqueue_conversation_agents(
                 workspace,
                 agent_queues,
@@ -1977,7 +1981,7 @@ async fn process_workspace_request(
                 &update,
             )
             .await?;
-            flush_workspace_notification_outbox(workspace, messenger).await;
+            flush_workspace_notification_outbox(workspace, messenger, outbound).await;
             enqueue_conversation_agents(
                 workspace,
                 agent_queues,
@@ -2063,7 +2067,7 @@ async fn process_workspace_request(
                 typing: None,
             };
             if update.messages[0].channel_id.is_some() {
-                broadcast_workspace_update(workspace, messenger, &update).await?;
+                broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             } else {
                 for member in [
                     sender,
@@ -2072,8 +2076,12 @@ async fn process_workspace_request(
                         .as_deref()
                         .unwrap_or_default(),
                 ] {
-                    messenger
-                        .send_wire_to_pubkey(member, WireMessage::workspace_update(update.clone()))
+                    outbound
+                        .send(
+                            messenger,
+                            member,
+                            WireMessage::workspace_update(update.clone()),
+                        )
                         .await?;
                 }
             }
@@ -2135,7 +2143,7 @@ async fn process_workspace_request(
                 conversation_preprompts: vec![],
                 typing: None,
             };
-            broadcast_workspace_update(workspace, messenger, &update).await?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
         "rename_agent" => {
@@ -2153,7 +2161,7 @@ async fn process_workspace_request(
                 conversation_preprompts: vec![],
                 typing: None,
             };
-            broadcast_workspace_update(workspace, messenger, &update).await?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
         "restart_agent_session" => {
@@ -2182,7 +2190,7 @@ async fn process_workspace_request(
                 conversation_preprompts: vec![],
                 typing: None,
             };
-            broadcast_workspace_update(workspace, messenger, &update).await?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
         "update_agent_profile" => {
@@ -2208,7 +2216,7 @@ async fn process_workspace_request(
                 conversation_preprompts: vec![],
                 typing: None,
             };
-            broadcast_workspace_update(workspace, messenger, &update).await?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
         "delete_agent" => {
@@ -2231,7 +2239,7 @@ async fn process_workspace_request(
                     .collect(),
                 typing: None,
             };
-            broadcast_workspace_update(workspace, messenger, &update).await?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
         "add_conversation_agent" | "remove_conversation_agent" => {
@@ -2271,13 +2279,13 @@ async fn process_workspace_request(
                     .collect(),
                 typing: None,
             };
-            broadcast_workspace_update(workspace, messenger, &update).await?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
         _ => bail!("unsupported workspace request"),
     };
-    messenger
-        .send_wire_to_pubkey(sender, WireMessage::workspace_update(update))
+    outbound
+        .send(messenger, sender, WireMessage::workspace_update(update))
         .await?;
     Ok(())
 }
@@ -2285,6 +2293,7 @@ async fn process_workspace_request(
 async fn send_workspace_snapshot(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
     sender: &str,
 ) -> Result<()> {
     let mut snapshot = workspace_snapshot(workspace, sender)?;
@@ -2301,8 +2310,8 @@ async fn send_workspace_snapshot(
         payload_bytes = payload.len(),
         "sending workspace snapshot header"
     );
-    messenger
-        .send_wire_to_pubkey(sender, WireMessage::workspace_update(snapshot))
+    outbound
+        .send(messenger, sender, WireMessage::workspace_update(snapshot))
         .await?;
 
     for (index, messages) in messages.chunks(WORKSPACE_TRANSFER_CHUNK_SIZE).enumerate() {
@@ -2321,8 +2330,8 @@ async fn send_workspace_snapshot(
             conversation_preprompts: vec![],
             typing: None,
         };
-        messenger
-            .send_wire_to_pubkey(sender, WireMessage::workspace_update(update))
+        outbound
+            .send(messenger, sender, WireMessage::workspace_update(update))
             .await?;
     }
     Ok(())
@@ -2351,6 +2360,8 @@ async fn run_workspace_fips_acceptor(
     capabilities: Arc<Mutex<HashMap<String, (String, Instant)>>>,
     workspace_path: PathBuf,
     incoming: mpsc::Sender<IncomingMessage>,
+    routes: Arc<Mutex<HashMap<String, String>>>,
+    mut outgoing: mpsc::Receiver<WorkspaceFipsOutbound>,
 ) {
     let mut client = match build_workspace_fips_client(&secret_key, &relays).await {
         Ok(client) => client,
@@ -2388,7 +2399,7 @@ async fn run_workspace_fips_acceptor(
                     warn!("dropped FIPS workspace frame because the assembler registry is full");
                     continue;
                 }
-                let frame = match assemblers.entry(source.clone()).or_insert_with(WorkspaceFrameAssembler::default).push(&packet.payload) {
+                let frame = match assemblers.entry(source.clone()).or_insert_with(FipsApplicationFrameAssembler::default).push(&packet.payload) {
                     Ok(Some(frame)) => frame,
                     Ok(None) => continue,
                     Err(error) => {
@@ -2398,7 +2409,7 @@ async fn run_workspace_fips_acceptor(
                     }
                 };
                 if let Some(peer) = peers.get_mut(&source) {
-                    let envelope = match serde_json::from_slice::<WorkspaceFipsEnvelope>(&frame) {
+                    let envelope = match FipsApplicationEnvelope::decode(&frame) {
                         Ok(envelope) if envelope.version == WORKSPACE_FIPS_PROTOCOL_VERSION => envelope,
                         _ => {
                             warn!("rejected invalid FIPS workspace peer envelope");
@@ -2425,11 +2436,18 @@ async fn run_workspace_fips_acceptor(
                                 continue;
                             }
                             peer.last_message_id = message_id;
+                            // Turn an authenticated FIPS payload back into the
+                            // same shape as a decrypted Nostr DM. Dispatch and
+                            // authorization must not depend on its transport.
+                            let wire = match parse_wire_message(&frame) {
+                                Ok(wire) => wire,
+                                Err(_) => unreachable!("validated above"),
+                            };
                             let message = IncomingMessage {
                                 sender_pubkey: peer.npub.clone(),
                                 sender_pubkey_hex: peer.member.clone(),
-                                kind: "fips_app".to_string(),
-                                text: frame.clone(),
+                                kind: wire.kind().to_string(),
+                                text: wire.text().to_string(),
                                 raw_json: frame,
                                 event_id: format!("fips:{}:{message_id}", peer.member),
                             };
@@ -2475,11 +2493,12 @@ async fn run_workspace_fips_acceptor(
                         continue;
                     }
                 };
-                peers.insert(source, WorkspaceFipsPeer {
+                peers.insert(source.clone(), WorkspaceFipsPeer {
                     member: member.clone(),
                     npub: peer_npub.clone(),
                     last_pong: Instant::now(),
                     last_message_id: 0,
+                    next_message_id: 0,
                 });
                 if let Err(error) = send_workspace_fips_envelope(&client, &peer_npub, &mut frame_id, "hello", None).await {
                     warn!(member, "failed to send FIPS workspace hello: {error:#}");
@@ -2496,13 +2515,47 @@ async fn run_workspace_fips_acceptor(
                                     break;
                                 }
                             };
-                            if let Err(error) = send_workspace_fips_envelope(&client, &peer_npub, &mut frame_id, "snapshot", Some(frame)).await {
+                            let peer = peers.get_mut(&source).expect("peer was just inserted");
+                            if let Err(error) = send_workspace_fips_app(
+                                &client,
+                                &peer.npub,
+                                &mut frame_id,
+                                &mut peer.next_message_id,
+                                frame,
+                            ).await {
                                 warn!(member, "failed to send FIPS workspace snapshot frame: {error:#}");
                                 break;
                             }
                         }
                     }
                     Err(error) => warn!(member, "cannot build FIPS workspace snapshot: {error:#}"),
+                }
+                routes.lock().await.insert(member, peer_npub);
+            }
+            outbound = outgoing.recv() => {
+                let Some(outbound) = outbound else {
+                    error!("shared FIPS workspace outbound queue closed");
+                    return;
+                };
+                let Some(peer) = peers.values_mut().find(|peer| peer.member == outbound.member) else {
+                    warn!(member = %outbound.member, "dropped workspace FIPS outbound message for a disconnected peer");
+                    continue;
+                };
+                let frame = match outbound.wire.to_json() {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        warn!(member = %peer.member, "cannot encode workspace FIPS outbound message: {error:#}");
+                        continue;
+                    }
+                };
+                if let Err(error) = send_workspace_fips_app(
+                    &client,
+                    &peer.npub,
+                    &mut frame_id,
+                    &mut peer.next_message_id,
+                    frame,
+                ).await {
+                    warn!(member = %peer.member, "failed to send workspace FIPS outbound message: {error:#}");
                 }
             }
             _ = heartbeat.tick() => {
@@ -2511,6 +2564,13 @@ async fn run_workspace_fips_acceptor(
                 peers.retain(|_, peer| {
                     peer.last_pong.elapsed()
                         < WORKSPACE_FIPS_HEARTBEAT_INTERVAL + WORKSPACE_FIPS_HEARTBEAT_TIMEOUT
+                });
+                let live_npubs = peers
+                    .values()
+                    .map(|peer| (peer.member.clone(), peer.npub.clone()))
+                    .collect::<HashMap<_, _>>();
+                routes.lock().await.retain(|member, npub| {
+                    live_npubs.get(member).is_some_and(|live| live == npub)
                 });
                 for peer in peers.values() {
                     if let Err(error) = send_workspace_fips_envelope(&client, &peer.npub, &mut frame_id, "ping", None).await {
@@ -2526,37 +2586,13 @@ async fn build_workspace_fips_client(
     secret_key: &str,
     relays: &[String],
 ) -> Result<FipsMobileClient> {
-    let mut config = Config::default();
-    config.node.identity.nsec = Some(secret_key.trim().to_string());
-    config.node.identity.persistent = false;
-    config.tun.enabled = false;
-    config.dns.enabled = false;
-    config.node.control.enabled = false;
-    config.node.discovery.nostr.enabled = true;
-    config.node.discovery.nostr.advertise = true;
-    config.node.discovery.nostr.advert_relays = relays.to_vec();
-    config.node.discovery.nostr.dm_relays = relays.to_vec();
-    // Keep the default STUN set and advertise same-LAN candidates for local peers.
-    config.node.discovery.nostr.share_local_candidates = true;
-    // FipsMobileClient supplies an ephemeral Nostr-advertised UDP transport
-    // when the embedded config has no explicit transport.
-    Ok(FipsMobileClient::start(FipsMobileConfig {
-        config,
-        response_port: WORKSPACE_FIPS_SERVICE_PORT,
-        queue_depth: 256,
-    })
-    .await?)
-}
-
-#[derive(Serialize, Deserialize)]
-struct WorkspaceFipsEnvelope {
-    version: u8,
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message_id: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    frame: Option<String>,
+    FipsClientConfig {
+        secret_key: secret_key.to_string(),
+        relays: relays.to_vec(),
+        stun_servers: vec![],
+    }
+    .application_client(WORKSPACE_FIPS_SERVICE_PORT, 256)
+    .await
 }
 
 async fn send_workspace_fips_envelope(
@@ -2566,14 +2602,38 @@ async fn send_workspace_fips_envelope(
     kind: &str,
     frame: Option<String>,
 ) -> Result<()> {
-    let envelope = WorkspaceFipsEnvelope {
-        version: WORKSPACE_FIPS_PROTOCOL_VERSION,
-        kind: kind.to_string(),
-        message_id: None,
-        frame,
-    };
+    let envelope = FipsApplicationEnvelope::control(kind, frame);
     *frame_id = frame_id.wrapping_add(1);
-    for packet in workspace_service_frames(*frame_id, &serde_json::to_vec(&envelope)?)? {
+    for packet in fips_application_service_frames(*frame_id, &envelope.encode()?)? {
+        client
+            .send_service_frame_to_npub(
+                peer_npub,
+                WORKSPACE_FIPS_SERVICE_PORT,
+                WORKSPACE_FIPS_SERVICE_PORT,
+                packet,
+                Duration::from_secs(20),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Application frames always carry a monotonically increasing ID. The mobile
+/// client can therefore reject retransmits before they reach workspace state.
+async fn send_workspace_fips_app(
+    client: &FipsMobileClient,
+    peer_npub: &str,
+    frame_id: &mut u64,
+    message_id: &mut u64,
+    frame: String,
+) -> Result<()> {
+    *message_id = message_id.wrapping_add(1);
+    if *message_id == 0 {
+        *message_id = 1;
+    }
+    let envelope = FipsApplicationEnvelope::app(*message_id, frame)?;
+    *frame_id = frame_id.wrapping_add(1);
+    for packet in fips_application_service_frames(*frame_id, &envelope.encode()?)? {
         client
             .send_service_frame_to_npub(
                 peer_npub,
@@ -2747,13 +2807,14 @@ fn recent_workspace_snapshot_messages(
     let mut recent = conversations
         .into_values()
         .flat_map(|messages| {
-            let first = messages.len().saturating_sub(WORKSPACE_SNAPSHOT_MESSAGE_LIMIT);
+            let first = messages
+                .len()
+                .saturating_sub(WORKSPACE_SNAPSHOT_MESSAGE_LIMIT);
             messages.into_iter().skip(first)
         })
         .collect::<Vec<_>>();
     recent.sort_by(|left, right| {
-        left
-            .created_at
+        left.created_at
             .cmp(&right.created_at)
             .then_with(|| left.id.cmp(&right.id))
     });
@@ -2763,11 +2824,13 @@ fn recent_workspace_snapshot_messages(
 async fn broadcast_workspace_update(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
     update: &WorkspaceUpdate,
 ) -> Result<()> {
     for member in workspace.members()? {
-        messenger
-            .send_wire_to_pubkey(
+        outbound
+            .send(
+                messenger,
                 &member.pubkey,
                 WireMessage::workspace_update(update.clone()),
             )
@@ -2779,9 +2842,10 @@ async fn broadcast_workspace_update(
 async fn broadcast_workspace_snapshots(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
 ) -> Result<()> {
     for member in workspace.members()? {
-        send_workspace_snapshot(workspace, messenger, &member.pubkey).await?;
+        send_workspace_snapshot(workspace, messenger, outbound, &member.pubkey).await?;
     }
     Ok(())
 }
@@ -3229,6 +3293,7 @@ async fn workspace_agent_queue_worker(
     turn_lock: Arc<Mutex<()>>,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
+    outbound: WorkspaceOutbound,
     codex_config: CodexConfig,
 ) {
     while let Some(job) = receiver.recv().await {
@@ -3238,6 +3303,7 @@ async fn workspace_agent_queue_worker(
         if let Err(err) = process_workspace_agent_job(
             &workspace_path,
             messenger.as_ref(),
+            &outbound,
             &codex_config,
             &agent_id,
             &conversation,
@@ -3253,6 +3319,7 @@ async fn workspace_agent_queue_worker(
 async fn process_workspace_agent_job(
     workspace_path: &Path,
     messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
     codex_config: &CodexConfig,
     agent_id: &str,
     conversation: &WorkspaceConversation,
@@ -3272,6 +3339,7 @@ async fn process_workspace_agent_job(
             route_conversation_agents(
                 &workspace,
                 messenger,
+                outbound,
                 codex_config,
                 Some(agent_id),
                 Some(channel_id),
@@ -3287,6 +3355,7 @@ async fn process_workspace_agent_job(
             route_conversation_agents(
                 &workspace,
                 messenger,
+                outbound,
                 codex_config,
                 Some(agent_id),
                 None,
@@ -3418,6 +3487,7 @@ fn codex_config_for_workspace_agent_record(
 async fn route_conversation_agents(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
     codex_config: &CodexConfig,
     only_agent_id: Option<&str>,
     channel_id: Option<&str>,
@@ -3517,6 +3587,7 @@ async fn route_conversation_agents(
                     broadcast_workspace_update(
                         workspace,
                         messenger,
+                        outbound,
                         &WorkspaceUpdate {
                             action: "agent_session_restarted".to_string(),
                             channels: vec![],
@@ -3541,6 +3612,7 @@ async fn route_conversation_agents(
                 broadcast_workspace_update(
                     workspace,
                     messenger,
+                    outbound,
                     &WorkspaceUpdate {
                         action: "agent_session_restarted".to_string(),
                         channels: vec![],
@@ -3629,6 +3701,7 @@ async fn route_conversation_agents(
             broadcast_workspace_update(
                 workspace,
                 messenger,
+                outbound,
                 &WorkspaceUpdate {
                     action: "agent_usage_updated".to_string(),
                     channels: vec![],
@@ -3674,13 +3747,19 @@ async fn route_conversation_agents(
             typing: None,
         };
         if channel_id.is_some() {
-            if let Err(err) = broadcast_workspace_update(workspace, messenger, &update).await {
+            if let Err(err) =
+                broadcast_workspace_update(workspace, messenger, outbound, &update).await
+            {
                 warn!(agent = %agent.id, "persisted workspace agent reply notification failed: {err:#}");
             }
         } else {
             for recipient in [member.unwrap_or_default(), peer.unwrap_or_default()] {
-                if let Err(err) = messenger
-                    .send_wire_to_pubkey(recipient, WireMessage::workspace_update(update.clone()))
+                if let Err(err) = outbound
+                    .send(
+                        messenger,
+                        recipient,
+                        WireMessage::workspace_update(update.clone()),
+                    )
                     .await
                 {
                     warn!(agent = %agent.id, recipient = %recipient, "persisted workspace agent direct-reply notification failed: {err:#}");
@@ -7574,8 +7653,10 @@ fn canonical_path_key(path: &Path) -> String {
 }
 
 async fn send_response(messenger: &NostrMessenger, receiver_pubkey: &str, response: String) {
-    if let Err(err) = messenger.send_response_to(receiver_pubkey, response).await {
-        error!("failed to send response DM: {err:#}");
+    if let Err(err) =
+        send_application_wire(messenger, receiver_pubkey, WireMessage::response(response)).await
+    {
+        error!("failed to send response: {err:#}");
     }
 }
 
@@ -7584,11 +7665,10 @@ async fn send_status(messenger: &NostrMessenger, receiver_pubkey: &str, status: 
     if status.is_empty() {
         return;
     }
-    if let Err(err) = messenger
-        .send_wire_to_pubkey(receiver_pubkey, WireMessage::status(status))
-        .await
+    if let Err(err) =
+        send_application_wire(messenger, receiver_pubkey, WireMessage::status(status)).await
     {
-        warn!("failed to send status DM: {err:#}");
+        warn!("failed to send status: {err:#}");
     }
 }
 
@@ -7599,16 +7679,14 @@ async fn send_response_and_remember(
     response: String,
     workdir: &Path,
 ) {
-    match messenger
-        .send_routed_response_to(
-            receiver_pubkey,
-            response.clone(),
-            workdir.to_string_lossy().to_string(),
-        )
-        .await
-    {
-        Ok(event_id) => {
+    let wire =
+        WireMessage::routed_response(response.clone(), workdir.to_string_lossy().to_string());
+    match send_application_wire(messenger, receiver_pubkey, wire).await {
+        Ok(()) => {
             if let Some(memory) = memory.as_mut() {
+                // FIPS envelopes have no Nostr event ID. The local record only
+                // needs a stable outgoing identifier for memory bookkeeping.
+                let event_id = format!("outbound:{}", generate_pairing_secret());
                 if let Err(err) =
                     memory.record_outgoing(receiver_pubkey, &event_id, "response", &response)
                 {
@@ -8272,6 +8350,29 @@ mod tests {
         assert_eq!(member, "member-a");
         assert!(expires_at > Instant::now());
         assert!(capabilities.remove(&first).is_none());
+    }
+
+    #[test]
+    fn workspace_fips_app_envelope_is_ordered_and_contains_a_wire_message() {
+        let frame = WireMessage::workspace_update(WorkspaceUpdate {
+            action: "snapshot".to_string(),
+            channels: vec![],
+            members: vec![],
+            messages: vec![],
+            agents: vec![],
+            conversation_agents: vec![],
+            conversation_preprompts: vec![],
+            typing: None,
+        })
+        .to_json()
+        .unwrap();
+        let envelope = FipsApplicationEnvelope::app(1, frame.clone()).unwrap();
+
+        let encoded = envelope.encode().unwrap();
+        let decoded = FipsApplicationEnvelope::decode(&encoded).unwrap();
+        assert_eq!(decoded.kind, "app");
+        assert_eq!(decoded.message_id, Some(1));
+        assert!(parse_wire_message(decoded.frame.as_deref().unwrap()).is_ok());
     }
 
     #[test]

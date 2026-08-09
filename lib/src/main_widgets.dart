@@ -3291,102 +3291,137 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
       ],
     );
     return LayoutBuilder(
-      builder: (context, constraints) => Align(
-        alignment: widget.isLocalSender
-            ? Alignment.centerRight
-            : Alignment.centerLeft,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: math.min(constraints.maxWidth * 0.9, 820),
+      builder: (context, constraints) {
+        final maxBubbleWidth = math
+            .min(constraints.maxWidth * 0.9, 820)
+            .toDouble();
+        final leadingWidth = widget.isLocalSender
+            ? 0.0
+            : widget.groupedWithPrevious
+            ? 36.0
+            : 48.0;
+        final maxContentWidth = math
+            .max(0, maxBubbleWidth - leadingWidth - 20)
+            .toDouble();
+        final bodyWidth = (TextPainter(
+          text: TextSpan(
+            text: _messageText,
+            style: DefaultTextStyle.of(context).style,
           ),
-          child: MouseRegion(
-            onEnter: (_) => setState(() => _hovered = true),
-            onExit: (_) => setState(() => _hovered = false),
-            child: GestureDetector(
-              onLongPress: () => unawaited(_showMessageActions(context)),
-              child: Stack(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 8,
+          textDirection: Directionality.of(context),
+        )..layout(maxWidth: maxContentWidth)).width;
+        final authorWidth = !widget.groupedWithPrevious && !widget.isLocalSender
+            ? (TextPainter(
+                text: TextSpan(
+                  text: widget.authorName,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                textDirection: Directionality.of(context),
+              )..layout(maxWidth: maxContentWidth)).width
+            : 0.0;
+        final contentWidth = math
+            .max(math.max(bodyWidth, authorWidth), 48.0)
+            .toDouble();
+        final bubbleWidth = math
+            .min(maxBubbleWidth, leadingWidth + contentWidth + 20)
+            .toDouble();
+        return Align(
+          alignment: widget.isLocalSender
+              ? Alignment.centerRight
+              : Alignment.centerLeft,
+          child: SizedBox(
+            width: bubbleWidth,
+            child: MouseRegion(
+              onEnter: (_) => setState(() => _hovered = true),
+              onExit: (_) => setState(() => _hovered = false),
+              child: GestureDetector(
+                onLongPress: () => unawaited(_showMessageActions(context)),
+                child: Stack(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: widget.isLocalSender
+                            ? Theme.of(context).colorScheme.primaryContainer
+                            : isAgent
+                            ? const Color(0xff12332d)
+                            : Theme.of(
+                                context,
+                              ).colorScheme.surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: row,
                     ),
-                    decoration: BoxDecoration(
-                      color: widget.isLocalSender
-                          ? Theme.of(context).colorScheme.primaryContainer
-                          : isAgent
-                          ? const Color(0xff12332d)
-                          : Theme.of(context).colorScheme.surfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: row,
-                  ),
-                  if (_hovered)
-                    Positioned(
-                      top: -8,
-                      right: 0,
-                      child: Material(
-                        elevation: 3,
-                        borderRadius: BorderRadius.circular(8),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              tooltip: 'Copy',
-                              icon: const Icon(Icons.copy_outlined, size: 18),
-                              onPressed: () => Clipboard.setData(
-                                ClipboardData(text: _messageText),
-                              ),
-                            ),
-                            if (widget.showThreadAction)
+                    if (_hovered)
+                      Positioned(
+                        top: -8,
+                        right: 0,
+                        child: Material(
+                          elevation: 3,
+                          borderRadius: BorderRadius.circular(8),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
                               IconButton(
-                                tooltip: 'Reply in thread',
+                                tooltip: 'Copy',
+                                icon: const Icon(Icons.copy_outlined, size: 18),
+                                onPressed: () => Clipboard.setData(
+                                  ClipboardData(text: _messageText),
+                                ),
+                              ),
+                              if (widget.showThreadAction)
+                                IconButton(
+                                  tooltip: 'Reply in thread',
+                                  icon: const Icon(
+                                    Icons.reply_outlined,
+                                    size: 18,
+                                  ),
+                                  onPressed: widget.onThread,
+                                ),
+                              PopupMenuButton<String>(
+                                tooltip: 'React',
                                 icon: const Icon(
-                                  Icons.reply_outlined,
+                                  Icons.add_reaction_outlined,
                                   size: 18,
                                 ),
-                                onPressed: widget.onThread,
+                                onSelected: widget.onReact,
+                                itemBuilder: (_) => const [
+                                  PopupMenuItem(value: '👍', child: Text('👍')),
+                                  PopupMenuItem(value: '❤️', child: Text('❤️')),
+                                  PopupMenuItem(value: '👀', child: Text('👀')),
+                                ],
                               ),
-                            PopupMenuButton<String>(
-                              tooltip: 'React',
-                              icon: const Icon(
-                                Icons.add_reaction_outlined,
-                                size: 18,
+                              PopupMenuButton<String>(
+                                tooltip: 'More',
+                                icon: const Icon(Icons.more_horiz, size: 18),
+                                onSelected: (value) {
+                                  if (value == 'copy') {
+                                    Clipboard.setData(
+                                      ClipboardData(text: _messageText),
+                                    );
+                                  }
+                                },
+                                itemBuilder: (_) => const [
+                                  PopupMenuItem(
+                                    value: 'copy',
+                                    child: Text('Copy text'),
+                                  ),
+                                ],
                               ),
-                              onSelected: widget.onReact,
-                              itemBuilder: (_) => const [
-                                PopupMenuItem(value: '👍', child: Text('👍')),
-                                PopupMenuItem(value: '❤️', child: Text('❤️')),
-                                PopupMenuItem(value: '👀', child: Text('👀')),
-                              ],
-                            ),
-                            PopupMenuButton<String>(
-                              tooltip: 'More',
-                              icon: const Icon(Icons.more_horiz, size: 18),
-                              onSelected: (value) {
-                                if (value == 'copy') {
-                                  Clipboard.setData(
-                                    ClipboardData(text: _messageText),
-                                  );
-                                }
-                              },
-                              itemBuilder: (_) => const [
-                                PopupMenuItem(
-                                  value: 'copy',
-                                  child: Text('Copy text'),
-                                ),
-                              ],
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 

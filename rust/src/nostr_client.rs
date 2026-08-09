@@ -297,7 +297,10 @@ impl NostrMessenger {
     async fn send_payload_to(&self, receiver: PublicKey, payload: String) -> Result<String> {
         let event = PrivateDirectMessageBuilder::new(receiver, payload)
             .finalize(&self.keys)
-            .context("failed to build GiftWrapped DM")?;
+            // Flutter receives an error's display text, not its anyhow chain.
+            // Include the NIP-17 cause so intermittent construction failures
+            // can be diagnosed from the client diagnostics panel.
+            .map_err(|error| anyhow!("failed to build GiftWrapped DM: {error:#}"))?;
         self.send_event(event).await
     }
 
@@ -314,7 +317,7 @@ impl NostrMessenger {
             // NIP-40 directs relays to discard the GiftWrap after this lease.
             .extra_tags([Tag::parse(["expiration", &expires_at.to_string()])?])
             .finalize(&self.keys)
-            .context("failed to build expiring GiftWrapped DM")?;
+            .map_err(|error| anyhow!("failed to build expiring GiftWrapped DM: {error:#}"))?;
         self.send_event(event).await
     }
 

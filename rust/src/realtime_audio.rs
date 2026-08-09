@@ -17,6 +17,23 @@ const OPUS_BITRATE_BPS: i32 = 16_000;
 const JITTER_BUFFER_PACKETS: usize = 3;
 const JITTER_BUFFER_MAX_PACKETS: usize = 8;
 
+struct VoiceProfile {
+    bitrate_bps: i32,
+    dtx: bool,
+    inband_fec: bool,
+    expected_packet_loss_percent: i32,
+}
+
+const fn voice_profile() -> VoiceProfile {
+    VoiceProfile {
+        bitrate_bps: OPUS_BITRATE_BPS,
+        dtx: true,
+        inband_fec: true,
+        // Enables Opus FEC only when it is likely to improve received speech.
+        expected_packet_loss_percent: 10,
+    }
+}
+
 /// Stateful 20 ms Opus encoder for the platform PCM bridge.
 pub struct RealtimeAudioEncoder {
     encoder: Encoder,
@@ -27,7 +44,11 @@ pub struct RealtimeAudioEncoder {
 impl RealtimeAudioEncoder {
     pub fn new() -> Result<Self> {
         let mut encoder = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip)?;
-        encoder.set_bitrate(Bitrate::Bits(OPUS_BITRATE_BPS))?;
+        let profile = voice_profile();
+        encoder.set_bitrate(Bitrate::Bits(profile.bitrate_bps))?;
+        encoder.set_dtx(profile.dtx)?;
+        encoder.set_inband_fec(profile.inband_fec)?;
+        encoder.set_packet_loss_perc(profile.expected_packet_loss_percent)?;
         Ok(Self {
             encoder,
             sequence: 0,
@@ -106,13 +127,28 @@ impl RealtimeAudioDecoder {
         }
 
         let expected = self.expected_sequence.expect("set above");
-        let sequence = if self.packets.contains_key(&expected) {
-            expected
-        } else if self.packets.len() >= JITTER_BUFFER_PACKETS {
-            *self.packets.first_key_value().expect("not empty").0
-        } else {
-            return Ok(None);
-        };
+        if !self.packets.contains_key(&expected) {
+            if self.packets.len() < JITTER_BUFFER_PACKETS {
+                return Ok(None);
+            }
+            // Opus includes recovery data for the previous packet in the next
+            // packet. Decode it before advancing past confirmed packet loss.
+            let (next_sequence, next) = self.packets.first_key_value().expect("not empty");
+            if *next_sequence == expected.wrapping_add(1) {
+                let mut samples = [0i16; FRAME_SAMPLES];
+                let sample_count = self
+                    .decoder
+                    .decode(&next.opus_payload, &mut samples, true)?;
+                self.expected_sequence = Some(expected.wrapping_add(1));
+                return Ok(Some(
+                    samples[..sample_count]
+                        .iter()
+                        .flat_map(|sample| sample.to_le_bytes())
+                        .collect(),
+                ));
+            }
+        }
+        let sequence = expected;
         let packet = self.packets.remove(&sequence).expect("present above");
         self.expected_sequence = Some(sequence.wrapping_add(1));
 
@@ -291,6 +327,16 @@ mod tests {
             .unwrap()
             .encode_pcm(&[0; FRAME_BYTES - 1])
             .is_err());
+    }
+
+    #[test]
+    fn voice_profile_uses_dtx_and_fec_for_constrained_links() {
+        let profile = voice_profile();
+
+        assert_eq!(profile.bitrate_bps, 16_000);
+        assert!(profile.dtx);
+        assert!(profile.inband_fec);
+        assert_eq!(profile.expected_packet_loss_percent, 10);
     }
 
     #[test]

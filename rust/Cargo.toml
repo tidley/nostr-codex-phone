@@ -3,6 +3,10 @@ name = "rust_lib_nostr_codex_phone"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+members = ["fips-client"]
+resolver = "2"
+
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
@@ -11,7 +15,8 @@ anyhow = "1"
 base64 = "0.22"
 chacha20poly1305 = "0.10"
 flutter_rust_bridge = "=2.11.1"
-fips-mobile = { git = "https://github.com/tidley/fips.git", rev = "b518e0a41b953cedd2a15f408ffaaecd5a946831", default-features = false, features = ["nostr-discovery"] }
+fips-mobile = { git = "https://github.com/tidley/fips.git", rev = "531d890a77401aaca53e2769d0dfe204387bc4a9", default-features = false, features = ["nostr-discovery"] }
+fips-client = { path = "fips-client" }
 futures-util = "0.3"
 hound = "3.5"
 libc = "0.2"

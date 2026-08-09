@@ -389,13 +389,15 @@ bool RealtimeVideo::StartCapture(const char* source, const char** error_message)
       return false;
     }
     screen_display_ = std::string(display) + "+0,0";
-    arguments.insert(arguments.end(), {"-f", "x11grab", "-framerate", "10", "-i", screen_display_.c_str()});
+    // Screen content is usually static; fewer frames save bandwidth and CPU.
+    arguments.insert(arguments.end(), {"-f", "x11grab", "-framerate", "5", "-i", screen_display_.c_str()});
   } else {
     *error_message = "Capture source must be camera or screen.";
     return false;
   }
   arguments.insert(arguments.end(), {"-an", "-vf", "scale=640:360", "-c:v", "libx264",
-      "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-g", "10",
+      "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p", "-b:v", "350k",
+      "-maxrate", "400k", "-bufsize", "400k", "-g", "10",
       "-keyint_min", "10", "-x264-params", "repeat-headers=1:annexb=1:aud=1", "-f", "h264", "pipe:1"});
   capture_pid_ = SpawnFfmpeg(arguments, nullptr, &capture_output_fd_);
   if (capture_pid_ < 0) {
