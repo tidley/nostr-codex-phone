@@ -1334,164 +1334,167 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       },
       onConversationActions: _openConversationActions,
     );
-    final conversation = _WorkspaceConversation(
-      key: _conversationWidgetKey,
-      title: _title,
-      section: _section,
-      channelId: _section == _WorkspaceSection.channel ? _active : null,
-      directPeer: _section == _WorkspaceSection.direct ? _active : null,
-      messages: _activeMessages
-          .where(
-            (message) => message.parentId == null || message.alsoSendToMain,
-          )
-          .toList(growable: false),
-      threadReplyCounts: {
-        for (final message in _activeMessages.where(
-          (message) => message.parentId != null,
-        ))
-          message.parentId!: _activeMessages
-              .where((reply) => reply.parentId == message.parentId)
-              .length,
-      },
-      threadUnreadCounts: {
-        for (final entry in widget.threadUnreadCounts.entries)
-          if (_conversationKey != null &&
-              entry.key.startsWith('$_conversationKey:'))
-            entry.key.substring(_conversationKey!.length + 1): entry.value,
-      },
-      threadActivityLabels: _threadActivityLabels(typing),
-      composer: _composer,
-      composerFocus: _composerFocus,
-      onSend: _send,
-      onAttach: _attach,
-      voiceRecording: _voiceRecording,
-      voiceTranscribing: _voiceTranscribing,
-      voiceError: _voiceError,
-      onVoicePressed: () => unawaited(_toggleVoiceRecording()),
-      onOpenAttachment: widget.onOpenAttachment,
-      onOpenThread: (message) {
-        setState(() {
-          if (_thread?.id != message.id) {
-            _saveThreadDraft();
-            _thread = message;
-            _restoreThreadDraft();
-          }
-          _alsoSendToMain = false;
-        });
-        final conversationKey = _conversationKey;
-        if (conversationKey != null) {
-          widget.onOpenThread(conversationKey, message.id);
-        }
-      },
-      onCloseThread: () {
-        setState(() {
-          _saveThreadDraft();
-          _thread = null;
-          _alsoSendToMain = false;
-          _threadFullWindow = false;
-        });
-        widget.onCloseThread();
-      },
-      onToggleReaction: (message, emoji) => widget.onRequest({
-        'action': 'toggle_reaction',
-        'parent_id': message.id,
-        'reaction': emoji,
-      }),
-      thread: _thread,
-      alsoSendToMain: _alsoSendToMain,
-      onAlsoSendToMainChanged: (value) =>
-          setState(() => _alsoSendToMain = value),
-      onOpenSettings: widget.onOpenSettings,
-      onReload: _reloadActiveMessages,
-      onOpenFiles: () {
-        final conversationKey = _conversationKey;
-        return conversationKey == null
-            ? Future<void>.value()
-            : widget.onOpenFiles(conversationKey);
-      },
-      onRenameConversation: (name) async {
-        if (_section == _WorkspaceSection.channel) {
-          await widget.onRequest({
-            'action': 'rename_channel',
-            'channel_id': _active,
-            'channel_name': name,
-          });
-        } else if (_section == _WorkspaceSection.direct) {
-          widget.onMemberAliasChanged(_active, name);
-        }
-      },
-      onDeleteConversation: () async {
-        if (_section == _WorkspaceSection.channel) {
-          await widget.onRequest({
-            'action': 'delete_channel',
-            'channel_id': _active,
-          });
-        } else if (_section == _WorkspaceSection.direct) {
-          await widget.onRequest({
-            'action': 'delete_direct_conversation',
-            'recipient_pubkey': _active,
-          });
-        }
-        if (mounted) _select(_WorkspaceSection.channel, 'workspace');
-      },
-      inviteCode: widget.inviteCode,
-      memberStatus: widget.memberStatus,
-      onCreateInvite: widget.onCreateInvite,
-      members: widget.workspace.members,
-      channelHumanMemberCount: _section == _WorkspaceSection.channel
-          ? widget.workspace.channelHumanMemberCount(_active)
-          : 0,
-      ownPubkey: widget.ownPubkey,
-      localSenderIds: widget.localSenderIds,
-      displayName: widget.displayName,
-      memberAliases: widget.memberAliases,
-      memberNames: widget.memberNames,
-      onOpenDirect: (pubkey) => _select(_WorkspaceSection.direct, pubkey),
-      onDisplayNameChanged: widget.onDisplayNameChanged,
-      onMemberAliasChanged: widget.onMemberAliasChanged,
-      workspace: widget.workspace,
-      workspaceRevision: widget.workspaceRevision,
-      onRequest: widget.onRequest,
-      onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
-      initialFolderChoices: widget.initialFolderChoices,
-      onLoadFolders: widget.onLoadFolders,
-      onOpenAgentConversation: widget.onOpenAgentConversation,
-      conversationPreprompt: widget.workspace.conversationPreprompt(
+    final conversation = ValueListenableBuilder<int>(
+      valueListenable: widget.workspaceRevision,
+      builder: (context, _, _) => _WorkspaceConversation(
+        key: _conversationWidgetKey,
+        title: _title,
+        section: _section,
         channelId: _section == _WorkspaceSection.channel ? _active : null,
+        directPeer: _section == _WorkspaceSection.direct ? _active : null,
+        messages: _activeMessages
+            .where(
+              (message) => message.parentId == null || message.alsoSendToMain,
+            )
+            .toList(growable: false),
+        threadReplyCounts: {
+          for (final message in _activeMessages.where(
+            (message) => message.parentId != null,
+          ))
+            message.parentId!: _activeMessages
+                .where((reply) => reply.parentId == message.parentId)
+                .length,
+        },
+        threadUnreadCounts: {
+          for (final entry in widget.threadUnreadCounts.entries)
+            if (_conversationKey != null &&
+                entry.key.startsWith('$_conversationKey:'))
+              entry.key.substring(_conversationKey!.length + 1): entry.value,
+        },
+        threadActivityLabels: _threadActivityLabels(typing),
+        composer: _composer,
+        composerFocus: _composerFocus,
+        onSend: _send,
+        onAttach: _attach,
+        voiceRecording: _voiceRecording,
+        voiceTranscribing: _voiceTranscribing,
+        voiceError: _voiceError,
+        onVoicePressed: () => unawaited(_toggleVoiceRecording()),
+        onOpenAttachment: widget.onOpenAttachment,
+        onOpenThread: (message) {
+          setState(() {
+            if (_thread?.id != message.id) {
+              _saveThreadDraft();
+              _thread = message;
+              _restoreThreadDraft();
+            }
+            _alsoSendToMain = false;
+          });
+          final conversationKey = _conversationKey;
+          if (conversationKey != null) {
+            widget.onOpenThread(conversationKey, message.id);
+          }
+        },
+        onCloseThread: () {
+          setState(() {
+            _saveThreadDraft();
+            _thread = null;
+            _alsoSendToMain = false;
+            _threadFullWindow = false;
+          });
+          widget.onCloseThread();
+        },
+        onToggleReaction: (message, emoji) => widget.onRequest({
+          'action': 'toggle_reaction',
+          'parent_id': message.id,
+          'reaction': emoji,
+        }),
+        thread: _thread,
+        alsoSendToMain: _alsoSendToMain,
+        onAlsoSendToMainChanged: (value) =>
+            setState(() => _alsoSendToMain = value),
+        onOpenSettings: widget.onOpenSettings,
+        onReload: _reloadActiveMessages,
+        onOpenFiles: () {
+          final conversationKey = _conversationKey;
+          return conversationKey == null
+              ? Future<void>.value()
+              : widget.onOpenFiles(conversationKey);
+        },
+        onRenameConversation: (name) async {
+          if (_section == _WorkspaceSection.channel) {
+            await widget.onRequest({
+              'action': 'rename_channel',
+              'channel_id': _active,
+              'channel_name': name,
+            });
+          } else if (_section == _WorkspaceSection.direct) {
+            widget.onMemberAliasChanged(_active, name);
+          }
+        },
+        onDeleteConversation: () async {
+          if (_section == _WorkspaceSection.channel) {
+            await widget.onRequest({
+              'action': 'delete_channel',
+              'channel_id': _active,
+            });
+          } else if (_section == _WorkspaceSection.direct) {
+            await widget.onRequest({
+              'action': 'delete_direct_conversation',
+              'recipient_pubkey': _active,
+            });
+          }
+          if (mounted) _select(_WorkspaceSection.channel, 'workspace');
+        },
+        inviteCode: widget.inviteCode,
+        memberStatus: widget.memberStatus,
+        onCreateInvite: widget.onCreateInvite,
+        members: widget.workspace.members,
+        channelHumanMemberCount: _section == _WorkspaceSection.channel
+            ? widget.workspace.channelHumanMemberCount(_active)
+            : 0,
         ownPubkey: widget.ownPubkey,
-        peerPubkey: _section == _WorkspaceSection.direct ? _active : null,
+        localSenderIds: widget.localSenderIds,
+        displayName: widget.displayName,
+        memberAliases: widget.memberAliases,
+        memberNames: widget.memberNames,
+        onOpenDirect: (pubkey) => _select(_WorkspaceSection.direct, pubkey),
+        onDisplayNameChanged: widget.onDisplayNameChanged,
+        onMemberAliasChanged: widget.onMemberAliasChanged,
+        workspace: widget.workspace,
+        workspaceRevision: widget.workspaceRevision,
+        onRequest: widget.onRequest,
+        onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
+        initialFolderChoices: widget.initialFolderChoices,
+        onLoadFolders: widget.onLoadFolders,
+        onOpenAgentConversation: widget.onOpenAgentConversation,
+        conversationPreprompt: widget.workspace.conversationPreprompt(
+          channelId: _section == _WorkspaceSection.channel ? _active : null,
+          ownPubkey: widget.ownPubkey,
+          peerPubkey: _section == _WorkspaceSection.direct ? _active : null,
+        ),
+        agentsPageRevision: _agentsPageRevision,
+        agents: _activeAgents,
+        onManageAgents:
+            _section == _WorkspaceSection.channel ||
+                _section == _WorkspaceSection.direct
+            ? () => _manageAgents(context)
+            : null,
+        onEditConversationPreprompt: (value) => widget.onRequest({
+          'action': 'set_conversation_preprompt',
+          'body': value,
+          if (_section == _WorkspaceSection.channel) 'channel_id': _active,
+          if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
+        }),
+        mentionOptions: _mentionOptionsFor(_composer),
+        onMentionSelected: (mention) =>
+            _insertMention(_composer, _selectedComposerMentions, mention),
+        typingLabels: _typingLabels(typing),
+        callPhase: widget.callPhase,
+        callPeerPubkey: widget.callPeerPubkey,
+        groupCallPhase: widget.groupCallPhase,
+        groupCallChannelId: widget.groupCallChannelId,
+        onStartCall: widget.onStartCall,
+        onStartChannelCall: widget.onStartChannelCall,
+        onAcceptCall: widget.onAcceptCall,
+        onRejectCall: widget.onRejectCall,
+        onHangupCall: widget.onHangupCall,
+        onAcceptGroupCall: widget.onAcceptGroupCall,
+        onRejectGroupCall: widget.onRejectGroupCall,
+        onHangupGroupCall: widget.onHangupGroupCall,
+        mediaSource: widget.mediaSource,
+        onMediaSourceChanged: widget.onMediaSourceChanged,
       ),
-      agentsPageRevision: _agentsPageRevision,
-      agents: _activeAgents,
-      onManageAgents:
-          _section == _WorkspaceSection.channel ||
-              _section == _WorkspaceSection.direct
-          ? () => _manageAgents(context)
-          : null,
-      onEditConversationPreprompt: (value) => widget.onRequest({
-        'action': 'set_conversation_preprompt',
-        'body': value,
-        if (_section == _WorkspaceSection.channel) 'channel_id': _active,
-        if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
-      }),
-      mentionOptions: _mentionOptionsFor(_composer),
-      onMentionSelected: (mention) =>
-          _insertMention(_composer, _selectedComposerMentions, mention),
-      typingLabels: _typingLabels(typing),
-      callPhase: widget.callPhase,
-      callPeerPubkey: widget.callPeerPubkey,
-      groupCallPhase: widget.groupCallPhase,
-      groupCallChannelId: widget.groupCallChannelId,
-      onStartCall: widget.onStartCall,
-      onStartChannelCall: widget.onStartChannelCall,
-      onAcceptCall: widget.onAcceptCall,
-      onRejectCall: widget.onRejectCall,
-      onHangupCall: widget.onHangupCall,
-      onAcceptGroupCall: widget.onAcceptGroupCall,
-      onRejectGroupCall: widget.onRejectGroupCall,
-      onHangupGroupCall: widget.onHangupGroupCall,
-      mediaSource: widget.mediaSource,
-      onMediaSourceChanged: widget.onMediaSourceChanged,
     );
     final contextPane = _WorkspaceContext(
       key: ValueKey(_thread?.id),
