@@ -3980,6 +3980,7 @@ fn conversation_scope_prompt(scope: &[String], config: &CodexConfig) -> Result<S
         return Ok(String::new());
     }
     let folders = canonical_conversation_folder_scope(scope, config)?;
+    let reference_roots = canonical_allowed_workdir_roots(&config.working_dir)?;
     let repositories = repositories_in_folder_scope(&folders)?;
     let repository_list = if repositories.is_empty() {
         "No Git repositories were found in the selected folders.".to_string()
@@ -3987,8 +3988,13 @@ fn conversation_scope_prompt(scope: &[String], config: &CodexConfig) -> Result<S
         repositories.join("\n")
     };
     Ok(format!(
-        "Conversation folder access: work only in these folders (their nested repositories are included):\n{}\n\nRepositories in scope:\n{}",
+        "Conversation folder access: make changes only in these folders (their nested repositories are included):\n{}\n\nRead-only local resources: you may inspect these folders to reference related projects, but do not modify them unless they are also listed above:\n{}\n\nRepositories in scope:\n{}",
         folders.join("\n"),
+        reference_roots
+            .iter()
+            .map(|root| root.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n"),
         repository_list,
     ))
 }

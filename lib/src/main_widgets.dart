@@ -3507,8 +3507,6 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
         bot: isAgent,
       ),
     );
-    final compactMessage =
-        _messageText.runes.length <= 48 && !_messageText.contains('\n');
     final messageContent = Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: widget.isLocalSender
@@ -3519,9 +3517,13 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                widget.authorName,
-                style: const TextStyle(fontWeight: FontWeight.bold),
+              Flexible(
+                child: Text(
+                  widget.authorName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
               ),
               if (isAgent) ...[
                 const SizedBox(width: 6),
@@ -3607,17 +3609,11 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (widget.isLocalSender) ...[
-          if (compactMessage)
-            messageContent
-          else
-            Flexible(child: messageContent),
+          Flexible(child: messageContent),
         ] else ...[
           widget.groupedWithPrevious ? const SizedBox(width: 36) : avatar,
           const SizedBox(width: 12),
-          if (compactMessage)
-            messageContent
-          else
-            Flexible(child: messageContent),
+          Flexible(child: messageContent),
         ],
       ],
     );
@@ -6258,19 +6254,21 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
               ? null
               : now.difference(heartbeat.lastHeartbeatAt!);
           final active = heartbeat.connectionState == 'active';
-          final stateColor = active
-              ? const Color(0xff35d6a0)
-              : heartbeat.connectionState == 'disabled'
-              ? theme.colorScheme.onSurfaceVariant
-              : heartbeat.connectionState == 'reconnecting'
-              ? const Color(0xffffb547)
-              : theme.colorScheme.error;
+           final stateColor = active
+               ? const Color(0xff35d6a0)
+               : heartbeat.connectionState == 'disabled'
+               ? theme.colorScheme.onSurfaceVariant
+               : heartbeat.connectionState == 'reconnecting' ||
+                     heartbeat.connectionState == 'fallback'
+               ? const Color(0xffffb547)
+               : theme.colorScheme.error;
           final stateLabel = switch (heartbeat.connectionState) {
             'active' => 'Connected',
             'connected' => 'Connected',
-            'connecting' => 'Connecting',
-            'reconnecting' => 'Reconnecting',
-            'disabled' => 'Nostr only',
+             'connecting' => 'Connecting',
+             'reconnecting' => 'Reconnecting',
+             'fallback' => 'Nostr fallback',
+             'disabled' => 'Nostr only',
             _ => 'Disconnected',
           };
           final contentWidth = ((MediaQuery.sizeOf(context).width - 960) / 2)
