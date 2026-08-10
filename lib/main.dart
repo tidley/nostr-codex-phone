@@ -7592,6 +7592,9 @@ Return a concise catch-up summary of what happened after that point: completed w
               );
               continue;
             }
+            final missedUpdate =
+                _workspaceFipsLastReceivedMessageId > 0 &&
+                messageId != _workspaceFipsLastReceivedMessageId + 1;
             _workspaceFipsLastReceivedMessageId = messageId;
             if (_workspaceFipsReceivedMessageIds.length > 4096) {
               // IDs are strictly increasing, so retaining only the newest ID
@@ -7612,6 +7615,12 @@ Return a concise catch-up summary of what happened after that point: completed w
             }
             _receiveMessage(message);
             _setWorkspaceFipsConnectionState('active');
+            if (missedUpdate) {
+              _recordDiagnostic(
+                'FIPS workspace update gap detected; synchronizing workspace',
+              );
+              unawaited(_sendWorkspaceRequest({'action': 'list'}));
+            }
             continue;
           default:
             throw FormatException(
@@ -7622,12 +7631,21 @@ Return a concise catch-up summary of what happened after that point: completed w
     } catch (error) {
       if (sessionGeneration != _workspaceFipsSessionGeneration) return;
       final fipsEnabled = _workspaceFipsEnabled.value;
+      final traversalUnavailable = error.toString().contains(
+        'NAT traversal failed',
+      );
       _setWorkspaceFipsConnectionState(
-        fipsEnabled ? 'reconnecting' : 'disabled',
+        fipsEnabled
+            ? traversalUnavailable
+                  ? 'fallback'
+                  : 'reconnecting'
+            : 'disabled',
       );
       if (fipsEnabled) {
         _recordDiagnostic(
-          'FIPS workspace ${snapshotComplete ? 'session' : 'bootstrap'} failed, using Nostr: $error',
+          traversalUnavailable
+              ? 'FIPS direct route is unavailable; using Nostr until FIPS is toggled: $error'
+              : 'FIPS workspace ${snapshotComplete ? 'session' : 'bootstrap'} failed, using Nostr: $error',
         );
       }
       try {
@@ -7635,7 +7653,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       } catch (fallbackError) {
         _recordDiagnostic('Nostr workspace fallback failed: $fallbackError');
       }
-      if (fipsEnabled) _scheduleWorkspaceFipsRetry();
+      if (fipsEnabled && !traversalUnavailable) _scheduleWorkspaceFipsRetry();
     } finally {
       if (sessionGeneration == _workspaceFipsSessionGeneration) {
         try {
