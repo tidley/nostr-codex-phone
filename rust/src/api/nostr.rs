@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use fips_client::{call_status, clean_endpoints, FipsClientConfig};
@@ -572,7 +572,14 @@ pub async fn fips_workspace_snapshot_connect(
     let mut client = WorkspaceFipsClient {
         client: build_workspace_fips_client(config).await?,
         peer_npub,
-        next_frame_id: 0,
+        // The worker retains replay state while a peer reconnects. Start each
+        // client transport above earlier sessions instead of reusing frame 1.
+        next_frame_id: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX - 1),
         assembler: FipsApplicationFrameAssembler::default(),
     };
     workspace_snapshot_send_frame(&mut client, capability.into_bytes()).await?;
@@ -976,8 +983,11 @@ mod tests {
     use super::*;
     use fips_mobile::{FipsMobileQuicSessionConfig, Identity};
 
+    static CALL_SLOT_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
     #[tokio::test]
     async fn stopping_a_call_cancels_pending_acceptance() {
+        let _guard = CALL_SLOT_TEST_LOCK.lock().await;
         *CALL_SESSION.lock().await = Some(FipsMobileQuicSession::new(
             Identity::generate(),
             FipsMobileQuicSessionConfig::default(),
@@ -993,6 +1003,7 @@ mod tests {
 
     #[tokio::test]
     async fn completing_acceptance_requires_a_published_advert() {
+        let _guard = CALL_SLOT_TEST_LOCK.lock().await;
         let error = fips_call_accept_complete().await.unwrap_err();
 
         assert!(error.to_string().contains("acceptance is not started"));
@@ -1000,6 +1011,7 @@ mod tests {
 
     #[tokio::test]
     async fn stopping_workspace_transport_does_not_use_the_call_slot() {
+        let _guard = CALL_SLOT_TEST_LOCK.lock().await;
         *CALL_SESSION.lock().await = Some(FipsMobileQuicSession::new(
             Identity::generate(),
             FipsMobileQuicSessionConfig::default(),

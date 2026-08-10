@@ -524,7 +524,7 @@ class _WorkersPage extends StatelessWidget {
 
 enum _WorkerAction { test, remove }
 
-enum _WorkspaceSection { channel, direct, people, access, agents }
+enum _WorkspaceSection { channel, direct, people, access }
 
 class _WorkspaceDraft {
   _WorkspaceDraft(this.value, List<WorkspaceMention> mentions)
@@ -573,7 +573,6 @@ class _TeamWorkspace extends StatefulWidget {
     required this.onLoadOpenCodeModels,
     required this.initialFolderChoices,
     required this.onLoadFolders,
-    required this.onOpenAgentConversation,
     required this.inviteCode,
     required this.memberStatus,
     required this.workspace,
@@ -641,7 +640,6 @@ class _TeamWorkspace extends StatefulWidget {
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
   final List<RepoChoice> initialFolderChoices;
   final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
-  final Future<void> Function(WorkspaceAgent agent) onOpenAgentConversation;
   final String? inviteCode;
   final String memberStatus;
   final WorkspaceState workspace;
@@ -713,6 +711,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   String _voiceDurationLabel = '00:00';
   Timer? _typingRefreshTimer;
   Timer? _typingExpiryTimer;
+  var _showingMentionOptions = false;
   DateTime? _lastTypingLease;
   _WorkspaceSection _section = _WorkspaceSection.channel;
   String _active = 'workspace';
@@ -721,7 +720,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   bool _filesSelected = false;
   bool _filesFullWindow = false;
   bool _threadFullWindow = false;
-  int _agentsPageRevision = 0;
   double _sidebarWidth = 280;
   double _threadPaneWidth = 340;
 
@@ -843,7 +841,13 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   }
 
   void _onComposerChanged() {
-    setState(() {});
+    final showingMentionOptions =
+        _mentionQueryFor(_composer) != null ||
+        _mentionQueryFor(_threadComposer) != null;
+    if (showingMentionOptions ||
+        showingMentionOptions != _showingMentionOptions) {
+      setState(() => _showingMentionOptions = showingMentionOptions);
+    }
     _syncTypingLease();
   }
 
@@ -1180,8 +1184,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         return 'People';
       case _WorkspaceSection.access:
         return 'Access';
-      case _WorkspaceSection.agents:
-        return 'Agents';
     }
   }
 
@@ -1212,6 +1214,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       'mentions': _mentionsFor(
         text,
         selectedMentions,
+        thread: thread,
       ).map((mention) => mention.toJson()).toList(),
       if (thread != null) 'parent_id': thread.id,
       if (thread != null) 'also_send_to_main': _alsoSendToMain,
@@ -1241,6 +1244,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       'mentions': _mentionsFor(
         composer.text,
         selectedMentions,
+        thread: thread,
       ).map((mention) => mention.toJson()).toList(),
       if (thread != null) 'parent_id': thread.id,
       if (thread != null) 'also_send_to_main': _alsoSendToMain,
@@ -1258,8 +1262,30 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   List<WorkspaceMention> _mentionsFor(
     String text,
-    List<WorkspaceMention> selected,
-  ) => workspaceSelectedMentionsIn(text, selected).toList();
+    List<WorkspaceMention> selected, {
+    WorkspaceMessage? thread,
+  }) {
+    final mentions = workspaceSelectedMentionsIn(text, selected).toList();
+    final previous = thread == null
+        ? null
+        : _threadReplies.isEmpty
+        ? thread
+        : _threadReplies.last;
+    if (previous == null || !isWorkspaceAgentSender(previous.senderPubkey)) {
+      return mentions;
+    }
+    final agentId = previous.senderPubkey.substring('agent:'.length);
+    final agent = _activeAgents
+        .where((agent) => agent.id == agentId)
+        .firstOrNull;
+    if (agent == null || mentions.any((mention) => mention.id == agentId)) {
+      return mentions;
+    }
+    return [
+      ...mentions,
+      WorkspaceMention(kind: 'agent', id: agentId, label: agent.name),
+    ];
+  }
 
   void _select(_WorkspaceSection section, String id) {
     _closeDrawer();
@@ -1279,7 +1305,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final nextKey = _conversationKeyFor(section, id);
     final nextPanelState = nextKey == null ? null : _panelStates[nextKey];
     setState(() {
-      if (section == _WorkspaceSection.agents) _agentsPageRevision++;
       _section = section;
       _active = id;
       _thread = _threadWithId(nextPanelState?.threadId);
@@ -1500,13 +1525,11 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
         initialFolderChoices: widget.initialFolderChoices,
         onLoadFolders: widget.onLoadFolders,
-        onOpenAgentConversation: widget.onOpenAgentConversation,
         conversationPreprompt: widget.workspace.conversationPreprompt(
           channelId: _section == _WorkspaceSection.channel ? _active : null,
           ownPubkey: widget.ownPubkey,
           peerPubkey: _section == _WorkspaceSection.direct ? _active : null,
         ),
-        agentsPageRevision: _agentsPageRevision,
         agents: _activeAgents,
         onManageAgents:
             _section == _WorkspaceSection.channel ||
@@ -1886,6 +1909,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           peerPubkey: isChannel ? null : _active,
           onRequest: widget.onRequest,
           onLoadFolders: widget.onLoadFolderChoices,
+          onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
+          initialFolderChoices: widget.initialFolderChoices,
         ),
       ),
     );
@@ -1902,6 +1927,8 @@ class _ConversationAgentsPage extends StatelessWidget {
     required this.peerPubkey,
     required this.onRequest,
     required this.onLoadFolders,
+    required this.onLoadOpenCodeModels,
+    required this.initialFolderChoices,
   });
 
   final String title;
@@ -1912,6 +1939,31 @@ class _ConversationAgentsPage extends StatelessWidget {
   final String? peerPubkey;
   final Future<void> Function(Map<String, Object?> request) onRequest;
   final Future<List<RepoChoice>> Function() onLoadFolders;
+  final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
+  final List<RepoChoice> initialFolderChoices;
+
+  static const _presets = [
+    (
+      'Builder',
+      'Build and implement focused changes.',
+      Icons.handyman_outlined,
+    ),
+    (
+      'Reviewer',
+      'Review changes for bugs, risk, and test gaps.',
+      Icons.fact_check_outlined,
+    ),
+    (
+      'Researcher',
+      'Investigate options and report concise evidence.',
+      Icons.travel_explore_outlined,
+    ),
+    (
+      'Coordinator',
+      'Break work down and coordinate the next steps.',
+      Icons.account_tree_outlined,
+    ),
+  ];
 
   bool _matches(WorkspaceConversationAgent membership) {
     if (membership.channelId != null) return membership.channelId == channelId;
@@ -1927,46 +1979,6 @@ class _ConversationAgentsPage extends StatelessWidget {
     if (channelId != null) 'channel_id': channelId,
     if (channelId == null) 'recipient_pubkey': peerPubkey,
   };
-
-  Future<void> _add(BuildContext context) async {
-    final attached = workspace.conversationAgents
-        .where(_matches)
-        .map((membership) => membership.agentId)
-        .toSet();
-    final agent = await showModalBottomSheet<WorkspaceAgent>(
-      context: context,
-      builder: (context) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            const ListTile(title: Text('Add agent')),
-            for (final agent in workspace.agents)
-              ListTile(
-                enabled: !attached.contains(agent.id),
-                title: Text(agent.name),
-                subtitle: Text(agent.role),
-                trailing: attached.contains(agent.id)
-                    ? const Text('Added')
-                    : const Icon(Icons.add),
-                onTap: attached.contains(agent.id)
-                    ? null
-                    : () => Navigator.pop(context, agent),
-              ),
-          ],
-        ),
-      ),
-    );
-    if (agent == null || !context.mounted) return;
-    final folders = await showDialog<List<String>>(
-      context: context,
-      builder: (_) => _FolderScopeDialog(onLoadChoices: onLoadFolders),
-    );
-    if (folders == null) return;
-    await onRequest({
-      ..._request('add_conversation_agent', agent.id),
-      'folder_scope': folders,
-    });
-  }
 
   Future<void> _editFolder(
     BuildContext context,
@@ -1987,16 +1999,10 @@ class _ConversationAgentsPage extends StatelessWidget {
     }
   }
 
-  Future<void> _create(BuildContext context) async {
-    final profile = await showDialog<Map<String, Object?>>(
-      context: context,
-      builder: (_) => _AgentEditorDialog(
-        onLoadOpenCodeModels: () async => const [],
-        initialFolderChoices: const [],
-        onLoadFolders: (_) => onLoadFolders(),
-      ),
-    );
-    if (profile == null || !context.mounted) return;
+  Future<void> _createPreset(
+    BuildContext context,
+    (String, String, IconData) preset,
+  ) async {
     final folders = await showDialog<List<String>>(
       context: context,
       builder: (_) => _FolderScopeDialog(onLoadChoices: onLoadFolders),
@@ -2004,11 +2010,71 @@ class _ConversationAgentsPage extends StatelessWidget {
     if (folders == null) return;
     await onRequest(
       {
-        ...profile,
         ..._request('create_conversation_agent', ''),
+        'agent_name': preset.$1,
+        'agent_role': preset.$2,
+        'agent_preset': preset.$1.toLowerCase(),
+        'agent_skills': const <String>[],
         'folder_scope': folders,
       }..remove('agent_id'),
     );
+  }
+
+  Future<void> _createCustom(BuildContext context) async {
+    final profile = await showDialog<Map<String, Object?>>(
+      context: context,
+      builder: (_) => _AgentEditorDialog(
+        onLoadOpenCodeModels: onLoadOpenCodeModels,
+        initialFolderChoices: initialFolderChoices,
+        onLoadFolders: (_) => onLoadFolders(),
+      ),
+    );
+    if (profile == null || !context.mounted) return;
+    await onRequest(
+      {...profile, ..._request('create_conversation_agent', '')}
+        ..remove('agent_id'),
+    );
+  }
+
+  Future<void> _create(BuildContext context) async {
+    final choice = await showModalBottomSheet<Object>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(
+              title: Text('Create conversation agent'),
+              subtitle: Text(
+                'This agent is assigned only to this conversation.',
+              ),
+            ),
+            for (final preset in _presets)
+              ListTile(
+                leading: Icon(preset.$3),
+                title: Text(preset.$1),
+                subtitle: Text(preset.$2),
+                onTap: () => Navigator.pop(context, preset),
+              ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.tune_outlined),
+              title: const Text('Custom agent'),
+              subtitle: const Text(
+                'Choose its role, skills, and OpenCode profile.',
+              ),
+              onTap: () => Navigator.pop(context, 'custom'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!context.mounted || choice == null) return;
+    if (choice == 'custom') {
+      await _createCustom(context);
+    } else {
+      await _createPreset(context, choice as (String, String, IconData));
+    }
   }
 
   @override
@@ -2017,16 +2083,11 @@ class _ConversationAgentsPage extends StatelessWidget {
       title: const Text('Conversation agents'),
       actions: [
         IconButton(
-          tooltip: 'Create agent',
+          tooltip: 'Create conversation agent',
           onPressed: () => _create(context),
           icon: const Icon(Icons.add_circle_outline),
         ),
       ],
-    ),
-    floatingActionButton: FloatingActionButton.extended(
-      onPressed: () => _add(context),
-      icon: const Icon(Icons.add),
-      label: const Text('Add agent'),
     ),
     body: ValueListenableBuilder<int>(
       valueListenable: workspaceRevision,
@@ -2050,14 +2111,14 @@ class _ConversationAgentsPage extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             const Text(
-              'Only agents assigned to this conversation can respond here.',
+              'Agents created here are assigned only to this conversation.',
             ),
             const SizedBox(height: 24),
             if (agents.isEmpty)
               const Padding(
                 padding: EdgeInsets.only(top: 48),
                 child: Center(
-                  child: Text('No agents are assigned to this conversation.'),
+                  child: Text('Create an agent to work in this conversation.'),
                 ),
               ),
             for (final agent in agents)
@@ -2566,12 +2627,6 @@ class _WorkspaceSidebar extends StatelessWidget {
                   selected: section == _WorkspaceSection.access,
                   onTap: () => onSelect(_WorkspaceSection.access, 'access'),
                 ),
-                item(
-                  Icons.smart_toy_outlined,
-                  'Agents',
-                  selected: section == _WorkspaceSection.agents,
-                  onTap: () => onSelect(_WorkspaceSection.agents, 'agents'),
-                ),
                 const SizedBox(height: 18),
                 Text(
                   'Focused work',
@@ -2677,9 +2732,7 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.onLoadOpenCodeModels,
     required this.initialFolderChoices,
     required this.onLoadFolders,
-    required this.onOpenAgentConversation,
     required this.conversationPreprompt,
-    required this.agentsPageRevision,
     required this.agents,
     required this.onManageAgents,
     required this.onEditConversationPreprompt,
@@ -2751,9 +2804,7 @@ class _WorkspaceConversation extends StatefulWidget {
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
   final List<RepoChoice> initialFolderChoices;
   final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
-  final Future<void> Function(WorkspaceAgent agent) onOpenAgentConversation;
   final String conversationPreprompt;
-  final int agentsPageRevision;
   final List<WorkspaceAgent> agents;
   final VoidCallback? onManageAgents;
   final Future<void> Function(String value) onEditConversationPreprompt;
@@ -3002,19 +3053,6 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         memberStatus: widget.memberStatus,
         onCreateInvite: widget.onCreateInvite,
         onOpenSettings: widget.onOpenSettings,
-      );
-    }
-    if (widget.section == _WorkspaceSection.agents) {
-      return _AgentsPage(
-        key: ValueKey(widget.agentsPageRevision),
-        workspace: widget.workspace,
-        ownPubkey: widget.ownPubkey,
-        workspaceRevision: widget.workspaceRevision,
-        onRequest: widget.onRequest,
-        onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
-        initialFolderChoices: widget.initialFolderChoices,
-        onLoadFolders: widget.onLoadFolders,
-        onOpenConversation: widget.onOpenAgentConversation,
       );
     }
     final palette = Theme.of(context).extension<_WorkspacePalette>()!;
@@ -4723,7 +4761,6 @@ class _ContextLine extends StatelessWidget {
 
 class _AgentsPage extends StatefulWidget {
   const _AgentsPage({
-    super.key,
     required this.workspace,
     required this.ownPubkey,
     required this.workspaceRevision,
@@ -5449,19 +5486,17 @@ class _AgentEditorDialogState extends State<_AgentEditorDialog> {
   ];
   final _name = TextEditingController();
   final _role = TextEditingController();
-  final _traits = TextEditingController();
-  final _openCodeAgent = TextEditingController();
-  final _workdir = TextEditingController();
-  final _profileFieldsKey = GlobalKey<_OpenCodeProfileFieldsState>();
-  bool _restartOnFailure = true;
+  final _modelFieldsKey = GlobalKey<_OpenCodeProfileFieldsState>();
+  final _unusedOpenCodeAgent = TextEditingController();
+  final _unusedWorkdir = TextEditingController();
+  String? _workingFolder;
   final _selected = <String>{};
   @override
   void dispose() {
     _name.dispose();
     _role.dispose();
-    _traits.dispose();
-    _openCodeAgent.dispose();
-    _workdir.dispose();
+    _unusedOpenCodeAgent.dispose();
+    _unusedWorkdir.dispose();
     super.dispose();
   }
 
@@ -5479,14 +5514,9 @@ class _AgentEditorDialogState extends State<_AgentEditorDialog> {
           ),
           TextField(
             controller: _role,
-            decoration: const InputDecoration(labelText: 'Role'),
-          ),
-          TextField(
-            controller: _traits,
-            maxLines: 2,
             decoration: const InputDecoration(
-              labelText: 'Traits',
-              hintText: 'Concise, skeptical, detail-oriented',
+              labelText: 'Role',
+              hintText: "Describe the agent's role",
             ),
           ),
           const SizedBox(height: 12),
@@ -5516,15 +5546,40 @@ class _AgentEditorDialogState extends State<_AgentEditorDialog> {
           ),
           const SizedBox(height: 16),
           _OpenCodeProfileFields(
-            key: _profileFieldsKey,
+            key: _modelFieldsKey,
+            showIntro: false,
+            modelOnly: true,
             onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
             initialFolderChoices: widget.initialFolderChoices,
             onLoadFolders: widget.onLoadFolders,
-            openCodeAgent: _openCodeAgent,
-            workdir: _workdir,
-            restartOnFailure: _restartOnFailure,
-            onRestartOnFailureChanged: (value) =>
-                setState(() => _restartOnFailure = value),
+            openCodeAgent: _unusedOpenCodeAgent,
+            workdir: _unusedWorkdir,
+            restartOnFailure: true,
+            onRestartOnFailureChanged: (_) {},
+          ),
+          DropdownButtonFormField<String>(
+            initialValue: _workingFolder ?? '',
+            isExpanded: true,
+            decoration: const InputDecoration(
+              labelText: 'Working folder',
+              helperText: 'Choose where this conversation agent can work.',
+              prefixIcon: Icon(Icons.folder_outlined),
+            ),
+            items: [
+              const DropdownMenuItem(value: '', child: Text('Worker default')),
+              for (final folder in widget.initialFolderChoices)
+                DropdownMenuItem(
+                  value: folder.path,
+                  child: Text(
+                    folder.displayName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+            ],
+            onChanged: (path) => setState(() {
+              _workingFolder = path?.isEmpty ?? true ? null : path;
+            }),
           ),
         ],
       ),
@@ -5540,21 +5595,16 @@ class _AgentEditorDialogState extends State<_AgentEditorDialog> {
           Navigator.pop(context, {
             'agent_name': _name.text.trim(),
             'agent_role': _role.text.trim(),
-            'agent_traits': _traits.text.trim(),
             'agent_skills': _selected.toList(),
-            if (_profileFieldsKey.currentState?.selectedModel case final model?)
+            if (_modelFieldsKey.currentState?.selectedModel case final model?)
               'opencode_provider_id': model.providerId,
-            if (_profileFieldsKey.currentState?.selectedModel case final model?)
+            if (_modelFieldsKey.currentState?.selectedModel case final model?)
               'opencode_provider_name': model.providerName,
-            if (_profileFieldsKey.currentState?.selectedModel case final model?)
+            if (_modelFieldsKey.currentState?.selectedModel case final model?)
               'opencode_model_id': model.modelId,
-            if (_profileFieldsKey.currentState?.selectedModel case final model?)
+            if (_modelFieldsKey.currentState?.selectedModel case final model?)
               'opencode_model_name': model.modelName,
-            if (_openCodeAgent.text.trim().isNotEmpty)
-              'opencode_agent': _openCodeAgent.text.trim(),
-            if (_workdir.text.trim().isNotEmpty)
-              'agent_workdir': _workdir.text.trim(),
-            'restart_agent_session_on_failure': _restartOnFailure,
+            'folder_scope': [?_workingFolder],
           });
         },
         child: const Text('Create'),
@@ -5657,6 +5707,7 @@ class _OpenCodeProfileFields extends StatefulWidget {
     super.key,
     this.initialModel,
     this.showIntro = true,
+    this.modelOnly = false,
     required this.onLoadOpenCodeModels,
     required this.initialFolderChoices,
     required this.onLoadFolders,
@@ -5668,6 +5719,7 @@ class _OpenCodeProfileFields extends StatefulWidget {
 
   final _OpenCodeModelChoice? initialModel;
   final bool showIntro;
+  final bool modelOnly;
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
   final List<RepoChoice> initialFolderChoices;
   final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
@@ -5807,38 +5859,40 @@ class _OpenCodeProfileFieldsState extends State<_OpenCodeProfileFields> {
             : const Icon(Icons.chevron_right),
         onTap: _loadingModels ? null : _chooseModel,
       ),
-      TextField(
-        controller: widget.openCodeAgent,
-        maxLength: 100,
-        decoration: const InputDecoration(
-          labelText: 'OpenCode execution profile',
-          helperText: 'Named OpenCode profile, for example build or explore.',
+      if (!widget.modelOnly) ...[
+        TextField(
+          controller: widget.openCodeAgent,
+          maxLength: 100,
+          decoration: const InputDecoration(
+            labelText: 'OpenCode execution profile',
+            helperText: 'Named OpenCode profile, for example build or explore.',
+          ),
         ),
-      ),
-      ListTile(
-        contentPadding: EdgeInsets.zero,
-        leading: const Icon(Icons.folder_outlined),
-        title: Text(
-          widget.workdir.text.trim().isEmpty
-              ? 'Working folder: worker default'
-              : 'Working folder: ${_selectedFolderLabel ?? widget.workdir.text.trim()}',
+        ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.folder_outlined),
+          title: Text(
+            widget.workdir.text.trim().isEmpty
+                ? 'Working folder: worker default'
+                : 'Working folder: ${_selectedFolderLabel ?? widget.workdir.text.trim()}',
+          ),
+          subtitle: Text(
+            widget.workdir.text.trim().isEmpty
+                ? 'Used by conversations without an explicit folder scope'
+                : widget.workdir.text.trim(),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: _chooseWorkingFolder,
         ),
-        subtitle: Text(
-          widget.workdir.text.trim().isEmpty
-              ? 'Used by conversations without an explicit folder scope'
-              : widget.workdir.text.trim(),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+        SwitchListTile.adaptive(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('Restart session after a failed turn'),
+          value: widget.restartOnFailure,
+          onChanged: widget.onRestartOnFailureChanged,
         ),
-        trailing: const Icon(Icons.chevron_right),
-        onTap: _chooseWorkingFolder,
-      ),
-      SwitchListTile.adaptive(
-        contentPadding: EdgeInsets.zero,
-        title: const Text('Restart session after a failed turn'),
-        value: widget.restartOnFailure,
-        onChanged: widget.onRestartOnFailureChanged,
-      ),
+      ],
     ],
   );
 }
@@ -6207,12 +6261,6 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
             'disabled' => 'Nostr only',
             _ => 'Disconnected',
           };
-          final lifecycle = switch (heartbeat.connectionState) {
-            'active' => 3,
-            'connected' => 2,
-            'connecting' || 'reconnecting' => 1,
-            _ => 0,
-          };
           final contentWidth = ((MediaQuery.sizeOf(context).width - 960) / 2)
               .clamp(16.0, double.infinity)
               .toDouble();
@@ -6220,33 +6268,22 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
             padding: EdgeInsets.fromLTRB(contentWidth, 16, contentWidth, 32),
             children: [
               _DiagnosticPanel(
-                number: '01',
-                title: 'Connection settings',
+                title: 'Transport',
                 child: ValueListenableBuilder<bool>(
                   valueListenable: widget.fipsEnabled,
                   builder: (context, enabled, _) => Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      Container(
-                        width: 40,
-                        height: 40,
-                        decoration: BoxDecoration(
-                          color: theme.colorScheme.primary.withValues(
-                            alpha: 0.12,
-                          ),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Icon(
-                          Icons.shield_outlined,
-                          color: theme.colorScheme.primary,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text('Use FIPS transport'),
+                            Text(
+                              enabled ? 'FIPS preferred' : 'Nostr only',
+                              style: theme.textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
                             const SizedBox(height: 2),
                             Text(
                               enabled
@@ -6259,38 +6296,17 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                           ],
                         ),
                       ),
-                      const SizedBox(width: 12),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text(
-                            enabled ? 'FIPS' : 'NOSTR',
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: enabled
-                                  ? theme.colorScheme.primary
-                                  : theme.colorScheme.onSurfaceVariant,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 0.7,
-                            ),
-                          ),
-                          Switch(
-                            value: enabled,
-                            onChanged: widget.onFipsEnabledChanged,
-                          ),
-                        ],
+                      Switch(
+                        value: enabled,
+                        onChanged: widget.onFipsEnabledChanged,
                       ),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 28),
               _DiagnosticPanel(
-                number: '02',
-                title: 'Connection status',
-                trailing: _DiagnosticBadge(
-                  label: active ? 'LIVE' : 'MONITORING',
-                  color: stateColor,
-                ),
+                title: 'Connection',
                 child: LayoutBuilder(
                   builder: (context, constraints) {
                     final status = _DiagnosticConnectionStatus(
@@ -6319,68 +6335,26 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                               Expanded(child: metrics),
                             ],
                           ),
-                        const SizedBox(height: 18),
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.surfaceContainerLow,
-                            border: Border.all(
-                              color: theme.colorScheme.outlineVariant,
-                            ),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Lifecycle',
-                                style: theme.textTheme.labelMedium?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              const SizedBox(height: 12),
-                              _DiagnosticTimeline(
-                                stage: lifecycle,
-                                color: stateColor,
-                                connecting:
-                                    heartbeat.connectionState == 'connecting',
-                              ),
-                            ],
-                          ),
-                        ),
                       ],
                     );
                   },
                 ),
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 28),
               _DiagnosticPanel(
-                number: '03',
-                title: 'Recent events',
+                title: 'Activity',
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
-                      children: [
-                        _DiagnosticBadge(label: '${events.length} total'),
-                        _DiagnosticBadge(
-                          label: '$warnings warnings',
-                          color: const Color(0xffffb547),
-                        ),
-                        _DiagnosticBadge(
-                          label: '$errors errors',
-                          color: theme.colorScheme.error,
-                        ),
-                      ],
+                    Text(
+                      '$warnings warnings  /  $errors errors  /  ${events.length} events',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 16),
                     Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
+                      spacing: 8,
                       children: _DiagnosticFilter.values
                           .map(
                             (filter) => ChoiceChip(
@@ -6396,8 +6370,7 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                           )
                           .toList(),
                     ),
-                    const SizedBox(height: 14),
-                    const _DiagnosticEventTableHeader(),
+                    const SizedBox(height: 16),
                     if (visibleEvents.isEmpty)
                       Padding(
                         padding: const EdgeInsets.symmetric(vertical: 28),
@@ -6434,90 +6407,26 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
 }
 
 class _DiagnosticPanel extends StatelessWidget {
-  const _DiagnosticPanel({
-    required this.number,
-    required this.title,
-    required this.child,
-    this.trailing,
-  });
+  const _DiagnosticPanel({required this.title, required this.child});
 
-  final String number;
   final String title;
   final Widget child;
-  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                number,
-                style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.primary,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: 0.8,
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  title,
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-              ?trailing,
-            ],
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: theme.textTheme.titleSmall?.copyWith(
+            fontWeight: FontWeight.w700,
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 14),
-            child: Divider(height: 1),
-          ),
-          child,
-        ],
-      ),
-    );
-  }
-}
-
-class _DiagnosticBadge extends StatelessWidget {
-  const _DiagnosticBadge({required this.label, this.color});
-
-  final String label;
-  final Color? color;
-
-  @override
-  Widget build(BuildContext context) {
-    final resolvedColor =
-        color ?? Theme.of(context).colorScheme.onSurfaceVariant;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-      decoration: BoxDecoration(
-        color: resolvedColor.withValues(alpha: 0.12),
-        border: Border.all(color: resolvedColor.withValues(alpha: 0.35)),
-        borderRadius: BorderRadius.circular(5),
-      ),
-      child: Text(
-        label.toUpperCase(),
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          color: resolvedColor,
-          fontSize: 10,
-          fontWeight: FontWeight.w800,
-          letterSpacing: 0.55,
         ),
-      ),
+        const SizedBox(height: 12),
+        child,
+      ],
     );
   }
 }
@@ -6661,31 +6570,6 @@ class _DiagnosticStat extends StatelessWidget {
   }
 }
 
-class _DiagnosticEventTableHeader extends StatelessWidget {
-  const _DiagnosticEventTableHeader();
-
-  @override
-  Widget build(BuildContext context) {
-    final style = Theme.of(context).textTheme.labelSmall?.copyWith(
-      color: Theme.of(context).colorScheme.onSurfaceVariant,
-      fontWeight: FontWeight.w700,
-      letterSpacing: 0.5,
-    );
-    return Container(
-      padding: const EdgeInsets.fromLTRB(10, 7, 8, 7),
-      color: Theme.of(context).colorScheme.surfaceContainerLow,
-      child: Row(
-        children: [
-          SizedBox(width: 68, child: Text('TIME', style: style)),
-          SizedBox(width: 24, child: Text('TYPE', style: style)),
-          Expanded(child: Text('EVENT', style: style)),
-          Text('DETAILS', style: style),
-        ],
-      ),
-    );
-  }
-}
-
 class _DiagnosticEvent extends StatefulWidget {
   const _DiagnosticEvent({
     super.key,
@@ -6754,7 +6638,7 @@ class _DiagnosticEventState extends State<_DiagnosticEvent> {
         onTap: () => setState(() => _expanded = !_expanded),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
-          padding: const EdgeInsets.fromLTRB(10, 9, 8, 9),
+          padding: const EdgeInsets.symmetric(vertical: 12),
           decoration: BoxDecoration(
             color: _highlightNewest
                 ? color.withValues(alpha: 0.08)
@@ -6768,47 +6652,44 @@ class _DiagnosticEventState extends State<_DiagnosticEvent> {
             children: [
               Row(
                 children: [
-                  SizedBox(
-                    width: 68,
-                    child: Text(
-                      event.timestamp,
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        fontFamily: 'monospace',
-                        fontSize: 10,
-                        color: theme.colorScheme.onSurfaceVariant.withValues(
-                          alpha: 0.72,
-                        ),
-                      ),
-                    ),
-                  ),
-                  SizedBox(
-                    width: 24,
-                    child: Icon(icon, size: 16, color: color),
-                  ),
+                  Icon(icon, size: 17, color: color),
+                  const SizedBox(width: 10),
                   Expanded(
-                    child: Text(
-                      event.count > 1
-                          ? '${event.title} (${event.count})'
-                          : event.title,
-                      maxLines: _expanded ? null : 1,
-                      overflow: _expanded ? null : TextOverflow.ellipsis,
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: color,
-                        fontWeight: FontWeight.w700,
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          event.count > 1
+                              ? '${event.title} (${event.count})'
+                              : event.title,
+                          maxLines: _expanded ? null : 1,
+                          overflow: _expanded ? null : TextOverflow.ellipsis,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: color,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        if (event.detail != null) ...[
+                          const SizedBox(height: 3),
+                          Text(
+                            event.detail!,
+                            maxLines: _expanded ? null : 1,
+                            overflow: _expanded ? null : TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Text(
-                      event.metadata,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
+                  const SizedBox(width: 12),
+                  Text(
+                    event.timestamp,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
-                  const SizedBox(width: 2),
                   Icon(
                     _expanded ? Icons.expand_less : Icons.expand_more,
                     size: 18,
@@ -6816,22 +6697,10 @@ class _DiagnosticEventState extends State<_DiagnosticEvent> {
                   ),
                 ],
               ),
-              if (event.detail != null) ...[
-                const SizedBox(height: 3),
-                Padding(
-                  padding: const EdgeInsets.only(left: 92),
-                  child: Text(
-                    event.detail!,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-              ],
               if (_expanded) ...[
                 const SizedBox(height: 9),
                 Padding(
-                  padding: const EdgeInsets.only(left: 92),
+                  padding: const EdgeInsets.only(left: 27),
                   child: Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(9),
@@ -6853,32 +6722,19 @@ class _DiagnosticEventState extends State<_DiagnosticEvent> {
   }
 }
 
-enum _DiagnosticFilter {
-  all,
-  connection,
-  snapshots,
-  transport,
-  warnings,
-  errors,
-}
+enum _DiagnosticFilter { all, issues }
 
 extension on _DiagnosticFilter {
   String get label => switch (this) {
     _DiagnosticFilter.all => 'All',
-    _DiagnosticFilter.connection => 'Connection',
-    _DiagnosticFilter.snapshots => 'Snapshots',
-    _DiagnosticFilter.transport => 'Transport',
-    _DiagnosticFilter.warnings => 'Warnings',
-    _DiagnosticFilter.errors => 'Errors',
+    _DiagnosticFilter.issues => 'Issues',
   };
 
   bool includes(_DiagnosticCategory category) => switch (this) {
     _DiagnosticFilter.all => true,
-    _DiagnosticFilter.connection => category == _DiagnosticCategory.connection,
-    _DiagnosticFilter.snapshots => category == _DiagnosticCategory.snapshot,
-    _DiagnosticFilter.transport => category == _DiagnosticCategory.transport,
-    _DiagnosticFilter.warnings => category == _DiagnosticCategory.warning,
-    _DiagnosticFilter.errors => category == _DiagnosticCategory.error,
+    _DiagnosticFilter.issues =>
+      category == _DiagnosticCategory.warning ||
+          category == _DiagnosticCategory.error,
   };
 }
 
@@ -7021,114 +6877,6 @@ _DiagnosticEventData _diagnosticEvent(String entry) {
     category: _DiagnosticCategory.info,
     title: value,
     raw: raw,
-  );
-}
-
-class _DiagnosticTimeline extends StatelessWidget {
-  const _DiagnosticTimeline({
-    required this.stage,
-    required this.color,
-    required this.connecting,
-  });
-
-  final int stage;
-  final Color color;
-  final bool connecting;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        _DiagnosticTimelineStep(
-          label: connecting ? 'Connecting' : 'Connected',
-          complete: stage >= 1,
-          active: stage == 1,
-          color: color,
-        ),
-        _DiagnosticTimelineLine(complete: stage >= 2, color: color),
-        _DiagnosticTimelineStep(
-          label: 'Snapshot',
-          complete: stage >= 2,
-          active: stage == 2,
-          color: color,
-        ),
-        _DiagnosticTimelineLine(complete: stage >= 3, color: color),
-        _DiagnosticTimelineStep(
-          label: 'Active',
-          complete: stage >= 3,
-          active: stage == 3,
-          color: color,
-        ),
-      ],
-    );
-  }
-}
-
-class _DiagnosticTimelineLine extends StatelessWidget {
-  const _DiagnosticTimelineLine({required this.complete, required this.color});
-
-  final bool complete;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) => Expanded(
-    child: AnimatedContainer(
-      duration: const Duration(milliseconds: 280),
-      height: 1,
-      margin: const EdgeInsets.only(bottom: 20),
-      color: complete ? color : Theme.of(context).colorScheme.outlineVariant,
-    ),
-  );
-}
-
-class _DiagnosticTimelineStep extends StatelessWidget {
-  const _DiagnosticTimelineStep({
-    required this.label,
-    required this.complete,
-    required this.active,
-    required this.color,
-  });
-
-  final String label;
-  final bool complete;
-  final bool active;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) => Column(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      AnimatedContainer(
-        duration: const Duration(milliseconds: 280),
-        width: 20,
-        height: 20,
-        decoration: BoxDecoration(
-          color: complete
-              ? color
-              : Theme.of(context).colorScheme.surfaceContainerHighest,
-          shape: BoxShape.circle,
-        ),
-        child: Icon(
-          complete
-              ? (active ? Icons.circle : Icons.check)
-              : Icons.circle_outlined,
-          size: active ? 9 : 13,
-          color: complete
-              ? Theme.of(context).colorScheme.onPrimary
-              : Theme.of(context).colorScheme.onSurfaceVariant,
-        ),
-      ),
-      const SizedBox(height: 5),
-      Text(
-        label,
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          color: complete
-              ? Theme.of(context).colorScheme.onSurface
-              : Theme.of(context).colorScheme.onSurfaceVariant,
-          fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-        ),
-      ),
-    ],
   );
 }
 

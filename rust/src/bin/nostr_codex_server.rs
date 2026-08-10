@@ -223,6 +223,7 @@ struct WorkerRuntimeConfig {
 struct WorkspaceFipsPeer {
     member: String,
     npub: String,
+    connection_id: String,
     last_pong: Instant,
     last_message_id: u64,
     next_message_id: u64,
@@ -257,14 +258,21 @@ impl WorkspaceOutbound {
             self.fips_outgoing
                 .send(WorkspaceFipsOutbound {
                     member: member.to_string(),
-                    wire,
+                    wire: wire.clone(),
                     delivered,
                 })
                 .await
                 .map_err(|_| anyhow!("shared FIPS workspace outbound queue stopped"))?;
-            return receipt
+            if receipt
                 .await
-                .map_err(|_| anyhow!("shared FIPS workspace outbound receipt dropped"))?;
+                .map_err(|_| anyhow!("shared FIPS workspace outbound receipt dropped"))?
+                .is_ok()
+            {
+                return Ok(());
+            }
+            // A route can disappear between the registry lookup and its send.
+            // Deliver this update through Nostr instead of dropping it.
+            self.fips_routes.lock().await.remove(member);
         }
         messenger
             .send_wire_to_pubkey(member, wire)
@@ -1729,8 +1737,8 @@ async fn process_workspace_request(
                 return Ok(());
             }
             let capability = issue_workspace_fips_capability(fips_capabilities, sender).await;
-            // This gift-wrapped Nostr update is only signaling. The snapshot
-            // itself is sent after this capability is proven on FIPS.
+            // The capability upgrades this client to FIPS after the Nostr
+            // bootstrap snapshot has made its workspace usable.
             messenger
                 .send_wire_to_pubkey(
                     sender,
@@ -1747,9 +1755,16 @@ async fn process_workspace_request(
                     }),
                 )
                 .await?;
+            // Bootstrap the visible workspace through Nostr in the same
+            // request. FIPS is an upgrade for live traffic, never a reason to
+            // make a newly connected client wait for its initial state.
+            send_workspace_snapshot(workspace, messenger, outbound, sender).await?;
             return Ok(());
         }
         "list_fallback" => {
+            // This request follows a failed or disabled FIPS bootstrap. Remove
+            // any stale route so its snapshot cannot be sent over FIPS again.
+            outbound.fips_routes.lock().await.remove(sender);
             send_workspace_snapshot(workspace, messenger, outbound, sender).await?;
             return Ok(());
         }
@@ -2472,14 +2487,11 @@ async fn run_workspace_fips_acceptor(
                     }
                 };
                 if let Some(peer) = peers.get_mut(&source) {
-                    let envelope = match FipsApplicationEnvelope::decode(&frame) {
-                        Ok(envelope) if envelope.version == WORKSPACE_FIPS_PROTOCOL_VERSION => envelope,
-                        _ => {
-                            warn!("rejected invalid FIPS workspace peer envelope");
+                    if let Ok(envelope) = FipsApplicationEnvelope::decode(&frame) {
+                        if envelope.version != WORKSPACE_FIPS_PROTOCOL_VERSION {
                             continue;
                         }
-                    };
-                    match envelope.kind.as_str() {
+                        match envelope.kind.as_str() {
                         "pong" => peer.last_pong = Instant::now(),
                         "ping" => {
                             peer.last_pong = Instant::now();
@@ -2526,15 +2538,23 @@ async fn run_workspace_fips_acceptor(
                                 kind: wire.kind().to_string(),
                                 text: wire.text().to_string(),
                                 raw_json: frame,
-                                event_id: format!("fips:{}:{message_id}", peer.member),
+                                // App IDs restart when a client restarts. Scope
+                                // them to this accepted capability connection so
+                                // durable request de-duplication does not drop
+                                // the first request after reconnect.
+                                event_id: format!(
+                                    "fips:{}:{}:{message_id}",
+                                    peer.member, peer.connection_id
+                                ),
                             };
                             if incoming.try_send(message).is_err() {
                                 warn!(member = %peer.member, "dropped FIPS app envelope because worker dispatch queue is full");
                             }
                         }
-                        _ => warn!(member = %peer.member, kind = %envelope.kind, "rejected unexpected FIPS workspace peer envelope"),
+                            _ => warn!(member = %peer.member, kind = %envelope.kind, "rejected unexpected FIPS workspace peer envelope"),
+                        }
+                        continue;
                     }
-                    continue;
                 }
                 let member = match String::from_utf8(frame) {
                     Ok(capability) => {
@@ -2549,7 +2569,7 @@ async fn run_workspace_fips_acceptor(
                     warn!("rejected FIPS workspace peer without a valid capability");
                     continue;
                 };
-                if peers.len() >= WORKSPACE_FIPS_ROUTE_CAPACITY {
+                if !peers.contains_key(&source) && peers.len() >= WORKSPACE_FIPS_ROUTE_CAPACITY {
                     warn!(member, "rejected FIPS workspace peer because the route registry is full");
                     continue;
                 }
@@ -2570,9 +2590,19 @@ async fn run_workspace_fips_acceptor(
                         continue;
                     }
                 };
+                let previous_sources = peers
+                    .iter()
+                    .filter_map(|(source, peer)| (peer.member == member).then_some(source.clone()))
+                    .collect::<Vec<_>>();
+                for previous_source in previous_sources {
+                    peers.remove(&previous_source);
+                    assemblers.remove(&previous_source);
+                }
+                routes.lock().await.remove(&member);
                 peers.insert(source.clone(), WorkspaceFipsPeer {
                     member: member.clone(),
                     npub: peer_npub.clone(),
+                    connection_id: generate_pairing_secret(),
                     last_pong: Instant::now(),
                     last_message_id: 0,
                     next_message_id: 0,
@@ -2700,7 +2730,7 @@ async fn send_workspace_fips_envelope(
                 WORKSPACE_FIPS_SERVICE_PORT,
                 WORKSPACE_FIPS_SERVICE_PORT,
                 packet,
-                Duration::from_secs(20),
+                Duration::from_secs(5),
             )
             .await?;
     }
@@ -2729,7 +2759,7 @@ async fn send_workspace_fips_app(
                 WORKSPACE_FIPS_SERVICE_PORT,
                 WORKSPACE_FIPS_SERVICE_PORT,
                 packet,
-                Duration::from_secs(20),
+                Duration::from_secs(5),
             )
             .await?;
     }
