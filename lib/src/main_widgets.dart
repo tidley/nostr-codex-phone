@@ -1539,53 +1539,56 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         onMediaSourceChanged: widget.onMediaSourceChanged,
       ),
     );
-    final contextPane = _WorkspaceContext(
-      key: ValueKey(_thread?.id),
-      message: _thread,
-      replies: _threadReplies,
-      title: _title,
-      composer: _threadComposer,
-      composerFocus: _threadComposerFocus,
-      mentionOptions: _mentionOptionsFor(_threadComposer),
-      onMentionSelected: (mention) =>
-          _insertMention(_threadComposer, _selectedThreadMentions, mention),
-      onSend: () => _send(thread: _thread),
-      onAttach: () => _attach(thread: _thread),
-      voiceRecording: _voiceRecording && _voiceComposer == _threadComposer,
-      voiceTranscribing:
-          _voiceTranscribing && _voiceComposer == _threadComposer,
-      voiceError: _voiceComposer == _threadComposer ? _voiceError : null,
-      onVoicePressed: () => unawaited(_toggleVoiceRecording(thread: _thread)),
-      voiceDurationLabel: _voiceDurationLabel,
-      onCancelVoiceRecording: () => unawaited(_cancelVoiceRecording()),
-      alsoSendToMain: _alsoSendToMain,
-      onAlsoSendToMainChanged: (value) =>
-          setState(() => _alsoSendToMain = value),
-      onClose: () {
-        setState(() {
-          _saveThreadDraft();
-          _thread = null;
-          _alsoSendToMain = false;
-          _threadFullWindow = false;
-        });
-        widget.onCloseThread();
-      },
-      onToggleReaction: (message, emoji) => widget.onRequest({
-        'action': 'toggle_reaction',
-        'parent_id': message.id,
-        'reaction': emoji,
-      }),
-      onOpenAttachment: widget.onOpenAttachment,
-      ownPubkey: widget.ownPubkey,
-      localSenderIds: widget.localSenderIds,
-      displayName: widget.displayName,
-      memberAliases: widget.memberAliases,
-      memberNames: widget.memberNames,
-      agents: _activeAgents,
-      typingLabels: _typingLabels(threadTyping),
-      fullWindow: _threadFullWindow,
-      onToggleFullWindow: () =>
-          setState(() => _threadFullWindow = !_threadFullWindow),
+    final contextPane = ValueListenableBuilder<int>(
+      valueListenable: widget.workspaceRevision,
+      builder: (context, _, _) => _WorkspaceContext(
+        key: ValueKey(_thread?.id),
+        message: _thread,
+        replies: _threadReplies,
+        title: _title,
+        composer: _threadComposer,
+        composerFocus: _threadComposerFocus,
+        mentionOptions: _mentionOptionsFor(_threadComposer),
+        onMentionSelected: (mention) =>
+            _insertMention(_threadComposer, _selectedThreadMentions, mention),
+        onSend: () => _send(thread: _thread),
+        onAttach: () => _attach(thread: _thread),
+        voiceRecording: _voiceRecording && _voiceComposer == _threadComposer,
+        voiceTranscribing:
+            _voiceTranscribing && _voiceComposer == _threadComposer,
+        voiceError: _voiceComposer == _threadComposer ? _voiceError : null,
+        onVoicePressed: () => unawaited(_toggleVoiceRecording(thread: _thread)),
+        voiceDurationLabel: _voiceDurationLabel,
+        onCancelVoiceRecording: () => unawaited(_cancelVoiceRecording()),
+        alsoSendToMain: _alsoSendToMain,
+        onAlsoSendToMainChanged: (value) =>
+            setState(() => _alsoSendToMain = value),
+        onClose: () {
+          setState(() {
+            _saveThreadDraft();
+            _thread = null;
+            _alsoSendToMain = false;
+            _threadFullWindow = false;
+          });
+          widget.onCloseThread();
+        },
+        onToggleReaction: (message, emoji) => widget.onRequest({
+          'action': 'toggle_reaction',
+          'parent_id': message.id,
+          'reaction': emoji,
+        }),
+        onOpenAttachment: widget.onOpenAttachment,
+        ownPubkey: widget.ownPubkey,
+        localSenderIds: widget.localSenderIds,
+        displayName: widget.displayName,
+        memberAliases: widget.memberAliases,
+        memberNames: widget.memberNames,
+        agents: _activeAgents,
+        typingLabels: _typingLabels(threadTyping),
+        fullWindow: _threadFullWindow,
+        onToggleFullWindow: () =>
+            setState(() => _threadFullWindow = !_threadFullWindow),
+      ),
     );
     final conversationKey = _conversationKey;
     final fileBrowser = widget.fileBrowser.value;
@@ -6148,18 +6151,25 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
     appBar: AppBar(
       title: const Text('Client diagnostics'),
       actions: [
-        IconButton(
-          tooltip: 'Copy diagnostics',
-          onPressed: () => Clipboard.setData(
-            ClipboardData(text: widget.diagnostics.value.join('\n')),
+        Tooltip(
+          message: 'Copy diagnostics',
+          child: TextButton.icon(
+            onPressed: () => Clipboard.setData(
+              ClipboardData(text: widget.diagnostics.value.join('\n')),
+            ),
+            icon: const Icon(Icons.copy_outlined, size: 18),
+            label: const Text('Copy'),
           ),
-          icon: const Icon(Icons.copy_outlined),
         ),
-        IconButton(
-          tooltip: 'Clear diagnostics',
-          onPressed: () => widget.diagnostics.value = const [],
-          icon: const Icon(Icons.delete_outline),
+        Tooltip(
+          message: 'Clear diagnostics',
+          child: TextButton.icon(
+            onPressed: () => widget.diagnostics.value = const [],
+            icon: const Icon(Icons.delete_outline, size: 18),
+            label: const Text('Clear'),
+          ),
         ),
+        const SizedBox(width: 8),
       ],
     ),
     body: ValueListenableBuilder<_WorkspaceFipsHeartbeat>(
@@ -6197,29 +6207,6 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
             'disabled' => 'Nostr only',
             _ => 'Disconnected',
           };
-          Widget section(String label, {String? trailing}) => Padding(
-            padding: const EdgeInsets.only(top: 24, bottom: 8),
-            child: Row(
-              children: [
-                Text(
-                  label,
-                  style: theme.textTheme.labelLarge?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                if (trailing != null) ...[
-                  const Spacer(),
-                  Text(
-                    trailing,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          );
           final lifecycle = switch (heartbeat.connectionState) {
             'active' => 3,
             'connected' => 2,
@@ -6230,171 +6217,214 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
               .clamp(16.0, double.infinity)
               .toDouble();
           return ListView(
-            padding: EdgeInsets.fromLTRB(contentWidth, 8, contentWidth, 24),
+            padding: EdgeInsets.fromLTRB(contentWidth, 16, contentWidth, 32),
             children: [
-              section('Connection settings'),
-              ValueListenableBuilder<bool>(
-                valueListenable: widget.fipsEnabled,
-                builder: (context, enabled, _) => ListTile(
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-                  title: const Text('Use FIPS transport'),
-                  subtitle: Text(
-                    enabled
-                        ? 'Direct connection with Nostr fallback'
-                        : 'Nostr messages only',
-                  ),
-                  trailing: Switch(
-                    value: enabled,
-                    onChanged: widget.onFipsEnabledChanged,
+              _DiagnosticPanel(
+                number: '01',
+                title: 'Connection settings',
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: widget.fipsEnabled,
+                  builder: (context, enabled, _) => Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.primary.withValues(
+                            alpha: 0.12,
+                          ),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Icon(
+                          Icons.shield_outlined,
+                          color: theme.colorScheme.primary,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('Use FIPS transport'),
+                            const SizedBox(height: 2),
+                            Text(
+                              enabled
+                                  ? 'Direct connection with Nostr fallback'
+                                  : 'Nostr messages only',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text(
+                            enabled ? 'FIPS' : 'NOSTR',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: enabled
+                                  ? theme.colorScheme.primary
+                                  : theme.colorScheme.onSurfaceVariant,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.7,
+                            ),
+                          ),
+                          Switch(
+                            value: enabled,
+                            onChanged: widget.onFipsEnabledChanged,
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
                 ),
               ),
-              Container(
-                margin: const EdgeInsets.only(top: 14),
-                padding: const EdgeInsets.fromLTRB(14, 11, 14, 10),
-                decoration: BoxDecoration(
-                  color: theme.colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(14),
+              const SizedBox(height: 14),
+              _DiagnosticPanel(
+                number: '02',
+                title: 'Connection status',
+                trailing: _DiagnosticBadge(
+                  label: active ? 'LIVE' : 'MONITORING',
+                  color: stateColor,
                 ),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final status = _DiagnosticConnectionStatus(
+                      stateLabel: stateLabel,
+                      stateColor: stateColor,
+                      active: active,
+                    );
+                    final metrics = _DiagnosticMetrics(
+                      liveFor: liveFor,
+                      lastHeartbeat: lastHeartbeat,
+                      heartbeatCount: heartbeat.count,
+                      transport: active ? 'FIPS' : 'Nostr',
+                    );
+                    return Column(
+                      children: [
+                        if (constraints.maxWidth < 560) ...[
+                          status,
+                          const SizedBox(height: 18),
+                          metrics,
+                        ] else
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(child: status),
+                              const SizedBox(width: 28),
+                              Expanded(child: metrics),
+                            ],
+                          ),
+                        const SizedBox(height: 18),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.surfaceContainerLow,
+                            border: Border.all(
+                              color: theme.colorScheme.outlineVariant,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Lifecycle',
+                                style: theme.textTheme.labelMedium?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              _DiagnosticTimeline(
+                                stage: lifecycle,
+                                color: stateColor,
+                                connecting:
+                                    heartbeat.connectionState == 'connecting',
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 14),
+              _DiagnosticPanel(
+                number: '03',
+                title: 'Recent events',
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
                       children: [
-                        TweenAnimationBuilder<double>(
-                          tween: Tween(begin: 0.65, end: active ? 1 : 0.8),
-                          duration: const Duration(milliseconds: 750),
-                          curve: Curves.easeOutCubic,
-                          builder: (context, opacity, child) =>
-                              Opacity(opacity: opacity, child: child),
-                          child: Container(
-                            width: 9,
-                            height: 9,
-                            decoration: BoxDecoration(
-                              color: stateColor,
-                              shape: BoxShape.circle,
+                        _DiagnosticBadge(label: '${events.length} total'),
+                        _DiagnosticBadge(
+                          label: '$warnings warnings',
+                          color: const Color(0xffffb547),
+                        ),
+                        _DiagnosticBadge(
+                          label: '$errors errors',
+                          color: theme.colorScheme.error,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: _DiagnosticFilter.values
+                          .map(
+                            (filter) => ChoiceChip(
+                              label: Text(filter.label),
+                              selected: _filter == filter,
+                              onSelected: (_) =>
+                                  setState(() => _filter = filter),
+                              visualDensity: const VisualDensity(
+                                horizontal: -4,
+                                vertical: -4,
+                              ),
+                            ),
+                          )
+                          .toList(),
+                    ),
+                    const SizedBox(height: 14),
+                    const _DiagnosticEventTableHeader(),
+                    if (visibleEvents.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 28),
+                        child: Center(
+                          child: Text(
+                            entries.isEmpty
+                                ? 'No connection events yet.'
+                                : 'No events match this filter.',
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
                             ),
                           ),
                         ),
-                        const SizedBox(width: 9),
-                        Text(
-                          stateLabel,
-                          style: theme.textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
+                      )
+                    else
+                      for (var index = 0; index < visibleEvents.length; index++)
+                        _DiagnosticEvent(
+                          key: ValueKey(
+                            '${visibleEvents[index].timestamp}:${visibleEvents[index].raw}',
                           ),
+                          event: visibleEvents[index],
+                          isLast: index == visibleEvents.length - 1,
+                          isNewest: index == 0,
                         ),
-                        const Spacer(),
-                        Text(
-                          active ? 'Live' : 'Monitoring',
-                          style: theme.textTheme.labelMedium?.copyWith(
-                            color: stateColor,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 9),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Column(
-                            children: [
-                              _DiagnosticStat(
-                                label: 'Duration',
-                                value: liveFor == null
-                                    ? 'Not connected'
-                                    : _formatFipsDuration(liveFor),
-                              ),
-                              const SizedBox(height: 4),
-                              _DiagnosticStat(
-                                label: 'Heartbeat',
-                                value: lastHeartbeat == null
-                                    ? 'Waiting'
-                                    : '${_formatFipsDuration(lastHeartbeat)} ago',
-                              ),
-                              const SizedBox(height: 4),
-                              _DiagnosticStat(
-                                label: 'Heartbeats',
-                                value: '${heartbeat.count}',
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(width: 20),
-                        Expanded(
-                          child: Column(
-                            children: [
-                              _DiagnosticStat(
-                                label: 'Transport',
-                                value: active ? 'FIPS' : 'Nostr',
-                              ),
-                              const SizedBox(height: 6),
-                              const _DiagnosticStat(
-                                label: 'Fallback',
-                                value: 'Nostr enabled',
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    _DiagnosticTimeline(
-                      stage: lifecycle,
-                      color: stateColor,
-                      connecting: heartbeat.connectionState == 'connecting',
-                    ),
                   ],
                 ),
               ),
-              section(
-                'Recent events',
-                trailing:
-                    '${events.length} total · $warnings warnings · $errors errors',
-              ),
-              Wrap(
-                spacing: 7,
-                runSpacing: 7,
-                children: _DiagnosticFilter.values
-                    .map(
-                      (filter) => ChoiceChip(
-                        label: Text(filter.label),
-                        selected: _filter == filter,
-                        onSelected: (_) => setState(() => _filter = filter),
-                        visualDensity: const VisualDensity(
-                          horizontal: -3,
-                          vertical: -3,
-                        ),
-                        side: BorderSide.none,
-                        selectedColor: theme.colorScheme.primaryContainer,
-                        backgroundColor: theme.colorScheme.surfaceContainerLow,
-                      ),
-                    )
-                    .toList(),
-              ),
-              if (visibleEvents.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 24),
-                  child: Text(
-                    entries.isEmpty
-                        ? 'No connection events yet.'
-                        : 'No events match this filter.',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                )
-              else
-                for (var index = 0; index < visibleEvents.length; index++)
-                  _DiagnosticEvent(
-                    key: ValueKey(
-                      '${visibleEvents[index].timestamp}:${visibleEvents[index].raw}',
-                    ),
-                    event: visibleEvents[index],
-                    isLast: index == visibleEvents.length - 1,
-                    isNewest: index == 0,
-                  ),
             ],
           );
         },
@@ -6403,37 +6433,257 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
   );
 }
 
-class _DiagnosticStat extends StatelessWidget {
-  const _DiagnosticStat({required this.label, required this.value});
+class _DiagnosticPanel extends StatelessWidget {
+  const _DiagnosticPanel({
+    required this.number,
+    required this.title,
+    required this.child,
+    this.trailing,
+  });
 
-  final String label;
-  final String value;
+  final String number;
+  final String title;
+  final Widget child;
+  final Widget? trailing;
 
   @override
-  Widget build(BuildContext context) => Row(
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      SizedBox(
-        width: 78,
-        child: Text(
-          label,
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                number,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.primary,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.8,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  title,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              ?trailing,
+            ],
           ),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 14),
+            child: Divider(height: 1),
+          ),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+class _DiagnosticBadge extends StatelessWidget {
+  const _DiagnosticBadge({required this.label, this.color});
+
+  final String label;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final resolvedColor =
+        color ?? Theme.of(context).colorScheme.onSurfaceVariant;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+      decoration: BoxDecoration(
+        color: resolvedColor.withValues(alpha: 0.12),
+        border: Border.all(color: resolvedColor.withValues(alpha: 0.35)),
+        borderRadius: BorderRadius.circular(5),
+      ),
+      child: Text(
+        label.toUpperCase(),
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+          color: resolvedColor,
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.55,
         ),
       ),
-      const SizedBox(width: 8),
-      Expanded(
-        child: Text(
-          value,
-          overflow: TextOverflow.ellipsis,
-          style: Theme.of(
-            context,
-          ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+    );
+  }
+}
+
+class _DiagnosticConnectionStatus extends StatelessWidget {
+  const _DiagnosticConnectionStatus({
+    required this.stateLabel,
+    required this.stateColor,
+    required this.active,
+  });
+
+  final String stateLabel;
+  final Color stateColor;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Row(
+        children: [
+          TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0.65, end: active ? 1 : 0.8),
+            duration: const Duration(milliseconds: 750),
+            curve: Curves.easeOutCubic,
+            builder: (context, opacity, child) =>
+                Opacity(opacity: opacity, child: child),
+            child: Container(
+              width: 10,
+              height: 10,
+              decoration: BoxDecoration(
+                color: stateColor,
+                shape: BoxShape.circle,
+              ),
+            ),
+          ),
+          const SizedBox(width: 9),
+          Text(
+            stateLabel,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              color: stateColor,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+      const SizedBox(height: 10),
+      Text(
+        active
+            ? 'Heartbeat channel is active and receiving updates.'
+            : 'Connection lifecycle is being monitored.',
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
         ),
       ),
     ],
   );
+}
+
+class _DiagnosticMetrics extends StatelessWidget {
+  const _DiagnosticMetrics({
+    required this.liveFor,
+    required this.lastHeartbeat,
+    required this.heartbeatCount,
+    required this.transport,
+  });
+
+  final Duration? liveFor;
+  final Duration? lastHeartbeat;
+  final int heartbeatCount;
+  final String transport;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      _DiagnosticStat(
+        label: 'Duration',
+        value: liveFor == null
+            ? 'Not connected'
+            : _formatFipsDuration(liveFor!),
+      ),
+      _DiagnosticStat(
+        label: 'Last heartbeat',
+        value: lastHeartbeat == null
+            ? 'Waiting'
+            : '${_formatFipsDuration(lastHeartbeat!)} ago',
+      ),
+      _DiagnosticStat(label: 'Heartbeats received', value: '$heartbeatCount'),
+      _DiagnosticStat(label: 'Transport', value: transport, isLast: true),
+    ],
+  );
+}
+
+class _DiagnosticStat extends StatelessWidget {
+  const _DiagnosticStat({
+    required this.label,
+    required this.value,
+    this.isLast = false,
+  });
+
+  final String label;
+  final String value;
+  final bool isLast;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      decoration: BoxDecoration(
+        border: isLast
+            ? null
+            : Border(
+                bottom: BorderSide(color: theme.colorScheme.outlineVariant),
+              ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Flexible(
+            child: Text(
+              value,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.right,
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DiagnosticEventTableHeader extends StatelessWidget {
+  const _DiagnosticEventTableHeader();
+
+  @override
+  Widget build(BuildContext context) {
+    final style = Theme.of(context).textTheme.labelSmall?.copyWith(
+      color: Theme.of(context).colorScheme.onSurfaceVariant,
+      fontWeight: FontWeight.w700,
+      letterSpacing: 0.5,
+    );
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 7, 8, 7),
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      child: Row(
+        children: [
+          SizedBox(width: 68, child: Text('TIME', style: style)),
+          SizedBox(width: 24, child: Text('TYPE', style: style)),
+          Expanded(child: Text('EVENT', style: style)),
+          Text('DETAILS', style: style),
+        ],
+      ),
+    );
+  }
 }
 
 class _DiagnosticEvent extends StatefulWidget {
@@ -6501,113 +6751,100 @@ class _DiagnosticEventState extends State<_DiagnosticEvent> {
       button: true,
       expanded: _expanded,
       child: InkWell(
-        borderRadius: BorderRadius.circular(8),
         onTap: () => setState(() => _expanded = !_expanded),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
-          margin: const EdgeInsets.only(bottom: 2),
-          padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 4),
+          padding: const EdgeInsets.fromLTRB(10, 9, 8, 9),
           decoration: BoxDecoration(
             color: _highlightNewest
-                ? color.withValues(alpha: 0.055)
+                ? color.withValues(alpha: 0.08)
                 : Colors.transparent,
-            borderRadius: BorderRadius.circular(8),
+            border: Border(
+              bottom: BorderSide(color: theme.colorScheme.outlineVariant),
+            ),
           ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SizedBox(
-                width: 64,
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 3),
+              Row(
+                children: [
+                  SizedBox(
+                    width: 68,
+                    child: Text(
+                      event.timestamp,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        fontFamily: 'monospace',
+                        fontSize: 10,
+                        color: theme.colorScheme.onSurfaceVariant.withValues(
+                          alpha: 0.72,
+                        ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 24,
+                    child: Icon(icon, size: 16, color: color),
+                  ),
+                  Expanded(
+                    child: Text(
+                      event.count > 1
+                          ? '${event.title} (${event.count})'
+                          : event.title,
+                      maxLines: _expanded ? null : 1,
+                      overflow: _expanded ? null : TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: color,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      event.metadata,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 2),
+                  Icon(
+                    _expanded ? Icons.expand_less : Icons.expand_more,
+                    size: 18,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+              if (event.detail != null) ...[
+                const SizedBox(height: 3),
+                Padding(
+                  padding: const EdgeInsets.only(left: 92),
                   child: Text(
-                    event.timestamp,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      fontFamily: 'monospace',
-                      fontSize: 10,
-                      color: theme.colorScheme.onSurfaceVariant.withValues(
-                        alpha: 0.72,
+                    event.detail!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+              if (_expanded) ...[
+                const SizedBox(height: 9),
+                Padding(
+                  padding: const EdgeInsets.only(left: 92),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(9),
+                    color: theme.colorScheme.surfaceContainerLow,
+                    child: SelectableText(
+                      event.raw,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
                       ),
                     ),
                   ),
                 ),
-              ),
-              SizedBox(
-                width: 27,
-                child: Column(
-                  children: [
-                    Icon(icon, size: 17, color: color),
-                    if (!widget.isLast)
-                      Expanded(
-                        child: Container(
-                          width: 1,
-                          margin: const EdgeInsets.symmetric(vertical: 4),
-                          color: theme.colorScheme.outlineVariant,
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            event.count > 1
-                                ? '${event.title} (${event.count})'
-                                : event.title,
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: color,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                        Text(
-                          event.metadata,
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                        const SizedBox(width: 2),
-                        Icon(
-                          _expanded ? Icons.expand_less : Icons.expand_more,
-                          size: 18,
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ],
-                    ),
-                    if (event.detail != null) ...[
-                      const SizedBox(height: 1),
-                      Text(
-                        event.detail!,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                    if (_expanded) ...[
-                      const SizedBox(height: 7),
-                      Text(
-                        'Details',
-                        style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      SelectableText(
-                        event.raw,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
+              ],
             ],
           ),
         ),
@@ -7582,8 +7819,8 @@ class _ConsoleMetric extends StatelessWidget {
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: status == _ConsoleMetricStatus.critical
-            ? color.withValues(alpha: 0.14)
-            : Theme.of(context).colorScheme.surface.withValues(alpha: 0.72),
+            ? color.withValues(alpha: 0.10)
+            : Theme.of(context).colorScheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: status == _ConsoleMetricStatus.critical
@@ -7695,7 +7932,7 @@ class _ConsolePanel extends StatelessWidget {
           ? Theme.of(
               context,
             ).colorScheme.surfaceContainerHigh.withValues(alpha: 0.3)
-          : Theme.of(context).colorScheme.surface.withValues(alpha: 0.74),
+          : Theme.of(context).colorScheme.surfaceContainerLow,
       borderRadius: BorderRadius.circular(12),
       border: quiet
           ? null
@@ -7904,7 +8141,7 @@ class _HistoryLinePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final grid = Paint()
-      ..color = gridColor.withValues(alpha: 0.35)
+      ..color = gridColor.withValues(alpha: 0.24)
       ..strokeWidth = 1;
     for (var row = 0; row <= 4; row++) {
       final y = size.height * row / 4;
@@ -7928,12 +8165,28 @@ class _HistoryLinePainter extends CustomPainter {
         path.lineTo(x, y);
       }
     }
+    final area = Path.from(path)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+    canvas.drawPath(
+      area,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            lineColor.withValues(alpha: 0.18),
+            lineColor.withValues(alpha: 0),
+          ],
+        ).createShader(Offset.zero & size),
+    );
     canvas.drawPath(
       path,
       Paint()
         ..color = lineColor
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 2,
+        ..strokeWidth = 1.6,
     );
   }
 

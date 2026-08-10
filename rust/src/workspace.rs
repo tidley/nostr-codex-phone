@@ -250,7 +250,42 @@ impl WorkspaceStore {
                 [],
             )?;
         }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS workspace_metadata (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+             INSERT OR IGNORE INTO workspace_metadata (key, value) VALUES ('revision', 0);
+             CREATE TRIGGER IF NOT EXISTS workspace_members_revision_insert AFTER INSERT ON workspace_members BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_members_revision_update AFTER UPDATE ON workspace_members BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_channels_revision_insert AFTER INSERT ON workspace_channels BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_channels_revision_update AFTER UPDATE ON workspace_channels BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_channels_revision_delete AFTER DELETE ON workspace_channels BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_messages_revision_insert AFTER INSERT ON workspace_messages BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_messages_revision_update AFTER UPDATE ON workspace_messages BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_messages_revision_delete AFTER DELETE ON workspace_messages BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_message_reactions_revision_insert AFTER INSERT ON workspace_message_reactions BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_message_reactions_revision_delete AFTER DELETE ON workspace_message_reactions BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_agents_revision_insert AFTER INSERT ON workspace_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_agents_revision_update AFTER UPDATE ON workspace_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_agents_revision_delete AFTER DELETE ON workspace_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_agent_instances_revision_insert AFTER INSERT ON workspace_agent_instances BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_agent_instances_revision_update AFTER UPDATE ON workspace_agent_instances BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_agent_instances_revision_delete AFTER DELETE ON workspace_agent_instances BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_conversation_agents_revision_insert AFTER INSERT ON workspace_conversation_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_conversation_agents_revision_update AFTER UPDATE ON workspace_conversation_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_conversation_agents_revision_delete AFTER DELETE ON workspace_conversation_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_insert AFTER INSERT ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_update AFTER UPDATE ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_delete AFTER DELETE ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;",
+        )?;
         Ok(Self { conn })
+    }
+
+    pub fn revision(&self) -> Result<u64> {
+        let revision: i64 = self.conn.query_row(
+            "SELECT value FROM workspace_metadata WHERE key = 'revision'",
+            [],
+            |row| row.get(0),
+        )?;
+        u64::try_from(revision).context("workspace revision is invalid")
     }
 
     pub fn add_member(&self, pubkey: &str) -> Result<()> {
@@ -829,6 +864,29 @@ impl WorkspaceStore {
         parent_id: Option<&str>,
         also_send_to_main: bool,
     ) -> Result<WorkspaceMessage> {
+        self.add_channel_message_with_main_and_id(
+            sender,
+            channel_id,
+            body,
+            attachments,
+            mentions,
+            parent_id,
+            also_send_to_main,
+            None,
+        )
+    }
+
+    pub fn add_channel_message_with_main_and_id(
+        &self,
+        sender: &str,
+        channel_id: &str,
+        body: &str,
+        attachments: &[MediaReference],
+        mentions: &[WorkspaceMentionPayload],
+        parent_id: Option<&str>,
+        also_send_to_main: bool,
+        message_id: Option<&str>,
+    ) -> Result<WorkspaceMessage> {
         self.require_channel(channel_id)?;
         self.add_message(
             sender,
@@ -839,6 +897,7 @@ impl WorkspaceStore {
             mentions,
             parent_id,
             also_send_to_main,
+            message_id,
         )
     }
 
@@ -872,6 +931,29 @@ impl WorkspaceStore {
         parent_id: Option<&str>,
         also_send_to_main: bool,
     ) -> Result<WorkspaceMessage> {
+        self.add_direct_message_with_main_and_id(
+            sender,
+            recipient,
+            body,
+            attachments,
+            mentions,
+            parent_id,
+            also_send_to_main,
+            None,
+        )
+    }
+
+    pub fn add_direct_message_with_main_and_id(
+        &self,
+        sender: &str,
+        recipient: &str,
+        body: &str,
+        attachments: &[MediaReference],
+        mentions: &[WorkspaceMentionPayload],
+        parent_id: Option<&str>,
+        also_send_to_main: bool,
+        message_id: Option<&str>,
+    ) -> Result<WorkspaceMessage> {
         let recipient = required("recipient", recipient)?;
         if !self.is_member(&recipient)? {
             bail!("recipient is not a workspace member");
@@ -885,6 +967,7 @@ impl WorkspaceStore {
             mentions,
             parent_id,
             also_send_to_main,
+            message_id,
         )
     }
 
@@ -898,9 +981,13 @@ impl WorkspaceStore {
         mentions: &[WorkspaceMentionPayload],
         parent_id: Option<&str>,
         also_send_to_main: bool,
+        message_id: Option<&str>,
     ) -> Result<WorkspaceMessage> {
         let message = WorkspaceMessage {
-            id: new_id(),
+            id: message_id
+                .map(|id| required("message id", id))
+                .transpose()?
+                .unwrap_or_else(new_id),
             channel_id: channel_id.map(ToOwned::to_owned),
             recipient_pubkey: recipient.map(ToOwned::to_owned),
             sender_pubkey: required("sender", sender)?,
@@ -1179,6 +1266,28 @@ mod tests {
             .unwrap()
             .iter()
             .any(|message| message.parent_id.as_deref() == Some(parent.id.as_str())));
+    }
+
+    #[test]
+    fn persists_monotonic_workspace_revision() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        let initial = store.revision().unwrap();
+        store.add_member("owner").unwrap();
+        let after_member = store.revision().unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let after_channel = store.revision().unwrap();
+        assert!(after_member > initial);
+        assert!(after_channel > after_member);
+        drop(store);
+        assert_eq!(
+            WorkspaceStore::open(path.path())
+                .unwrap()
+                .revision()
+                .unwrap(),
+            after_channel
+        );
+        let _ = channel;
     }
 
     #[test]

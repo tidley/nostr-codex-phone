@@ -569,6 +569,8 @@ class WorkspaceTyping {
 }
 
 class WorkspaceState {
+  /// Last worker-authoritative workspace revision applied to this state.
+  int revision = 0;
   List<WorkspaceChannel> channels = [];
   List<String> members = [];
   final Map<String, String> memberNames = {};
@@ -580,6 +582,7 @@ class WorkspaceState {
   final Map<String, _WorkspaceHistoryTransfer> _historyTransfers = {};
 
   void clear() {
+    revision = 0;
     channels = [];
     members = [];
     memberNames.clear();
@@ -593,6 +596,7 @@ class WorkspaceState {
 
   Map<String, Object> toSnapshotJson() => {
     'action': 'snapshot',
+    'revision': revision,
     'channels': channels
         .map((channel) => channel.toJson())
         .toList(growable: false),
@@ -621,6 +625,8 @@ class WorkspaceState {
     final update = raw['workspace_update'];
     if (update is! Map) return const [];
     final data = Map<String, dynamic>.from(update);
+    final incomingRevision = _revision(data['revision']);
+    if (incomingRevision < revision) return const [];
     final transfer = _historyTransferAction(data['action']?.toString());
     if (transfer != null) {
       final pending = _historyTransfers.putIfAbsent(
@@ -663,6 +669,7 @@ class WorkspaceState {
         preserveMessagesOnSnapshot: preserveMessagesOnSnapshot,
       );
     }
+    if (incomingRevision > revision) revision = incomingRevision;
     final addedMessages = <WorkspaceMessage>[];
     final isSnapshot = data['action'] == 'snapshot';
     final isSnapshotHeader = data['action'] == 'snapshot_header';
@@ -923,6 +930,12 @@ class WorkspaceState {
     }
     return members;
   }
+
+  static int _revision(Object? value) => switch (value) {
+    num() => value.toInt(),
+    String() => int.tryParse(value) ?? 0,
+    _ => 0,
+  };
 
   static List<WorkspaceChannel> _channels(Object? raw) => raw is List
       ? raw

@@ -221,6 +221,9 @@ pub struct WorkspaceRequest {
     pub recipient_pubkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// Client-generated ID used to reconcile optimistic message delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MediaReference>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -286,6 +289,9 @@ pub struct WorkspaceMentionPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceUpdate {
     pub action: String,
+    /// Monotonic revision assigned by the worker's workspace store.
+    #[serde(default)]
+    pub revision: u64,
     #[serde(default)]
     pub channels: Vec<WorkspaceChannelPayload>,
     #[serde(default, deserialize_with = "deserialize_workspace_members")]

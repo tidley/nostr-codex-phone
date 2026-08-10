@@ -136,6 +136,81 @@ void main() {
     expect(state.apply(update), isEmpty);
   });
 
+  test('workspace ignores stale revisions and accepts a newer snapshot', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'revision': 4,
+          'channels': [
+            {'id': 'current', 'name': 'Current'},
+          ],
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'revision': 3,
+          'channels': [
+            {'id': 'stale', 'name': 'Stale'},
+          ],
+        },
+      });
+
+    expect(state.revision, 4);
+    expect(state.channels.single.id, 'current');
+
+    state.apply({
+      'workspace_update': {
+        'action': 'snapshot',
+        'revision': 5,
+        'channels': [
+          {'id': 'newer', 'name': 'Newer'},
+        ],
+      },
+    });
+    expect(state.revision, 5);
+    expect(state.channels.single.id, 'newer');
+  });
+
+  test('workspace state reconciles an optimistic message by ID', () {
+    final state = WorkspaceState();
+    state.apply({
+      'workspace_update': {
+        'action': 'message_created',
+        'messages': [
+          {
+            'id': 'client-message-1',
+            'channel_id': 'channel-1',
+            'sender_pubkey': 'owner',
+            'body': 'Hello',
+            'created_at': 1,
+          },
+        ],
+      },
+    });
+
+    expect(
+      state.apply({
+        'workspace_update': {
+          'action': 'message_created',
+          'messages': [
+            {
+              'id': 'client-message-1',
+              'channel_id': 'channel-1',
+              'sender_pubkey': 'owner',
+              'body': 'Hello',
+              'created_at': 2,
+            },
+          ],
+        },
+      }),
+      isEmpty,
+    );
+    expect(state.messages['channel-1'], hasLength(1));
+    expect(state.messages['channel-1']!.single.createdAt, 2);
+  });
+
   test('conversation agent retains its folder scope', () {
     final agent = WorkspaceConversationAgent.fromJson({
       'agent_id': 'agent-1',
