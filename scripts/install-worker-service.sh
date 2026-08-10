@@ -56,6 +56,8 @@ Environment=OPENCODE_BIN=$opencode_bin
 Environment=OPENCODE_AGENT=build
 Environment=OPENCODE_SYSTEMD_SCOPE=1
 Environment=OPENCODE_MAX_CONCURRENT_RUNS=10
+# Record the STUN server and reflexive candidate selected for FIPS traversal.
+Environment=RUST_LOG=info,nostr_codex_server=debug,fips::discovery::nostr::stun=debug,nostr_sdk=info,nostr=info
 EnvironmentFile=-$env_file
 Environment=NOSTR_CODEX_ENV_FILE=$env_file
 Environment=PATH=$PATH

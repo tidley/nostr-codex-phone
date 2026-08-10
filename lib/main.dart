@@ -681,7 +681,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Timer? _workspaceFipsHeartbeatTicker;
   Timer? _workspaceFipsRetryTimer;
   Timer? _workspaceFipsOfferTimer;
-  int _workspaceFipsRetryAttempt = 0;
   int _workspaceFipsSessionGeneration = 0;
   int _nostrPollGeneration = 0;
   Future<void>? _nostrRestartInFlight;
@@ -1606,7 +1605,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _saveWorkspaceCache();
     _workspaceFipsSessionGeneration++;
     _workspaceFipsRetryTimer?.cancel();
-    _workspaceFipsRetryAttempt = 0;
     try {
       await fipsWorkspaceSnapshotStop();
     } catch (_) {
@@ -7573,7 +7571,6 @@ Return a concise catch-up summary of what happened after that point: completed w
               snapshotComplete = true;
               _workspaceFipsRetryTimer?.cancel();
               _workspaceFipsOfferTimer?.cancel();
-              _workspaceFipsRetryAttempt = 0;
               _setWorkspaceFipsConnectionState('active');
             }
             continue;
@@ -7791,7 +7788,6 @@ Return a concise catch-up summary of what happened after that point: completed w
     );
     _workspaceFipsRetryTimer?.cancel();
     _workspaceFipsOfferTimer?.cancel();
-    _workspaceFipsRetryAttempt = 0;
     if (enabled) {
       _setWorkspaceFipsConnectionState('disconnected');
       _recordDiagnostic('FIPS workspace transport enabled');
@@ -7839,13 +7835,9 @@ Return a concise catch-up summary of what happened after that point: completed w
   void _scheduleWorkspaceFipsRetry() {
     if (!_workspaceFipsEnabled.value) return;
     _workspaceFipsRetryTimer?.cancel();
-    final delaySeconds = (10 * (1 << _workspaceFipsRetryAttempt)).clamp(
-      10,
-      300,
-    );
-    _workspaceFipsRetryAttempt = (_workspaceFipsRetryAttempt + 1).clamp(0, 5);
-    _recordDiagnostic('FIPS workspace snapshot: retrying in ${delaySeconds}s');
-    _workspaceFipsRetryTimer = Timer(Duration(seconds: delaySeconds), () {
+    const delay = Duration(seconds: 20);
+    _recordDiagnostic('FIPS workspace snapshot: retrying in 20s');
+    _workspaceFipsRetryTimer = Timer(delay, () {
       if (_workspaceFipsSnapshotInFlight) return;
       _recordDiagnostic('FIPS workspace snapshot: retrying');
       unawaited(_sendWorkspaceRequest({'action': 'list'}));

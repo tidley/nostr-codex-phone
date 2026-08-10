@@ -2027,6 +2027,7 @@ class _ConversationAgentsPage extends StatelessWidget {
         onLoadOpenCodeModels: onLoadOpenCodeModels,
         initialFolderChoices: initialFolderChoices,
         onLoadFolders: (_) => onLoadFolders(),
+        conversationScoped: true,
       ),
     );
     if (profile == null || !context.mounted) return;
@@ -4833,6 +4834,7 @@ class _AgentsPageState extends State<_AgentsPage> {
         onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
         initialFolderChoices: widget.initialFolderChoices,
         onLoadFolders: widget.onLoadFolders,
+        conversationScoped: false,
       ),
     );
     if (result != null) {
@@ -5461,10 +5463,12 @@ class _AgentEditorDialog extends StatefulWidget {
     required this.onLoadOpenCodeModels,
     required this.initialFolderChoices,
     required this.onLoadFolders,
+    required this.conversationScoped,
   });
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
   final List<RepoChoice> initialFolderChoices;
   final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
+  final bool conversationScoped;
   @override
   State<_AgentEditorDialog> createState() => _AgentEditorDialogState();
 }
@@ -5557,8 +5561,8 @@ class _AgentEditorDialogState extends State<_AgentEditorDialog> {
             initialValue: _workingFolder ?? '',
             isExpanded: true,
             decoration: const InputDecoration(
-              labelText: 'Working folder',
-              helperText: 'Choose where this conversation agent can work.',
+              labelText: 'Build directory',
+              helperText: 'Choose where this agent can make changes.',
               prefixIcon: Icon(Icons.folder_outlined),
             ),
             items: [
@@ -5600,7 +5604,9 @@ class _AgentEditorDialogState extends State<_AgentEditorDialog> {
               'opencode_model_id': model.modelId,
             if (_modelFieldsKey.currentState?.selectedModel case final model?)
               'opencode_model_name': model.modelName,
-            'folder_scope': [?_workingFolder],
+            if (widget.conversationScoped) 'folder_scope': [?_workingFolder],
+            if (!widget.conversationScoped && _workingFolder != null)
+              'agent_workdir': _workingFolder,
           });
         },
         child: const Text('Create'),
@@ -6800,6 +6806,7 @@ List<_DiagnosticEventData> _groupDiagnosticEvents(List<String> entries) {
   final grouped = <_DiagnosticEventData>[];
   for (final entry in entries.reversed.take(80)) {
     final event = _diagnosticEvent(entry);
+    if (event.raw.toLowerCase().contains('connection: active')) continue;
     if (event.category == _DiagnosticCategory.snapshot &&
         grouped.isNotEmpty &&
         grouped.last.category == _DiagnosticCategory.snapshot) {
