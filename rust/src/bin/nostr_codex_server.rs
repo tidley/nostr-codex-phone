@@ -2708,7 +2708,12 @@ async fn build_workspace_fips_client(
     FipsClientConfig {
         secret_key: secret_key.to_string(),
         relays: relays.to_vec(),
-        stun_servers: vec![],
+        stun_servers: vec![
+            "stun:45.77.228.152:3478".to_string(),
+            "stun:stun.l.google.com:19302".to_string(),
+            "stun:stun.cloudflare.com:3478".to_string(),
+            "stun:global.stun.twilio.com:3478".to_string(),
+        ],
     }
     .application_client(WORKSPACE_FIPS_SERVICE_PORT, 256)
     .await

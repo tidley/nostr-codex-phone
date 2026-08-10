@@ -6815,19 +6815,8 @@ _DiagnosticEventData _diagnosticEvent(String entry) {
   final value = _diagnosticSummary(raw);
   final lower = raw.toLowerCase();
 
-  if (lower.contains('failed') || lower.contains('timed out')) {
-    final heartbeat = lower.contains('heartbeat');
-    return _DiagnosticEventData(
-      timestamp: timestamp,
-      category: _DiagnosticCategory.error,
-      title: 'Session failed',
-      raw: raw,
-      detail: heartbeat
-          ? 'Heartbeat timed out. Switched to Nostr fallback.'
-          : 'Switched to Nostr fallback.',
-    );
-  }
-  if (lower.contains('fallback') ||
+  if (lower.contains('offer timed out') ||
+      lower.contains('fallback') ||
       lower.contains('retrying') ||
       lower.contains('reconnecting')) {
     return _DiagnosticEventData(
@@ -6846,9 +6835,21 @@ _DiagnosticEventData _diagnosticEvent(String entry) {
           : 'Snapshot exchange is retrying.',
     );
   }
-  if (lower.contains('connection:') ||
-      lower == 'connected' ||
-      lower == 'disconnected') {
+  if (lower.contains('failed') || lower.contains('timed out')) {
+    final heartbeat = lower.contains('heartbeat');
+    return _DiagnosticEventData(
+      timestamp: timestamp,
+      category: _DiagnosticCategory.error,
+      title: 'Session failed',
+      raw: raw,
+      detail: heartbeat
+          ? 'Heartbeat timed out. Switched to Nostr fallback.'
+          : 'Switched to Nostr fallback.',
+    );
+  }
+  if (lower == 'fips workspace connection: active' ||
+      lower == 'fips workspace connection: connected' ||
+      lower == 'connected') {
     return _DiagnosticEventData(
       timestamp: timestamp,
       category: _DiagnosticCategory.connection,
@@ -6856,10 +6857,10 @@ _DiagnosticEventData _diagnosticEvent(String entry) {
       raw: raw,
     );
   }
-  if (lower.contains('snapshot')) {
+  if (lower.contains('connection:') || lower.contains('snapshot')) {
     return _DiagnosticEventData(
       timestamp: timestamp,
-      category: _DiagnosticCategory.snapshot,
+      category: _DiagnosticCategory.info,
       title: value,
       raw: raw,
     );
