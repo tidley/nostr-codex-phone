@@ -1091,15 +1091,19 @@ fn wire__crate__api__nostr__fips_workspace_send_wire_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_workspace_key = <String>::sse_decode(&mut deserializer);
             let api_frame = <String>::sse_decode(&mut deserializer);
             let api_message_id = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::nostr::fips_workspace_send_wire(api_frame, api_message_id)
-                                .await?;
+                        let output_ok = crate::api::nostr::fips_workspace_send_wire(
+                            api_workspace_key,
+                            api_frame,
+                            api_message_id,
+                        )
+                        .await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -1132,6 +1136,7 @@ fn wire__crate__api__nostr__fips_workspace_snapshot_connect_impl(
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
             let api_config =
                 <crate::api::nostr::BridgeFipsCallConfig>::sse_decode(&mut deserializer);
+            let api_workspace_key = <String>::sse_decode(&mut deserializer);
             let api_peer_npub = <String>::sse_decode(&mut deserializer);
             let api_capability = <String>::sse_decode(&mut deserializer);
             deserializer.end();
@@ -1140,6 +1145,7 @@ fn wire__crate__api__nostr__fips_workspace_snapshot_connect_impl(
                     (move || async move {
                         let output_ok = crate::api::nostr::fips_workspace_snapshot_connect(
                             api_config,
+                            api_workspace_key,
                             api_peer_npub,
                             api_capability,
                         )
@@ -1174,14 +1180,17 @@ fn wire__crate__api__nostr__fips_workspace_snapshot_receive_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_workspace_key = <String>::sse_decode(&mut deserializer);
             let api_timeout_ms = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::nostr::fips_workspace_snapshot_receive(api_timeout_ms)
-                                .await?;
+                        let output_ok = crate::api::nostr::fips_workspace_snapshot_receive(
+                            api_workspace_key,
+                            api_timeout_ms,
+                        )
+                        .await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -1212,13 +1221,17 @@ fn wire__crate__api__nostr__fips_workspace_snapshot_send_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_workspace_key = <String>::sse_decode(&mut deserializer);
             let api_frame = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::nostr::fips_workspace_snapshot_send(api_frame).await?;
+                        let output_ok = crate::api::nostr::fips_workspace_snapshot_send(
+                            api_workspace_key,
+                            api_frame,
+                        )
+                        .await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -1249,11 +1262,14 @@ fn wire__crate__api__nostr__fips_workspace_snapshot_stop_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_workspace_key = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
-                        let output_ok = crate::api::nostr::fips_workspace_snapshot_stop().await?;
+                        let output_ok =
+                            crate::api::nostr::fips_workspace_snapshot_stop(api_workspace_key)
+                                .await?;
                         Ok(output_ok)
                     })()
                     .await,

@@ -189,23 +189,31 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiNostrFipsGroupCallStop({required String callId});
 
   Future<void> crateApiNostrFipsWorkspaceSendWire({
+    required String workspaceKey,
     required String frame,
     required BigInt messageId,
   });
 
   Future<void> crateApiNostrFipsWorkspaceSnapshotConnect({
     required BridgeFipsCallConfig config,
+    required String workspaceKey,
     required String peerNpub,
     required String capability,
   });
 
   Future<String?> crateApiNostrFipsWorkspaceSnapshotReceive({
+    required String workspaceKey,
     required BigInt timeoutMs,
   });
 
-  Future<void> crateApiNostrFipsWorkspaceSnapshotSend({required String frame});
+  Future<void> crateApiNostrFipsWorkspaceSnapshotSend({
+    required String workspaceKey,
+    required String frame,
+  });
 
-  Future<void> crateApiNostrFipsWorkspaceSnapshotStop();
+  Future<void> crateApiNostrFipsWorkspaceSnapshotStop({
+    required String workspaceKey,
+  });
 
   Future<void> crateApiSimpleInitApp();
 
@@ -1142,6 +1150,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @override
   Future<void> crateApiNostrFipsWorkspaceSendWire({
+    required String workspaceKey,
     required String frame,
     required BigInt messageId,
   }) {
@@ -1149,6 +1158,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(workspaceKey, serializer);
           sse_encode_String(frame, serializer);
           sse_encode_u_64(messageId, serializer);
           pdeCallFfi(
@@ -1163,7 +1173,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiNostrFipsWorkspaceSendWireConstMeta,
-        argValues: [frame, messageId],
+        argValues: [workspaceKey, frame, messageId],
         apiImpl: this,
       ),
     );
@@ -1172,12 +1182,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiNostrFipsWorkspaceSendWireConstMeta =>
       const TaskConstMeta(
         debugName: "fips_workspace_send_wire",
-        argNames: ["frame", "messageId"],
+        argNames: ["workspaceKey", "frame", "messageId"],
       );
 
   @override
   Future<void> crateApiNostrFipsWorkspaceSnapshotConnect({
     required BridgeFipsCallConfig config,
+    required String workspaceKey,
     required String peerNpub,
     required String capability,
   }) {
@@ -1186,6 +1197,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_box_autoadd_bridge_fips_call_config(config, serializer);
+          sse_encode_String(workspaceKey, serializer);
           sse_encode_String(peerNpub, serializer);
           sse_encode_String(capability, serializer);
           pdeCallFfi(
@@ -1200,7 +1212,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiNostrFipsWorkspaceSnapshotConnectConstMeta,
-        argValues: [config, peerNpub, capability],
+        argValues: [config, workspaceKey, peerNpub, capability],
         apiImpl: this,
       ),
     );
@@ -1209,17 +1221,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiNostrFipsWorkspaceSnapshotConnectConstMeta =>
       const TaskConstMeta(
         debugName: "fips_workspace_snapshot_connect",
-        argNames: ["config", "peerNpub", "capability"],
+        argNames: ["config", "workspaceKey", "peerNpub", "capability"],
       );
 
   @override
   Future<String?> crateApiNostrFipsWorkspaceSnapshotReceive({
+    required String workspaceKey,
     required BigInt timeoutMs,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(workspaceKey, serializer);
           sse_encode_u_64(timeoutMs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -1233,7 +1247,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiNostrFipsWorkspaceSnapshotReceiveConstMeta,
-        argValues: [timeoutMs],
+        argValues: [workspaceKey, timeoutMs],
         apiImpl: this,
       ),
     );
@@ -1242,15 +1256,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiNostrFipsWorkspaceSnapshotReceiveConstMeta =>
       const TaskConstMeta(
         debugName: "fips_workspace_snapshot_receive",
-        argNames: ["timeoutMs"],
+        argNames: ["workspaceKey", "timeoutMs"],
       );
 
   @override
-  Future<void> crateApiNostrFipsWorkspaceSnapshotSend({required String frame}) {
+  Future<void> crateApiNostrFipsWorkspaceSnapshotSend({
+    required String workspaceKey,
+    required String frame,
+  }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(workspaceKey, serializer);
           sse_encode_String(frame, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -1264,7 +1282,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiNostrFipsWorkspaceSnapshotSendConstMeta,
-        argValues: [frame],
+        argValues: [workspaceKey, frame],
         apiImpl: this,
       ),
     );
@@ -1273,15 +1291,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiNostrFipsWorkspaceSnapshotSendConstMeta =>
       const TaskConstMeta(
         debugName: "fips_workspace_snapshot_send",
-        argNames: ["frame"],
+        argNames: ["workspaceKey", "frame"],
       );
 
   @override
-  Future<void> crateApiNostrFipsWorkspaceSnapshotStop() {
+  Future<void> crateApiNostrFipsWorkspaceSnapshotStop({
+    required String workspaceKey,
+  }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(workspaceKey, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1294,7 +1315,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_AnyhowException,
         ),
         constMeta: kCrateApiNostrFipsWorkspaceSnapshotStopConstMeta,
-        argValues: [],
+        argValues: [workspaceKey],
         apiImpl: this,
       ),
     );
@@ -1303,7 +1324,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiNostrFipsWorkspaceSnapshotStopConstMeta =>
       const TaskConstMeta(
         debugName: "fips_workspace_snapshot_stop",
-        argNames: [],
+        argNames: ["workspaceKey"],
       );
 
   @override

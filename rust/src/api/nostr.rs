@@ -25,8 +25,8 @@ static SESSION: Lazy<Mutex<Option<Arc<NostrMessenger>>>> = Lazy::new(|| Mutex::n
 static CALL_SESSION: Lazy<Mutex<Option<FipsMobileQuicSession>>> = Lazy::new(|| Mutex::new(None));
 // Workspace frames use one embedded FIPS node, separate from the QUIC call
 // session whose datagrams are consumed by realtime media.
-static WORKSPACE_SNAPSHOT_CLIENT: Lazy<Mutex<Option<WorkspaceFipsClient>>> =
-    Lazy::new(|| Mutex::new(None));
+static WORKSPACE_SNAPSHOT_CLIENTS: Lazy<Mutex<HashMap<String, WorkspaceFipsClient>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 static CALL_ACCEPT_CANCEL: Lazy<Mutex<Option<oneshot::Sender<()>>>> =
     Lazy::new(|| Mutex::new(None));
 static REALTIME_AUDIO: Lazy<Mutex<Option<RealtimeAudioPipeline>>> = Lazy::new(|| Mutex::new(None));
@@ -562,12 +562,14 @@ pub async fn fips_call_stop() -> Result<()> {
 /// one-time capability delivered to this authenticated Nostr member.
 pub async fn fips_workspace_snapshot_connect(
     config: BridgeFipsCallConfig,
+    workspace_key: String,
     peer_npub: String,
     capability: String,
 ) -> Result<()> {
     if capability.len() < 32 {
         return Err(anyhow!("workspace FIPS capability is invalid"));
     }
+    let workspace_key = workspace_transport_key(&workspace_key)?;
     let peer_npub = PublicKey::parse(peer_npub.trim())?.to_bech32()?;
     let mut client = WorkspaceFipsClient {
         client: build_workspace_fips_client(config).await?,
@@ -583,15 +585,22 @@ pub async fn fips_workspace_snapshot_connect(
         assembler: FipsApplicationFrameAssembler::default(),
     };
     workspace_snapshot_send_frame(&mut client, capability.into_bytes()).await?;
-    *WORKSPACE_SNAPSHOT_CLIENT.lock().await = Some(client);
+    WORKSPACE_SNAPSHOT_CLIENTS
+        .lock()
+        .await
+        .insert(workspace_key, client);
     Ok(())
 }
 
 /// Receive one JSON workspace frame from the shared FIPS service transport.
-pub async fn fips_workspace_snapshot_receive(timeout_ms: u64) -> Result<Option<String>> {
-    let mut transport = WORKSPACE_SNAPSHOT_CLIENT.lock().await;
-    let transport = transport
-        .as_mut()
+pub async fn fips_workspace_snapshot_receive(
+    workspace_key: String,
+    timeout_ms: u64,
+) -> Result<Option<String>> {
+    let workspace_key = workspace_transport_key(&workspace_key)?;
+    let mut transports = WORKSPACE_SNAPSHOT_CLIENTS.lock().await;
+    let transport = transports
+        .get_mut(&workspace_key)
         .ok_or_else(|| anyhow!("FIPS workspace transport is not active"))?;
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.clamp(1, 5_000));
     loop {
@@ -621,21 +630,27 @@ pub async fn fips_workspace_snapshot_receive(timeout_ms: u64) -> Result<Option<S
 }
 
 /// Send one JSON workspace control frame over the dedicated reliable stream.
-pub async fn fips_workspace_snapshot_send(frame: String) -> Result<()> {
-    let mut transport = WORKSPACE_SNAPSHOT_CLIENT.lock().await;
-    let transport = transport
-        .as_mut()
+pub async fn fips_workspace_snapshot_send(workspace_key: String, frame: String) -> Result<()> {
+    let workspace_key = workspace_transport_key(&workspace_key)?;
+    let mut transports = WORKSPACE_SNAPSHOT_CLIENTS.lock().await;
+    let transport = transports
+        .get_mut(&workspace_key)
         .ok_or_else(|| anyhow!("FIPS workspace transport is not active"))?;
     workspace_snapshot_send_frame(transport, frame.into_bytes()).await
 }
 
 /// Send one application envelope on the persistent workspace FIPS service.
 /// The snapshot bridge remains available for legacy hello/ping/pong traffic.
-pub async fn fips_workspace_send_wire(frame: String, message_id: u64) -> Result<()> {
+pub async fn fips_workspace_send_wire(
+    workspace_key: String,
+    frame: String,
+    message_id: u64,
+) -> Result<()> {
     let envelope = workspace_fips_app_envelope(&frame, message_id)?;
-    let mut transport = WORKSPACE_SNAPSHOT_CLIENT.lock().await;
-    let transport = transport
-        .as_mut()
+    let workspace_key = workspace_transport_key(&workspace_key)?;
+    let mut transports = WORKSPACE_SNAPSHOT_CLIENTS.lock().await;
+    let transport = transports
+        .get_mut(&workspace_key)
         .ok_or_else(|| anyhow!("FIPS workspace transport is not active"))?;
     workspace_snapshot_send_frame(transport, envelope).await
 }
@@ -648,11 +663,22 @@ fn workspace_fips_app_envelope(frame: &str, message_id: u64) -> Result<Vec<u8>> 
     Ok(FipsApplicationEnvelope::app(message_id, frame.to_string())?.encode()?)
 }
 
-pub async fn fips_workspace_snapshot_stop() -> Result<()> {
-    if let Some(transport) = WORKSPACE_SNAPSHOT_CLIENT.lock().await.take() {
+pub async fn fips_workspace_snapshot_stop(workspace_key: String) -> Result<()> {
+    let workspace_key = workspace_transport_key(&workspace_key)?;
+    if let Some(transport) = WORKSPACE_SNAPSHOT_CLIENTS
+        .lock()
+        .await
+        .remove(&workspace_key)
+    {
         transport.client.stop().await?;
     }
     Ok(())
+}
+
+fn workspace_transport_key(workspace_key: &str) -> Result<String> {
+    PublicKey::parse(workspace_key.trim())?
+        .to_bech32()
+        .map_err(Into::into)
 }
 
 async fn workspace_snapshot_send_frame(
@@ -1030,6 +1056,17 @@ mod tests {
         );
         assert!(workspace_fips_app_envelope("not a wire message", 7).is_err());
         assert!(workspace_fips_app_envelope(r#"{"query":"hello"}"#, 0).is_err());
+    }
+
+    #[test]
+    fn workspace_transport_key_is_a_canonical_npub() {
+        let public_key = Keys::generate().public_key();
+
+        assert_eq!(
+            workspace_transport_key(&format!("  {}  ", public_key.to_hex())).unwrap(),
+            public_key.to_bech32().unwrap()
+        );
+        assert!(workspace_transport_key("not-a-public-key").is_err());
     }
 
     #[test]
