@@ -4140,6 +4140,27 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         await _sendPairingSecretIfNeeded(parent);
   }
 
+  Future<bool> _ensureConnectedToWorkspaceService(RepoTarget target) async {
+    final peer = target.pubkey.trim();
+    if (peer.isEmpty) return false;
+    if (_workspaceFipsConnectionState == 'active' &&
+        _workspaceWorkerKey == peer) {
+      return true;
+    }
+    if (_connected && _connectedPeerPubkey == peer) {
+      return _sendPairingSecretIfNeeded(target);
+    }
+    if (_connected || _connecting) {
+      await _disconnect(expand: false);
+    }
+    if (!mounted) return false;
+    await _connectToTargetInBackground(target);
+    return mounted &&
+        _connected &&
+        _connectedPeerPubkey == peer &&
+        await _sendPairingSecretIfNeeded(target);
+  }
+
   Future<RepoTarget?> _parentServiceTargetForSpawn() async {
     final selected = _targetById(_repoTargets, _selectedRepoTargetId);
     if (selected != null) {
@@ -7525,7 +7546,10 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _createWorkspaceInvite() async {
-    if (!await _ensureConnectedToParentService()) return;
+    final target = _computerServiceTarget;
+    if (target == null || !await _ensureConnectedToWorkspaceService(target)) {
+      return;
+    }
     _workspaceInviteTimer?.cancel();
     setState(() {
       _workspaceInviteCode = null;
@@ -9141,12 +9165,13 @@ Return a concise catch-up summary of what happened after that point: completed w
       invite.target,
       status: 'Imported workspace target',
     );
-    if (target == null || !await _ensureConnectedToParentService()) return;
+    if (target == null) return;
     if (_isComputerServiceTarget(target)) {
       await _storeComputerServiceTarget(
         _normalizeComputerServiceTarget(target),
       );
     }
+    if (!await _ensureConnectedToWorkspaceService(target)) return;
     await nostrSendQuery(
       query: jsonEncode({
         'redeem_invite': {'code': invite.secret},
