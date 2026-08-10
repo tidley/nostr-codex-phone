@@ -668,9 +668,10 @@ async fn workspace_snapshot_send_frame(
                 WORKSPACE_FIPS_SERVICE_PORT,
                 WORKSPACE_FIPS_SERVICE_PORT,
                 packet,
-                // A missing direct route cannot be repaired by waiting for the
-                // full call timeout. Fall back to the Nostr snapshot promptly.
-                Duration::from_secs(5),
+                // Nostr has already provided the visible workspace snapshot.
+                // Give STUN discovery enough time to establish the optional
+                // direct FIPS route before declaring this bootstrap failed.
+                Duration::from_secs(20),
             )
             .await?;
     }
