@@ -562,6 +562,7 @@ class _TeamWorkspace extends StatefulWidget {
     required this.onOpenSessions,
     required this.onOpenSettings,
     required this.diagnostics,
+    required this.fipsConnected,
     required this.onOpenDiagnostics,
     required this.onOpenWorkerConsole,
     required this.onOpenFiles,
@@ -619,6 +620,7 @@ class _TeamWorkspace extends StatefulWidget {
   final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
   final ValueNotifier<List<String>> diagnostics;
+  final bool fipsConnected;
   final VoidCallback onOpenDiagnostics;
   final VoidCallback onOpenWorkerConsole;
   final Future<void> Function(String conversationKey) onOpenFiles;
@@ -1378,6 +1380,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       memberNames: widget.memberNames,
       unreadCounts: widget.unreadCounts,
       activityLabels: activityLabels,
+      fipsConnected: widget.fipsConnected,
       onSelect: _select,
       onSessions: () {
         _closeDrawer();
@@ -2349,6 +2352,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.memberNames,
     required this.unreadCounts,
     required this.activityLabels,
+    required this.fipsConnected,
     required this.onSelect,
     required this.onSessions,
     required this.onSettings,
@@ -2374,6 +2378,7 @@ class _WorkspaceSidebar extends StatelessWidget {
   final Map<String, String> memberNames;
   final Map<String, int> unreadCounts;
   final Map<String, String> activityLabels;
+  final bool fipsConnected;
   final void Function(_WorkspaceSection, String) onSelect;
   final VoidCallback onSessions;
   final VoidCallback onSettings;
@@ -2493,8 +2498,13 @@ class _WorkspaceSidebar extends StatelessWidget {
                                 activeSpace?.displayName ?? 'Select workspace',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.titleMedium
-                                    ?.copyWith(fontWeight: FontWeight.bold),
+                                 style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(
+                                      color: fipsConnected
+                                          ? const Color(0xff35d6a0)
+                                          : null,
+                                      fontWeight: FontWeight.bold,
+                                    ),
                               ),
                             ),
                             const SizedBox(width: 4),
@@ -3124,7 +3134,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                       icon: const Icon(Icons.edit_note_outlined),
                       tooltip: 'Edit agent brief',
                     ),
-                    if (widget.section == _WorkspaceSection.direct)
+                    if (_supportsLiveCalls &&
+                        widget.section == _WorkspaceSection.direct)
                       _CallControl(
                         phase:
                             widget.callPeerPubkey == null ||
@@ -3138,7 +3149,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                         mediaSource: widget.mediaSource,
                         onMediaSourceChanged: widget.onMediaSourceChanged,
                       ),
-                    if (widget.section == _WorkspaceSection.channel)
+                    if (_supportsLiveCalls &&
+                        widget.section == _WorkspaceSection.channel)
                       _CallControl(
                         phase:
                             widget.groupCallChannelId == null ||
@@ -3637,6 +3649,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
             style: DefaultTextStyle.of(context).style,
           ),
           textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
         )..layout(maxWidth: maxContentWidth)).width;
         final authorWidth = !widget.groupedWithPrevious && !widget.isLocalSender
             ? (TextPainter(
@@ -3645,6 +3658,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
                 textDirection: Directionality.of(context),
+                textScaler: MediaQuery.textScalerOf(context),
               )..layout(maxWidth: maxContentWidth)).width
             : 0.0;
         final contentWidth = math
@@ -3888,6 +3902,7 @@ class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
       final painter = TextPainter(
         text: TextSpan(text: widget.text, style: style),
         textDirection: Directionality.of(context),
+        textScaler: MediaQuery.textScalerOf(context),
         maxLines: _collapsedLines,
       )..layout(maxWidth: constraints.maxWidth);
       final truncated = painter.didExceedMaxLines;
@@ -6187,12 +6202,18 @@ class _ClientDiagnosticsPage extends StatefulWidget {
     required this.diagnostics,
     required this.fipsEnabled,
     required this.fipsHeartbeat,
+    required this.fipsPeers,
+    required this.fipsPeerNpub,
+    required this.onRefreshFipsMesh,
     required this.onFipsEnabledChanged,
   });
 
   final ValueNotifier<List<String>> diagnostics;
   final ValueNotifier<bool> fipsEnabled;
   final ValueNotifier<_WorkspaceFipsHeartbeat> fipsHeartbeat;
+  final ValueNotifier<List<String>> fipsPeers;
+  final String fipsPeerNpub;
+  final Future<void> Function() onRefreshFipsMesh;
   final ValueChanged<bool> onFipsEnabledChanged;
 
   @override
@@ -6201,6 +6222,23 @@ class _ClientDiagnosticsPage extends StatefulWidget {
 
 class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
   _DiagnosticFilter _filter = _DiagnosticFilter.all;
+  bool _refreshingFipsMesh = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_refreshFipsMesh());
+  }
+
+  Future<void> _refreshFipsMesh() async {
+    if (_refreshingFipsMesh) return;
+    setState(() => _refreshingFipsMesh = true);
+    try {
+      await widget.onRefreshFipsMesh();
+    } finally {
+      if (mounted) setState(() => _refreshingFipsMesh = false);
+    }
+  }
 
   Future<void> _copyDiagnostics() => Clipboard.setData(
     ClipboardData(
@@ -6210,6 +6248,8 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
         'FIPS connected at: ${widget.fipsHeartbeat.value.connectedAt?.toIso8601String() ?? 'never'}',
         'FIPS last heartbeat: ${widget.fipsHeartbeat.value.lastHeartbeatAt?.toIso8601String() ?? 'never'}',
         'FIPS heartbeats received: ${widget.fipsHeartbeat.value.count}',
+        'FIPS direct peer: ${widget.fipsPeerNpub.isEmpty ? 'none' : widget.fipsPeerNpub}',
+        'FIPS topology: direct client-to-worker route; clients are not a full mesh',
         '',
         ...widget.diagnostics.value,
       ].join('\n'),
@@ -6303,7 +6343,7 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                             const SizedBox(height: 2),
                             Text(
                               enabled
-                                  ? 'Direct connection with Nostr fallback'
+                                  ? 'Direct route to worker with Nostr fallback'
                                   : 'Nostr messages only',
                               style: theme.textTheme.bodySmall?.copyWith(
                                 color: theme.colorScheme.onSurfaceVariant,
@@ -6317,6 +6357,20 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                         onChanged: widget.onFipsEnabledChanged,
                       ),
                     ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 28),
+              _DiagnosticPanel(
+                title: 'FIPS topology',
+                child: ValueListenableBuilder<List<String>>(
+                  valueListenable: widget.fipsPeers,
+                  builder: (context, peers, _) => _FipsMeshMap(
+                    worker: widget.fipsPeerNpub,
+                    peers: peers,
+                    active: active,
+                    onRefresh: _refreshFipsMesh,
+                    refreshing: _refreshingFipsMesh,
                   ),
                 ),
               ),
@@ -6442,6 +6496,86 @@ class _DiagnosticPanel extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         child,
+      ],
+    );
+  }
+}
+
+class _FipsMeshMap extends StatelessWidget {
+  const _FipsMeshMap({
+    required this.worker,
+    required this.peers,
+    required this.active,
+    required this.onRefresh,
+    required this.refreshing,
+  });
+
+  final String worker;
+  final List<String> peers;
+  final bool active;
+  final Future<void> Function() onRefresh;
+  final bool refreshing;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final linkColor = active
+        ? const Color(0xff35d6a0)
+        : theme.colorScheme.outlineVariant;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.hub_outlined, color: linkColor),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Worker ${compactIdentifier(worker)}',
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Refresh topology',
+              onPressed: refreshing ? null : () => unawaited(onRefresh()),
+              icon: refreshing
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.refresh_outlined),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Text(
+          peers.isEmpty
+              ? 'No live FIPS routes reported by the worker.'
+              : '${peers.length} live direct route${peers.length == 1 ? '' : 's'}',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        for (final peer in peers)
+          Padding(
+            padding: const EdgeInsets.only(top: 10, left: 7),
+            child: Row(
+              children: [
+                Container(width: 1, height: 24, color: linkColor),
+                const SizedBox(width: 12),
+                Icon(Icons.devices_other_outlined, size: 18, color: linkColor),
+                const SizedBox(width: 8),
+                Text(compactIdentifier(peer)),
+                const SizedBox(width: 8),
+                Text(
+                  'connected',
+                  style: theme.textTheme.labelSmall?.copyWith(color: linkColor),
+                ),
+              ],
+            ),
+          ),
       ],
     );
   }
@@ -9892,7 +10026,7 @@ class _SettingsPage extends StatelessWidget {
                         : 'Computer service: ${computerServiceTarget!.displayName}',
                   ),
                   Text('Total saved sessions: ${repoTargets.length}'),
-                  const Text('Version: $_appVersion'),
+                  Text('Version: $_appVersion'),
                   const SizedBox(height: 12),
                   Wrap(
                     spacing: 8,
