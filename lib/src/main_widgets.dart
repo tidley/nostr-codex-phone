@@ -709,6 +709,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   DateTime? _voiceStartedAt;
   TextEditingController? _voiceComposer;
   String? _voiceError;
+  Timer? _voiceTimer;
+  String _voiceDurationLabel = '00:00';
   Timer? _typingRefreshTimer;
   Timer? _typingExpiryTimer;
   DateTime? _lastTypingLease;
@@ -834,6 +836,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     unawaited(_voiceRecorder.dispose());
     final path = _voicePath;
     if (path != null) unawaited(_deleteVoiceFile(path));
+    _voiceTimer?.cancel();
     _typingRefreshTimer?.cancel();
     _typingExpiryTimer?.cancel();
     super.dispose();
@@ -894,6 +897,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     if (_voiceRecording) {
       final path = _voicePath;
       final startedAt = _voiceStartedAt;
+      _voiceTimer?.cancel();
       try {
         final stopped = await _voiceRecorder.stop();
         final audioPath = _usableVoiceAudioPath(stopped, path);
@@ -906,6 +910,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             setState(() {
               _voiceRecording = false;
               _voicePath = null;
+              _voiceStartedAt = null;
+              _voiceDurationLabel = '00:00';
               _voiceError = 'Record at least one second of audio.';
             });
           }
@@ -917,6 +923,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           _voiceTranscribing = true;
           _voiceError = null;
           _voicePath = null;
+          _voiceStartedAt = null;
+          _voiceDurationLabel = '00:00';
         });
         await widget.onVoiceTranscribe(audioPath, {
           'action': _section == _WorkspaceSection.channel
@@ -935,6 +943,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             _voiceRecording = false;
             _voiceTranscribing = false;
             _voicePath = null;
+            _voiceStartedAt = null;
+            _voiceDurationLabel = '00:00';
             _voiceError = 'Voice transcription failed: $error';
           });
         }
@@ -971,6 +981,16 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           _voiceComposer = thread == null ? _composer : _threadComposer;
           _voiceError = null;
           widget.voiceResult.value = null;
+          _voiceDurationLabel = '00:00';
+        });
+        _voiceTimer?.cancel();
+        _voiceTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+          if (!mounted || !_voiceRecording || _voiceStartedAt == null) return;
+          final elapsed = DateTime.now().difference(_voiceStartedAt!);
+          setState(() {
+            _voiceDurationLabel =
+                '${elapsed.inMinutes.toString().padLeft(2, '0')}:${(elapsed.inSeconds % 60).toString().padLeft(2, '0')}';
+          });
         });
       }
     } catch (error) {
@@ -978,6 +998,27 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         setState(() => _voiceError = 'Could not start recording: $error');
       }
     }
+  }
+
+  Future<void> _cancelVoiceRecording() async {
+    if (!_voiceRecording) return;
+    final path = _voicePath;
+    _voiceTimer?.cancel();
+    try {
+      await _voiceRecorder.stop();
+    } catch (_) {
+      // The recorder can already be stopped if the platform interrupted it.
+    }
+    if (path != null) unawaited(_deleteVoiceFile(path));
+    if (!mounted) return;
+    setState(() {
+      _voiceRecording = false;
+      _voicePath = null;
+      _voiceStartedAt = null;
+      _voiceComposer = null;
+      _voiceDurationLabel = '00:00';
+      _voiceError = null;
+    });
   }
 
   String? _usableVoiceAudioPath(String? primary, String? fallback) {
@@ -1366,10 +1407,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         composerFocus: _composerFocus,
         onSend: _send,
         onAttach: _attach,
-        voiceRecording: _voiceRecording,
-        voiceTranscribing: _voiceTranscribing,
-        voiceError: _voiceError,
+        voiceRecording: _voiceRecording && _voiceComposer == _composer,
+        voiceTranscribing: _voiceTranscribing && _voiceComposer == _composer,
+        voiceError: _voiceComposer == _composer ? _voiceError : null,
         onVoicePressed: () => unawaited(_toggleVoiceRecording()),
+        voiceDurationLabel: _voiceDurationLabel,
+        onCancelVoiceRecording: () => unawaited(_cancelVoiceRecording()),
         onOpenAttachment: widget.onOpenAttachment,
         onOpenThread: (message) {
           setState(() {
@@ -1513,6 +1556,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           _voiceTranscribing && _voiceComposer == _threadComposer,
       voiceError: _voiceComposer == _threadComposer ? _voiceError : null,
       onVoicePressed: () => unawaited(_toggleVoiceRecording(thread: _thread)),
+      voiceDurationLabel: _voiceDurationLabel,
+      onCancelVoiceRecording: () => unawaited(_cancelVoiceRecording()),
       alsoSendToMain: _alsoSendToMain,
       onAlsoSendToMainChanged: (value) =>
           setState(() => _alsoSendToMain = value),
@@ -2596,6 +2641,8 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.voiceTranscribing,
     required this.voiceError,
     required this.onVoicePressed,
+    required this.voiceDurationLabel,
+    required this.onCancelVoiceRecording,
     required this.onOpenAttachment,
     required this.onOpenThread,
     required this.onCloseThread,
@@ -2667,6 +2714,8 @@ class _WorkspaceConversation extends StatefulWidget {
   final bool voiceTranscribing;
   final String? voiceError;
   final VoidCallback onVoicePressed;
+  final String voiceDurationLabel;
+  final VoidCallback onCancelVoiceRecording;
   final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
   final ValueChanged<WorkspaceMessage> onOpenThread;
   final VoidCallback onCloseThread;
@@ -3198,6 +3247,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                   voiceTranscribing: widget.voiceTranscribing,
                   voiceError: widget.voiceError,
                   onVoicePressed: widget.onVoicePressed,
+                  voiceDurationLabel: widget.voiceDurationLabel,
+                  onCancelVoiceRecording: widget.onCancelVoiceRecording,
                 ),
               ],
             ),
@@ -3965,6 +4016,8 @@ class _WorkspaceContext extends StatelessWidget {
     required this.voiceTranscribing,
     required this.voiceError,
     required this.onVoicePressed,
+    required this.voiceDurationLabel,
+    required this.onCancelVoiceRecording,
     required this.alsoSendToMain,
     required this.onAlsoSendToMainChanged,
     required this.onClose,
@@ -3993,6 +4046,8 @@ class _WorkspaceContext extends StatelessWidget {
   final bool voiceTranscribing;
   final String? voiceError;
   final VoidCallback onVoicePressed;
+  final String voiceDurationLabel;
+  final VoidCallback onCancelVoiceRecording;
   final bool alsoSendToMain;
   final ValueChanged<bool> onAlsoSendToMainChanged;
   final VoidCallback onClose;
@@ -4156,6 +4211,8 @@ class _WorkspaceContext extends StatelessWidget {
                 voiceTranscribing: voiceTranscribing,
                 voiceError: voiceError,
                 onVoicePressed: onVoicePressed,
+                voiceDurationLabel: voiceDurationLabel,
+                onCancelVoiceRecording: onCancelVoiceRecording,
               ),
             ],
           ),
@@ -4437,6 +4494,8 @@ class WorkspaceComposer extends StatelessWidget {
     this.voiceTranscribing = false,
     this.voiceError,
     this.onVoicePressed,
+    this.voiceDurationLabel = '00:00',
+    this.onCancelVoiceRecording,
   });
 
   final TextEditingController composer;
@@ -4450,6 +4509,8 @@ class WorkspaceComposer extends StatelessWidget {
   final bool voiceTranscribing;
   final String? voiceError;
   final VoidCallback? onVoicePressed;
+  final String voiceDurationLabel;
+  final VoidCallback? onCancelVoiceRecording;
 
   bool _isDesktop(TargetPlatform platform) => switch (platform) {
     TargetPlatform.linux ||
@@ -4571,8 +4632,11 @@ class WorkspaceComposer extends StatelessWidget {
                       : null,
                   // Keep desktop focus in this field after a submit action.
                   onEditingComplete: () {},
+                  readOnly: voiceRecording || voiceTranscribing,
                   decoration: InputDecoration(
-                    hintText: hintText,
+                    hintText: voiceRecording
+                        ? 'Recording $voiceDurationLabel'
+                        : hintText,
                     filled: true,
                     fillColor:
                         Theme.of(
@@ -4580,45 +4644,47 @@ class WorkspaceComposer extends StatelessWidget {
                         ).extension<_WorkspacePalette>()?.composer ??
                         Theme.of(context).colorScheme.surfaceContainerHighest,
                     prefixIcon: IconButton(
-                      tooltip: 'Attach file',
-                      onPressed: () => unawaited(onAttach()),
-                      icon: const Icon(Icons.attach_file),
+                      tooltip: voiceRecording
+                          ? 'Cancel recording'
+                          : 'Attach file',
+                      onPressed: voiceRecording
+                          ? onCancelVoiceRecording
+                          : () => unawaited(onAttach()),
+                      icon: Icon(
+                        voiceRecording ? Icons.close : Icons.attach_file,
+                        color: voiceRecording
+                            ? Theme.of(context).colorScheme.error
+                            : null,
+                      ),
                     ),
                     suffixIcon: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        if (onVoicePressed != null)
+                        if (voiceTranscribing)
                           IconButton(
-                            tooltip: voiceTranscribing
-                                ? 'Transcribing voice'
-                                : voiceRecording
-                                ? 'Stop recording and transcribe'
-                                : 'Record voice to text',
-                            onPressed: voiceTranscribing
-                                ? null
-                                : onVoicePressed,
-                            icon: voiceTranscribing
-                                ? const SizedBox.square(
-                                    dimension: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : Icon(
-                                    voiceRecording
-                                        ? Icons.stop_circle_outlined
-                                        : Icons.mic_none_outlined,
-                                  ),
+                            tooltip: 'Transcribing voice',
+                            onPressed: null,
+                            icon: const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
                           ),
-                        IconButton(
-                          tooltip: canSend
-                              ? desktop
-                                    ? 'Send message (Enter)'
-                                    : 'Send message'
-                              : 'Write a message to send',
-                          onPressed: canSend ? onSend : null,
-                          icon: const Icon(Icons.send),
-                        ),
+                        if (voiceRecording || canSend)
+                          IconButton(
+                            tooltip: voiceRecording
+                                ? 'Send recording'
+                                : desktop
+                                ? 'Send message (Enter)'
+                                : 'Send message',
+                            onPressed: voiceRecording ? onVoicePressed : onSend,
+                            icon: const Icon(Icons.send),
+                          )
+                        else if (onVoicePressed != null)
+                          IconButton(
+                            tooltip: 'Record voice to text',
+                            onPressed: onVoicePressed,
+                            icon: const Icon(Icons.mic_none_outlined),
+                          ),
                       ],
                     ),
                     border: OutlineInputBorder(
