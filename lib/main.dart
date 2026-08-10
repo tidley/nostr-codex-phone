@@ -683,6 +683,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Timer? _workspaceFipsOfferTimer;
   int _workspaceFipsRetryAttempt = 0;
   int _workspaceFipsSessionGeneration = 0;
+  int _nostrPollGeneration = 0;
+  Future<void>? _nostrRestartInFlight;
   int? _workspaceFipsSnapshotGeneration;
   int _workspaceFipsNextMessageId = 0;
   int _workspaceFipsLastReceivedMessageId = 0;
@@ -925,6 +927,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _workspaceFipsRetryTimer?.cancel();
     _workspaceFipsOfferTimer?.cancel();
     _workspaceFipsHeartbeatTicker?.cancel();
+    _workspaceFipsSessionGeneration++;
     _workspaceInviteTimer?.cancel();
     unawaited(_saveWorkspaceCache());
     _inactiveReplyNoticeTimer?.cancel();
@@ -950,6 +953,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _queryController.dispose();
     _queryFocusNode.dispose();
     _menuNotificationPulseController.dispose();
+    unawaited(fipsWorkspaceSnapshotStop());
     unawaited(fipsCallStop());
     unawaited(nostrStop());
     super.dispose();
@@ -4320,8 +4324,22 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _restartNostrForSendRecovery() async {
+    final existing = _nostrRestartInFlight;
+    if (existing != null) return existing;
+    late final Future<void> restart;
+    restart = _restartNostrForSendRecoveryImpl().whenComplete(() {
+      if (identical(_nostrRestartInFlight, restart)) {
+        _nostrRestartInFlight = null;
+      }
+    });
+    _nostrRestartInFlight = restart;
+    return restart;
+  }
+
+  Future<void> _restartNostrForSendRecoveryImpl() async {
     final config = _activeNostrConfig();
     _polling = false;
+    _nostrPollGeneration++;
     if (mounted) {
       setState(() {
         _connecting = true;
@@ -4364,13 +4382,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<void> _disconnect({bool expand = true}) async {
     _polling = false;
+    _nostrPollGeneration++;
+    _workspaceFipsSessionGeneration++;
     _workspaceFipsRetryTimer?.cancel();
+    _workspaceFipsOfferTimer?.cancel();
+    _workspaceFipsSnapshotInFlight = false;
+    _workspaceFipsSnapshotGeneration = null;
     _setWorkspaceFipsConnectionState('disconnected');
     await fipsWorkspaceSnapshotStop();
     await nostrStop();
     if (!mounted) return;
     setState(() {
       _connected = false;
+      _connecting = false;
       _connectedPeerPubkey = null;
       _connectedRelays = const [];
       _status = 'Disconnected';
@@ -4442,14 +4466,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   void _startPolling() {
     if (_polling) return;
     _polling = true;
-    unawaited(_pollLoop());
+    final generation = ++_nostrPollGeneration;
+    unawaited(_pollLoop(generation));
   }
 
-  Future<void> _pollLoop() async {
+  Future<void> _pollLoop(int generation) async {
     var emptyPolls = 0;
-    while (mounted && _polling) {
+    while (mounted && _polling && generation == _nostrPollGeneration) {
       try {
         final message = await nostrNextMessage(timeoutMs: BigInt.from(1500));
+        if (generation != _nostrPollGeneration) return;
         if (message == null || !mounted) {
           emptyPolls += 1;
           if (emptyPolls >= 10) {
@@ -4461,7 +4487,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         emptyPolls = 0;
         _receiveMessage(message);
       } catch (error) {
-        if (!mounted || !_polling) return;
+        if (!mounted || !_polling || generation != _nostrPollGeneration) {
+          return;
+        }
         _recordDiagnostic('Receive error: $error');
         if (error.toString().contains('Nostr listener has stopped')) {
           setState(() => _status = 'Listener stopped, reconnecting...');
@@ -7062,7 +7090,6 @@ Return a concise catch-up summary of what happened after that point: completed w
         onLoadOpenCodeModels: _loadOpenCodeModels,
         initialFolderChoices: _cachedRepoChoices,
         onLoadFolders: (path) => _requestRepoChoices(path: path),
-        onOpenAgentConversation: _openAgentConversation,
         inviteCode: _workspaceInviteCode,
         memberStatus: _workspaceMemberStatus,
         workspace: _workspace,
@@ -7377,14 +7404,22 @@ Return a concise catch-up summary of what happened after that point: completed w
             _workspaceFipsConnectionState != 'active',
       };
     }
+    _addOptimisticWorkspaceMessage(request);
     final bootstrap = request['action'] == 'list_fallback';
+    final durableMessage =
+        request['action'] == 'send_channel_message' ||
+        request['action'] == 'send_direct_message';
     if (!bootstrap && _workspaceFipsConnectionState == 'active') {
       try {
         await fipsWorkspaceSendWire(
           frame: jsonEncode({'workspace_request': request}),
           messageId: BigInt.from(++_workspaceFipsNextMessageId),
         );
-        return;
+        if (!durableMessage) return;
+        // FIPS confirms a local write, not delivery to the worker. Mirror
+        // durable messages through Nostr so a dead direct route cannot lose a
+        // message that the composer already displayed optimistically.
+        _recordDiagnostic('Mirroring workspace message through Nostr');
       } catch (error) {
         _recordDiagnostic(
           'FIPS workspace send failed; recovering with Nostr: $error',
@@ -7401,11 +7436,46 @@ Return a concise catch-up summary of what happened after that point: completed w
     );
     if (request['action'] == 'list' && request['fips_snapshot'] == true) {
       _awaitWorkspaceFipsOffer();
-      // Nostr is the reliable bootstrap path. Do not make a cold workspace wait
-      // for a direct route that may not exist yet; FIPS takes over live updates
-      // after its capability is accepted.
-      unawaited(_sendWorkspaceRequest({'action': 'list_fallback'}));
     }
+  }
+
+  void _addOptimisticWorkspaceMessage(Map<String, Object?> request) {
+    final action = request['action'];
+    if (action != 'send_channel_message' && action != 'send_direct_message') {
+      return;
+    }
+    final sender = _ownPubkeyHex ?? _ownPubkey;
+    if (sender == null || sender.isEmpty) return;
+    final messageId =
+        'client-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
+    request['message_id'] = messageId;
+    final message = WorkspaceMessage.fromJson({
+      'id': messageId,
+      if (action == 'send_channel_message') 'channel_id': request['channel_id'],
+      if (action == 'send_direct_message')
+        'recipient_pubkey': request['recipient_pubkey'],
+      'sender_pubkey': sender,
+      'body': request['body'] ?? '',
+      'attachments': request['attachments'] ?? const [],
+      'mentions': request['mentions'] ?? const [],
+      if (request['parent_id'] != null) 'parent_id': request['parent_id'],
+      'also_send_to_main': request['also_send_to_main'] == true,
+      'created_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    });
+    if (!mounted) return;
+    setState(() {
+      _workspace.apply({
+        'workspace_update': {
+          'action': 'message_created',
+          // Optimistic rows must be accepted alongside the latest worker
+          // snapshot instead of looking stale because they lack a revision.
+          'revision': _workspace.revision,
+          'messages': [message.toJson()],
+        },
+      });
+      _workspaceRevision.value++;
+    });
+    _scheduleWorkspaceCacheSave();
   }
 
   String? _workspaceFipsCapabilityFromOffer(String action) {
@@ -7736,7 +7806,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
     _workspaceFipsOfferTimer?.cancel();
     _recordDiagnostic('FIPS workspace snapshot requested');
-    _workspaceFipsOfferTimer = Timer(const Duration(seconds: 5), () {
+    _workspaceFipsOfferTimer = Timer(const Duration(seconds: 20), () {
       if (!_workspaceFipsEnabled.value ||
           _workspaceFipsSnapshotInFlight ||
           _workspaceFipsConnectionState == 'active') {
@@ -8784,37 +8854,6 @@ Return a concise catch-up summary of what happened after that point: completed w
     } catch (error) {
       if (mounted) _showError('Attachment download failed: $error');
     }
-  }
-
-  Future<void> _openAgentConversation(WorkspaceAgent agent) async {
-    final sessionId = agent.openCodeSessionId;
-    if (agent.sessionStatus != 'ready' ||
-        sessionId == null ||
-        sessionId.isEmpty) {
-      _showStatus(
-        agent.sessionError ??
-            '${agent.name} is not ready because OpenCode session provisioning failed.',
-      );
-      return;
-    }
-    final target = _targetById(_repoTargets, _selectedRepoTargetId);
-    if (target == null) {
-      _showError('Select a repo session before opening an agent conversation');
-      return;
-    }
-    final updated = target.copyWith(
-      opencodeSessionId: sessionId,
-      opencodeSessionTitle: agent.name,
-    );
-    setState(() {
-      _repoTargets = [
-        for (final item in _repoTargets)
-          if (item.id == updated.id) updated else item,
-      ];
-      _showTeamWorkspace = false;
-    });
-    await _saveSettings();
-    await _loadConversationHistoryForActiveSession();
   }
 
   Future<void> _redeemWorkspaceInvite(String code) async {
