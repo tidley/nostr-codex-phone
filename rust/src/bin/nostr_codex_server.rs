@@ -1679,6 +1679,7 @@ async fn process_workspace_request(
                 + expires_in as i64;
             let update = WorkspaceUpdate {
                 action: "typing".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![],
@@ -1735,6 +1736,7 @@ async fn process_workspace_request(
                     sender,
                     WireMessage::workspace_update(WorkspaceUpdate {
                         action: format!("fips_snapshot_offer:{capability}"),
+                        revision: workspace.revision()?,
                         channels: vec![],
                         members: vec![],
                         messages: vec![],
@@ -1756,6 +1758,7 @@ async fn process_workspace_request(
                 .create_channel(request.channel_name.as_deref().unwrap_or_default(), sender)?;
             let update = WorkspaceUpdate {
                 action: "channel_created".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![channel_payload(channel)],
                 members: vec![],
                 messages: vec![],
@@ -1778,6 +1781,7 @@ async fn process_workspace_request(
                 outbound,
                 &WorkspaceUpdate {
                     action: "channel_renamed".to_string(),
+                    revision: workspace.revision()?,
                     channels: vec![channel_payload(channel)],
                     members: vec![],
                     messages: vec![],
@@ -1810,6 +1814,7 @@ async fn process_workspace_request(
             )?;
             let update = WorkspaceUpdate {
                 action: "profile_updated".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![member_payload(member)],
                 messages: vec![],
@@ -1832,6 +1837,7 @@ async fn process_workspace_request(
             )?;
             let update = WorkspaceUpdate {
                 action: "conversation_preprompt_updated".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![],
@@ -1859,6 +1865,7 @@ async fn process_workspace_request(
         }
         "list_direct_messages" => WorkspaceUpdate {
             action: "direct_messages".to_string(),
+            revision: workspace.revision()?,
             channels: vec![],
             members: vec![],
             messages: workspace
@@ -1918,7 +1925,7 @@ async fn process_workspace_request(
             return Ok(());
         }
         "send_channel_message" => {
-            let message = workspace.add_channel_message_with_main(
+            let message = workspace.add_channel_message_with_main_and_id(
                 sender,
                 request.channel_id.as_deref().unwrap_or_default(),
                 request.body.as_deref().unwrap_or_default(),
@@ -1926,10 +1933,12 @@ async fn process_workspace_request(
                 &request.mentions,
                 request.parent_id.as_deref(),
                 request.also_send_to_main,
+                request.message_id.as_deref(),
             )?;
             let message_id = message.id.clone();
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![message_payload(message)],
@@ -1957,7 +1966,7 @@ async fn process_workspace_request(
             return Ok(());
         }
         "send_direct_message" => {
-            let message = workspace.add_direct_message_with_main(
+            let message = workspace.add_direct_message_with_main_and_id(
                 sender,
                 request.recipient_pubkey.as_deref().unwrap_or_default(),
                 request.body.as_deref().unwrap_or_default(),
@@ -1965,10 +1974,12 @@ async fn process_workspace_request(
                 &request.mentions,
                 request.parent_id.as_deref(),
                 request.also_send_to_main,
+                request.message_id.as_deref(),
             )?;
             let message_id = message.id.clone();
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![message_payload(message)],
@@ -2068,6 +2079,7 @@ async fn process_workspace_request(
             )?;
             let update = WorkspaceUpdate {
                 action: "message_updated".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![message_payload(message)],
@@ -2103,6 +2115,7 @@ async fn process_workspace_request(
                 .unwrap_or_default();
             WorkspaceUpdate {
                 action: "agents".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![],
@@ -2167,6 +2180,7 @@ async fn process_workspace_request(
             }
             let update = WorkspaceUpdate {
                 action: "agent_created".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![],
@@ -2193,6 +2207,7 @@ async fn process_workspace_request(
             )?;
             let update = WorkspaceUpdate {
                 action: "agent_renamed".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![],
@@ -2222,6 +2237,7 @@ async fn process_workspace_request(
             )?;
             let update = WorkspaceUpdate {
                 action: "agent_session_restarted".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![],
@@ -2248,6 +2264,7 @@ async fn process_workspace_request(
             )?;
             let update = WorkspaceUpdate {
                 action: "agent_profile_updated".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![],
@@ -2263,6 +2280,7 @@ async fn process_workspace_request(
             workspace.delete_agent(request.agent_id.as_deref().unwrap_or_default())?;
             let update = WorkspaceUpdate {
                 action: "agent_deleted".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![],
@@ -2303,6 +2321,7 @@ async fn process_workspace_request(
             }
             let update = WorkspaceUpdate {
                 action: "conversation_agents_updated".to_string(),
+                revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
                 messages: vec![],
@@ -2337,6 +2356,7 @@ async fn send_workspace_snapshot(
     sender: &str,
 ) -> Result<()> {
     let mut snapshot = workspace_snapshot(workspace, sender)?;
+    let revision = snapshot.revision;
     let messages = std::mem::take(&mut snapshot.messages);
     let transfer_id = generate_pairing_secret();
     let message_chunks =
@@ -2364,6 +2384,7 @@ async fn send_workspace_snapshot(
                 total_chunks,
                 "snapshot_messages",
             ),
+            revision,
             channels: vec![],
             members: vec![],
             messages,
@@ -2615,12 +2636,24 @@ async fn run_workspace_fips_acceptor(
                 let _ = outbound.delivered.send(result);
             }
             _ = heartbeat.tick() => {
-                // Peers can only answer after a ping. Keep them through the
-                // next 20-second interval plus its 10-second response window.
-                peers.retain(|_, peer| {
-                    peer.last_pong.elapsed()
-                        < WORKSPACE_FIPS_HEARTBEAT_INTERVAL + WORKSPACE_FIPS_HEARTBEAT_TIMEOUT
-                });
+                // A reconnect restarts application frame IDs from one. Remove
+                // the source assembler with an expired peer so its first
+                // capability frame is not mistaken for a replay.
+                let stale_sources = peers
+                    .iter()
+                    .filter_map(|(source, peer)| {
+                        (peer.last_pong.elapsed()
+                            >= WORKSPACE_FIPS_HEARTBEAT_INTERVAL
+                                + WORKSPACE_FIPS_HEARTBEAT_TIMEOUT)
+                            .then_some(source.clone())
+                    })
+                    .collect::<Vec<_>>();
+                for source in stale_sources {
+                    if let Some(peer) = peers.remove(&source) {
+                        info!(member = %peer.member, "expired FIPS workspace peer route");
+                    }
+                    assemblers.remove(&source);
+                }
                 let live_npubs = peers
                     .values()
                     .map(|peer| (peer.member.clone(), peer.npub.clone()))
@@ -2708,6 +2741,7 @@ fn workspace_snapshot_frames(
     sender: &str,
 ) -> Result<Vec<WorkspaceUpdate>> {
     let mut snapshot = workspace_snapshot(workspace, sender)?;
+    let revision = snapshot.revision;
     let messages = std::mem::take(&mut snapshot.messages);
     let transfer_id = generate_pairing_secret();
     let total_chunks = messages.chunks(WORKSPACE_FIPS_TRANSFER_CHUNK_SIZE).len() + 1;
@@ -2724,6 +2758,7 @@ fn workspace_snapshot_frames(
                 total_chunks,
                 "snapshot_messages",
             ),
+            revision,
             channels: vec![],
             members: vec![],
             messages: messages.to_vec(),
@@ -2747,6 +2782,7 @@ async fn send_channel_history(
         .into_iter()
         .map(message_payload)
         .collect::<Vec<_>>();
+    let revision = workspace.revision()?;
     let transfer_id = generate_pairing_secret();
     let message_chunks =
         nostr_workspace_message_chunks(&messages, &transfer_id, "channel_messages")?;
@@ -2758,6 +2794,7 @@ async fn send_channel_history(
     );
     let header = WorkspaceUpdate {
         action: history_transfer_action(&transfer_id, 0, total_chunks, "channel_messages"),
+        revision,
         channels: vec![],
         members: vec![],
         messages: vec![],
@@ -2790,6 +2827,7 @@ async fn send_channel_history(
                         total_chunks,
                         "channel_messages",
                     ),
+                    revision,
                     channels: vec![],
                     members: vec![],
                     messages: chunk,
@@ -2818,6 +2856,7 @@ fn nostr_workspace_message_chunks(
         chunk.push(message.clone());
         let update = WorkspaceUpdate {
             action: transfer_action.clone(),
+            revision: 0,
             channels: vec![],
             members: vec![],
             messages: chunk.clone(),
@@ -2839,6 +2878,7 @@ fn nostr_workspace_message_chunks(
         chunk.push(message);
         let single_message = WorkspaceUpdate {
             action: transfer_action.clone(),
+            revision: 0,
             channels: vec![],
             members: vec![],
             messages: chunk.clone(),
@@ -2875,6 +2915,7 @@ fn history_transfer_action(
 fn workspace_snapshot(workspace: &WorkspaceStore, member: &str) -> Result<WorkspaceUpdate> {
     Ok(WorkspaceUpdate {
         action: "snapshot".to_string(),
+        revision: workspace.revision()?,
         channels: workspace
             .channels()?
             .into_iter()
@@ -2990,6 +3031,7 @@ async fn send_agent_typing(
         .unwrap_or(0);
     let update = WorkspaceUpdate {
         action: "typing".to_string(),
+        revision: workspace.revision()?,
         channels: vec![],
         members: vec![],
         messages: vec![],
@@ -3714,6 +3756,7 @@ async fn route_conversation_agents(
                         outbound,
                         &WorkspaceUpdate {
                             action: "agent_session_restarted".to_string(),
+                            revision: workspace.revision()?,
                             channels: vec![],
                             members: vec![],
                             messages: vec![],
@@ -3739,6 +3782,7 @@ async fn route_conversation_agents(
                     outbound,
                     &WorkspaceUpdate {
                         action: "agent_session_restarted".to_string(),
+                        revision: workspace.revision()?,
                         channels: vec![],
                         members: vec![],
                         messages: vec![],
@@ -3828,6 +3872,7 @@ async fn route_conversation_agents(
                 outbound,
                 &WorkspaceUpdate {
                     action: "agent_usage_updated".to_string(),
+                    revision: workspace.revision()?,
                     channels: vec![],
                     members: vec![],
                     messages: vec![],
@@ -3862,6 +3907,7 @@ async fn route_conversation_agents(
         };
         let update = WorkspaceUpdate {
             action: "message_created".to_string(),
+            revision: workspace.revision()?,
             channels: vec![],
             members: vec![],
             messages: vec![message_payload(message)],
@@ -8480,6 +8526,7 @@ mod tests {
     fn workspace_fips_app_envelope_is_ordered_and_contains_a_wire_message() {
         let frame = WireMessage::workspace_update(WorkspaceUpdate {
             action: "snapshot".to_string(),
+            revision: 1,
             channels: vec![],
             members: vec![],
             messages: vec![],
