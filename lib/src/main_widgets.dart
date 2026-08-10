@@ -6200,6 +6200,20 @@ class _ClientDiagnosticsPage extends StatefulWidget {
 class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
   _DiagnosticFilter _filter = _DiagnosticFilter.all;
 
+  Future<void> _copyDiagnostics() => Clipboard.setData(
+    ClipboardData(
+      text: [
+        'FIPS enabled: ${widget.fipsEnabled.value}',
+        'FIPS connection: ${widget.fipsHeartbeat.value.connectionState}',
+        'FIPS connected at: ${widget.fipsHeartbeat.value.connectedAt?.toIso8601String() ?? 'never'}',
+        'FIPS last heartbeat: ${widget.fipsHeartbeat.value.lastHeartbeatAt?.toIso8601String() ?? 'never'}',
+        'FIPS heartbeats received: ${widget.fipsHeartbeat.value.count}',
+        '',
+        ...widget.diagnostics.value,
+      ].join('\n'),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
@@ -6208,9 +6222,7 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
         Tooltip(
           message: 'Copy diagnostics',
           child: TextButton.icon(
-            onPressed: () => Clipboard.setData(
-              ClipboardData(text: widget.diagnostics.value.join('\n')),
-            ),
+            onPressed: _copyDiagnostics,
             icon: const Icon(Icons.copy_outlined, size: 18),
             label: const Text('Copy'),
           ),
