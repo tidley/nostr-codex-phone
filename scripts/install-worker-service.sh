@@ -52,7 +52,8 @@ Type=simple
 WorkingDirectory=$root
 Environment=AGENT_BACKEND=opencode
 Environment=AGENT_WORKDIR=$root
-Environment=OPENCODE_BIN=$opencode_bin
+Environment=OPENCODE_REAL_BIN=$opencode_bin
+Environment=OPENCODE_BIN=$root/scripts/opencode-workdir-sandbox.sh
 Environment=OPENCODE_AGENT=build
 Environment=OPENCODE_SYSTEMD_SCOPE=1
 Environment=OPENCODE_MAX_CONCURRENT_RUNS=10

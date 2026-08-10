@@ -1332,7 +1332,7 @@ fn validate_redeem_invite(invite: &RedeemInvite) -> Result<()> {
 
 fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
     match request.action.as_str() {
-        "list" => Ok(()),
+        "list" | "fips_mesh" => Ok(()),
         "typing"
             if request
                 .expires_in_seconds

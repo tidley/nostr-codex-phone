@@ -13,6 +13,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:open_filex/open_filex.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:crew/src/rust/api/nostr.dart';
 import 'package:crew/src/rust/frb_generated.dart';
@@ -56,9 +57,10 @@ const _callStunServers = [
   'stun:global.stun.twilio.com:3478',
 ];
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
-const _appVersion = '0.3.27+327';
+var _appVersion = 'unknown';
 
 bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
+bool get _supportsLiveCalls => Platform.isAndroid || Platform.isLinux;
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -336,6 +338,8 @@ class _WorkspaceVoiceResult {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  final package = await PackageInfo.fromPlatform();
+  _appVersion = '${package.version}+${package.buildNumber}';
   await RustLib.init();
   runApp(const NostrCodexApp());
 }
@@ -678,6 +682,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _workspaceFipsHeartbeat = ValueNotifier<_WorkspaceFipsHeartbeat>(
     const _WorkspaceFipsHeartbeat(),
   );
+  final _workspaceFipsPeers = ValueNotifier<List<String>>(const []);
   Timer? _workspaceFipsHeartbeatTicker;
   Timer? _workspaceFipsRetryTimer;
   Timer? _workspaceFipsOfferTimer;
@@ -948,6 +953,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _clientDiagnostics.dispose();
     _workspaceFipsEnabled.dispose();
     _workspaceFipsHeartbeat.dispose();
+    _workspaceFipsPeers.dispose();
     _workspaceVoiceResult.dispose();
     _queryController.dispose();
     _queryFocusNode.dispose();
@@ -4576,6 +4582,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
         final update = decoded['workspace_update'];
         final action = update is Map ? update['action']?.toString() : null;
+        if (action == 'fips_mesh') {
+          _workspaceFipsPeers.value = (update['members'] as List? ?? const [])
+              .whereType<Map>()
+              .map((member) => member['pubkey']?.toString() ?? '')
+              .where((pubkey) => pubkey.isNotEmpty)
+              .toList(growable: false);
+          return true;
+        }
         if (action == 'list_fallback') {
           // This is transport control, never a visible workspace update.
           return true;
@@ -7043,27 +7057,36 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
 
     if (_showTeamWorkspace) {
-      return _TeamWorkspace(
-        key: ValueKey(_computerServiceTarget?.id),
-        sessions: _repoTargets,
-        spaces: _computerServiceTargets,
-        activeSpace: _computerServiceTarget,
-        onSwitchSpace: (target) =>
-            unawaited(_selectComputerServiceTarget(target)),
-        onOpenSessions: () => setState(() => _showTeamWorkspace = false),
-        onOpenSettings: () => unawaited(_openSettings()),
-        diagnostics: _clientDiagnostics,
-        onOpenDiagnostics: () => Navigator.of(context).push<void>(
-          MaterialPageRoute(
-            builder: (_) => _ClientDiagnosticsPage(
-              diagnostics: _clientDiagnostics,
-              fipsEnabled: _workspaceFipsEnabled,
-              fipsHeartbeat: _workspaceFipsHeartbeat,
-              onFipsEnabledChanged: _setWorkspaceFipsEnabled,
+      return ValueListenableBuilder<_WorkspaceFipsHeartbeat>(
+        valueListenable: _workspaceFipsHeartbeat,
+        builder: (context, heartbeat, _) => _TeamWorkspace(
+          key: ValueKey(_computerServiceTarget?.id),
+          sessions: _repoTargets,
+          spaces: _computerServiceTargets,
+          activeSpace: _computerServiceTarget,
+          onSwitchSpace: (target) =>
+              unawaited(_selectComputerServiceTarget(target)),
+          onOpenSessions: () => setState(() => _showTeamWorkspace = false),
+          onOpenSettings: () => unawaited(_openSettings()),
+          diagnostics: _clientDiagnostics,
+          onOpenDiagnostics: () => Navigator.of(context).push<void>(
+            MaterialPageRoute(
+              builder: (_) => _ClientDiagnosticsPage(
+                diagnostics: _clientDiagnostics,
+                fipsEnabled: _workspaceFipsEnabled,
+                fipsHeartbeat: _workspaceFipsHeartbeat,
+                fipsPeers: _workspaceFipsPeers,
+                fipsPeerNpub:
+                    _connectedPeerPubkey ?? _peerPubkeyController.text.trim(),
+                onRefreshFipsMesh: () => _sendWorkspaceRequest({
+                  'action': 'fips_mesh',
+                }),
+                onFipsEnabledChanged: _setWorkspaceFipsEnabled,
+              ),
             ),
           ),
-        ),
-        onOpenWorkerConsole: () => unawaited(_openWorkerConsole()),
+          fipsConnected: heartbeat.connectionState == 'active',
+          onOpenWorkerConsole: () => unawaited(_openWorkerConsole()),
         onOpenFiles: (conversationKey) => _sendToolRequest(
           'file_browser',
           workspaceConversationKey: conversationKey,
@@ -7141,7 +7164,8 @@ Return a concise catch-up summary of what happened after that point: completed w
         onRejectGroupCall: _hangupGroupCall,
         onHangupGroupCall: _hangupGroupCall,
         mediaSource: _callMediaSource,
-        onMediaSourceChanged: _setCallMediaSource,
+          onMediaSourceChanged: _setCallMediaSource,
+        ),
       );
     }
 
@@ -7388,8 +7412,12 @@ Return a concise catch-up summary of what happened after that point: completed w
 
   Future<void> _sendWorkspaceRequest(Map<String, Object?> request) async {
     if (request['action'] == 'refresh') {
-      // A cached Flutter connection can outlive its native relay session.
-      if (_connected || _connecting) await _disconnect(expand: false);
+      // Keep an authenticated FIPS route alive. It can refresh workspace state
+      // directly, while stale Nostr sessions still need reconnecting.
+      if ((_connected || _connecting) &&
+          _workspaceFipsConnectionState != 'active') {
+        await _disconnect(expand: false);
+      }
       request = {'action': 'list'};
     }
     if (request['action'] == 'list') {
@@ -7439,6 +7467,53 @@ Return a concise catch-up summary of what happened after that point: completed w
 
   void _addOptimisticWorkspaceMessage(Map<String, Object?> request) {
     final action = request['action'];
+    if (action == 'rename_channel') {
+      final channelId = request['channel_id']?.toString();
+      final name = request['channel_name']?.toString().trim().toLowerCase();
+      final channel = channelId == null
+          ? null
+          : _workspace.channels.where((item) => item.id == channelId).firstOrNull;
+      if (channel == null || name == null || name.isEmpty || !mounted) return;
+      setState(() {
+        _workspace.apply({
+          'workspace_update': {
+            'action': 'channel_renamed',
+            'revision': _workspace.revision,
+            'channels': [
+              {
+                'id': channel.id,
+                'name': name,
+              },
+            ],
+          },
+        });
+        _workspaceRevision.value++;
+      });
+      _scheduleWorkspaceCacheSave();
+      return;
+    }
+    if (action == 'remove_conversation_agent') {
+      final agentId = request['agent_id']?.toString();
+      final channelId = request['channel_id']?.toString();
+      final recipient = request['recipient_pubkey']?.toString();
+      if (agentId == null || !mounted) return;
+      setState(() {
+        _workspace.conversationAgents = _workspace.conversationAgents
+            .where(
+              (membership) {
+                if (membership.agentId != agentId) return true;
+                if (channelId != null) return membership.channelId != channelId;
+                return membership.channelId != null ||
+                    (membership.memberPubkey != recipient &&
+                        membership.peerPubkey != recipient);
+              },
+            )
+            .toList(growable: false);
+        _workspaceRevision.value++;
+      });
+      _scheduleWorkspaceCacheSave();
+      return;
+    }
     if (action != 'send_channel_message' && action != 'send_direct_message') {
       return;
     }
@@ -7600,6 +7675,20 @@ Return a concise catch-up summary of what happened after that point: completed w
                 ..clear()
                 ..add(messageId);
             }
+            final wireJson = jsonDecode(wireFrame);
+            if (wireJson is Map && wireJson['workspace_update'] is Map) {
+              final update = wireJson['workspace_update'] as Map;
+              if (update['action'] == 'fips_mesh') {
+                _workspaceFipsPeers.value =
+                    (update['members'] as List? ?? const [])
+                        .whereType<Map>()
+                        .map((member) => member['pubkey']?.toString() ?? '')
+                        .where((pubkey) => pubkey.isNotEmpty)
+                        .toList(growable: false);
+                _setWorkspaceFipsConnectionState('active');
+                continue;
+              }
+            }
             final message = _fipsWireMessage(
               wireFrame,
               messageId,
@@ -7730,6 +7819,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     if (!_workspaceFipsEnabled.value && state != 'disabled') state = 'disabled';
     if (_workspaceFipsConnectionState == state) return;
     _workspaceFipsConnectionState = state;
+    if (state != 'active') _workspaceFipsPeers.value = const [];
     final previous = _workspaceFipsHeartbeat.value;
     if (state == 'connected' || state == 'active') {
       _workspaceFipsHeartbeat.value = _WorkspaceFipsHeartbeat(

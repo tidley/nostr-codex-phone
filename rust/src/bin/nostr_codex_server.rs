@@ -1768,6 +1768,38 @@ async fn process_workspace_request(
             send_workspace_snapshot(workspace, messenger, outbound, sender).await?;
             return Ok(());
         }
+        "fips_mesh" => {
+            let peers: Vec<WorkspaceMemberPayload> = outbound
+                .fips_routes
+                .lock()
+                .await
+                .keys()
+                .cloned()
+                .map(|pubkey| WorkspaceMemberPayload {
+                    pubkey,
+                    display_name: String::new(),
+                })
+                .collect();
+            info!(live_routes = peers.len(), requester = sender, "reporting FIPS topology");
+            outbound
+                .send(
+                    messenger,
+                    sender,
+                    WireMessage::workspace_update(WorkspaceUpdate {
+                        action: "fips_mesh".to_string(),
+                        revision: workspace.revision()?,
+                        channels: vec![],
+                        members: peers,
+                        messages: vec![],
+                        agents: vec![],
+                        conversation_agents: vec![],
+                        conversation_preprompts: vec![],
+                        typing: None,
+                    }),
+                )
+                .await?;
+            return Ok(());
+        }
         "create_channel" => {
             let channel = workspace
                 .create_channel(request.channel_name.as_deref().unwrap_or_default(), sender)?;
@@ -2607,6 +2639,12 @@ async fn run_workspace_fips_acceptor(
                     last_message_id: 0,
                     next_message_id: 0,
                 });
+                info!(
+                    member,
+                    peer_npub,
+                    direct_peers = peers.len(),
+                    "FIPS workspace peer connected"
+                );
                 if let Err(error) = send_workspace_fips_envelope(&client, &peer_npub, &mut frame_id, "hello", None).await {
                     warn!(member, "failed to send FIPS workspace hello: {error:#}");
                     continue;
@@ -2680,7 +2718,12 @@ async fn run_workspace_fips_acceptor(
                     .collect::<Vec<_>>();
                 for source in stale_sources {
                     if let Some(peer) = peers.remove(&source) {
-                        info!(member = %peer.member, "expired FIPS workspace peer route");
+                        info!(
+                            member = %peer.member,
+                            peer_npub = %peer.npub,
+                            direct_peers = peers.len(),
+                            "expired FIPS workspace peer route"
+                        );
                     }
                     assemblers.remove(&source);
                 }
