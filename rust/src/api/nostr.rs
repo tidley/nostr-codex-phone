@@ -661,7 +661,9 @@ async fn workspace_snapshot_send_frame(
                 WORKSPACE_FIPS_SERVICE_PORT,
                 WORKSPACE_FIPS_SERVICE_PORT,
                 packet,
-                Duration::from_secs(20),
+                // A missing direct route cannot be repaired by waiting for the
+                // full call timeout. Fall back to the Nostr snapshot promptly.
+                Duration::from_secs(5),
             )
             .await?;
     }
