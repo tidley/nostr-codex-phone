@@ -25,7 +25,7 @@ static SESSION: Lazy<Mutex<Option<Arc<NostrMessenger>>>> = Lazy::new(|| Mutex::n
 static CALL_SESSION: Lazy<Mutex<Option<FipsMobileQuicSession>>> = Lazy::new(|| Mutex::new(None));
 // Workspace frames use one embedded FIPS node, separate from the QUIC call
 // session whose datagrams are consumed by realtime media.
-static WORKSPACE_SNAPSHOT_CLIENTS: Lazy<Mutex<HashMap<String, WorkspaceFipsClient>>> =
+static WORKSPACE_SNAPSHOT_CLIENTS: Lazy<Mutex<HashMap<String, Arc<Mutex<WorkspaceFipsClient>>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static CALL_ACCEPT_CANCEL: Lazy<Mutex<Option<oneshot::Sender<()>>>> =
     Lazy::new(|| Mutex::new(None));
@@ -42,7 +42,7 @@ const WORKSPACE_FIPS_SERVICE_PORT: u16 = 49_160;
 // This client carries both the legacy snapshot envelopes and future app envelopes.
 // The public snapshot bridge names remain stable for the current Flutter client.
 struct WorkspaceFipsClient {
-    client: FipsMobileClient,
+    client: Option<FipsMobileClient>,
     peer_npub: String,
     next_frame_id: u64,
     assembler: FipsApplicationFrameAssembler,
@@ -572,7 +572,7 @@ pub async fn fips_workspace_snapshot_connect(
     let workspace_key = workspace_transport_key(&workspace_key)?;
     let peer_npub = PublicKey::parse(peer_npub.trim())?.to_bech32()?;
     let mut client = WorkspaceFipsClient {
-        client: build_workspace_fips_client(config).await?,
+        client: Some(build_workspace_fips_client(config).await?),
         peer_npub,
         // The worker retains replay state while a peer reconnects. Start each
         // client transport above earlier sessions instead of reusing frame 1.
@@ -585,10 +585,18 @@ pub async fn fips_workspace_snapshot_connect(
         assembler: FipsApplicationFrameAssembler::default(),
     };
     workspace_snapshot_send_frame(&mut client, capability.into_bytes()).await?;
-    WORKSPACE_SNAPSHOT_CLIENTS
+    let replaced = WORKSPACE_SNAPSHOT_CLIENTS
         .lock()
         .await
-        .insert(workspace_key, client);
+        .insert(workspace_key, Arc::new(Mutex::new(client)));
+    if let Some(replaced) = replaced {
+        // A repeated offer must close its superseded node instead of retaining
+        // sockets and tasks until the process exits.
+        let client = replaced.lock().await.client.take();
+        if let Some(client) = client {
+            client.stop().await?;
+        }
+    }
     Ok(())
 }
 
@@ -598,10 +606,15 @@ pub async fn fips_workspace_snapshot_receive(
     timeout_ms: u64,
 ) -> Result<Option<String>> {
     let workspace_key = workspace_transport_key(&workspace_key)?;
-    let mut transports = WORKSPACE_SNAPSHOT_CLIENTS.lock().await;
-    let transport = transports
+    let transport = WORKSPACE_SNAPSHOT_CLIENTS
+        .lock()
+        .await
         .get_mut(&workspace_key)
+        .cloned()
         .ok_or_else(|| anyhow!("FIPS workspace transport is not active"))?;
+    // Do not hold the registry lock while waiting for a network packet. Each
+    // workspace transport can now receive independently.
+    let mut transport = transport.lock().await;
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms.clamp(1, 5_000));
     loop {
         let now = tokio::time::Instant::now();
@@ -610,7 +623,11 @@ pub async fn fips_workspace_snapshot_receive(
         }
         let packet = match tokio::time::timeout(
             deadline - now,
-            transport.client.recv_service_packet(),
+            transport
+                .client
+                .as_mut()
+                .ok_or_else(|| anyhow!("FIPS workspace transport is stopped"))?
+                .recv_service_packet(),
         )
         .await
         {
@@ -632,11 +649,14 @@ pub async fn fips_workspace_snapshot_receive(
 /// Send one JSON workspace control frame over the dedicated reliable stream.
 pub async fn fips_workspace_snapshot_send(workspace_key: String, frame: String) -> Result<()> {
     let workspace_key = workspace_transport_key(&workspace_key)?;
-    let mut transports = WORKSPACE_SNAPSHOT_CLIENTS.lock().await;
-    let transport = transports
+    let transport = WORKSPACE_SNAPSHOT_CLIENTS
+        .lock()
+        .await
         .get_mut(&workspace_key)
+        .cloned()
         .ok_or_else(|| anyhow!("FIPS workspace transport is not active"))?;
-    workspace_snapshot_send_frame(transport, frame.into_bytes()).await
+    let mut transport = transport.lock().await;
+    workspace_snapshot_send_frame(&mut transport, frame.into_bytes()).await
 }
 
 /// Send one application envelope on the persistent workspace FIPS service.
@@ -648,11 +668,14 @@ pub async fn fips_workspace_send_wire(
 ) -> Result<()> {
     let envelope = workspace_fips_app_envelope(&frame, message_id)?;
     let workspace_key = workspace_transport_key(&workspace_key)?;
-    let mut transports = WORKSPACE_SNAPSHOT_CLIENTS.lock().await;
-    let transport = transports
+    let transport = WORKSPACE_SNAPSHOT_CLIENTS
+        .lock()
+        .await
         .get_mut(&workspace_key)
+        .cloned()
         .ok_or_else(|| anyhow!("FIPS workspace transport is not active"))?;
-    workspace_snapshot_send_frame(transport, envelope).await
+    let mut transport = transport.lock().await;
+    workspace_snapshot_send_frame(&mut transport, envelope).await
 }
 
 fn workspace_fips_app_envelope(frame: &str, message_id: u64) -> Result<Vec<u8>> {
@@ -670,7 +693,10 @@ pub async fn fips_workspace_snapshot_stop(workspace_key: String) -> Result<()> {
         .await
         .remove(&workspace_key)
     {
-        transport.client.stop().await?;
+        let client = transport.lock().await.client.take();
+        if let Some(client) = client {
+            client.stop().await?;
+        }
     }
     Ok(())
 }
@@ -689,6 +715,8 @@ async fn workspace_snapshot_send_frame(
     for packet in fips_application_service_frames(transport.next_frame_id, &payload)? {
         transport
             .client
+            .as_mut()
+            .ok_or_else(|| anyhow!("FIPS workspace transport is stopped"))?
             .send_service_frame_to_npub(
                 &transport.peer_npub,
                 WORKSPACE_FIPS_SERVICE_PORT,

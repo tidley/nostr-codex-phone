@@ -110,6 +110,7 @@ class _WorkspaceFipsSession {
 class _WorkspaceWorkerState {
   final WorkspaceState workspace = WorkspaceState();
   final _WorkspaceFipsSession fips = _WorkspaceFipsSession();
+  final ValueNotifier<int> revision = ValueNotifier(0);
   String? cacheRestoredKey;
   Timer? cacheSaveTimer;
   final Map<String, int> unreadCounts = {};
@@ -120,6 +121,7 @@ class _WorkspaceWorkerState {
   void dispose() {
     cacheSaveTimer?.cancel();
     fips.dispose();
+    revision.dispose();
   }
 }
 
@@ -614,6 +616,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _pendingConversationHistorySaves = <String>{};
   Future<void> _conversationHistoryWriteTail = Future<void>.value();
   Timer? _conversationHistorySaveTimer;
+  Timer? _seenIncomingEventIdsSaveTimer;
   late final AnimationController _menuNotificationPulseController;
   OverlayEntry? _inactiveReplyNotice;
   AnimationController? _inactiveReplyNoticeController;
@@ -717,8 +720,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _workspaceCache = WorkspaceCache();
   final _workspaceFipsEnabled = ValueNotifier(true);
   int _nostrPollGeneration = 0;
+  int _workspaceSelectionGeneration = 0;
   Future<void>? _nostrRestartInFlight;
-  final ValueNotifier<int> _workspaceRevision = ValueNotifier(0);
   final _workspaceVoiceResult = ValueNotifier<_WorkspaceVoiceResult?>(null);
   bool _workspaceVoicePending = false;
   String _workspaceDisplayName = '';
@@ -946,6 +949,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _recordingDurationLabel.dispose();
     _recordingTimer?.cancel();
     _conversationHistorySaveTimer?.cancel();
+    _seenIncomingEventIdsSaveTimer?.cancel();
+    unawaited(_saveSeenIncomingEventIds());
     for (final state in _workspaceWorkers.values) {
       state.fips.generation++;
       state.fips.retryTimer?.cancel();
@@ -969,7 +974,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _relayController.dispose();
     _blossomServerController.dispose();
     _workspaceDisplayNameController.dispose();
-    _workspaceRevision.dispose();
     _workspaceFileBrowser.dispose();
     _workspaceFilePreview.dispose();
     _clientDiagnostics.dispose();
@@ -995,6 +999,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       unawaited(_saveWorkspaceCache());
+      _seenIncomingEventIdsSaveTimer?.cancel();
+      unawaited(_saveSeenIncomingEventIds());
     }
     if (state == AppLifecycleState.resumed && _connected) {
       unawaited(_fetchRecentInboxMessages(allowCatchUpSpeech: true));
@@ -1633,12 +1639,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<void> _selectComputerServiceTarget(RepoTarget target) async {
     if (_computerServiceTarget?.id == target.id) return;
-    await _saveWorkspaceCache();
-    if (_connected || _connecting) await _disconnect(expand: false);
+    final selectionGeneration = ++_workspaceSelectionGeneration;
+    unawaited(_saveWorkspaceCache());
     if (!mounted) return;
     await _clearCall();
     await _clearGroupCall();
-    if (!mounted) return;
+    if (!mounted || selectionGeneration != _workspaceSelectionGeneration) {
+      return;
+    }
     setState(() {
       _computerServiceTarget = target;
       _workspaceInviteTimer?.cancel();
@@ -1649,19 +1657,35 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _workspaceFileBrowser.value = null;
       _workspaceFilePreview.value = null;
       _pendingToolViews.clear();
-      _workspaceRevision.value++;
+      _activeWorkspaceWorker.revision.value++;
       _status = 'Switching to ${target.displayName}...';
     });
     await _saveComputerServiceTarget();
     await _restoreWorkspaceCache();
-    if (!mounted) return;
+    if (!mounted || selectionGeneration != _workspaceSelectionGeneration) {
+      return;
+    }
+    if (_workspaceFipsConnectionState == 'active') return;
+    if ((_connected || _connecting) && _connectedPeerPubkey != target.pubkey) {
+      await _disconnect(expand: false);
+    }
+    if (!mounted || selectionGeneration != _workspaceSelectionGeneration) {
+      return;
+    }
     await _connectToTargetInBackground(target);
-    if (mounted && _connected && _connectedPeerPubkey == target.pubkey) {
+    if (mounted &&
+        selectionGeneration == _workspaceSelectionGeneration &&
+        _connected &&
+        _connectedPeerPubkey == target.pubkey) {
       await _sendWorkspaceRequest({'action': 'list'});
     }
   }
 
   Future<void> _deleteComputerServiceTarget(RepoTarget target) async {
+    final wasActive = _computerServiceTarget?.id == target.id;
+    if (wasActive && (_connected || _connecting)) {
+      await _disconnect(expand: false);
+    }
     final workerKey = target.pubkey.trim().toLowerCase();
     final removedWorker = _workspaceWorkers.remove(workerKey);
     if (removedWorker != null) {
@@ -1681,6 +1705,37 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _status = 'Worker removed: ${target.displayName}';
     });
     await _saveComputerServiceTarget();
+    final nextTarget = _computerServiceTarget;
+    if (wasActive && nextTarget != null && mounted) {
+      await _restoreWorkspaceCache();
+      await _connectToTargetInBackground(nextTarget);
+      if (mounted && _connected && _connectedPeerPubkey == nextTarget.pubkey) {
+        await _sendWorkspaceRequest({'action': 'list'});
+      }
+    }
+  }
+
+  Future<void> _leaveComputerServiceTarget(RepoTarget target) async {
+    final leave = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Leave ${target.displayName}?'),
+        content: const Text(
+          'This removes the workspace from this device. You can join it again with its target.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Leave workspace'),
+          ),
+        ],
+      ),
+    );
+    if (leave == true && mounted) await _deleteComputerServiceTarget(target);
   }
 
   List<String> _decodeSeenEventIds(String? raw) {
@@ -1742,6 +1797,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _storage.write(
       key: _seenIncomingEventIdsStorageKey,
       value: jsonEncode(_seenIncomingEventIds.toList()),
+    );
+  }
+
+  void _scheduleSeenIncomingEventIdsSave() {
+    _seenIncomingEventIdsSaveTimer?.cancel();
+    _seenIncomingEventIdsSaveTimer = Timer(
+      const Duration(seconds: 1),
+      () => unawaited(_saveSeenIncomingEventIds()),
     );
   }
 
@@ -3790,6 +3853,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       );
 
   WorkspaceState get _workspace => _activeWorkspaceWorker.workspace;
+  ValueNotifier<int> get _workspaceRevision => _activeWorkspaceWorker.revision;
   Map<String, int> get _workspaceUnreadCounts =>
       _activeWorkspaceWorker.unreadCounts;
   Map<String, int> get _workspaceThreadUnreadCounts =>
@@ -3842,7 +3906,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     setState(() {
       worker.workspace.apply({'workspace_update': cached.toSnapshotJson()});
       worker.cacheRestoredKey = _workspaceCacheKeyFor(servicePubkey);
-      _workspaceRevision.value++;
+      worker.revision.value++;
     });
   }
 
@@ -4722,7 +4786,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               }
             }
           }
-          _workspaceRevision.value++;
+          worker.revision.value++;
         });
         _scheduleWorkspaceCacheSave(workerKey: workerKey);
       } catch (_) {
@@ -4744,6 +4808,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (message.kind == 'call_invite' ||
         message.kind == 'call_answer' ||
         message.kind == 'call_hangup') {
+      if (!_incomingFromActivePeer(message)) return false;
       final callId = _callIdFromMessage(message);
       if (callId == null) return true;
       final sender = _callPeerFromMessage(message);
@@ -4775,6 +4840,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (message.kind == 'group_call_invite' ||
         message.kind == 'group_call_answer' ||
         message.kind == 'group_call_hangup') {
+      if (!_incomingFromActivePeer(message)) return false;
       WorkspaceGroupCall? groupCall;
       try {
         final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
@@ -5157,13 +5223,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     while (_seenIncomingEventIds.length > _maxSeenIncomingEventIds) {
       _seenIncomingEventIds.remove(_seenIncomingEventIds.first);
     }
-    unawaited(_saveSeenIncomingEventIds());
+    _scheduleSeenIncomingEventIdsSave();
     return true;
   }
 
   void _forgetIncomingEventId(String eventId) {
     if (eventId.isEmpty || !_seenIncomingEventIds.remove(eventId)) return;
-    unawaited(_saveSeenIncomingEventIds());
+    _scheduleSeenIncomingEventIdsSave();
   }
 
   String? _transcriptSourceEventId(BridgeIncomingMessage message) {
@@ -7142,6 +7208,8 @@ Return a concise catch-up summary of what happened after that point: completed w
           activeSpace: _computerServiceTarget,
           onSwitchSpace: (target) =>
               unawaited(_selectComputerServiceTarget(target)),
+          onLeaveSpace: (target) =>
+              unawaited(_leaveComputerServiceTarget(target)),
           onOpenSessions: () => setState(() => _showTeamWorkspace = false),
           onOpenSettings: () => unawaited(_openSettings()),
           diagnostics: _clientDiagnostics,
@@ -7563,7 +7631,7 @@ Return a concise catch-up summary of what happened after that point: completed w
             ],
           },
         });
-        _workspaceRevision.value++;
+        _activeWorkspaceWorker.revision.value++;
       });
       _scheduleWorkspaceCacheSave();
       return;
@@ -7583,7 +7651,7 @@ Return a concise catch-up summary of what happened after that point: completed w
                       membership.peerPubkey != recipient);
             })
             .toList(growable: false);
-        _workspaceRevision.value++;
+        _activeWorkspaceWorker.revision.value++;
       });
       _scheduleWorkspaceCacheSave();
       return;
@@ -7620,7 +7688,7 @@ Return a concise catch-up summary of what happened after that point: completed w
           'messages': [message.toJson()],
         },
       });
-      _workspaceRevision.value++;
+      _activeWorkspaceWorker.revision.value++;
     });
     _scheduleWorkspaceCacheSave();
   }
@@ -7722,7 +7790,7 @@ Return a concise catch-up summary of what happened after that point: completed w
                 preserveMessagesOnSnapshot:
                     worker.cacheRestoredKey == _workspaceCacheKeyFor(workerKey),
               );
-              _workspaceRevision.value++;
+              worker.revision.value++;
             });
             _scheduleWorkspaceCacheSave(workerKey: workerKey);
             if (_isFinalWorkspaceSnapshotFrame(decoded)) {
@@ -7976,6 +8044,9 @@ Return a concise catch-up summary of what happened after that point: completed w
     for (final state in _workspaceWorkers.values) {
       state.fips.retryTimer?.cancel();
       state.fips.offerTimer?.cancel();
+      if (!enabled) {
+        _setWorkspaceFipsConnectionState('disabled', session: state.fips);
+      }
     }
     if (enabled) {
       _setWorkspaceFipsConnectionState('disconnected');
@@ -7983,7 +8054,6 @@ Return a concise catch-up summary of what happened after that point: completed w
       unawaited(_sendWorkspaceRequest({'action': 'list'}));
       return;
     }
-    _setWorkspaceFipsConnectionState('disabled');
     _recordDiagnostic('FIPS workspace transport disabled; using Nostr');
     unawaited(_stopWorkspaceFipsAndFallback());
   }

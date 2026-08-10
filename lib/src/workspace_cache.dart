@@ -10,6 +10,7 @@ import 'workspace_models.dart';
 /// to reopen a conversation after an application restart.
 class WorkspaceCache {
   static const _schemaVersion = 1;
+  Future<void> _writeTail = Future.value();
 
   Future<WorkspaceState?> load({
     required String localPubkey,
@@ -44,6 +45,23 @@ class WorkspaceCache {
   }
 
   Future<void> save({
+    required String localPubkey,
+    required String servicePubkey,
+    required WorkspaceState workspace,
+  }) {
+    final write = _writeTail.then(
+      (_) => _save(
+        localPubkey: localPubkey,
+        servicePubkey: servicePubkey,
+        workspace: workspace,
+      ),
+    );
+    // Keep a failed write from blocking later saves for another workspace.
+    _writeTail = write.catchError((_) {});
+    return write;
+  }
+
+  Future<void> _save({
     required String localPubkey,
     required String servicePubkey,
     required WorkspaceState workspace,
