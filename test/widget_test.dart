@@ -338,7 +338,7 @@ void main() {
   });
 
   testWidgets(
-    'composer disables send until text exists and supports multiline',
+    'composer shows send only when text exists and supports multiline',
     (tester) async {
       final controller = TextEditingController();
       final focus = FocusNode();
@@ -362,16 +362,16 @@ void main() {
       );
 
       expect(find.text('Enter for new line'), findsNothing);
-      final sendButton = find.ancestor(
-        of: find.byIcon(Icons.send),
-        matching: find.byType(IconButton),
-      );
-      expect(tester.widget<IconButton>(sendButton).onPressed, isNull);
+      expect(find.byIcon(Icons.send), findsNothing);
 
       await tester.enterText(find.byType(TextField), 'First line\nSecond line');
       await tester.pump();
 
       expect(controller.text, 'First line\nSecond line');
+      final sendButton = find.ancestor(
+        of: find.byIcon(Icons.send),
+        matching: find.byType(IconButton),
+      );
       expect(tester.widget<IconButton>(sendButton).onPressed, isNotNull);
       await tester.tap(find.byIcon(Icons.send));
       expect(sends, 1);
@@ -419,6 +419,49 @@ void main() {
       focus.dispose();
     },
   );
+
+  testWidgets('composer sends or cancels an active voice recording', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    final focus = FocusNode();
+    var sends = 0;
+    var cancels = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Material(
+          child: WorkspaceComposer(
+            composer: controller,
+            composerFocus: focus,
+            hintText: 'Message # workspace',
+            mentionOptions: const [],
+            onMentionSelected: (_) {},
+            onSend: () {},
+            onAttach: () async {},
+            voiceRecording: true,
+            voiceDurationLabel: '00:12',
+            onVoicePressed: () => sends++,
+            onCancelVoiceRecording: () => cancels++,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Recording 00:12'), findsOneWidget);
+    expect(find.byIcon(Icons.attach_file), findsNothing);
+    expect(find.byIcon(Icons.close), findsOneWidget);
+    expect(find.byIcon(Icons.mic_none_outlined), findsNothing);
+
+    await tester.tap(find.byIcon(Icons.send));
+    await tester.tap(find.byIcon(Icons.close));
+
+    expect(sends, 1);
+    expect(cancels, 1);
+
+    controller.dispose();
+    focus.dispose();
+  });
 
   test('cleans markdown before text to speech', () {
     final spoken = cleanTextForSpeech('''

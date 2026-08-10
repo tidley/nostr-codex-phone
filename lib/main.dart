@@ -4571,6 +4571,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             );
             return true;
           }
+          // The native bridge owns one transport slot. Fence this attempt so a
+          // previous session's asynchronous cleanup cannot stop it.
+          _workspaceFipsSessionGeneration++;
           _workspaceFipsSnapshotInFlight = true;
           _workspaceFipsSnapshotGeneration = _workspaceFipsSessionGeneration;
           _recordDiagnostic('FIPS workspace snapshot offer received');
@@ -7438,6 +7441,11 @@ Return a concise catch-up summary of what happened after that point: completed w
               const Duration(seconds: 45)) {
             throw TimeoutException('FIPS workspace heartbeat timed out');
           }
+          // Keep the route alive even when the worker's periodic ping is
+          // delayed by a reconnect or a busy dispatch loop.
+          await fipsWorkspaceSnapshotSend(
+            frame: jsonEncode({'version': 1, 'type': 'ping'}),
+          );
           // Native receive may return immediately when the stream is idle.
           // Yield so a lack of queued frames cannot consume the timeout at CPU speed.
           await Future<void>.delayed(const Duration(seconds: 1));
@@ -7456,6 +7464,10 @@ Return a concise catch-up summary of what happened after that point: completed w
             await fipsWorkspaceSnapshotSend(
               frame: jsonEncode({'version': 1, 'type': 'pong'}),
             );
+            _recordWorkspaceFipsHeartbeat();
+            _setWorkspaceFipsConnectionState('active');
+            continue;
+          case 'pong':
             _recordWorkspaceFipsHeartbeat();
             _setWorkspaceFipsConnectionState('active');
             continue;
@@ -7546,10 +7558,12 @@ Return a concise catch-up summary of what happened after that point: completed w
       }
       if (fipsEnabled) _scheduleWorkspaceFipsRetry();
     } finally {
-      try {
-        await fipsWorkspaceSnapshotStop();
-      } catch (_) {
-        // The worker can close after the final frame before Dart closes locally.
+      if (sessionGeneration == _workspaceFipsSessionGeneration) {
+        try {
+          await fipsWorkspaceSnapshotStop();
+        } catch (_) {
+          // The worker can close after the final frame before Dart closes locally.
+        }
       }
       if (_workspaceFipsSnapshotGeneration == sessionGeneration) {
         _workspaceFipsSnapshotInFlight = false;
@@ -7663,6 +7677,8 @@ Return a concise catch-up summary of what happened after that point: completed w
   void _setWorkspaceFipsEnabled(bool enabled) {
     if (_workspaceFipsEnabled.value == enabled) return;
     _workspaceFipsEnabled.value = enabled;
+    // Invalidates an in-flight session before its asynchronous stop completes.
+    _workspaceFipsSessionGeneration++;
     unawaited(
       _storage.write(
         key: _workspaceFipsEnabledStorageKey,

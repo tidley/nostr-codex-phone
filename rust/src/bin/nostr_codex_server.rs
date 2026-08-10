@@ -2460,6 +2460,20 @@ async fn run_workspace_fips_acceptor(
                     };
                     match envelope.kind.as_str() {
                         "pong" => peer.last_pong = Instant::now(),
+                        "ping" => {
+                            peer.last_pong = Instant::now();
+                            if let Err(error) = send_workspace_fips_envelope(
+                                &client,
+                                &peer.npub,
+                                &mut frame_id,
+                                "pong",
+                                None,
+                            )
+                            .await
+                            {
+                                warn!(member = %peer.member, "failed to answer FIPS workspace heartbeat: {error:#}");
+                            }
+                        }
                         "app" => {
                             let Some(message_id) = envelope.message_id else {
                                 warn!(member = %peer.member, "rejected FIPS app envelope without a message id");
