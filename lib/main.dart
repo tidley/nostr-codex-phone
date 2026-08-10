@@ -4314,6 +4314,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final message = error.toString().toLowerCase();
     return message.contains('no relay accepted') ||
         message.contains('relay not connected') ||
+        message.contains('nostr session is not started') ||
         message.contains('timed out sending giftwrapped dm') ||
         message.contains('failed to send giftwrapped dm');
   }
@@ -7398,8 +7399,12 @@ Return a concise catch-up summary of what happened after that point: completed w
       sender: () =>
           nostrSendQuery(query: jsonEncode({'workspace_request': request})),
     );
-    if (request['action'] == 'list' && _workspaceFipsEnabled.value) {
+    if (request['action'] == 'list' && request['fips_snapshot'] == true) {
       _awaitWorkspaceFipsOffer();
+      // Nostr is the reliable bootstrap path. Do not make a cold workspace wait
+      // for a direct route that may not exist yet; FIPS takes over live updates
+      // after its capability is accepted.
+      unawaited(_sendWorkspaceRequest({'action': 'list_fallback'}));
     }
   }
 
@@ -7525,7 +7530,11 @@ Return a concise catch-up summary of what happened after that point: completed w
                 ..clear()
                 ..add(messageId);
             }
-            final message = _fipsWireMessage(wireFrame, messageId);
+            final message = _fipsWireMessage(
+              wireFrame,
+              messageId,
+              sessionGeneration,
+            );
             if (message == null) {
               throw const FormatException(
                 'FIPS workspace app wire message is invalid',
@@ -7572,7 +7581,11 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
   }
 
-  BridgeIncomingMessage? _fipsWireMessage(String frame, int messageId) {
+  BridgeIncomingMessage? _fipsWireMessage(
+    String frame,
+    int messageId,
+    int sessionGeneration,
+  ) {
     try {
       final decoded = jsonDecode(frame);
       if (decoded is! Map) return null;
@@ -7618,7 +7631,10 @@ Return a concise catch-up summary of what happened after that point: completed w
         kind: kind,
         text: text,
         rawJson: frame,
-        eventId: 'fips:$peer:$messageId',
+        // Worker application IDs restart for every authenticated FIPS session.
+        // Include this session's generation so reconnect updates are not
+        // mistaken for already processed frames by the global event deduper.
+        eventId: 'fips:$peer:$sessionGeneration:$messageId',
       );
     } catch (_) {
       return null;
@@ -7720,7 +7736,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
     _workspaceFipsOfferTimer?.cancel();
     _recordDiagnostic('FIPS workspace snapshot requested');
-    _workspaceFipsOfferTimer = Timer(const Duration(seconds: 15), () {
+    _workspaceFipsOfferTimer = Timer(const Duration(seconds: 5), () {
       if (!_workspaceFipsEnabled.value ||
           _workspaceFipsSnapshotInFlight ||
           _workspaceFipsConnectionState == 'active') {
