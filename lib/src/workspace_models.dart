@@ -569,6 +569,8 @@ class WorkspaceTyping {
 }
 
 class WorkspaceState {
+  static const _maxMessagesPerConversation = 500;
+
   /// Last worker-authoritative workspace revision applied to this state.
   int revision = 0;
   List<WorkspaceChannel> channels = [];
@@ -790,8 +792,15 @@ class WorkspaceState {
       final current = {for (final item in messages[key] ?? []) item.id: item};
       if (!current.containsKey(message.id)) addedMessages.add(message);
       current[message.id] = message;
-      messages[key] = current.values.cast<WorkspaceMessage>().toList()
+      final ordered = current.values.cast<WorkspaceMessage>().toList()
         ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      if (ordered.length > _maxMessagesPerConversation) {
+        messages[key] = ordered.sublist(
+          ordered.length - _maxMessagesPerConversation,
+        );
+      } else {
+        messages[key] = ordered;
+      }
     }
     return addedMessages;
   }

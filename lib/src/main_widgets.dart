@@ -559,6 +559,7 @@ class _TeamWorkspace extends StatefulWidget {
     required this.spaces,
     required this.activeSpace,
     required this.onSwitchSpace,
+    required this.onLeaveSpace,
     required this.onOpenSessions,
     required this.onOpenSettings,
     required this.diagnostics,
@@ -617,6 +618,7 @@ class _TeamWorkspace extends StatefulWidget {
   final List<RepoTarget> spaces;
   final RepoTarget? activeSpace;
   final ValueChanged<RepoTarget> onSwitchSpace;
+  final ValueChanged<RepoTarget> onLeaveSpace;
   final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
   final ValueNotifier<List<String>> diagnostics;
@@ -1372,6 +1374,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       spaces: widget.spaces,
       activeSpace: widget.activeSpace,
       onSwitchSpace: widget.onSwitchSpace,
+      onLeaveSpace: widget.onLeaveSpace,
       channels: widget.workspace.channels,
       members: widget.workspace.directPeers(widget.ownPubkey),
       ownPubkey: widget.ownPubkey,
@@ -2344,6 +2347,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.spaces,
     required this.activeSpace,
     required this.onSwitchSpace,
+    required this.onLeaveSpace,
     required this.channels,
     required this.members,
     required this.ownPubkey,
@@ -2370,6 +2374,7 @@ class _WorkspaceSidebar extends StatelessWidget {
   final List<RepoTarget> spaces;
   final RepoTarget? activeSpace;
   final ValueChanged<RepoTarget> onSwitchSpace;
+  final ValueChanged<RepoTarget> onLeaveSpace;
   final List<WorkspaceChannel> channels;
   final List<String> members;
   final String ownPubkey;
@@ -2469,6 +2474,11 @@ class _WorkspaceSidebar extends StatelessWidget {
                             onSettings();
                             return;
                           }
+                          if (value == 'leave') {
+                            final activeSpace = this.activeSpace;
+                            if (activeSpace != null) onLeaveSpace(activeSpace);
+                            return;
+                          }
                           final matches = spaces.where(
                             (space) => 'space:${space.id}' == value,
                           );
@@ -2481,6 +2491,17 @@ class _WorkspaceSidebar extends StatelessWidget {
                               checked: space.id == activeSpace?.id,
                               child: Text(space.displayName),
                             ),
+                          if (activeSpace != null) ...[
+                            const PopupMenuDivider(),
+                            const PopupMenuItem(
+                              value: 'leave',
+                              child: ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.logout_outlined),
+                                title: Text('Leave workspace'),
+                              ),
+                            ),
+                          ],
                           if (spaces.isNotEmpty) const PopupMenuDivider(),
                           const PopupMenuItem(
                             value: 'join',
@@ -2498,7 +2519,7 @@ class _WorkspaceSidebar extends StatelessWidget {
                                 activeSpace?.displayName ?? 'Select workspace',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                 style: Theme.of(context).textTheme.titleMedium
+                                style: Theme.of(context).textTheme.titleMedium
                                     ?.copyWith(
                                       color: fipsConnected
                                           ? const Color(0xff35d6a0)
@@ -6300,21 +6321,21 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
               ? null
               : now.difference(heartbeat.lastHeartbeatAt!);
           final active = heartbeat.connectionState == 'active';
-           final stateColor = active
-               ? const Color(0xff35d6a0)
-               : heartbeat.connectionState == 'disabled'
-               ? theme.colorScheme.onSurfaceVariant
-               : heartbeat.connectionState == 'reconnecting' ||
-                     heartbeat.connectionState == 'fallback'
-               ? const Color(0xffffb547)
-               : theme.colorScheme.error;
+          final stateColor = active
+              ? const Color(0xff35d6a0)
+              : heartbeat.connectionState == 'disabled'
+              ? theme.colorScheme.onSurfaceVariant
+              : heartbeat.connectionState == 'reconnecting' ||
+                    heartbeat.connectionState == 'fallback'
+              ? const Color(0xffffb547)
+              : theme.colorScheme.error;
           final stateLabel = switch (heartbeat.connectionState) {
             'active' => 'Connected',
             'connected' => 'Connected',
-             'connecting' => 'Connecting',
-             'reconnecting' => 'Reconnecting',
-             'fallback' => 'Nostr fallback',
-             'disabled' => 'Nostr only',
+            'connecting' => 'Connecting',
+            'reconnecting' => 'Reconnecting',
+            'fallback' => 'Nostr fallback',
+            'disabled' => 'Nostr only',
             _ => 'Disconnected',
           };
           final contentWidth = ((MediaQuery.sizeOf(context).width - 960) / 2)
@@ -12347,7 +12368,6 @@ class _MessageTileState extends State<_MessageTile>
     if (scheme != 'http' && scheme != 'https') {
       return _markdownImageFallback(context, title, alt);
     }
-
     return ConstrainedBox(
       constraints: const BoxConstraints(maxHeight: 220),
       child: ClipRRect(
