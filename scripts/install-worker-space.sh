@@ -85,7 +85,18 @@ if [[ "$opencode_bin" == /* ]]; then
   opencode_bind="$opencode_bin"
 fi
 space_home="$state_dir/home"
-mkdir -p -- "$space_home/.config" "$space_home/.cache" "$space_home/.local/share"
+mkdir -p -- "$space_home/.config" "$space_home/.cache" "$space_home/.local/share/opencode"
+mkdir -p -- "$space_home/.config/opencode"
+for config_file in opencode.json opencode.jsonc tui.json; do
+  if [[ -f "$HOME/.config/opencode/$config_file" ]]; then
+    install -m 600 "$HOME/.config/opencode/$config_file" "$space_home/.config/opencode/$config_file"
+  fi
+done
+if [[ -f "$HOME/.local/share/opencode/auth.json" ]]; then
+  # Keep credentials private to this worker's state while its session database
+  # remains independent from every other worker.
+  install -m 600 "$HOME/.local/share/opencode/auth.json" "$space_home/.local/share/opencode/auth.json"
+fi
 
 # Escape values for systemd's unit-file parser without using shell quoting.
 systemd_escape() {

@@ -316,9 +316,15 @@ pub async fn list_opencode_sessions(config: &CodexConfig) -> Result<Vec<OpenCode
         None,
     )
     .await?;
+    parse_opencode_session_list_output(&output.stdout)
+}
+
+fn parse_opencode_session_list_output(output: &[u8]) -> Result<Vec<OpenCodeSessionInfo>> {
+    if output.iter().all(u8::is_ascii_whitespace) {
+        return Ok(vec![]);
+    }
     parse_opencode_session_list(
-        &serde_json::from_slice(&output.stdout)
-            .context("OpenCode session list returned invalid JSON")?,
+        &serde_json::from_slice(output).context("OpenCode session list returned invalid JSON")?,
     )
 }
 
@@ -1738,6 +1744,13 @@ mod tests {
         assert_eq!(sessions[0].input_tokens, Some(1200));
         assert_eq!(sessions[0].output_tokens, Some(34));
         assert_eq!(sessions[1].updated_at.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn accepts_empty_opencode_session_list_output() {
+        assert!(parse_opencode_session_list_output(b" \n\t")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

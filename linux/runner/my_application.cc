@@ -65,6 +65,8 @@ static void my_application_activate(GApplication* application) {
       fl_dart_project_get_assets_path(project),
       "assets", "branding", "ribbet-mark.png", nullptr);
   gtk_window_set_icon_from_file(window, icon_path, nullptr);
+  // Wayland shells resolve the application icon through the desktop entry.
+  gtk_window_set_icon_name(window, APPLICATION_ID);
 
   FlView* view = fl_view_new(project);
   GdkRGBA background_color;

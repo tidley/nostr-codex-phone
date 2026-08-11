@@ -21,6 +21,24 @@ String? incomingRouteWorkdir(String rawJson) {
   }
 }
 
+String? incomingRouteSessionId(String rawJson) {
+  if (rawJson.trim().isEmpty) return null;
+  try {
+    final decoded = jsonDecode(rawJson);
+    if (decoded is! Map) return null;
+    final sessionId = decoded['session_id']?.toString().trim();
+    if (sessionId != null && sessionId.isNotEmpty) return sessionId;
+    final route = decoded['route'];
+    if (route is! Map) return null;
+    final routedSessionId = route['session_id']?.toString().trim();
+    return routedSessionId == null || routedSessionId.isEmpty
+        ? null
+        : routedSessionId;
+  } catch (_) {
+    return null;
+  }
+}
+
 String? conversationKeyForIncomingRoute({
   required List<RepoTarget> targets,
   required String senderPubkey,
@@ -29,6 +47,16 @@ String? conversationKeyForIncomingRoute({
   String? fallbackKey,
 }) {
   final routeWorkdir = incomingRouteWorkdir(rawJson);
+  final routeSessionId = incomingRouteSessionId(rawJson);
+  if (routeSessionId != null) {
+    for (final target in targets) {
+      if (_targetMatchesSender(target, senderPubkey, senderPubkeyHex) &&
+          target.opencodeSessionId?.trim() == routeSessionId &&
+          (routeWorkdir == null || target.workdir?.trim() == routeWorkdir)) {
+        return target.id;
+      }
+    }
+  }
   if (routeWorkdir != null) {
     for (final target in targets) {
       if (_targetMatchesSender(target, senderPubkey, senderPubkeyHex) &&

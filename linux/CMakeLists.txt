@@ -121,6 +121,14 @@ install(CODE "
 install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
   DESTINATION "${INSTALL_BUNDLE_DATA_DIR}" COMPONENT Runtime)
 
+# GTK/Wayland resolves window icons through the desktop entry rather than the
+# file assigned to the GTK window. Keep the launcher metadata in the bundle.
+install(FILES "${CMAKE_SOURCE_DIR}/runner/com.tidley.nostr_codex_phone.desktop"
+  DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/applications" COMPONENT Runtime)
+install(FILES "${CMAKE_SOURCE_DIR}/../assets/branding/ribbet-mark.png"
+  DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/icons/hicolor/256x256/apps"
+  RENAME "${APPLICATION_ID}.png" COMPONENT Runtime)
+
 # Install the AOT library on non-Debug builds only.
 if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
   install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"

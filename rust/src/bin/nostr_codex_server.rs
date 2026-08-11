@@ -1184,8 +1184,9 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         }
 
         if let Some(request) = workspace_request(&message) {
+            let action = request.action.clone();
             info!(
-                action = %request.action,
+                action = %action,
                 sender = %message.sender_pubkey,
                 "received workspace request"
             );
@@ -1221,6 +1222,11 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                     }
                 }
                 Err(err) => {
+                    warn!(
+                        action = %action,
+                        sender = %message.sender_pubkey,
+                        "workspace request failed: {err:#}"
+                    );
                     let _ = config
                         .messenger
                         .send_error_to(&message.sender_pubkey_hex, err.to_string())
@@ -1780,7 +1786,11 @@ async fn process_workspace_request(
                     display_name: String::new(),
                 })
                 .collect();
-            info!(live_routes = peers.len(), requester = sender, "reporting FIPS topology");
+            info!(
+                live_routes = peers.len(),
+                requester = sender,
+                "reporting FIPS topology"
+            );
             outbound
                 .send(
                     messenger,
@@ -2190,7 +2200,19 @@ async fn process_workspace_request(
             let conversation_scoped = request.action == "create_conversation_agent";
             let mut profile = workspace_agent_profile_from_request(&request, codex_config)?;
             let folder_scope = conversation_scoped
-                .then(|| canonical_conversation_folder_scope(&request.folder_scope, codex_config))
+                .then(|| {
+                    if request.folder_scope.is_empty() && request.agent_preset.is_some() {
+                        // Presets are intentionally quick to add. Their default
+                        // scope is the worker root, while custom agents still
+                        // require an explicit folder selection.
+                        canonical_conversation_folder_scope(
+                            &[codex_config.working_dir.to_string_lossy().into_owned()],
+                            codex_config,
+                        )
+                    } else {
+                        canonical_conversation_folder_scope(&request.folder_scope, codex_config)
+                    }
+                })
                 .transpose()?;
             // Conversation-created agents never retain a global workdir. Their
             // membership folder is the directory used for session provisioning.
@@ -3994,26 +4016,20 @@ async fn route_conversation_agents(
             conversation_preprompts: vec![],
             typing: None,
         };
-        if channel_id.is_some() {
-            if let Err(err) =
-                broadcast_workspace_update(workspace, messenger, outbound, &update).await
-            {
-                warn!(agent = %agent.id, "persisted workspace agent reply notification failed: {err:#}");
-            }
+        let recipients = if channel_id.is_some() {
+            workspace
+                .members()?
+                .into_iter()
+                .map(|member| member.pubkey)
+                .collect()
         } else {
-            for recipient in [member.unwrap_or_default(), peer.unwrap_or_default()] {
-                if let Err(err) = outbound
-                    .send(
-                        messenger,
-                        recipient,
-                        WireMessage::workspace_update(update.clone()),
-                    )
-                    .await
-                {
-                    warn!(agent = %agent.id, recipient = %recipient, "persisted workspace agent direct-reply notification failed: {err:#}");
-                }
-            }
-        }
+            vec![
+                member.unwrap_or_default().to_string(),
+                peer.unwrap_or_default().to_string(),
+            ]
+        };
+        queue_workspace_update(workspace, recipients, &update).await?;
+        flush_workspace_notification_outbox(workspace, messenger, outbound).await;
     }
     Ok(())
 }
@@ -4731,7 +4747,7 @@ async fn process_message(
                 None => return,
             };
             if cancel_token.is_cancelled() {
-                report_codex_cancelled(messenger, &message.sender_pubkey_hex)
+                report_codex_cancelled::<()>(messenger, &message.sender_pubkey_hex)
                     .await
                     .ok();
                 return;
@@ -4877,7 +4893,9 @@ async fn process_media_bundle_turn(
 
     for (index, attachment) in bundle.attachments.iter().enumerate() {
         if cancel_token.is_cancelled() {
-            report_codex_cancelled(messenger, peer_pubkey).await.ok();
+            report_codex_cancelled::<()>(messenger, peer_pubkey)
+                .await
+                .ok();
             return;
         }
         let label = attachment
@@ -4901,7 +4919,9 @@ async fn process_media_bundle_turn(
                 None => continue,
             };
             if cancel_token.is_cancelled() {
-                report_codex_cancelled(messenger, peer_pubkey).await.ok();
+                report_codex_cancelled::<()>(messenger, peer_pubkey)
+                    .await
+                    .ok();
                 return;
             }
 
@@ -4941,7 +4961,9 @@ async fn process_media_bundle_turn(
                 None => continue,
             };
             if cancel_token.is_cancelled() {
-                report_codex_cancelled(messenger, peer_pubkey).await.ok();
+                report_codex_cancelled::<()>(messenger, peer_pubkey)
+                    .await
+                    .ok();
                 return;
             }
 
@@ -4963,7 +4985,9 @@ async fn process_media_bundle_turn(
                 None => continue,
             };
             if cancel_token.is_cancelled() {
-                report_codex_cancelled(messenger, peer_pubkey).await.ok();
+                report_codex_cancelled::<()>(messenger, peer_pubkey)
+                    .await
+                    .ok();
                 return;
             }
             let local_path = downloaded.path.display().to_string();
@@ -4988,7 +5012,9 @@ async fn process_media_bundle_turn(
             None => continue,
         };
         if cancel_token.is_cancelled() {
-            report_codex_cancelled(messenger, peer_pubkey).await.ok();
+            report_codex_cancelled::<()>(messenger, peer_pubkey)
+                .await
+                .ok();
             return;
         }
         let local_path = downloaded.path.display().to_string();
@@ -4999,7 +5025,9 @@ async fn process_media_bundle_turn(
     }
 
     if cancel_token.is_cancelled() {
-        report_codex_cancelled(messenger, peer_pubkey).await.ok();
+        report_codex_cancelled::<()>(messenger, peer_pubkey)
+            .await
+            .ok();
         return;
     }
 
@@ -6158,7 +6186,9 @@ async fn process_text_turn(
         None
     };
     if cancel_token.is_cancelled() {
-        report_codex_cancelled(messenger, peer_pubkey).await.ok();
+        report_codex_cancelled::<()>(messenger, peer_pubkey)
+            .await
+            .ok();
         return;
     }
     let prompt = codex_phone_prompt(request, memory_context.as_deref());
@@ -6178,12 +6208,18 @@ async fn process_text_turn(
         Err(()) => return,
     };
 
+    let response_session_id = response
+        .session_id
+        .as_deref()
+        .or(session_id.as_deref())
+        .map(ToOwned::to_owned);
     send_response_and_remember(
         messenger,
         memory,
         peer_pubkey,
-        response,
+        response.response,
         &codex_config.working_dir,
+        response_session_id.as_deref(),
     )
     .await;
     spawn_compaction_if_needed(memory, peer_pubkey, codex_config);
@@ -7932,9 +7968,13 @@ async fn send_response_and_remember(
     receiver_pubkey: &str,
     response: String,
     workdir: &Path,
+    session_id: Option<&str>,
 ) {
-    let wire =
-        WireMessage::routed_response(response.clone(), workdir.to_string_lossy().to_string());
+    let wire = WireMessage::routed_response(
+        response.clone(),
+        workdir.to_string_lossy().to_string(),
+        session_id.map(ToOwned::to_owned),
+    );
     match send_application_wire(messenger, receiver_pubkey, wire).await {
         Ok(()) => {
             if let Some(memory) = memory.as_mut() {
@@ -8016,7 +8056,7 @@ async fn run_codex_and_report(
     codex_config: &CodexConfig,
     session_id: Option<&str>,
     cancel_token: &CodexCancelToken,
-) -> std::result::Result<String, ()> {
+) -> std::result::Result<CodexRunResult, ()> {
     let first_attempt_config = codex_config_for_first_attempt(codex_config, session_id);
     let result = match run_codex_session_with_status(
         messenger,
@@ -8131,7 +8171,7 @@ async fn run_codex_and_report(
         }
     }
 
-    Ok(result.response)
+    Ok(result)
 }
 
 async fn run_codex_session_with_status(
@@ -8472,20 +8512,20 @@ fn is_opencode_busy_error(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains("OpenCode is still busy after")
 }
 
-async fn report_codex_cancelled(
+async fn report_codex_cancelled<T>(
     messenger: &NostrMessenger,
     receiver_pubkey: &str,
-) -> std::result::Result<String, ()> {
+) -> std::result::Result<T, ()> {
     info!("codex task cancelled for {receiver_pubkey}");
     send_status(messenger, receiver_pubkey, "Cancelled.").await;
     Err(())
 }
 
-async fn report_opencode_busy(
+async fn report_opencode_busy<T>(
     messenger: &NostrMessenger,
     receiver_pubkey: &str,
     err: anyhow::Error,
-) -> std::result::Result<String, ()> {
+) -> std::result::Result<T, ()> {
     warn!("OpenCode remains busy: {err:#}");
     send_status(
         messenger,
@@ -8496,11 +8536,11 @@ async fn report_opencode_busy(
     Err(())
 }
 
-async fn report_codex_error(
+async fn report_codex_error<T>(
     messenger: &NostrMessenger,
     receiver_pubkey: &str,
     err: anyhow::Error,
-) -> std::result::Result<String, ()> {
+) -> std::result::Result<T, ()> {
     error!("codex failed: {err:#}");
     if let Err(send_err) = messenger
         .send_error_to(receiver_pubkey, format!("Agent failed: {err:#}"))

@@ -99,6 +99,38 @@ void main() {
     },
   );
 
+  test('routes shared-workdir responses by embedded OpenCode session id', () {
+    final targets = [
+      const RepoTarget(
+        id: 'first',
+        name: 'first',
+        pubkey: 'npub1service',
+        relays: ['wss://relay.example'],
+        workdir: '/home/tom/code/phone',
+        opencodeSessionId: 'ses_first',
+      ),
+      const RepoTarget(
+        id: 'second',
+        name: 'second',
+        pubkey: 'npub1service',
+        relays: ['wss://relay.example'],
+        workdir: '/home/tom/code/phone',
+        opencodeSessionId: 'ses_second',
+      ),
+    ];
+
+    expect(
+      conversationKeyForIncomingRoute(
+        targets: targets,
+        senderPubkey: 'npub1service',
+        senderPubkeyHex: '',
+        rawJson:
+            '{"workdir":"/home/tom/code/phone","session_id":"ses_second","response":"done"}',
+      ),
+      'second',
+    );
+  });
+
   test('does not trust a routed workdir from another worker', () {
     const target = RepoTarget(
       id: 'phone',

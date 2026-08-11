@@ -89,6 +89,8 @@ pub enum WireMessage {
     RoutedResponse {
         response: String,
         workdir: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     Error {
         error: String,
@@ -713,10 +715,15 @@ impl WireMessage {
         }
     }
 
-    pub fn routed_response<S: Into<String>, W: Into<String>>(response: S, workdir: W) -> Self {
+    pub fn routed_response<S: Into<String>, W: Into<String>>(
+        response: S,
+        workdir: W,
+        session_id: Option<String>,
+    ) -> Self {
         Self::RoutedResponse {
             response: response.into(),
             workdir: workdir.into(),
+            session_id,
         }
     }
 
@@ -869,8 +876,16 @@ impl WireMessage {
             Self::Transcript { transcript } => json!({ "transcript": transcript }),
             Self::Status { status } => json!({ "status": status }),
             Self::Response { response } => json!({ "response": response }),
-            Self::RoutedResponse { response, workdir } => {
-                json!({ "workdir": workdir, "response": response })
+            Self::RoutedResponse {
+                response,
+                workdir,
+                session_id,
+            } => {
+                let mut response = json!({ "workdir": workdir, "response": response });
+                if let Some(session_id) = session_id {
+                    response["session_id"] = json!(session_id);
+                }
+                response
             }
             Self::Error { error } => json!({ "error": error }),
         };
@@ -1785,10 +1800,24 @@ mod tests {
     #[test]
     fn serializes_routed_response_contract() {
         assert_eq!(
-            WireMessage::routed_response("done", "/home/tom/code/phone")
+            WireMessage::routed_response("done", "/home/tom/code/phone", None)
                 .to_json()
                 .unwrap(),
             r#"{"response":"done","workdir":"/home/tom/code/phone"}"#
+        );
+    }
+
+    #[test]
+    fn serializes_routed_response_session_contract() {
+        assert_eq!(
+            WireMessage::routed_response(
+                "done",
+                "/home/tom/code/phone",
+                Some("ses_123".to_string()),
+            )
+            .to_json()
+            .unwrap(),
+            r#"{"response":"done","session_id":"ses_123","workdir":"/home/tom/code/phone"}"#
         );
     }
 
