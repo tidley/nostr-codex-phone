@@ -56,6 +56,7 @@ const _callStunServers = [
   'stun:stun.cloudflare.com:3478',
   'stun:global.stun.twilio.com:3478',
 ];
+const _fipsContactCallId = 'workspace-fips-presence';
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
 var _appVersion = 'unknown';
 
@@ -94,6 +95,8 @@ class _WorkspaceFipsSession {
     const _WorkspaceFipsHeartbeat(),
   );
   final ValueNotifier<List<String>> peers = ValueNotifier(const []);
+  final Set<String> directPeers = {};
+  final Set<String> contactNegotiations = {};
   Timer? heartbeatTicker;
   Timer? retryTimer;
   Timer? offerTimer;
@@ -2371,6 +2374,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<void> _offerTargetInvite(RepoTarget target) async {
     if (!mounted) return;
+    final alreadyKnown = [..._computerServiceTargets, ..._repoTargets].any(
+      (existing) =>
+          existing.pubkey.trim() == target.pubkey.trim() &&
+          _sameWorkdir(existing.workdir, target.workdir),
+    );
+    if (alreadyKnown) {
+      _recordDiagnostic('Ignored duplicate session target invite');
+      return;
+    }
     if (_recording) {
       _queueTargetInvite(target);
       return;
@@ -3203,6 +3215,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             theme: settingsTheme,
             repoTargets: _repoTargets,
             computerServiceTarget: _computerServiceTarget,
+            showRepoTarget: _activeWorkspaceHasLocalWorkerTarget,
             selectedRepoTargetId: _selectedRepoTargetId,
             activeTargetName: _activeTargetName(),
             profileNameController: _workspaceDisplayNameController,
@@ -3850,6 +3863,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   String get _workspaceWorkerKey =>
       _workspaceCacheServicePubkey ?? 'unconfigured-workspace';
+
+  bool get _activeWorkspaceHasLocalWorkerTarget {
+    final target = _computerServiceTarget;
+    return target != null && !target.id.startsWith('workspace-');
+  }
 
   _WorkspaceWorkerState get _activeWorkspaceWorker =>
       _workspaceWorkers.putIfAbsent(
@@ -4602,26 +4620,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
   }
 
-  /// Uses the authenticated FIPS application route after bootstrap. Nostr stays
-  /// available for discovery and when that UDP route cannot carry a request.
+  /// Generic queries use Nostr. The FIPS application transport accepts only
+  /// workspace protocol frames, which `_sendWorkspaceRequest` sends directly.
   Future<String> _sendQueryPreferFips(String query) async {
-    if (_workspaceFipsConnectionState == 'active') {
-      final messageId = ++_workspaceFipsNextMessageId;
-      try {
-        await fipsWorkspaceSendWire(
-          workspaceKey: _workspaceFipsKey,
-          frame: query,
-          messageId: BigInt.from(messageId),
-        );
-        return 'fips:out:$messageId';
-      } catch (error) {
-        _recordDiagnostic(
-          'FIPS application send failed; recovering with Nostr: $error',
-        );
-        _setWorkspaceFipsConnectionState('reconnecting');
-        _scheduleWorkspaceFipsRetry();
-      }
-    }
     return nostrSendQuery(query: query);
   }
 
@@ -4743,11 +4744,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         final update = decoded['workspace_update'];
         final action = update is Map ? update['action']?.toString() : null;
         if (action == 'fips_mesh') {
-          worker.fips.peers.value = (update['members'] as List? ?? const [])
-              .whereType<Map>()
-              .map((member) => member['pubkey']?.toString() ?? '')
-              .where((pubkey) => pubkey.isNotEmpty)
-              .toList(growable: false);
+          _updateFipsMesh(workerKey, update['members']);
+          return true;
+        }
+        if (action == 'fips_presence_offer' ||
+            action == 'fips_presence_ready') {
+          unawaited(_handleFipsPresenceUpdate(workerKey, action!, update));
           return true;
         }
         if (action == 'list_fallback') {
@@ -4767,9 +4769,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             return true;
           }
           if (worker.fips.snapshotInFlight) {
-            _recordDiagnostic(
-              'Ignored duplicate FIPS workspace snapshot offer',
-            );
             return true;
           }
           worker.fips.generation++;
@@ -5041,6 +5040,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           unawaited(_openToolResult(result));
         }
       }
+      return true;
+    }
+
+    if (_workspaceWorkerKeyForIncoming(message) != null) {
+      _recordDiagnostic('Ignored residual workspace transport message');
       return true;
     }
 
@@ -7320,12 +7324,14 @@ Return a concise catch-up summary of what happened after that point: completed w
           sessions: _repoTargets,
           spaces: _computerServiceTargets,
           activeSpace: _computerServiceTarget,
+          canManageAgents: _activeWorkspaceHasLocalWorkerTarget,
           onSwitchSpace: (target) =>
               unawaited(_selectComputerServiceTarget(target)),
           onLeaveSpace: (target) =>
               unawaited(_leaveComputerServiceTarget(target)),
           onOpenSessions: () => setState(() => _showTeamWorkspace = false),
           onOpenSettings: () => unawaited(_openSettings()),
+          onEnterInviteCode: () => unawaited(_enterWorkspaceInviteCode()),
           diagnostics: _clientDiagnostics,
           onOpenDiagnostics: () => Navigator.of(context).push<void>(
             MaterialPageRoute(
@@ -7336,6 +7342,7 @@ Return a concise catch-up summary of what happened after that point: completed w
                 fipsPeers: _workspaceFipsPeers,
                 fipsPeerNpub:
                     _connectedPeerPubkey ?? _peerPubkeyController.text.trim(),
+                contactNameForPubkey: _callParticipantName,
                 onRefreshFipsMesh: () =>
                     _sendWorkspaceRequest({'action': 'fips_mesh'}),
                 onFipsEnabledChanged: _setWorkspaceFipsEnabled,
@@ -7343,6 +7350,7 @@ Return a concise catch-up summary of what happened after that point: completed w
             ),
           ),
           fipsConnected: heartbeat.connectionState == 'active',
+          fipsConnectedPeers: _workspaceFips.directPeers,
           onOpenWorkerConsole: () => unawaited(_openWorkerConsole()),
           onOpenFiles: (conversationKey) => _sendToolRequest(
             'file_browser',
@@ -7369,7 +7377,9 @@ Return a concise catch-up summary of what happened after that point: completed w
           initialFolderChoices: _cachedRepoChoices,
           onLoadFolders: (path) => _requestRepoChoices(path: path),
           inviteCode: _workspaceInviteCode,
-          memberStatus: _workspaceMemberStatus,
+          memberStatus: _activeWorkspaceHasLocalWorkerTarget
+              ? 'Owner'
+              : _workspaceMemberStatus,
           workspace: _workspace,
           unreadCounts: _workspaceUnreadCounts,
           threadUnreadCounts: _workspaceThreadUnreadCounts,
@@ -7827,6 +7837,125 @@ Return a concise catch-up summary of what happened after that point: completed w
         : null;
   }
 
+  void _updateFipsMesh(String workerKey, Object? members) {
+    final worker = _workspaceWorkerForKey(workerKey);
+    final peers = (members as List? ?? const [])
+        .whereType<Map>()
+        .map((member) => member['pubkey']?.toString().trim() ?? '')
+        .where((pubkey) => pubkey.isNotEmpty)
+        .toSet();
+    worker.fips.peers.value = peers.toList(growable: false);
+    unawaited(_offerFipsContactLinks(workerKey, peers));
+  }
+
+  Future<void> _offerFipsContactLinks(
+    String workerKey,
+    Set<String> peers,
+  ) async {
+    if (workerKey != _workspaceWorkerKey ||
+        _workspaceFipsConnectionState != 'active') {
+      return;
+    }
+    final ownPubkey = _ownPubkeyHex?.trim();
+    if (ownPubkey == null || ownPubkey.isEmpty) return;
+    final worker = _workspaceWorkerForKey(workerKey);
+    final contacts = worker.workspace.members.toSet();
+    for (final peer in peers) {
+      if (peer == ownPubkey ||
+          !contacts.contains(peer) ||
+          peer.startsWith('agent:') ||
+          ownPubkey.compareTo(peer) >= 0 ||
+          worker.fips.directPeers.contains(peer) ||
+          !worker.fips.contactNegotiations.add(peer)) {
+        continue;
+      }
+      try {
+        await _sendWorkspaceRequest({
+          'action': 'fips_presence_offer',
+          'recipient_pubkey': peer,
+        });
+      } catch (_) {
+        worker.fips.contactNegotiations.remove(peer);
+      }
+    }
+  }
+
+  Future<void> _handleFipsPresenceUpdate(
+    String workerKey,
+    String action,
+    Map update,
+  ) async {
+    if (workerKey != _workspaceWorkerKey ||
+        _workspaceFipsConnectionState != 'active') {
+      return;
+    }
+    final peer = (update['members'] as List? ?? const [])
+        .whereType<Map>()
+        .map((member) => member['pubkey']?.toString().trim() ?? '')
+        .firstWhere((pubkey) => pubkey.isNotEmpty, orElse: () => '');
+    final ownPubkey = _ownPubkeyHex?.trim();
+    if (peer.isEmpty ||
+        ownPubkey == null ||
+        ownPubkey.isEmpty ||
+        peer == ownPubkey) {
+      return;
+    }
+    final worker = _workspaceWorkerForKey(workerKey);
+    if (worker.fips.directPeers.contains(peer)) return;
+    if (action == 'fips_presence_offer') {
+      if (!worker.fips.contactNegotiations.add(peer)) return;
+      try {
+        await fipsGroupCallAcceptStart(
+          config: _callConfig(),
+          callId: _fipsContactCallId,
+          peerNpub: peer,
+        );
+        unawaited(_acceptFipsContactLink(workerKey, peer));
+        await _sendWorkspaceRequest({
+          'action': 'fips_presence_ready',
+          'recipient_pubkey': peer,
+        });
+      } catch (_) {
+        worker.fips.contactNegotiations.remove(peer);
+      }
+      return;
+    }
+    if (ownPubkey.compareTo(peer) >= 0 ||
+        !worker.fips.contactNegotiations.contains(peer)) {
+      return;
+    }
+    try {
+      await fipsGroupCallConnect(
+        config: _callConfig(),
+        callId: _fipsContactCallId,
+        peerNpub: peer,
+      );
+      _markFipsContactConnected(workerKey, peer);
+    } catch (_) {
+      worker.fips.contactNegotiations.remove(peer);
+    }
+  }
+
+  Future<void> _acceptFipsContactLink(String workerKey, String peer) async {
+    try {
+      await fipsGroupCallAcceptComplete(
+        callId: _fipsContactCallId,
+        peerNpub: peer,
+      );
+      _markFipsContactConnected(workerKey, peer);
+    } catch (_) {
+      _workspaceWorkerForKey(workerKey).fips.contactNegotiations.remove(peer);
+    }
+  }
+
+  void _markFipsContactConnected(String workerKey, String peer) {
+    if (!mounted) return;
+    final worker = _workspaceWorkerForKey(workerKey);
+    if (!worker.fips.directPeers.add(peer)) return;
+    worker.fips.contactNegotiations.remove(peer);
+    setState(() => worker.revision.value++);
+  }
+
   Future<void> _receiveWorkspaceSnapshotOverFips(
     String capability,
     String workerKey,
@@ -7951,12 +8080,19 @@ Return a concise catch-up summary of what happened after that point: completed w
             if (wireJson is Map && wireJson['workspace_update'] is Map) {
               final update = wireJson['workspace_update'] as Map;
               if (update['action'] == 'fips_mesh') {
-                session.peers.value = (update['members'] as List? ?? const [])
-                    .whereType<Map>()
-                    .map((member) => member['pubkey']?.toString() ?? '')
-                    .where((pubkey) => pubkey.isNotEmpty)
-                    .toList(growable: false);
+                _updateFipsMesh(workerKey, update['members']);
                 _setWorkspaceFipsConnectionState('active', session: session);
+                continue;
+              }
+              if (update['action'] == 'fips_presence_offer' ||
+                  update['action'] == 'fips_presence_ready') {
+                unawaited(
+                  _handleFipsPresenceUpdate(
+                    workerKey,
+                    update['action']!.toString(),
+                    update,
+                  ),
+                );
                 continue;
               }
             }
@@ -8118,6 +8254,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       session.heartbeat.value = _WorkspaceFipsHeartbeat(connectionState: state);
     }
     if (state == 'active') {
+      unawaited(_sendWorkspaceRequest({'action': 'fips_mesh'}));
       session.heartbeatTicker ??= Timer.periodic(const Duration(seconds: 1), (
         _,
       ) {

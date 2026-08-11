@@ -558,10 +558,12 @@ class _TeamWorkspace extends StatefulWidget {
     required this.sessions,
     required this.spaces,
     required this.activeSpace,
+    required this.canManageAgents,
     required this.onSwitchSpace,
     required this.onLeaveSpace,
     required this.onOpenSessions,
     required this.onOpenSettings,
+    required this.onEnterInviteCode,
     required this.diagnostics,
     required this.fipsConnected,
     required this.onOpenDiagnostics,
@@ -580,6 +582,7 @@ class _TeamWorkspace extends StatefulWidget {
     required this.workspace,
     required this.ownPubkey,
     required this.localSenderIds,
+    required this.fipsConnectedPeers,
     required this.displayName,
     required this.memberAliases,
     required this.memberNames,
@@ -617,10 +620,12 @@ class _TeamWorkspace extends StatefulWidget {
   final List<RepoTarget> sessions;
   final List<RepoTarget> spaces;
   final RepoTarget? activeSpace;
+  final bool canManageAgents;
   final ValueChanged<RepoTarget> onSwitchSpace;
   final ValueChanged<RepoTarget> onLeaveSpace;
   final VoidCallback onOpenSessions;
   final VoidCallback onOpenSettings;
+  final VoidCallback onEnterInviteCode;
   final ValueNotifier<List<String>> diagnostics;
   final bool fipsConnected;
   final VoidCallback onOpenDiagnostics;
@@ -649,6 +654,7 @@ class _TeamWorkspace extends StatefulWidget {
   final WorkspaceState workspace;
   final String ownPubkey;
   final Set<String> localSenderIds;
+  final Set<String> fipsConnectedPeers;
   final String displayName;
   final Map<String, String> memberAliases;
   final Map<String, String> memberNames;
@@ -1185,7 +1191,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       case _WorkspaceSection.direct:
         return _memberLabel(_active);
       case _WorkspaceSection.people:
-        return 'People';
+        return 'Members';
       case _WorkspaceSection.access:
         return 'Access';
     }
@@ -1349,6 +1355,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       sessions: widget.sessions,
       spaces: widget.spaces,
       activeSpace: widget.activeSpace,
+      canManageAgents: widget.canManageAgents,
       onSwitchSpace: widget.onSwitchSpace,
       onLeaveSpace: widget.onLeaveSpace,
       channels: widget.workspace.channels,
@@ -1360,6 +1367,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       unreadCounts: widget.unreadCounts,
       activityLabels: activityLabels,
       fipsConnected: widget.fipsConnected,
+      fipsConnectedPeers: widget.fipsConnectedPeers,
       onSelect: _select,
       onSessions: () {
         _closeDrawer();
@@ -1454,6 +1462,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         onAlsoSendToMainChanged: (value) =>
             setState(() => _alsoSendToMain = value),
         onOpenSettings: widget.onOpenSettings,
+        onEnterInviteCode: widget.onEnterInviteCode,
         onReload: _reloadActiveMessages,
         onOpenFiles: () {
           final conversationKey = _conversationKey;
@@ -1487,6 +1496,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           if (mounted) _select(_WorkspaceSection.channel, 'workspace');
         },
         inviteCode: widget.inviteCode,
+        canCreateInvite: widget.canManageAgents,
         memberStatus: widget.memberStatus,
         onCreateInvite: widget.onCreateInvite,
         members: widget.workspace.members,
@@ -1495,6 +1505,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             : 0,
         ownPubkey: widget.ownPubkey,
         localSenderIds: widget.localSenderIds,
+        fipsConnectedPeers: widget.fipsConnectedPeers,
         displayName: widget.displayName,
         memberAliases: widget.memberAliases,
         memberNames: widget.memberNames,
@@ -1514,8 +1525,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         ),
         agents: _activeAgents,
         onManageAgents:
-            _section == _WorkspaceSection.channel ||
-                _section == _WorkspaceSection.direct
+            widget.canManageAgents && _section == _WorkspaceSection.channel
             ? () => _manageAgents(context)
             : null,
         onEditConversationPreprompt: (value) => widget.onRequest({
@@ -2314,6 +2324,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.sessions,
     required this.spaces,
     required this.activeSpace,
+    required this.canManageAgents,
     required this.onSwitchSpace,
     required this.onLeaveSpace,
     required this.channels,
@@ -2325,6 +2336,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.unreadCounts,
     required this.activityLabels,
     required this.fipsConnected,
+    required this.fipsConnectedPeers,
     required this.onSelect,
     required this.onSessions,
     required this.onSettings,
@@ -2341,6 +2353,7 @@ class _WorkspaceSidebar extends StatelessWidget {
   final List<RepoTarget> sessions;
   final List<RepoTarget> spaces;
   final RepoTarget? activeSpace;
+  final bool canManageAgents;
   final ValueChanged<RepoTarget> onSwitchSpace;
   final ValueChanged<RepoTarget> onLeaveSpace;
   final List<WorkspaceChannel> channels;
@@ -2352,6 +2365,7 @@ class _WorkspaceSidebar extends StatelessWidget {
   final Map<String, int> unreadCounts;
   final Map<String, String> activityLabels;
   final bool fipsConnected;
+  final Set<String> fipsConnectedPeers;
   final void Function(_WorkspaceSection, String) onSelect;
   final VoidCallback onSessions;
   final VoidCallback onSettings;
@@ -2374,6 +2388,7 @@ class _WorkspaceSidebar extends StatelessWidget {
       IconData icon,
       String label, {
       bool selected = false,
+      bool fipsConnected = false,
       VoidCallback? onTap,
       int unreadCount = 0,
       String? count,
@@ -2386,7 +2401,14 @@ class _WorkspaceSidebar extends StatelessWidget {
         selectedTileColor: palette.selected,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         leading: Icon(icon, size: 19),
-        title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+        title: Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: fipsConnected
+              ? const TextStyle(color: Color(0xff35d6a0))
+              : null,
+        ),
         subtitle: activity == null
             ? null
             : Text(
@@ -2585,6 +2607,7 @@ class _WorkspaceSidebar extends StatelessWidget {
                     Icons.chat_bubble_outline,
                     memberLabel(member),
                     selected: direct == member,
+                    fipsConnected: fipsConnectedPeers.contains(member),
                     unreadCount:
                         unreadCounts[WorkspaceState.directKey(
                           ownPubkey,
@@ -2607,7 +2630,23 @@ class _WorkspaceSidebar extends StatelessWidget {
                     ),
                     onTap: () => onSelect(_WorkspaceSection.direct, member),
                   ),
-                const SizedBox(height: 18),
+                if (canManageAgents) ...[
+                  const SizedBox(height: 18),
+                  Text(
+                    'Sessions',
+                    style: Theme.of(
+                      context,
+                    ).textTheme.labelLarge?.copyWith(color: palette.label),
+                  ),
+                  const SizedBox(height: 6),
+                  for (final session in sessions.take(3))
+                    item(
+                      Icons.terminal_outlined,
+                      session.displayName,
+                      onTap: onSessions,
+                    ),
+                  const SizedBox(height: 18),
+                ],
                 Text(
                   'Workspace',
                   style: Theme.of(
@@ -2617,7 +2656,7 @@ class _WorkspaceSidebar extends StatelessWidget {
                 const SizedBox(height: 6),
                 item(
                   Icons.people_outline,
-                  'People',
+                  'Members',
                   selected: section == _WorkspaceSection.people,
                   onTap: () => onSelect(_WorkspaceSection.people, 'people'),
                 ),
@@ -2629,33 +2668,20 @@ class _WorkspaceSidebar extends StatelessWidget {
                 ),
                 const SizedBox(height: 18),
                 Text(
-                  'Focused work',
+                  'Maintenance',
                   style: Theme.of(
                     context,
                   ).textTheme.labelLarge?.copyWith(color: palette.label),
                 ),
                 const SizedBox(height: 6),
                 item(
-                  Icons.workspaces_outline,
-                  'Sessions',
-                  count: sessions.isEmpty ? null : '${sessions.length}',
-                  onTap: onSessions,
-                ),
-                for (final session in sessions.take(3))
-                  item(
-                    Icons.terminal_outlined,
-                    session.displayName,
-                    onTap: onSessions,
-                  ),
-                const SizedBox(height: 18),
-                item(
                   Icons.monitor_heart_outlined,
-                  'Worker console',
+                  'Host',
                   onTap: onWorkerConsole,
                 ),
                 item(
                   Icons.bug_report_outlined,
-                  'Diagnostics',
+                  'Network',
                   onTap: onDiagnostics,
                 ),
               ],
@@ -2714,12 +2740,15 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.onRenameConversation,
     required this.onDeleteConversation,
     required this.inviteCode,
+    required this.canCreateInvite,
     required this.memberStatus,
     required this.onCreateInvite,
+    required this.onEnterInviteCode,
     required this.members,
     required this.channelHumanMemberCount,
     required this.ownPubkey,
     required this.localSenderIds,
+    required this.fipsConnectedPeers,
     required this.displayName,
     required this.memberAliases,
     required this.memberNames,
@@ -2786,12 +2815,15 @@ class _WorkspaceConversation extends StatefulWidget {
   final Future<void> Function(String name) onRenameConversation;
   final Future<void> Function() onDeleteConversation;
   final String? inviteCode;
+  final bool canCreateInvite;
   final String memberStatus;
   final Future<void> Function() onCreateInvite;
+  final VoidCallback onEnterInviteCode;
   final List<String> members;
   final int channelHumanMemberCount;
   final String ownPubkey;
   final Set<String> localSenderIds;
+  final Set<String> fipsConnectedPeers;
   final String displayName;
   final Map<String, String> memberAliases;
   final Map<String, String> memberNames;
@@ -3049,10 +3081,11 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     }
     if (widget.section == _WorkspaceSection.access) {
       return _WorkspaceAccessPage(
-        inviteCode: widget.inviteCode,
         memberStatus: widget.memberStatus,
+        canCreateInvite: widget.canCreateInvite,
+        inviteCode: widget.inviteCode,
+        onEnterInviteCode: widget.onEnterInviteCode,
         onCreateInvite: widget.onCreateInvite,
-        onOpenSettings: widget.onOpenSettings,
       );
     }
     final palette = Theme.of(context).extension<_WorkspacePalette>()!;
@@ -3118,11 +3151,12 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                         icon: const Icon(Icons.folder_open_outlined),
                         tooltip: 'Browse repository files',
                       ),
-                    IconButton(
-                      onPressed: _editConversationPreprompt,
-                      icon: const Icon(Icons.edit_note_outlined),
-                      tooltip: 'Edit agent brief',
-                    ),
+                    if (widget.section == _WorkspaceSection.channel)
+                      IconButton(
+                        onPressed: _editConversationPreprompt,
+                        icon: const Icon(Icons.edit_note_outlined),
+                        tooltip: 'Edit agent brief',
+                      ),
                     if (_supportsLiveCalls &&
                         widget.section == _WorkspaceSection.direct)
                       _CallControl(
@@ -3200,7 +3234,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                   itemCount: visibleMessages.length + 1,
                   itemBuilder: (context, index) {
                     if (index == 0) {
-                      if (widget.conversationPreprompt.isEmpty) {
+                      if (widget.conversationPreprompt.isEmpty &&
+                          widget.section == _WorkspaceSection.channel) {
                         return Padding(
                           padding: const EdgeInsets.only(bottom: 16),
                           child: TextButton.icon(
@@ -3247,6 +3282,9 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                           isLocalSender: isWorkspaceLocalSender(
                             m.senderPubkey,
                             widget.localSenderIds,
+                          ),
+                          fipsConnected: widget.fipsConnectedPeers.contains(
+                            m.senderPubkey,
                           ),
                           onThread: () => widget.onOpenThread(m),
                           threadReplyCount: widget.threadReplyCounts[m.id] ?? 0,
@@ -3428,6 +3466,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
     required this.authorName,
     required this.groupedWithPrevious,
     required this.isLocalSender,
+    required this.fipsConnected,
     required this.onThread,
     required this.onReact,
     required this.threadReplyCount,
@@ -3440,6 +3479,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
   final String authorName;
   final bool groupedWithPrevious;
   final bool isLocalSender;
+  final bool fipsConnected;
   final VoidCallback onThread;
   final ValueChanged<String> onReact;
   final int threadReplyCount;
@@ -3524,21 +3564,14 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
                   widget.authorName,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ),
-              if (isAgent) ...[
-                const SizedBox(width: 6),
-                Text(
-                  'AGENT',
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    fontSize: 9,
+                  style: TextStyle(
                     fontWeight: FontWeight.bold,
-                    letterSpacing: 0.6,
-                    color: Theme.of(context).colorScheme.secondary,
+                    color: widget.fipsConnected
+                        ? const Color(0xff35d6a0)
+                        : null,
                   ),
                 ),
-              ],
+              ),
             ],
           ),
         if (!widget.groupedWithPrevious && !widget.isLocalSender)
@@ -3653,8 +3686,16 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
         final contentWidth = math
             .max(math.max(bodyWidth, authorWidth), 48.0)
             .toDouble();
+        // Short bodies still need room for the author, timestamp, and thread
+        // controls. A compact floor prevents them from becoming tall slivers.
+        final minBubbleWidth = math
+            .min(maxBubbleWidth, constraints.maxWidth < 560 ? 144.0 : 200.0)
+            .toDouble();
         final bubbleWidth = math
-            .min(maxBubbleWidth, leadingWidth + contentWidth + 20)
+            .min(
+              maxBubbleWidth,
+              math.max(minBubbleWidth, leadingWidth + contentWidth + 20),
+            )
             .toDouble();
         return Align(
           alignment: widget.isLocalSender
@@ -3784,13 +3825,22 @@ class _WorkspaceFrogAvatar extends StatelessWidget {
   final bool bot;
 
   static const _colors = [
-    (Color(0xff78b9df), Color(0xff173d5c)),
-    (Color(0xffdfb777), Color(0xff593914)),
-    (Color(0xffdf8582), Color(0xff5f2027)),
-    (Color(0xff87c8a0), Color(0xff1d563a)),
-    (Color(0xffaa96df), Color(0xff38295e)),
-    (Color(0xffdf91bc), Color(0xff612546)),
-    (Color(0xff79c9c9), Color(0xff155556)),
+    (Color(0xff8bd3ff), Color(0xff164463)),
+    (Color(0xffffc98b), Color(0xff613b10)),
+    (Color(0xffff9dba), Color(0xff6b1f3b)),
+    (Color(0xff8de3b4), Color(0xff155b37)),
+    (Color(0xffc7a6ff), Color(0xff41216c)),
+    (Color(0xffffabd8), Color(0xff701b4c)),
+    (Color(0xff83e6df), Color(0xff125b58)),
+    (Color(0xffffb38a), Color(0xff6b2d18)),
+    (Color(0xffb8e986), Color(0xff365c18)),
+    (Color(0xffffc1ed), Color(0xff6f1e60)),
+    (Color(0xff9ac7ff), Color(0xff1d4072)),
+    (Color(0xffffdc88), Color(0xff634a0d)),
+    (Color(0xffa9f0d0), Color(0xff14553a)),
+    (Color(0xffe2b5ff), Color(0xff55256d)),
+    (Color(0xffffb5a7), Color(0xff6e2b27)),
+    (Color(0xffa6e6ff), Color(0xff15516b)),
   ];
 
   @override
@@ -4130,6 +4180,7 @@ class _WorkspaceContext extends StatelessWidget {
     authorName: _memberLabel(message.senderPubkey),
     groupedWithPrevious: groupedWithPrevious,
     isLocalSender: isWorkspaceLocalSender(message.senderPubkey, localSenderIds),
+    fipsConnected: false,
     onThread: () {},
     onReact: (emoji) => unawaited(onToggleReaction(message, emoji)),
     threadReplyCount: 0,
@@ -4154,7 +4205,7 @@ class _WorkspaceContext extends StatelessWidget {
               const SizedBox(height: 18),
               const _ContextLine(
                 Icons.people_outline,
-                'Workspace members appear in People',
+                'Workspace members appear in Members',
               ),
               const _ContextLine(Icons.push_pin_outlined, 'No pinned messages'),
               const _ContextLine(
@@ -5986,7 +6037,7 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
       padding: const EdgeInsets.all(24),
       children: [
         Text(
-          'People',
+          'Members',
           style: Theme.of(
             context,
           ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
@@ -6022,7 +6073,10 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
         for (final person in people)
           ListTile(
             contentPadding: EdgeInsets.zero,
-            leading: CircleAvatar(child: Icon(Icons.person_outline)),
+            leading: _WorkspaceFrogAvatar(
+              identity: person,
+              label: _memberLabel(person),
+            ),
             title: Text(_memberLabel(person)),
             subtitle: Text(person == widget.ownPubkey ? 'You' : 'Member'),
             trailing: person == widget.ownPubkey
@@ -6043,16 +6097,18 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
 
 class _WorkspaceAccessPage extends StatelessWidget {
   const _WorkspaceAccessPage({
-    required this.inviteCode,
     required this.memberStatus,
+    required this.canCreateInvite,
+    required this.inviteCode,
+    required this.onEnterInviteCode,
     required this.onCreateInvite,
-    required this.onOpenSettings,
   });
 
-  final String? inviteCode;
   final String memberStatus;
+  final bool canCreateInvite;
+  final String? inviteCode;
+  final VoidCallback onEnterInviteCode;
   final Future<void> Function() onCreateInvite;
-  final VoidCallback onOpenSettings;
 
   @override
   Widget build(BuildContext context) {
@@ -6080,38 +6136,42 @@ class _WorkspaceAccessPage extends StatelessWidget {
           title: Text(memberStatus),
           subtitle: const Text('Your current workspace confirmation status'),
         ),
-        const SizedBox(height: 24),
-        Text('Invitations', style: theme.textTheme.titleMedium),
-        const SizedBox(height: 8),
-        FilledButton.icon(
-          onPressed: () => onCreateInvite(),
-          icon: const Icon(Icons.person_add_alt_1),
-          label: const Text('Generate workspace invite code'),
-        ),
-        if (inviteCode != null) ...[
-          const SizedBox(height: 12),
-          Center(
-            child: QrImageView(
-              data: inviteCode!,
-              size: 220,
-              backgroundColor: Colors.white,
-              padding: const EdgeInsets.all(12),
-              errorCorrectionLevel: QrErrorCorrectLevel.M,
-            ),
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Workspace invite QR'),
-            subtitle: const Text('Scan this code or copy the invite payload.'),
-            trailing: IconButton(
-              icon: const Icon(Icons.copy),
-              onPressed: () =>
-                  Clipboard.setData(ClipboardData(text: inviteCode!)),
-              tooltip: 'Copy invite code',
-            ),
-          ),
-        ],
         const Divider(height: 40),
+        if (canCreateInvite) ...[
+          Text('Invite people', style: theme.textTheme.titleMedium),
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: onCreateInvite,
+            icon: const Icon(Icons.person_add_alt_1),
+            label: const Text('Generate workspace invite code'),
+          ),
+          if (inviteCode != null) ...[
+            const SizedBox(height: 12),
+            Center(
+              child: QrImageView(
+                data: inviteCode!,
+                size: 220,
+                backgroundColor: Colors.white,
+                padding: const EdgeInsets.all(12),
+                errorCorrectionLevel: QrErrorCorrectLevel.M,
+              ),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Workspace invite QR'),
+              subtitle: const Text(
+                'Scan this code or copy the invite payload.',
+              ),
+              trailing: IconButton(
+                icon: const Icon(Icons.copy),
+                onPressed: () =>
+                    Clipboard.setData(ClipboardData(text: inviteCode!)),
+                tooltip: 'Copy invite code',
+              ),
+            ),
+          ],
+          const Divider(height: 40),
+        ],
         Text('Join workspace', style: theme.textTheme.titleMedium),
         const SizedBox(height: 8),
         const Text(
@@ -6119,7 +6179,7 @@ class _WorkspaceAccessPage extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         OutlinedButton.icon(
-          onPressed: onOpenSettings,
+          onPressed: onEnterInviteCode,
           icon: const Icon(Icons.settings_outlined),
           label: const Text('Join with invite code'),
         ),
@@ -6193,6 +6253,7 @@ class _ClientDiagnosticsPage extends StatefulWidget {
     required this.fipsHeartbeat,
     required this.fipsPeers,
     required this.fipsPeerNpub,
+    required this.contactNameForPubkey,
     required this.onRefreshFipsMesh,
     required this.onFipsEnabledChanged,
   });
@@ -6202,6 +6263,7 @@ class _ClientDiagnosticsPage extends StatefulWidget {
   final ValueNotifier<_WorkspaceFipsHeartbeat> fipsHeartbeat;
   final ValueNotifier<List<String>> fipsPeers;
   final String fipsPeerNpub;
+  final String Function(String pubkey) contactNameForPubkey;
   final Future<void> Function() onRefreshFipsMesh;
   final ValueChanged<bool> onFipsEnabledChanged;
 
@@ -6248,7 +6310,7 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
-      title: const Text('Client diagnostics'),
+      title: const Text('Network'),
       actions: [
         Tooltip(
           message: 'Copy diagnostics',
@@ -6357,6 +6419,7 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
                   builder: (context, peers, _) => _FipsMeshMap(
                     worker: widget.fipsPeerNpub,
                     peers: peers,
+                    contactNameForPubkey: widget.contactNameForPubkey,
                     active: active,
                     onRefresh: _refreshFipsMesh,
                     refreshing: _refreshingFipsMesh,
@@ -6494,6 +6557,7 @@ class _FipsMeshMap extends StatelessWidget {
   const _FipsMeshMap({
     required this.worker,
     required this.peers,
+    required this.contactNameForPubkey,
     required this.active,
     required this.onRefresh,
     required this.refreshing,
@@ -6501,6 +6565,7 @@ class _FipsMeshMap extends StatelessWidget {
 
   final String worker;
   final List<String> peers;
+  final String Function(String pubkey) contactNameForPubkey;
   final bool active;
   final Future<void> Function() onRefresh;
   final bool refreshing;
@@ -6520,7 +6585,7 @@ class _FipsMeshMap extends StatelessWidget {
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                'Worker ${compactIdentifier(worker)}',
+                'Worker ${contactNameForPubkey(worker)}',
                 style: theme.textTheme.titleSmall?.copyWith(
                   fontWeight: FontWeight.w700,
                 ),
@@ -6556,7 +6621,7 @@ class _FipsMeshMap extends StatelessWidget {
                 const SizedBox(width: 12),
                 Icon(Icons.devices_other_outlined, size: 18, color: linkColor),
                 const SizedBox(width: 8),
-                Text(compactIdentifier(peer)),
+                Text(contactNameForPubkey(peer)),
                 const SizedBox(width: 8),
                 Text(
                   'connected',
@@ -7155,7 +7220,7 @@ class _WorkerConsolePageState extends State<_WorkerConsolePage> {
         .toList();
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Worker console'),
+        title: const Text('Host'),
         actions: [
           IconButton(
             tooltip: 'Refresh worker stats',
@@ -7933,13 +7998,15 @@ class _HistoryLineChart extends StatelessWidget {
               _ChartAxis(color: Theme.of(context).colorScheme.onSurfaceVariant),
               const SizedBox(width: 8),
               Expanded(
-                child: CustomPaint(
-                  painter: _HistoryLinePainter(
-                    values: values,
-                    color: color,
-                    secondaryValues: secondaryValues,
-                    secondaryColor: secondaryColor,
-                    gridColor: Theme.of(context).colorScheme.outlineVariant,
+                child: SizedBox.expand(
+                  child: CustomPaint(
+                    painter: _HistoryLinePainter(
+                      values: values,
+                      color: color,
+                      secondaryValues: secondaryValues,
+                      secondaryColor: secondaryColor,
+                      gridColor: Theme.of(context).colorScheme.outlineVariant,
+                    ),
                   ),
                 ),
               ),
@@ -9709,6 +9776,7 @@ class _SettingsPage extends StatelessWidget {
     required this.theme,
     required this.repoTargets,
     required this.computerServiceTarget,
+    required this.showRepoTarget,
     required this.selectedRepoTargetId,
     required this.activeTargetName,
     required this.profileNameController,
@@ -9791,6 +9859,7 @@ class _SettingsPage extends StatelessWidget {
   final AppTheme theme;
   final List<RepoTarget> repoTargets;
   final RepoTarget? computerServiceTarget;
+  final bool showRepoTarget;
   final String? selectedRepoTargetId;
   final String activeTargetName;
   final TextEditingController profileNameController;
@@ -9903,6 +9972,7 @@ class _SettingsPage extends StatelessWidget {
           const SizedBox(height: 16),
           _ConnectionPanel(
             repoTargets: repoTargets,
+            showRepoTarget: showRepoTarget,
             selectedRepoTargetId: selectedRepoTargetId,
             activeTargetName: activeTargetName,
             targetNameController: targetNameController,
@@ -10648,6 +10718,7 @@ class _AutoSpeakSwitchState extends State<_AutoSpeakSwitch> {
 class _ConnectionPanel extends StatelessWidget {
   const _ConnectionPanel({
     required this.repoTargets,
+    required this.showRepoTarget,
     required this.selectedRepoTargetId,
     required this.activeTargetName,
     required this.targetNameController,
@@ -10696,6 +10767,7 @@ class _ConnectionPanel extends StatelessWidget {
   });
 
   final List<RepoTarget> repoTargets;
+  final bool showRepoTarget;
   final String? selectedRepoTargetId;
   final String activeTargetName;
   final TextEditingController targetNameController;
@@ -10763,77 +10835,73 @@ class _ConnectionPanel extends StatelessWidget {
           children: [
             Text('Settings', style: theme.textTheme.titleMedium),
             const SizedBox(height: 12),
-            Text('Repo target', style: theme.textTheme.titleSmall),
-            const SizedBox(height: 8),
-            DropdownButtonFormField<String>(
-              initialValue: targetValue,
-              isExpanded: true,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: 'Active worker target',
-              ),
-              hint: const Text('New unsaved target'),
-              items: [
-                for (final target in repoTargets)
-                  DropdownMenuItem(
-                    value: target.id,
-                    child: Text(
-                      target.displayName,
-                      overflow: TextOverflow.ellipsis,
+            if (showRepoTarget) ...[
+              Text('Repo target', style: theme.textTheme.titleSmall),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                initialValue: targetValue,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: 'Active worker target',
+                ),
+                hint: const Text('New unsaved target'),
+                items: [
+                  for (final target in repoTargets)
+                    DropdownMenuItem(
+                      value: target.id,
+                      child: Text(
+                        target.displayName,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                  ),
-              ],
-              onChanged: connecting ? null : onTargetChanged,
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: targetNameController,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                labelText: 'Target name',
+                ],
+                onChanged: connecting ? null : onTargetChanged,
               ),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                TextButton.icon(
-                  onPressed: connecting ? null : onNewTarget,
-                  icon: const Icon(Icons.add),
-                  label: const Text('New'),
+              const SizedBox(height: 12),
+              TextField(
+                controller: targetNameController,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: 'Target name',
                 ),
-                TextButton.icon(
-                  onPressed: connecting ? null : onSaveTarget,
-                  icon: const Icon(Icons.save),
-                  label: const Text('Save'),
-                ),
-                if (_supportsCameraQrScan)
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
                   TextButton.icon(
-                    onPressed: connecting ? null : onScanTarget,
-                    icon: const Icon(Icons.qr_code_scanner),
-                    label: const Text('Scan'),
+                    onPressed: connecting ? null : onNewTarget,
+                    icon: const Icon(Icons.add),
+                    label: const Text('New'),
                   ),
-                TextButton.icon(
-                  onPressed: connecting ? null : onPasteTarget,
-                  icon: const Icon(Icons.content_paste_go_outlined),
-                  label: const Text('Paste target'),
-                ),
-                IconButton(
-                  tooltip: 'Delete target',
-                  onPressed: connecting ? null : onDeleteTarget,
-                  icon: const Icon(Icons.delete_outline),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: connecting ? null : onEnterInviteCode,
-              icon: const Icon(Icons.group_add_outlined),
-              label: const Text('Enter workspace invite code'),
-            ),
-            const Divider(height: 28),
+                  TextButton.icon(
+                    onPressed: connecting ? null : onSaveTarget,
+                    icon: const Icon(Icons.save),
+                    label: const Text('Save'),
+                  ),
+                  if (_supportsCameraQrScan)
+                    TextButton.icon(
+                      onPressed: connecting ? null : onScanTarget,
+                      icon: const Icon(Icons.qr_code_scanner),
+                      label: const Text('Scan'),
+                    ),
+                  TextButton.icon(
+                    onPressed: connecting ? null : onPasteTarget,
+                    icon: const Icon(Icons.content_paste_go_outlined),
+                    label: const Text('Paste target'),
+                  ),
+                  IconButton(
+                    tooltip: 'Delete target',
+                    onPressed: connecting ? null : onDeleteTarget,
+                    icon: const Icon(Icons.delete_outline),
+                  ),
+                ],
+              ),
+              const Divider(height: 28),
+            ],
             Text('Relay session', style: theme.textTheme.titleSmall),
             const SizedBox(height: 8),
             TextField(

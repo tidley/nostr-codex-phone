@@ -1206,6 +1206,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                 config.messenger.as_ref(),
                 &workspace_outbound,
                 &message.sender_pubkey_hex,
+                config.owner_peer_hex.as_deref(),
                 &message.event_id,
                 request,
                 &config.codex_config,
@@ -1670,11 +1671,26 @@ fn legacy_message_replays_workspace_voice(
         })
 }
 
+fn workspace_action_requires_owner(action: &str) -> bool {
+    matches!(
+        action,
+        "create_agent"
+            | "create_conversation_agent"
+            | "rename_agent"
+            | "restart_agent_session"
+            | "update_agent_profile"
+            | "delete_agent"
+            | "add_conversation_agent"
+            | "remove_conversation_agent"
+    )
+}
+
 async fn process_workspace_request(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
     outbound: &WorkspaceOutbound,
     sender: &str,
+    owner: Option<&str>,
     event_id: &str,
     request: WorkspaceRequest,
     codex_config: &CodexConfig,
@@ -1683,6 +1699,9 @@ async fn process_workspace_request(
     agent_queues: &mut WorkspaceAgentQueues,
     fips_capabilities: &Arc<Mutex<HashMap<String, (String, Instant)>>>,
 ) -> Result<()> {
+    if workspace_action_requires_owner(&request.action) && owner != Some(sender) {
+        bail!("Only the workspace owner can manage agents.");
+    }
     let update = match request.action.as_str() {
         "typing" => {
             let expires_in = request.expires_in_seconds.unwrap_or(4).clamp(1, 30);
@@ -1800,6 +1819,38 @@ async fn process_workspace_request(
                         revision: workspace.revision()?,
                         channels: vec![],
                         members: peers,
+                        messages: vec![],
+                        agents: vec![],
+                        conversation_agents: vec![],
+                        conversation_preprompts: vec![],
+                        typing: None,
+                    }),
+                )
+                .await?;
+            return Ok(());
+        }
+        "fips_presence_offer" | "fips_presence_ready" => {
+            let recipient = request.recipient_pubkey.as_deref().unwrap_or_default();
+            if recipient.is_empty() || recipient == sender || !workspace.is_member(recipient)? {
+                bail!("FIPS presence recipient is not a workspace member");
+            }
+            let routes = outbound.fips_routes.lock().await;
+            if !routes.contains_key(sender) || !routes.contains_key(recipient) {
+                return Ok(());
+            }
+            drop(routes);
+            outbound
+                .send(
+                    messenger,
+                    recipient,
+                    WireMessage::workspace_update(WorkspaceUpdate {
+                        action: request.action,
+                        revision: workspace.revision()?,
+                        channels: vec![],
+                        members: vec![WorkspaceMemberPayload {
+                            pubkey: sender.to_string(),
+                            display_name: String::new(),
+                        }],
                         messages: vec![],
                         agents: vec![],
                         conversation_agents: vec![],
@@ -10352,6 +10403,13 @@ mod tests {
 
         let session = latest_codex_session_for_workdir_in(&sessions_dir, &workdir).unwrap();
         assert_eq!(session.as_deref(), Some("zzz-session"));
+    }
+
+    #[test]
+    fn reserves_agent_management_for_workspace_owner() {
+        assert!(workspace_action_requires_owner("create_conversation_agent"));
+        assert!(workspace_action_requires_owner("delete_agent"));
+        assert!(!workspace_action_requires_owner("send_channel_message"));
     }
 
     fn write_session_fixture(
