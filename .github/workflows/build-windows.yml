@@ -26,6 +26,9 @@ jobs:
       - run: flutter config --enable-windows-desktop
       - run: flutter pub get
       - run: cargo build --release --manifest-path rust/Cargo.toml
+        env:
+          # audiopus_sys bundles an Opus CMake project that still requests 3.5.
+          CMAKE_POLICY_VERSION_MINIMUM: 3.5
       - run: flutter build windows --release
       - name: Package Windows bundle
         shell: pwsh

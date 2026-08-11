@@ -121,6 +121,7 @@ class _WorkspaceWorkerState {
   final WorkspaceState workspace = WorkspaceState();
   final _WorkspaceFipsSession fips = _WorkspaceFipsSession();
   final ValueNotifier<int> revision = ValueNotifier(0);
+  final ValueNotifier<List<String>> diagnostics = ValueNotifier(const []);
   String? cacheRestoredKey;
   Timer? cacheSaveTimer;
   final Map<String, int> unreadCounts = {};
@@ -132,6 +133,7 @@ class _WorkspaceWorkerState {
     cacheSaveTimer?.cancel();
     fips.dispose();
     revision.dispose();
+    diagnostics.dispose();
   }
 }
 
@@ -658,7 +660,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _workerConsoleHistoryCache = <String, Map<String, dynamic>>{};
   final _workspaceFileBrowser = ValueNotifier<FileBrowserResult?>(null);
   final _workspaceFilePreview = ValueNotifier<FileContentResult?>(null);
-  final _clientDiagnostics = ValueNotifier<List<String>>(const []);
   Completer<List<_OpenCodeModelChoice>>? _pendingOpenCodeModelListCompleter;
   final _completedVoiceEventIds = <String>{};
   Completer<List<RepoChoice>>? _pendingRepoListCompleter;
@@ -986,7 +987,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _workspaceDisplayNameController.dispose();
     _workspaceFileBrowser.dispose();
     _workspaceFilePreview.dispose();
-    _clientDiagnostics.dispose();
     _workspaceFipsEnabled.dispose();
     for (final state in _workspaceWorkers.values) {
       state.dispose();
@@ -7183,8 +7183,9 @@ Return a concise catch-up summary of what happened after that point: completed w
 
   void _recordDiagnostic(String message) {
     final timestamp = DateTime.now().toIso8601String().substring(11, 19);
-    final next = [..._clientDiagnostics.value, '$timestamp  $message'];
-    _clientDiagnostics.value = List.unmodifiable(
+    final diagnostics = _activeWorkspaceWorker.diagnostics;
+    final next = [...diagnostics.value, '$timestamp  $message'];
+    diagnostics.value = List.unmodifiable(
       next.length > 200 ? next.sublist(next.length - 200) : next,
     );
   }
@@ -7349,11 +7350,11 @@ Return a concise catch-up summary of what happened after that point: completed w
           onOpenSessions: () => setState(() => _showTeamWorkspace = false),
           onOpenSettings: () => unawaited(_openSettings()),
           onEnterInviteCode: () => unawaited(_enterWorkspaceInviteCode()),
-          diagnostics: _clientDiagnostics,
+          diagnostics: _activeWorkspaceWorker.diagnostics,
           onOpenDiagnostics: () => Navigator.of(context).push<void>(
             MaterialPageRoute(
               builder: (_) => _ClientDiagnosticsPage(
-                diagnostics: _clientDiagnostics,
+                diagnostics: _activeWorkspaceWorker.diagnostics,
                 fipsEnabled: _workspaceFipsEnabled,
                 fipsHeartbeat: _workspaceFipsHeartbeat,
                 fipsPeers: _workspaceFipsPeers,
