@@ -50,7 +50,7 @@ if [[ -n "${HOME:-}" && -x "$HOME/.opencode/bin/opencode" ]]; then
 fi
 
 export RUST_LOG="${RUST_LOG:-info,nostr_codex_server=debug,nostr_sdk=info,nostr=info}"
-export NOSTR_RELAYS="${NOSTR_RELAYS:-wss://relay.damus.io,wss://nos.lol,wss://nostr.mom}"
+export NOSTR_RELAYS="${NOSTR_RELAYS:-wss://relay.damus.io,wss://nos.lol,wss://nostr.mom,wss://relay.primal.net,wss://purplepag.es}"
 export NOSTR_CODEX_ENV_FILE="${NOSTR_CODEX_ENV_FILE:-$state_dir/.env.server}"
 export CODEX_MEMORY_DB="${CODEX_MEMORY_DB:-$state_dir/memory.sqlite3}"
 export AGENT_BACKEND="${AGENT_BACKEND:-opencode}"

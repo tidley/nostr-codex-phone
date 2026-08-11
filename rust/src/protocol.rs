@@ -222,6 +222,10 @@ pub struct WorkspaceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_pubkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_pubkey: Option<String>,
+    #[serde(default)]
+    pub member_is_admin: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// Client-generated ID used to reconcile optimistic message delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -427,6 +431,8 @@ pub struct WorkspaceMemberPayload {
     pub pubkey: String,
     #[serde(default)]
     pub display_name: String,
+    #[serde(default)]
+    pub is_admin: bool,
 }
 
 #[derive(Deserialize)]
@@ -452,6 +458,7 @@ where
                     (!pubkey.is_empty()).then_some(WorkspaceMemberPayload {
                         pubkey,
                         display_name: String::new(),
+                        is_admin: false,
                     })
                 }
             })
@@ -1443,6 +1450,14 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
                         .recipient_pubkey
                         .as_deref()
                         .is_some_and(|id| !id.trim().is_empty())) =>
+        {
+            Ok(())
+        }
+        "set_member_admin"
+            if request
+                .member_pubkey
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()) =>
         {
             Ok(())
         }
