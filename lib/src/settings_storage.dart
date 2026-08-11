@@ -8,10 +8,6 @@ import 'package:path_provider/path_provider.dart';
 bool isLinuxKeyringLocked(Object error) =>
     error is PlatformException && error.code == 'KeyringLocked';
 
-bool isMacOSKeychainUnavailable(Object error) =>
-    error is PlatformException &&
-    (error.code == '-34018' || error.details?.toString() == '-34018');
-
 abstract interface class SecureSettingsStorage {
   Future<String?> read({required String key});
   Future<void> write({required String key, required String? value});
@@ -34,7 +30,7 @@ class _FlutterSecureSettingsStorage implements SecureSettingsStorage {
   Future<void> delete({required String key}) => _storage.delete(key: key);
 }
 
-/// Uses platform secure storage normally, with a user-only file fallback when unavailable.
+/// Uses Secret Service normally, with a user-only file fallback if it is locked.
 class SettingsStorage {
   SettingsStorage({
     SecureSettingsStorage? secureStorage,
@@ -45,7 +41,7 @@ class SettingsStorage {
 
   final SecureSettingsStorage _secureStorage;
   final Future<Directory> Function() _applicationSupportDirectory;
-  bool _useFallback = false;
+  bool _useLinuxFallback = false;
   Future<void> _fallbackOperations = Future.value();
 
   Future<String?> read({required String key}) => _run(
@@ -75,15 +71,12 @@ class SettingsStorage {
     Future<T> Function() secureOperation,
     Future<T> Function() fallbackOperation,
   ) async {
-    if (_useFallback) return _runFallback(fallbackOperation);
+    if (_useLinuxFallback) return _runFallback(fallbackOperation);
     try {
       return await secureOperation();
     } on PlatformException catch (error) {
-      final shouldUseFallback =
-          (Platform.isLinux && isLinuxKeyringLocked(error)) ||
-          (Platform.isMacOS && isMacOSKeychainUnavailable(error));
-      if (!shouldUseFallback) rethrow;
-      _useFallback = true;
+      if (!Platform.isLinux || !isLinuxKeyringLocked(error)) rethrow;
+      _useLinuxFallback = true;
       return _runFallback(fallbackOperation);
     }
   }

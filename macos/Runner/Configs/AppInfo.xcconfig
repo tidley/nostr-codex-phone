@@ -10,6 +10,8 @@ PRODUCT_NAME = Ribbit
 // The application's bundle identifier
 PRODUCT_BUNDLE_IDENTIFIER = com.tidley.nostrcodexphone
 
+DEVELOPMENT_TEAM = 35YGTSUCNA
+CODE_SIGN_IDENTITY = Apple Development
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 com.tidley. All rights reserved.
