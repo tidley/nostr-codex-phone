@@ -582,6 +582,7 @@ class _TeamWorkspace extends StatefulWidget {
     required this.memberStatus,
     required this.workspace,
     required this.focusedConversationKey,
+    required this.openThreadKey,
     required this.ownPubkey,
     required this.localSenderIds,
     required this.fipsConnectedPeers,
@@ -656,6 +657,7 @@ class _TeamWorkspace extends StatefulWidget {
   final String memberStatus;
   final WorkspaceState workspace;
   final String focusedConversationKey;
+  final String? openThreadKey;
   final String ownPubkey;
   final Set<String> localSenderIds;
   final Set<String> fipsConnectedPeers;
@@ -823,6 +825,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   void initState() {
     super.initState();
     _restoreFocusedConversation();
+    _restoreOpenThread();
     _composer.addListener(_onComposerChanged);
     _composerFocus.addListener(_onComposerChanged);
     _threadComposer.addListener(_onComposerChanged);
@@ -839,6 +842,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     if (oldWidget.focusedConversationKey != widget.focusedConversationKey ||
         _active == 'workspace') {
       _restoreFocusedConversation();
+    }
+    if (oldWidget.openThreadKey != widget.openThreadKey || _thread == null) {
+      _restoreOpenThread();
     }
   }
 
@@ -857,6 +863,20 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         return;
       }
     }
+  }
+
+  void _restoreOpenThread() {
+    final conversationKey = _conversationKey;
+    final openThreadKey = widget.openThreadKey;
+    if (conversationKey == null ||
+        openThreadKey == null ||
+        !openThreadKey.startsWith('$conversationKey:')) {
+      return;
+    }
+    _thread = _threadWithId(
+      openThreadKey.substring(conversationKey.length + 1),
+    );
+    _restoreThreadDraft();
   }
 
   @override
@@ -1006,7 +1026,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       }
       final directory = await getTemporaryDirectory();
       final path =
-          '${directory.path}${Platform.pathSeparator}workspace_voice_${DateTime.now().millisecondsSinceEpoch}.ogg';
+          '${directory.path}/workspace_voice_${DateTime.now().millisecondsSinceEpoch}.ogg';
       await _voiceRecorder.start(
         const RecordConfig(
           encoder: AudioEncoder.opus,
@@ -1076,9 +1096,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   }
 
   Future<void> _deleteVoiceFile(String path) async {
-    try {
-      await File(path).delete();
-    } catch (_) {}
+    await deleteLocalFile(path);
   }
 
   bool get _canSendTyping =>
@@ -1754,12 +1772,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         if (!didPop && canDismissNarrowThread) _closeThread();
       },
       child: Scaffold(
-      key: _scaffoldKey,
-      backgroundColor: Theme.of(
-        context,
-      ).extension<_WorkspacePalette>()!.background,
-      appBar: wide
-          ? null
+        key: _scaffoldKey,
+        backgroundColor: Theme.of(
+          context,
+        ).extension<_WorkspacePalette>()!.background,
+        appBar: wide
+            ? null
             : AppBar(
                 title: Text(
                   _title,
@@ -1777,52 +1795,52 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                   ),
                 ],
               ),
-      drawer: wide ? null : Drawer(child: SafeArea(child: sidebar)),
-      body: SafeArea(
-        child: Row(
-          children: [
-            if (wide) SizedBox(width: _sidebarWidth, child: sidebar),
-            if (wide)
-              SidebarPaneResizeHandle(
-                onResize: (delta) => setState(() {
-                  _sidebarWidth = (_sidebarWidth + delta).clamp(
-                    _sidebarMinWidth,
-                    _sidebarMaxWidth,
-                  );
-                }),
-              ),
-            Expanded(
-              child: fullSidePane
-                  ? sidePane
-                  : showSingleSidePane
-                  ? narrowSidePane
-                  : conversation,
-            ),
-            if (canShowInlineSidePane) ...[
-              ThreadPaneResizeHandle(
-                onResize: (delta) => setState(() {
-                  _threadPaneWidth = (_threadPaneWidth + delta).clamp(
-                    _threadPaneMinWidth,
-                    maxSidePaneWidth,
-                  );
-                  final key = _conversationKey;
-                  if (key != null) {
-                    _panelStates[key] = _WorkspacePanelState(
-                      threadId: _thread?.id,
-                      width: _threadPaneWidth,
-                      alsoSendToMain: _alsoSendToMain,
-                      filesSelected: _filesSelected,
-                      fileBrowser: widget.fileBrowser.value,
-                      filePreview: widget.filePreview.value,
+        drawer: wide ? null : Drawer(child: SafeArea(child: sidebar)),
+        body: SafeArea(
+          child: Row(
+            children: [
+              if (wide) SizedBox(width: _sidebarWidth, child: sidebar),
+              if (wide)
+                SidebarPaneResizeHandle(
+                  onResize: (delta) => setState(() {
+                    _sidebarWidth = (_sidebarWidth + delta).clamp(
+                      _sidebarMinWidth,
+                      _sidebarMaxWidth,
                     );
-                  }
-                }),
+                  }),
+                ),
+              Expanded(
+                child: fullSidePane
+                    ? sidePane
+                    : showSingleSidePane
+                    ? narrowSidePane
+                    : conversation,
               ),
-              SizedBox(width: sidePaneWidth, child: sidePane),
+              if (canShowInlineSidePane) ...[
+                ThreadPaneResizeHandle(
+                  onResize: (delta) => setState(() {
+                    _threadPaneWidth = (_threadPaneWidth + delta).clamp(
+                      _threadPaneMinWidth,
+                      maxSidePaneWidth,
+                    );
+                    final key = _conversationKey;
+                    if (key != null) {
+                      _panelStates[key] = _WorkspacePanelState(
+                        threadId: _thread?.id,
+                        width: _threadPaneWidth,
+                        alsoSendToMain: _alsoSendToMain,
+                        filesSelected: _filesSelected,
+                        fileBrowser: widget.fileBrowser.value,
+                        filePreview: widget.filePreview.value,
+                      );
+                    }
+                  }),
+                ),
+                SizedBox(width: sidePaneWidth, child: sidePane),
+              ],
             ],
-          ],
+          ),
         ),
-      ),
       ),
     );
   }
@@ -2546,7 +2564,7 @@ class _WorkspaceSidebar extends StatelessWidget {
                         tooltip: 'Switch workspace',
                         onSelected: (value) {
                           if (value == 'join') {
-                            onSettings();
+                            onSelect(_WorkspaceSection.access, 'access');
                             return;
                           }
                           if (value == 'leave') {
@@ -3123,7 +3141,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     final directCall = widget.section == _WorkspaceSection.direct;
     final channelCall = widget.section == _WorkspaceSection.channel;
     final callPhase = directCall
-        ? widget.callPeerPubkey == null || widget.callPeerPubkey == widget.directPeer
+        ? widget.callPeerPubkey == null ||
+                  widget.callPeerPubkey == widget.directPeer
               ? widget.callPhase
               : _CallPhase.idle
         : widget.groupCallChannelId == null ||
@@ -3350,125 +3369,130 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         children: [
           if (!compactHeader)
             Container(
-            color: palette.sidebar.withValues(alpha: 0.48),
-            padding: const EdgeInsets.fromLTRB(24, 18, 20, 14),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            widget.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.titleLarge
-                                ?.copyWith(fontWeight: FontWeight.bold),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            '${widget.section == _WorkspaceSection.channel ? 'Channel' : 'Direct message'}${widget.agents.isEmpty ? '' : ' · ${widget.agents.length} agent${widget.agents.length == 1 ? '' : 's'}'}',
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ],
-                      ),
-                    ),
-                    if (widget.onManageAgents != null)
-                      IconButton(
-                        onPressed: widget.onManageAgents,
-                        icon: const Icon(Icons.person_add_alt_1_outlined),
-                        tooltip: 'Manage agents',
-                      ),
-                    IconButton(
-                      onPressed: () => setState(() {
-                        _searchOpen = !_searchOpen;
-                        if (!_searchOpen) {
-                          _searchController.clear();
-                          _searchQuery = '';
-                        }
-                      }),
-                      icon: Icon(
-                        _searchOpen ? Icons.search_off_outlined : Icons.search,
-                      ),
-                      tooltip: _searchOpen ? 'Close search' : 'Search messages',
-                    ),
-                    IconButton(
-                      onPressed: widget.onReload,
-                      icon: const Icon(Icons.arrow_upward_outlined),
-                      tooltip: 'Reload last messages',
-                    ),
-                    if (widget.section == _WorkspaceSection.channel)
-                      IconButton(
-                        onPressed: () => unawaited(widget.onOpenFiles()),
-                        icon: const Icon(Icons.folder_open_outlined),
-                        tooltip: 'Browse repository files',
-                      ),
-                    if (widget.section == _WorkspaceSection.channel)
-                      IconButton(
-                        onPressed: _editConversationPreprompt,
-                        icon: const Icon(Icons.edit_note_outlined),
-                        tooltip: 'Edit agent brief',
-                      ),
-                    if (_supportsLiveCalls &&
-                        widget.section == _WorkspaceSection.direct)
-                      _CallControl(
-                        phase:
-                            widget.callPeerPubkey == null ||
-                                widget.callPeerPubkey == widget.directPeer
-                            ? widget.callPhase
-                            : _CallPhase.idle,
-                        onStart: () => widget.onStartCall(widget.directPeer!),
-                        onAccept: widget.onAcceptCall,
-                        onReject: widget.onRejectCall,
-                        onHangup: widget.onHangupCall,
-                        mediaSource: widget.mediaSource,
-                        onMediaSourceChanged: widget.onMediaSourceChanged,
-                      ),
-                    if (_supportsLiveCalls &&
-                        widget.section == _WorkspaceSection.channel)
-                      _CallControl(
-                        phase:
-                            widget.groupCallChannelId == null ||
-                                widget.groupCallChannelId == widget.channelId
-                            ? widget.groupCallPhase
-                            : _CallPhase.idle,
-                        onStart: () => unawaited(
-                          widget.onStartChannelCall(widget.channelId!),
-                        ),
-                        onAccept: widget.onAcceptGroupCall,
-                        onReject: widget.onRejectGroupCall,
-                        onHangup: widget.onHangupGroupCall,
-                        mediaSource: widget.mediaSource,
-                        onMediaSourceChanged: widget.onMediaSourceChanged,
-                      ),
-                  ],
-                ),
-                if (_searchOpen) ...[
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _searchController,
-                    autofocus: true,
-                    onChanged: (value) => setState(() => _searchQuery = value),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      prefixIcon: const Icon(Icons.search),
-                      hintText: 'Search messages and people',
-                      suffixIcon: _searchQuery.isEmpty
-                          ? null
-                          : IconButton(
-                              tooltip: 'Clear search',
-                              onPressed: _searchController.clear,
-                              icon: const Icon(Icons.close),
+              color: palette.sidebar.withValues(alpha: 0.48),
+              padding: const EdgeInsets.fromLTRB(24, 18, 20, 14),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              widget.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.titleLarge
+                                  ?.copyWith(fontWeight: FontWeight.bold),
                             ),
-                      border: const OutlineInputBorder(),
-                    ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${widget.section == _WorkspaceSection.channel ? 'Channel' : 'Direct message'}${widget.agents.isEmpty ? '' : ' · ${widget.agents.length} agent${widget.agents.length == 1 ? '' : 's'}'}',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (widget.onManageAgents != null)
+                        IconButton(
+                          onPressed: widget.onManageAgents,
+                          icon: const Icon(Icons.person_add_alt_1_outlined),
+                          tooltip: 'Manage agents',
+                        ),
+                      IconButton(
+                        onPressed: () => setState(() {
+                          _searchOpen = !_searchOpen;
+                          if (!_searchOpen) {
+                            _searchController.clear();
+                            _searchQuery = '';
+                          }
+                        }),
+                        icon: Icon(
+                          _searchOpen
+                              ? Icons.search_off_outlined
+                              : Icons.search,
+                        ),
+                        tooltip: _searchOpen
+                            ? 'Close search'
+                            : 'Search messages',
+                      ),
+                      IconButton(
+                        onPressed: widget.onReload,
+                        icon: const Icon(Icons.arrow_upward_outlined),
+                        tooltip: 'Reload last messages',
+                      ),
+                      if (widget.section == _WorkspaceSection.channel)
+                        IconButton(
+                          onPressed: () => unawaited(widget.onOpenFiles()),
+                          icon: const Icon(Icons.folder_open_outlined),
+                          tooltip: 'Browse repository files',
+                        ),
+                      if (widget.section == _WorkspaceSection.channel)
+                        IconButton(
+                          onPressed: _editConversationPreprompt,
+                          icon: const Icon(Icons.edit_note_outlined),
+                          tooltip: 'Edit agent brief',
+                        ),
+                      if (_supportsLiveCalls &&
+                          widget.section == _WorkspaceSection.direct)
+                        _CallControl(
+                          phase:
+                              widget.callPeerPubkey == null ||
+                                  widget.callPeerPubkey == widget.directPeer
+                              ? widget.callPhase
+                              : _CallPhase.idle,
+                          onStart: () => widget.onStartCall(widget.directPeer!),
+                          onAccept: widget.onAcceptCall,
+                          onReject: widget.onRejectCall,
+                          onHangup: widget.onHangupCall,
+                          mediaSource: widget.mediaSource,
+                          onMediaSourceChanged: widget.onMediaSourceChanged,
+                        ),
+                      if (_supportsLiveCalls &&
+                          widget.section == _WorkspaceSection.channel)
+                        _CallControl(
+                          phase:
+                              widget.groupCallChannelId == null ||
+                                  widget.groupCallChannelId == widget.channelId
+                              ? widget.groupCallPhase
+                              : _CallPhase.idle,
+                          onStart: () => unawaited(
+                            widget.onStartChannelCall(widget.channelId!),
+                          ),
+                          onAccept: widget.onAcceptGroupCall,
+                          onReject: widget.onRejectGroupCall,
+                          onHangup: widget.onHangupGroupCall,
+                          mediaSource: widget.mediaSource,
+                          onMediaSourceChanged: widget.onMediaSourceChanged,
+                        ),
+                    ],
                   ),
+                  if (_searchOpen) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _searchController,
+                      autofocus: true,
+                      onChanged: (value) =>
+                          setState(() => _searchQuery = value),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        prefixIcon: const Icon(Icons.search),
+                        hintText: 'Search messages and people',
+                        suffixIcon: _searchQuery.isEmpty
+                            ? null
+                            : IconButton(
+                                tooltip: 'Clear search',
+                                onPressed: _searchController.clear,
+                                icon: const Icon(Icons.close),
+                              ),
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
                 ],
-              ],
+              ),
             ),
-          ),
           if (!compactHeader) const Divider(height: 1),
           Expanded(
             child: LayoutBuilder(
@@ -3848,9 +3872,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
             padding: const EdgeInsets.only(top: 2),
             child: Row(
               mainAxisSize: MainAxisSize.min,
-              children: [
-                _timestamp(context, grouped: true),
-              ],
+              children: [_timestamp(context, grouped: true)],
             ),
           ),
         ),
@@ -6422,7 +6444,8 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
                 : Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      if (widget.canManageMembers && !person.startsWith('agent:'))
+                      if (widget.canManageMembers &&
+                          !person.startsWith('agent:'))
                         Switch.adaptive(
                           value: widget.memberAdmins.contains(person),
                           onChanged: (isAdmin) => unawaited(
@@ -12454,6 +12477,14 @@ class _MessageTileState extends State<_MessageTile>
   Future<void> _downloadAndOpenAttachment(
     BridgeAudioReference attachment,
   ) async {
+    if (kIsWeb) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Attachment downloads are unavailable in the browser.'),
+        ),
+      );
+      return;
+    }
     final key = attachment.sha256;
     if (_downloadingAttachments.contains(key)) return;
     setState(() => _downloadingAttachments.add(key));
@@ -12461,7 +12492,7 @@ class _MessageTileState extends State<_MessageTile>
       final directory = await getApplicationDocumentsDirectory();
       final downloaded = await blossomDownloadAttachment(
         attachment: attachment,
-        destinationDir: '${directory.path}${Platform.pathSeparator}attachments',
+        destinationDir: '${directory.path}/attachments',
       );
       final result = await OpenFilex.open(
         downloaded.path,
