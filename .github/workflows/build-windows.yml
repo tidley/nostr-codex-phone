@@ -25,6 +25,7 @@ jobs:
 
       - run: flutter config --enable-windows-desktop
       - run: flutter pub get
+      - run: cargo build --release --manifest-path rust/Cargo.toml
       - run: flutter build windows --release
       - name: Package Windows bundle
         shell: pwsh
