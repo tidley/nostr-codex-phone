@@ -6899,8 +6899,8 @@ fn root_filesystem_status() -> Option<serde_json::Value> {
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     (unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } == 0).then(|| {
         let stat = unsafe { stat.assume_init() };
-        let total = stat.f_blocks.saturating_mul(stat.f_frsize);
-        let available = stat.f_bavail.saturating_mul(stat.f_frsize);
+        let total = u64::from(stat.f_blocks).saturating_mul(stat.f_frsize as u64);
+        let available = u64::from(stat.f_bavail).saturating_mul(stat.f_frsize as u64);
         serde_json::json!({"mount": "/", "total_bytes": total, "available_bytes": available, "used_bytes": total.saturating_sub(available)})
     })
 }

@@ -2029,6 +2029,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           !await _sendPairingSecretIfNeeded(serviceTarget)) {
         return;
       }
+      await _sendWorkspaceRequest({'action': 'list'});
       return;
     }
 

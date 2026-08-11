@@ -8,7 +8,8 @@
 PRODUCT_NAME = Ribbit
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.tidley.nostr_codex_phone
+PRODUCT_BUNDLE_IDENTIFIER = com.tidley.nostrcodexphone
+
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 com.tidley. All rights reserved.

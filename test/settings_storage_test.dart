@@ -41,6 +41,22 @@ void main() {
     expect(isLinuxKeyringLocked(StateError('keyring locked')), isFalse);
   });
 
+  test('recognizes only the unavailable macOS Keychain error', () {
+    expect(
+      isMacOSKeychainUnavailable(
+        PlatformException(
+          code: 'Unexpected security result code',
+          details: -34018,
+        ),
+      ),
+      isTrue,
+    );
+    expect(
+      isMacOSKeychainUnavailable(PlatformException(code: 'UnexpectedError')),
+      isFalse,
+    );
+  });
+
   test('uses the file fallback after a locked keyring read', () async {
     final directory = await Directory.systemTemp.createTemp(
       'settings-storage-',
