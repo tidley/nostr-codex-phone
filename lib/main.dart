@@ -2019,6 +2019,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     if (_isComputerServiceTarget(target)) {
       await _storeComputerServiceTarget(target);
+      final serviceTarget = _computerServiceTarget;
+      if (serviceTarget == null || !mounted) return;
+      await _restoreWorkspaceCache();
+      await _connectToTargetInBackground(serviceTarget);
+      if (!mounted ||
+          !_connected ||
+          _connectedPeerPubkey != serviceTarget.pubkey ||
+          !await _sendPairingSecretIfNeeded(serviceTarget)) {
+        return;
+      }
       return;
     }
 
@@ -3829,10 +3839,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   String? get _workspaceCacheServicePubkey {
-    final connected = _connectedPeerPubkey?.trim();
-    if (connected != null && connected.isNotEmpty) return connected;
     final selected = _computerServiceTarget?.pubkey.trim();
     if (selected != null && selected.isNotEmpty) return selected;
+    final connected = _connectedPeerPubkey?.trim();
+    if (connected != null && connected.isNotEmpty) return connected;
     final configured = _peerPubkeyController.text.trim();
     return configured.isEmpty ? null : configured;
   }
@@ -4036,7 +4046,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       await _restoreWorkspaceCache();
       _startPolling();
       unawaited(_fetchRecentInboxMessages());
-      unawaited(_sendWorkspaceRequest({'action': 'list'}));
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -4771,6 +4780,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         }
         final isMessageCreated =
             update is Map && update['action'] == 'message_created';
+        String? inactiveAgentConversationKey;
         setState(() {
           final addedMessages = worker.workspace.apply(
             decoded,
@@ -4804,15 +4814,33 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               if (!focused) {
                 worker.unreadCounts[conversationKey] =
                     (worker.unreadCounts[conversationKey] ?? 0) + 1;
+                if (isWorkspaceAgentSender(workspaceMessage.senderPubkey)) {
+                  inactiveAgentConversationKey = conversationKey;
+                }
               }
             }
           }
           worker.revision.value++;
         });
         _scheduleWorkspaceCacheSave(workerKey: workerKey);
+        if (inactiveAgentConversationKey != null) {
+          _showInactiveWorkspaceReplyPopup(
+            workerKey,
+            inactiveAgentConversationKey!,
+          );
+          _playInactiveSessionReplyAlert();
+        }
       } catch (_) {
         _showError('Received malformed workspace update');
       }
+      return true;
+    }
+
+    // FIPS workspace envelopes can also surface through the relay inbox. They
+    // are intentionally not normal chat payloads and must not create a reply
+    // notification for an unrelated session.
+    if (message.kind == 'invalid') {
+      _recordDiagnostic('Ignored non-chat encrypted inbox envelope');
       return true;
     }
 
@@ -5163,9 +5191,54 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   void _showInactiveSessionReplyPopup(String conversationKey) {
-    if (!_inactiveReplyPopupEnabled || !mounted) return;
     final target = _targetById(_repoTargets, conversationKey);
-    final sessionName = target?.displayName ?? 'another session';
+    final workspaceWorker = _computerServiceTargets
+        .cast<RepoTarget?>()
+        .firstWhere(
+          (worker) =>
+              worker != null &&
+              (worker.pubkey.trim().toLowerCase() ==
+                      conversationKey.trim().toLowerCase() ||
+                  worker.parentPubkey?.trim().toLowerCase() ==
+                      conversationKey.trim().toLowerCase()),
+          orElse: () => null,
+        );
+    if (workspaceWorker != null) {
+      final worker = _workspaceWorkerForKey(workspaceWorker.pubkey);
+      _showInactiveReplyPopup(
+        sessionName: workspaceWorker.displayName,
+        onTap: () => unawaited(
+          _openInactiveWorkspaceConversation(
+            workspaceWorker.pubkey,
+            worker.focusedConversationKey,
+          ),
+        ),
+      );
+      return;
+    }
+    _showInactiveReplyPopup(
+      sessionName: target?.displayName ?? 'another session',
+      onTap: () => unawaited(_selectRepoTarget(conversationKey)),
+    );
+  }
+
+  void _showInactiveWorkspaceReplyPopup(
+    String workerKey,
+    String conversationKey,
+  ) {
+    _showInactiveReplyPopup(
+      sessionName: 'Workspace',
+      onTap: () => unawaited(
+        _openInactiveWorkspaceConversation(workerKey, conversationKey),
+      ),
+    );
+  }
+
+  void _showInactiveReplyPopup({
+    required String sessionName,
+    required VoidCallback onTap,
+  }) {
+    if (!_inactiveReplyPopupEnabled || !mounted) return;
     _dismissInactiveReplyNotice(immediately: true);
 
     final overlay = Overlay.of(context, rootOverlay: true);
@@ -5181,7 +5254,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         sessionName: sessionName,
         onTap: () {
           _dismissInactiveReplyNotice();
-          unawaited(_selectRepoTarget(conversationKey));
+          onTap();
         },
       ),
     );
@@ -5193,6 +5266,25 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       const Duration(seconds: 4),
       _dismissInactiveReplyNotice,
     );
+  }
+
+  Future<void> _openInactiveWorkspaceConversation(
+    String workerKey,
+    String conversationKey,
+  ) async {
+    for (final target in _computerServiceTargets) {
+      if (target.pubkey.trim().toLowerCase() == workerKey.toLowerCase()) {
+        await _selectComputerServiceTarget(target);
+        break;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      final worker = _workspaceWorkerForKey(workerKey);
+      _showTeamWorkspace = true;
+      worker.focusedConversationKey = conversationKey;
+      worker.unreadCounts.remove(conversationKey);
+    });
   }
 
   void _dismissInactiveReplyNotice({bool immediately = false}) {
@@ -7623,7 +7715,11 @@ Return a concise catch-up summary of what happened after that point: completed w
         _scheduleWorkspaceFipsRetry();
       }
     }
-    if (!await _ensureConnectedToParentService()) return;
+    final workspaceTarget = _computerServiceTarget;
+    if (workspaceTarget == null ||
+        !await _ensureConnectedToWorkspaceService(workspaceTarget)) {
+      return;
+    }
     await _sendWithAutoRecovery(
       label: 'Workspace request',
       sender: () =>

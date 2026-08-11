@@ -2008,23 +2008,15 @@ class _ConversationAgentsPage extends StatelessWidget {
   Future<void> _createPreset(
     BuildContext context,
     (String, String, IconData) preset,
-  ) async {
-    final folders = await showDialog<List<String>>(
-      context: context,
-      builder: (_) => _FolderScopeDialog(onLoadChoices: onLoadFolders),
-    );
-    if (folders == null) return;
-    await onRequest(
-      {
-        ..._request('create_conversation_agent', ''),
-        'agent_name': preset.$1,
-        'agent_role': preset.$2,
-        'agent_preset': preset.$1.toLowerCase(),
-        'agent_skills': const <String>[],
-        'folder_scope': folders,
-      }..remove('agent_id'),
-    );
-  }
+  ) => onRequest(
+    {
+      ..._request('create_conversation_agent', ''),
+      'agent_name': preset.$1,
+      'agent_role': preset.$2,
+      'agent_preset': preset.$1.toLowerCase(),
+      'agent_skills': const <String>[],
+    }..remove('agent_id'),
+  );
 
   Future<void> _createCustom(BuildContext context) async {
     final profile = await showDialog<Map<String, Object?>>(

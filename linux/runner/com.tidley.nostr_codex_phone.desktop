@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ribbit
+Comment=Private coding workspace
+Exec=nostr_codex_phone
+Icon=com.tidley.nostr_codex_phone
+Categories=Development;Utility;
+Terminal=false
+StartupWMClass=com.tidley.nostr_codex_phone

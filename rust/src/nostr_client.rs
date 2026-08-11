@@ -243,7 +243,7 @@ impl NostrMessenger {
     ) -> Result<String> {
         self.send_wire_to_pubkey(
             receiver_pubkey,
-            WireMessage::routed_response(response, workdir),
+            WireMessage::routed_response(response, workdir, None),
         )
         .await
     }
@@ -295,6 +295,10 @@ impl NostrMessenger {
     }
 
     async fn send_payload_to(&self, receiver: PublicKey, payload: String) -> Result<String> {
+        tracing::info!(
+            recipient = %receiver.to_bech32()?,
+            "sending GiftWrapped DM"
+        );
         let event = PrivateDirectMessageBuilder::new(receiver, payload)
             .finalize(&self.keys)
             // Flutter receives an error's display text, not its anyhow chain.
