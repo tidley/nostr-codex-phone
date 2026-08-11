@@ -32,6 +32,7 @@ jobs:
       - run: flutter build windows --release
         env:
           CMAKE_POLICY_VERSION_MINIMUM: 3.5
+          CARGOKIT_VERBOSE: 1
       - name: Package Windows bundle
         shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath build/crew-windows-x64.zip
