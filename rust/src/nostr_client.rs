@@ -507,6 +507,8 @@ pub fn default_relays() -> Vec<String> {
         "wss://relay.damus.io".to_string(),
         "wss://nos.lol".to_string(),
         "wss://nostr.mom".to_string(),
+        "wss://relay.primal.net".to_string(),
+        "wss://purplepag.es".to_string(),
     ]
 }
 
