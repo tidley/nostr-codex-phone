@@ -37,8 +37,6 @@ jobs:
         env:
           CMAKE_POLICY_VERSION_MINIMUM: 3.5
           CARGOKIT_VERBOSE: 1
-          CC: cl.exe
-          CXX: cl.exe
       - name: Package Windows bundle
         shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath build/crew-windows-x64.zip
