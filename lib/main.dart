@@ -24,6 +24,7 @@ import 'package:crew/src/conversation_message.dart';
 import 'package:crew/src/incoming_route.dart';
 import 'package:crew/src/local_file_io.dart';
 import 'package:crew/src/nostr_transport.dart';
+import 'package:crew/src/profile_export.dart';
 import 'package:crew/src/repo_target_merge.dart';
 import 'package:crew/src/repo_choice.dart';
 import 'package:crew/src/repo_target.dart';
@@ -1380,14 +1381,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         RegExp(r'[:.]'),
         '-',
       );
-      final path = await FilePicker.platform.saveFile(
-        dialogTitle: 'Export profile',
-        fileName: 'code-call-profile-$timestamp.json',
-        type: FileType.custom,
-        allowedExtensions: const ['json'],
-        bytes: bytes,
+      final exported = await exportProfile(
+        bytes,
+        'code-call-profile-$timestamp.json',
       );
-      if (path == null) {
+      if (!exported) {
         _showStatus('Profile export cancelled');
         return;
       }
