@@ -30,6 +30,8 @@ jobs:
           # audiopus_sys bundles an Opus CMake project that still requests 3.5.
           CMAKE_POLICY_VERSION_MINIMUM: 3.5
       - run: flutter build windows --release
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: 3.5
       - name: Package Windows bundle
         shell: pwsh
         run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath build/crew-windows-x64.zip
