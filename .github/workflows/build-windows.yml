@@ -29,7 +29,7 @@ jobs:
         env:
           # audiopus_sys bundles an Opus CMake project that still requests 3.5.
           CMAKE_POLICY_VERSION_MINIMUM: 3.5
-      - run: flutter build windows --release
+      - run: flutter build windows --release -v
         env:
           CMAKE_POLICY_VERSION_MINIMUM: 3.5
           CARGOKIT_VERBOSE: 1
