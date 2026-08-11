@@ -576,6 +576,7 @@ class WorkspaceState {
   List<WorkspaceChannel> channels = [];
   List<String> members = [];
   final Map<String, String> memberNames = {};
+  final Set<String> memberAdmins = {};
   final Map<String, List<WorkspaceMessage>> messages = {};
   List<WorkspaceAgent> agents = [];
   List<WorkspaceConversationAgent> conversationAgents = [];
@@ -588,6 +589,7 @@ class WorkspaceState {
     channels = [];
     members = [];
     memberNames.clear();
+    memberAdmins.clear();
     messages.clear();
     agents = [];
     conversationAgents = [];
@@ -604,7 +606,11 @@ class WorkspaceState {
         .toList(growable: false),
     'members': [
       for (final member in members)
-        {'pubkey': member, 'display_name': memberNames[member] ?? ''},
+        {
+          'pubkey': member,
+          'display_name': memberNames[member] ?? '',
+          'is_admin': memberAdmins.contains(member),
+        },
     ],
     'messages': [
       for (final conversation in messages.values)
@@ -662,9 +668,18 @@ class WorkspaceState {
       final action = _historyTransferAction(header['action']?.toString());
       if (action == null) return const [];
       header['action'] = action.action;
-      header['messages'] = [
-        for (final chunk in chunks) ...(chunk['messages'] as List? ?? const []),
-      ];
+      for (final field in [
+        'channels',
+        'members',
+        'messages',
+        'agents',
+        'conversation_agents',
+        'conversation_preprompts',
+      ]) {
+        header[field] = [
+          for (final chunk in chunks) ...(chunk[field] as List? ?? const []),
+        ];
+      }
       return apply(
         {'workspace_update': header},
         localSenderIds: localSenderIds,
@@ -706,6 +721,7 @@ class WorkspaceState {
       channels = [];
       members = [];
       memberNames.clear();
+      memberAdmins.clear();
       if (!isSnapshotHeaderWithoutMessages) {
         messages
           ..clear()
@@ -772,10 +788,15 @@ class WorkspaceState {
         members = knownMembers.toList();
       }
       for (final entry in incomingMembers.entries) {
-        if (entry.value.isEmpty) {
+        if (entry.value.displayName.isEmpty) {
           memberNames.remove(entry.key);
         } else {
-          memberNames[entry.key] = entry.value;
+          memberNames[entry.key] = entry.value.displayName;
+        }
+        if (entry.value.isAdmin) {
+          memberAdmins.add(entry.key);
+        } else {
+          memberAdmins.remove(entry.key);
         }
       }
     }
@@ -925,16 +946,20 @@ class WorkspaceState {
     return _directKey(message.senderPubkey, message.recipientPubkey);
   }
 
-  static Map<String, String> _members(Object? raw) {
+  static Map<String, ({String displayName, bool isAdmin})> _members(
+    Object? raw,
+  ) {
     if (raw is! List) return {};
-    final members = <String, String>{};
+    final members = <String, ({String displayName, bool isAdmin})>{};
     for (final member in raw) {
       if (member is Map &&
           member['pubkey']?.toString().trim().isNotEmpty == true) {
-        members[member['pubkey'].toString().trim()] =
-            member['display_name']?.toString().trim() ?? '';
+        members[member['pubkey'].toString().trim()] = (
+          displayName: member['display_name']?.toString().trim() ?? '',
+          isAdmin: member['is_admin'] == true,
+        );
       } else if (member is String && member.trim().isNotEmpty) {
-        members[member.trim()] = '';
+        members[member.trim()] = (displayName: '', isAdmin: false);
       }
     }
     return members;

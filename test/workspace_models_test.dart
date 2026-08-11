@@ -115,6 +115,36 @@ void main() {
     expect(state.messages['channel-1']![1].parentId, 'message-1');
   });
 
+  test('workspace state retains member admin roles from updates and snapshots', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'members': [
+            {'pubkey': 'owner', 'is_admin': false},
+            {'pubkey': 'member', 'display_name': 'Member', 'is_admin': true},
+          ],
+        },
+      });
+
+    expect(state.memberAdmins, {'member'});
+    expect(state.toSnapshotJson()['members'], [
+      {'pubkey': 'owner', 'display_name': '', 'is_admin': false},
+      {'pubkey': 'member', 'display_name': 'Member', 'is_admin': true},
+    ]);
+
+    state.apply({
+      'workspace_update': {
+        'action': 'member_role_updated',
+        'members': [
+          {'pubkey': 'member', 'display_name': 'Member', 'is_admin': false},
+        ],
+      },
+    });
+
+    expect(state.memberAdmins, isEmpty);
+  });
+
   test('workspace state reports only newly inserted messages', () {
     final state = WorkspaceState();
     final update = {

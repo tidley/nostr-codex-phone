@@ -79,7 +79,9 @@ const WORKSPACE_VOICE_DEDUPE_CAPACITY: usize = 256;
 const WORKSPACE_HISTORY_REQUEST_STEP: usize = 5;
 // Gift-wrapped Nostr messages limit plaintext to 65,535 bytes. Leave room for
 // transfer metadata and future payload fields rather than batching by count.
-const NOSTR_WORKSPACE_TRANSFER_MAX_BYTES: usize = 60 * 1024;
+// GiftWrap adds encrypted/base64 envelope overhead, so this must stay well
+// below the NIP-44 plaintext ceiling accepted by relays and clients.
+const NOSTR_WORKSPACE_TRANSFER_MAX_BYTES: usize = 24 * 1024;
 const WORKSPACE_FIPS_TRANSFER_CHUNK_SIZE: usize = 64;
 const WORKSPACE_SNAPSHOT_MESSAGE_LIMIT: usize = 20;
 const WORKSPACE_HISTORY_REQUEST_MAX: usize = 50;
@@ -1671,7 +1673,7 @@ fn legacy_message_replays_workspace_voice(
         })
 }
 
-fn workspace_action_requires_owner(action: &str) -> bool {
+fn workspace_action_requires_admin(action: &str) -> bool {
     matches!(
         action,
         "create_agent"
@@ -1699,8 +1701,14 @@ async fn process_workspace_request(
     agent_queues: &mut WorkspaceAgentQueues,
     fips_capabilities: &Arc<Mutex<HashMap<String, (String, Instant)>>>,
 ) -> Result<()> {
-    if workspace_action_requires_owner(&request.action) && owner != Some(sender) {
-        bail!("Only the workspace owner can manage agents.");
+    if workspace_action_requires_admin(&request.action)
+        && owner != Some(sender)
+        && !workspace.is_admin(sender)?
+    {
+        bail!("Only workspace owners and admins can manage agents.");
+    }
+    if request.action == "set_member_admin" && owner != Some(sender) {
+        bail!("Only the workspace owner can manage member roles.");
     }
     let update = match request.action.as_str() {
         "typing" => {
@@ -1803,6 +1811,7 @@ async fn process_workspace_request(
                 .map(|pubkey| WorkspaceMemberPayload {
                     pubkey,
                     display_name: String::new(),
+                    is_admin: false,
                 })
                 .collect();
             info!(
@@ -1850,6 +1859,7 @@ async fn process_workspace_request(
                         members: vec![WorkspaceMemberPayload {
                             pubkey: sender.to_string(),
                             display_name: String::new(),
+                            is_admin: false,
                         }],
                         messages: vec![],
                         agents: vec![],
@@ -2320,6 +2330,25 @@ async fn process_workspace_request(
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
+        "set_member_admin" => {
+            let member = workspace.set_member_admin(
+                request.member_pubkey.as_deref().unwrap_or_default(),
+                request.member_is_admin,
+            )?;
+            let update = WorkspaceUpdate {
+                action: "member_role_updated".to_string(),
+                revision: workspace.revision()?,
+                channels: vec![],
+                members: vec![member_payload(member)],
+                messages: vec![],
+                agents: vec![],
+                conversation_agents: vec![],
+                conversation_preprompts: vec![],
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            return Ok(());
+        }
         "rename_agent" => {
             let agent = workspace.rename_agent(
                 request.agent_id.as_deref().unwrap_or_default(),
@@ -2475,44 +2504,18 @@ async fn send_workspace_snapshot(
     outbound: &WorkspaceOutbound,
     sender: &str,
 ) -> Result<()> {
-    let mut snapshot = workspace_snapshot(workspace, sender)?;
-    let revision = snapshot.revision;
-    let messages = std::mem::take(&mut snapshot.messages);
+    let snapshot = workspace_snapshot(workspace, sender)?;
     let transfer_id = generate_pairing_secret();
-    let message_chunks =
-        nostr_workspace_message_chunks(&messages, &transfer_id, "snapshot_messages")?;
-    let total_chunks = message_chunks.len() + 1;
-    snapshot.action = history_transfer_action(&transfer_id, 0, total_chunks, "snapshot");
-    let payload = WireMessage::workspace_update(snapshot.clone()).to_json()?;
+    let chunks = nostr_workspace_snapshot_chunks(&snapshot, &transfer_id)?;
     info!(
         channels = snapshot.channels.len(),
         members = snapshot.members.len(),
-        messages = messages.len(),
+        messages = snapshot.messages.len(),
         agents = snapshot.agents.len(),
-        payload_bytes = payload.len(),
-        "sending workspace snapshot header"
+        chunks = chunks.len(),
+        "sending chunked workspace snapshot"
     );
-    outbound
-        .send(messenger, sender, WireMessage::workspace_update(snapshot))
-        .await?;
-
-    for (index, messages) in message_chunks.into_iter().enumerate() {
-        let update = WorkspaceUpdate {
-            action: history_transfer_action(
-                &transfer_id,
-                index + 1,
-                total_chunks,
-                "snapshot_messages",
-            ),
-            revision,
-            channels: vec![],
-            members: vec![],
-            messages,
-            agents: vec![],
-            conversation_agents: vec![],
-            conversation_preprompts: vec![],
-            typing: None,
-        };
+    for update in chunks {
         outbound
             .send(messenger, sender, WireMessage::workspace_update(update))
             .await?;
@@ -3052,6 +3055,101 @@ fn nostr_workspace_message_chunks(
     Ok(chunks)
 }
 
+/// Split every snapshot collection below the wrapped-DM payload limit. A single
+/// ordered transfer lets clients rebuild the complete snapshot atomically.
+fn nostr_workspace_snapshot_chunks(
+    snapshot: &WorkspaceUpdate,
+    transfer_id: &str,
+) -> Result<Vec<WorkspaceUpdate>> {
+    let mut template = serde_json::to_value(snapshot)?;
+    let object = template
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("workspace snapshot is not an object"))?;
+    let fields = [
+        "channels",
+        "members",
+        "messages",
+        "agents",
+        "conversation_agents",
+        "conversation_preprompts",
+    ];
+    let collections: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            (
+                *field,
+                object
+                    .insert((*field).to_string(), serde_json::Value::Array(vec![]))
+                    .and_then(|value| value.as_array().cloned())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    object.insert(
+        "action".to_string(),
+        serde_json::Value::String(history_transfer_action(
+            transfer_id,
+            usize::MAX,
+            usize::MAX,
+            "snapshot",
+        )),
+    );
+    let mut chunks = vec![template.clone()];
+    for (field, items) in collections {
+        for item in items {
+            let current = chunks.last_mut().expect("snapshot has a chunk");
+            current[field]
+                .as_array_mut()
+                .expect("snapshot field is an array")
+                .push(item.clone());
+            let update: WorkspaceUpdate = serde_json::from_value(current.clone())?;
+            if WireMessage::workspace_update(update).to_json()?.len()
+                <= NOSTR_WORKSPACE_TRANSFER_MAX_BYTES
+            {
+                continue;
+            }
+            current[field]
+                .as_array_mut()
+                .expect("snapshot field is an array")
+                .pop();
+            if current[field]
+                .as_array()
+                .expect("snapshot field is an array")
+                .is_empty()
+                && chunks.len() == 1
+            {
+                bail!("workspace snapshot item is too large for Nostr fallback");
+            }
+            let mut next = template.clone();
+            next[field]
+                .as_array_mut()
+                .expect("snapshot field is an array")
+                .push(item);
+            let update: WorkspaceUpdate = serde_json::from_value(next.clone())?;
+            if WireMessage::workspace_update(update).to_json()?.len()
+                > NOSTR_WORKSPACE_TRANSFER_MAX_BYTES
+            {
+                bail!("workspace snapshot item is too large for Nostr fallback");
+            }
+            chunks.push(next);
+        }
+    }
+    let total = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(sequence, mut chunk)| {
+            chunk["action"] = serde_json::Value::String(history_transfer_action(
+                transfer_id,
+                sequence,
+                total,
+                "snapshot",
+            ));
+            Ok(serde_json::from_value(chunk)?)
+        })
+        .collect()
+}
+
 // A transfer envelope keeps chunked history identifiable across relay reordering.
 // The receiving client applies it only after all sequence numbers are present.
 fn history_transfer_action(
@@ -3319,6 +3417,7 @@ fn member_payload(
     WorkspaceMemberPayload {
         pubkey: member.pubkey,
         display_name: member.display_name,
+        is_admin: member.is_admin,
     }
 }
 fn message_payload(message: WorkspaceMessage) -> WorkspaceMessagePayload {
@@ -4871,15 +4970,6 @@ async fn process_message(
         }
         "invalid" => {
             warn!("invalid JSON DM from peer: {}", message.text);
-            if let Err(err) = messenger
-                .send_error_to(
-                    &message.sender_pubkey_hex,
-                    format!("Invalid request JSON: {}", message.text),
-                )
-                .await
-            {
-                error!("failed to send invalid-json error DM: {err:#}");
-            }
         }
         "unsupported" => {
             warn!("unsupported DM payload: {}", message.text);
@@ -10406,10 +10496,10 @@ mod tests {
     }
 
     #[test]
-    fn reserves_agent_management_for_workspace_owner() {
-        assert!(workspace_action_requires_owner("create_conversation_agent"));
-        assert!(workspace_action_requires_owner("delete_agent"));
-        assert!(!workspace_action_requires_owner("send_channel_message"));
+    fn permits_workspace_admins_to_manage_agents() {
+        assert!(workspace_action_requires_admin("create_conversation_agent"));
+        assert!(workspace_action_requires_admin("delete_agent"));
+        assert!(!workspace_action_requires_admin("send_channel_message"));
     }
 
     fn write_session_fixture(
