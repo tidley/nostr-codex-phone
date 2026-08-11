@@ -51,6 +51,7 @@ dependencies:
   open_filex: ^4.5.0
   sqlite3: ^2.9.4
   sqlite3_flutter_libs: ^0.5.28
+  nostr: ^2.0.0
 
 dev_dependencies:
   flutter_test:

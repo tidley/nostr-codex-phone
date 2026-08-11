@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -23,6 +22,8 @@ import 'package:crew/src/compact_identifier.dart';
 import 'package:crew/src/chat_scroll.dart';
 import 'package:crew/src/conversation_message.dart';
 import 'package:crew/src/incoming_route.dart';
+import 'package:crew/src/local_file_io.dart';
+import 'package:crew/src/nostr_transport.dart';
 import 'package:crew/src/repo_target_merge.dart';
 import 'package:crew/src/repo_choice.dart';
 import 'package:crew/src/repo_target.dart';
@@ -67,8 +68,12 @@ const _fipsContactCallId = 'workspace-fips-presence';
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
 var _appVersion = 'unknown';
 
-bool get _supportsCameraQrScan => Platform.isAndroid || Platform.isIOS;
-bool get _supportsLiveCalls => Platform.isAndroid || Platform.isLinux;
+bool get _isAndroid =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+bool get _isIOS => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+bool get _isLinux => !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+bool get _supportsCameraQrScan => _isAndroid || _isIOS;
+bool get _supportsLiveCalls => _isAndroid || _isLinux;
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -395,7 +400,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final package = await PackageInfo.fromPlatform();
   _appVersion = '${package.version}+${package.buildNumber}';
-  await RustLib.init();
+  if (!kIsWeb) await RustLib.init();
   runApp(const NostrCodexApp());
 }
 
@@ -617,6 +622,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _realtimeAudio = RealtimeAudio.instance;
   final _realtimeVideo = RealtimeVideo.instance;
   final _tts = FlutterTts();
+  final _nostr = NostrTransport();
   final _messagesByTarget = <String, List<ConversationMessage>>{};
   final _seenIncomingEventIds = <String>{};
   final _unreadCountsByTarget = <String, int>{};
@@ -995,11 +1001,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _queryController.dispose();
     _queryFocusNode.dispose();
     _menuNotificationPulseController.dispose();
-    for (final key in _workspaceWorkers.keys) {
-      unawaited(fipsWorkspaceSnapshotStop(workspaceKey: key));
+    if (!kIsWeb) {
+      for (final key in _workspaceWorkers.keys) {
+        unawaited(fipsWorkspaceSnapshotStop(workspaceKey: key));
+      }
+      unawaited(fipsCallStop());
     }
-    unawaited(fipsCallStop());
-    unawaited(nostrStop());
+    unawaited(_nostr.stop());
     super.dispose();
   }
 
@@ -1018,7 +1026,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _loadSettings() async {
-    final defaultRelays = nostrDefaultRelays().join('\n');
+    final defaultRelays = _nostr.defaultRelays().join('\n');
     final secretKey = await _storage.read(key: _secretKeyStorageKey);
     final peerPubkey = await _storage.read(key: _peerPubkeyStorageKey);
     final relays = await _storage.read(key: _relaysStorageKey);
@@ -1201,7 +1209,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _workspaceMemberAliases = decodeWorkspaceMemberAliases(
         workspaceMemberAliases,
       );
-      _workspaceFipsEnabled.value = _storedBool(workspaceFipsEnabled, true);
+      // Workspace FIPS depends on the native QUIC bridge. Browser sessions use
+      // the already authenticated Nostr route until a web transport exists.
+      _workspaceFipsEnabled.value =
+          !kIsWeb && _storedBool(workspaceFipsEnabled, true);
       _loadingSettings = false;
     });
     await _loadConversationHistoryForActiveSession();
@@ -1444,7 +1455,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (cleaned == null || cleaned.isEmpty) {
       throw const FormatException('Selected file was not readable');
     }
-    return File(cleaned).readAsBytes();
+    return readLocalFileBytes(cleaned);
   }
 
   Map<String, String> _decodeProfileExport(String raw) {
@@ -1700,7 +1711,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final removedWorker = _workspaceWorkers.remove(workerKey);
     if (removedWorker != null) {
       removedWorker.fips.generation++;
-      unawaited(fipsWorkspaceSnapshotStop(workspaceKey: workerKey));
+      if (!kIsWeb) {
+        unawaited(fipsWorkspaceSnapshotStop(workspaceKey: workerKey));
+      }
       removedWorker.dispose();
     }
     setState(() {
@@ -1939,7 +1952,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       await _disconnect(expand: true);
     }
     if (!mounted) return;
-    final defaultRelays = nostrDefaultRelays().join('\n');
+    final defaultRelays = _nostr.defaultRelays().join('\n');
     setState(() {
       _selectedRepoTargetId = null;
       _targetNameController.text = '';
@@ -2673,7 +2686,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _targetNameController.text = target?.name ?? '';
     _peerPubkeyController.text = target?.pubkey ?? '';
     _relayController.text =
-        target?.relays.join('\n') ?? nostrDefaultRelays().join('\n');
+        target?.relays.join('\n') ?? _nostr.defaultRelays().join('\n');
   }
 
   String _activeTargetName() {
@@ -3642,7 +3655,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _syncBackgroundDelivery() async {
-    if (!Platform.isAndroid) return;
+    if (!_isAndroid) return;
     await _ttsControlChannel.invokeMethod<void>('backgroundDelivery', {
       'enabled': _backgroundDeliveryEnabled,
     });
@@ -3672,10 +3685,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Future<void> _loadTtsOptions() async {
     try {
       final languages = _cleanStringList(await _tts.getLanguages);
-      final engines = Platform.isAndroid
+      final engines = _isAndroid
           ? _cleanStringList(await _tts.getEngines)
           : <String>[];
-      final defaultEngine = Platform.isAndroid
+      final defaultEngine = _isAndroid
           ? _cleanStoredString((await _tts.getDefaultEngine)?.toString())
           : null;
 
@@ -3694,10 +3707,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Future<void> _applyTtsSettings() async {
     try {
       final engine = _cleanStoredString(_ttsEngine);
-      if (Platform.isAndroid && engine != null) {
+      if (_isAndroid && engine != null) {
         await _tts.setEngine(engine);
       }
-      if (Platform.isAndroid) {
+      if (_isAndroid) {
         await _tts.setQueueMode(0);
       }
       await _tts.setLanguage(_ttsLanguage);
@@ -3770,7 +3783,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _nativeAndroidTtsStop() async {
-    if (!Platform.isAndroid) return;
+    if (!_isAndroid) return;
     await _ignoreTtsFailure(
       () => _ttsControlChannel.invokeMethod<void>('hardStop'),
     );
@@ -3821,7 +3834,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<void> _generateKey() async {
     try {
-      final pair = nostrGenerateSecretKey();
+      final pair = _nostr.generateSecretKey();
       setState(() {
         _secretKeyController.text = pair.secretKey;
         _ownPubkey = pair.publicKey;
@@ -3845,7 +3858,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
 
     try {
-      final pair = nostrPublicKey(secretKey: secret);
+      final pair = _nostr.publicKey(secret);
       setState(() {
         _ownPubkey = pair.publicKey;
         _ownPubkeyHex = pair.publicKeyHex;
@@ -3997,8 +4010,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     try {
       await _saveSettings();
-      final status = await nostrStart(
-        config: BridgeNostrConfig(
+      final status = await _nostr.start(
+        BridgeNostrConfig(
           secretKey: secret,
           peerPubkey: peer,
           receivePubkeys: _receivePubkeysForInbox(peer),
@@ -4054,8 +4067,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     });
 
     try {
-      final status = await nostrStart(
-        config: BridgeNostrConfig(
+      final status = await _nostr.start(
+        BridgeNostrConfig(
           secretKey: secret,
           peerPubkey: peer,
           receivePubkeys: _receivePubkeysForInbox(peer),
@@ -4392,8 +4405,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       setState(() => _status = 'Pairing ${target.displayName}...');
       await _sendWithAutoRecovery(
         label: 'pairing request',
-        sender: () => nostrSendQuery(
-          query: jsonEncode(
+        sender: () => _nostr.sendQuery(
+          jsonEncode(
             _withActiveRoute({
               'pairing_secret': secret,
               'pairing_confirmation': confirmation,
@@ -4402,8 +4415,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         ),
       );
       _clearPairingSecret(target.id);
-      await nostrSendQuery(
-        query: jsonEncode({
+      await _nostr.sendQuery(
+        jsonEncode({
           'workspace_request': {'action': 'list', 'fips_snapshot': true},
         }),
       );
@@ -4543,13 +4556,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
 
     try {
-      await nostrStop();
+      await _nostr.stop();
     } catch (_) {
       // A broken session should not prevent rebuilding a fresh one.
     }
 
     try {
-      final status = await nostrStart(config: config);
+      final status = await _nostr.start(config);
       if (!mounted) return;
       setState(() {
         _connected = true;
@@ -4580,7 +4593,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _nostrPollGeneration++;
     // Nostr has one active inbox configuration, but keyed FIPS workspace
     // sessions are independent and must survive switching workers.
-    await nostrStop();
+    await _nostr.stop();
     if (!mounted) return;
     setState(() {
       _connected = false;
@@ -4634,7 +4647,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   /// Generic queries use Nostr. The FIPS application transport accepts only
   /// workspace protocol frames, which `_sendWorkspaceRequest` sends directly.
   Future<String> _sendQueryPreferFips(String query) async {
-    return nostrSendQuery(query: query);
+    return _nostr.sendQuery(query);
   }
 
   void _startPolling() {
@@ -4648,7 +4661,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     var emptyPolls = 0;
     while (mounted && _polling && generation == _nostrPollGeneration) {
       try {
-        final message = await nostrNextMessage(timeoutMs: BigInt.from(1500));
+        final message = await _nostr.nextMessage(
+          const Duration(milliseconds: 1500),
+        );
         if (generation != _nostrPollGeneration) return;
         if (message == null || !mounted) {
           emptyPolls += 1;
@@ -4684,9 +4699,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     bool allowCatchUpSpeech = false,
   }) async {
     try {
-      final messages = await nostrFetchRecentMessages(
-        lookbackSecs: BigInt.from(_catchUpLookback.inSeconds),
-      );
+      final messages = await _nostr.fetchRecentMessages(_catchUpLookback);
       if (!mounted || messages.isEmpty) return 0;
       var accepted = 0;
       for (final message in messages) {
@@ -4725,17 +4738,24 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         message.kind == 'invite_rejected') {
       if (!_incomingFromActivePeer(message)) return false;
       final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
+      var acceptedInvite = false;
+      String? createdInviteCode;
       setState(() {
         if (message.kind == 'invite_created') {
           _workspaceInviteTimer?.cancel();
+          _workspaceInviteTimer = null;
           final invite = decoded['invite_created'] as Map<String, dynamic>?;
-          _workspaceInviteCode = invite?['code']?.toString();
+          createdInviteCode = invite?['code']?.toString();
+          _workspaceInviteCode = createdInviteCode;
           _workspaceMemberStatus = 'Invite ready';
         } else if (message.kind == 'invite_accepted') {
           _workspaceInviteTimer?.cancel();
+          _workspaceInviteTimer = null;
           _workspaceMemberStatus = 'Accepted';
+          acceptedInvite = true;
         } else {
           _workspaceInviteTimer?.cancel();
+          _workspaceInviteTimer = null;
           final rejected = decoded['invite_rejected'] as Map<String, dynamic>?;
           final reason = rejected?['reason']?.toString();
           _workspaceMemberStatus = reason == null || reason.isEmpty
@@ -4743,6 +4763,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               : 'Rejected: $reason';
         }
       });
+      if (createdInviteCode?.isNotEmpty == true) {
+        unawaited(Clipboard.setData(ClipboardData(text: createdInviteCode!)));
+      }
+      if (acceptedInvite) {
+        // Invite redemption only changes server-side membership. Request the
+        // initial snapshot now so a newly joined browser sees the workspace.
+        unawaited(_sendWorkspaceRequest({'action': 'list'}));
+      }
       return true;
     }
 
@@ -5339,7 +5367,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (!_receiveVibrationEnabled ||
         fromCatchUp ||
         message.kind == 'status' ||
-        !Platform.isAndroid) {
+        !_isAndroid) {
       return;
     }
     unawaited(_replyVibrate());
@@ -5502,7 +5530,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     try {
       await _stopTtsEngines();
-      if (Platform.isAndroid) {
+      if (_isAndroid) {
         await Future<void>.delayed(const Duration(milliseconds: 120));
         if (generation == _speechGeneration) {
           await _stopTtsEngines();
@@ -6373,12 +6401,12 @@ Return a concise catch-up summary of what happened after that point: completed w
       return MediaSelection(
         path: imagePath,
         fileName: _normalizeName(
-          imagePath.split(Platform.pathSeparator).last,
+          imagePath.split(RegExp(r'[/\\]')).last,
           imagePath,
         ),
         extension: _pathExtension(imagePath),
         contentType: _inferContentType(
-          imagePath.split(Platform.pathSeparator).last,
+          imagePath.split(RegExp(r'[/\\]')).last,
           _pathExtension(imagePath),
         ),
       );
@@ -6389,7 +6417,7 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<MediaSource?> _chooseMediaSource() async {
-    if (!Platform.isAndroid && !Platform.isIOS) {
+    if (!_isAndroid && !_isIOS) {
       return MediaSource.filePicker;
     }
 
@@ -6428,7 +6456,7 @@ Return a concise catch-up summary of what happened after that point: completed w
   String _normalizeName(String name, String path) {
     final trimmedName = name.trim();
     if (trimmedName.isNotEmpty) return trimmedName;
-    return path.split(Platform.pathSeparator).last;
+    return path.split(RegExp(r'[/\\]')).last;
   }
 
   Future<void> _resendTextMessage(
@@ -6611,7 +6639,7 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _performTapHapticFeedback() async {
-    if (Platform.isAndroid) {
+    if (_isAndroid) {
       try {
         await _ttsControlChannel.invokeMethod<void>('hapticTap');
         return;
@@ -6746,7 +6774,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         _status = 'Uploading voice note to Blossom...';
       });
 
-      final fileName = path.split(Platform.pathSeparator).last;
+      final fileName = path.split(RegExp(r'[/\\]')).last;
       final audio = await _uploadAudioToBlossom(
         path,
         fileName,
@@ -7121,12 +7149,7 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _deleteTempAudio(String path) async {
-    try {
-      final file = File(path);
-      if (await file.exists()) {
-        await file.delete();
-      }
-    } catch (_) {}
+    await deleteLocalFile(path);
   }
 
   Future<List<_RelayProbeResult>> _checkRelayStatus(List<String> relays) {
@@ -7134,19 +7157,16 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<_RelayProbeResult> _probeRelay(String relay) async {
-    final stopwatch = Stopwatch()..start();
     try {
-      final socket = await WebSocket.connect(relay).timeout(_relayProbeTimeout);
-      await socket.close(WebSocketStatus.normalClosure, 'relay probe complete');
-      stopwatch.stop();
-      final latency = stopwatch.elapsed;
+      final latency = await probeWebSocketRelay(
+        relay,
+      ).timeout(_relayProbeTimeout);
       return _RelayProbeResult(
         relay: relay,
         strength: _relayStrength(latency),
         latency: latency,
       );
     } catch (error) {
-      stopwatch.stop();
       return _RelayProbeResult(
         relay: relay,
         strength: _RelayProbeStrength.offline,
@@ -7402,6 +7422,7 @@ Return a concise catch-up summary of what happened after that point: completed w
               : _workspaceMemberStatus,
           workspace: _workspace,
           focusedConversationKey: _workspaceFocusedConversationKey,
+          openThreadKey: _activeWorkspaceWorker.openThreadKey,
           unreadCounts: _workspaceUnreadCounts,
           threadUnreadCounts: _workspaceThreadUnreadCounts,
           ownPubkey: _ownPubkeyHex ?? '',
@@ -7681,7 +7702,10 @@ Return a concise catch-up summary of what happened after that point: completed w
     });
     _workspaceInviteTimer = Timer(const Duration(seconds: 15), () {
       if (mounted && _workspaceMemberStatus == 'Creating invite...') {
-        setState(() => _workspaceMemberStatus = 'Invite request timed out');
+        setState(() {
+          _workspaceInviteTimer = null;
+          _workspaceMemberStatus = 'Invite request timed out';
+        });
       }
     });
     try {
@@ -7695,6 +7719,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       );
     } catch (error) {
       _workspaceInviteTimer?.cancel();
+      _workspaceInviteTimer = null;
       if (mounted && _workspaceMemberStatus == 'Creating invite...') {
         setState(() => _workspaceMemberStatus = 'Invite request failed');
       }
@@ -7755,7 +7780,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     await _sendWithAutoRecovery(
       label: 'Workspace request',
       sender: () =>
-          nostrSendQuery(query: jsonEncode({'workspace_request': request})),
+          _nostr.sendQuery(jsonEncode({'workspace_request': request})),
     );
     if (request['action'] == 'list' && request['fips_snapshot'] == true) {
       _awaitWorkspaceFipsOffer();
@@ -8308,6 +8333,12 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   void _setWorkspaceFipsEnabled(bool enabled) {
+    if (kIsWeb && enabled) {
+      _recordDiagnostic(
+        'FIPS workspace transport is unavailable in the browser',
+      );
+      return;
+    }
     if (_workspaceFipsEnabled.value == enabled) return;
     _workspaceFipsEnabled.value = enabled;
     // Invalidates every keyed session before asynchronous stops complete.
@@ -8338,11 +8369,13 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _stopWorkspaceFipsAndFallback() async {
-    for (final key in _workspaceWorkers.keys) {
-      try {
-        await fipsWorkspaceSnapshotStop(workspaceKey: key);
-      } catch (_) {
-        // A failed bootstrap can already have closed the native session.
+    if (!kIsWeb) {
+      for (final key in _workspaceWorkers.keys) {
+        try {
+          await fipsWorkspaceSnapshotStop(workspaceKey: key);
+        } catch (_) {
+          // A failed bootstrap can already have closed the native session.
+        }
       }
     }
     try {
@@ -8581,7 +8614,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       } else {
         unawaited(_receiveGroupCallAudio(call, peer));
         unawaited(_receiveGroupCallControl(call, peer));
-        if ((Platform.isAndroid || Platform.isLinux) && _callVideoStarted) {
+        if ((_isAndroid || _isLinux) && _callVideoStarted) {
           final texture = await _realtimeVideo.createRenderer();
           _videoTextures[peer] = texture;
           _showVideoOverlay();
@@ -8597,10 +8630,10 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<void> _activateGroupCallAudio(_GroupCallState call) async {
-    if (!Platform.isAndroid && !Platform.isLinux) {
+    if (!_isAndroid && !_isLinux) {
       throw UnsupportedError('Live call audio requires Android or Linux');
     }
-    if (Platform.isAndroid && !await _callRecorder.hasPermission()) {
+    if (_isAndroid && !await _callRecorder.hasPermission()) {
       throw StateError('Microphone permission is required for calls');
     }
     _callCaptureSubscription = _realtimeAudio.frames.listen(
@@ -8698,9 +8731,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     _GroupCallState call, {
     String source = 'camera',
   }) async {
-    if ((!Platform.isAndroid && !Platform.isLinux) ||
-        _groupCall != call ||
-        _callVideoStarted) {
+    if ((!_isAndroid && !_isLinux) || _groupCall != call || _callVideoStarted) {
       return;
     }
     try {
@@ -8946,14 +8977,14 @@ Return a concise catch-up summary of what happened after that point: completed w
     String callId,
     BridgeFipsCallStatus status,
   ) async {
-    if (!Platform.isAndroid && !Platform.isLinux) {
+    if (!_isAndroid && !_isLinux) {
       throw UnsupportedError('Live call audio requires Android or Linux');
     }
     final maxDatagramBytes = status.maxDatagramBytes;
     if (maxDatagramBytes == null || maxDatagramBytes < 9) {
       throw StateError('Call peer does not support audio datagrams');
     }
-    if (Platform.isAndroid && !await _callRecorder.hasPermission()) {
+    if (_isAndroid && !await _callRecorder.hasPermission()) {
       throw StateError('Microphone permission is required for calls');
     }
     _callCaptureSubscription = _realtimeAudio.frames.listen(
@@ -9084,7 +9115,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     String peer, {
     String source = 'camera',
   }) async {
-    if ((!Platform.isAndroid && !Platform.isLinux) ||
+    if ((!_isAndroid && !_isLinux) ||
         _callId != callId ||
         _callPhase != _CallPhase.active) {
       return;
@@ -9346,7 +9377,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     try {
       final attachment = await _uploadAudioToBlossom(
         path,
-        path.split(Platform.pathSeparator).last,
+        path.split(RegExp(r'[/\\]')).last,
         opusVoiceFormat.contentType,
       );
       request['action'] = 'transcribe_workspace_voice';
@@ -9388,11 +9419,15 @@ Return a concise catch-up summary of what happened after that point: completed w
   Future<void> _downloadAndOpenWorkspaceAttachment(
     BridgeAudioReference attachment,
   ) async {
+    if (kIsWeb) {
+      _showError('Attachment downloads are unavailable in the browser.');
+      return;
+    }
     try {
       final directory = await getApplicationDocumentsDirectory();
       final downloaded = await blossomDownloadAttachment(
         attachment: attachment,
-        destinationDir: '${directory.path}${Platform.pathSeparator}attachments',
+        destinationDir: '${directory.path}/attachments',
       );
       final result = await OpenFilex.open(
         downloaded.path,
@@ -9427,8 +9462,8 @@ Return a concise catch-up summary of what happened after that point: completed w
       );
     }
     if (!await _ensureConnectedToWorkspaceService(target)) return;
-    await nostrSendQuery(
-      query: jsonEncode({
+    await _nostr.sendQuery(
+      jsonEncode({
         'redeem_invite': {'code': invite.secret},
       }),
     );
