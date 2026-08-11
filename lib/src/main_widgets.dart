@@ -1218,7 +1218,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       'mentions': _mentionsFor(
         text,
         selectedMentions,
-        thread: thread,
       ).map((mention) => mention.toJson()).toList(),
       if (thread != null) 'parent_id': thread.id,
       if (thread != null) 'also_send_to_main': _alsoSendToMain,
@@ -1248,7 +1247,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       'mentions': _mentionsFor(
         composer.text,
         selectedMentions,
-        thread: thread,
       ).map((mention) => mention.toJson()).toList(),
       if (thread != null) 'parent_id': thread.id,
       if (thread != null) 'also_send_to_main': _alsoSendToMain,
@@ -1266,30 +1264,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   List<WorkspaceMention> _mentionsFor(
     String text,
-    List<WorkspaceMention> selected, {
-    WorkspaceMessage? thread,
-  }) {
-    final mentions = workspaceSelectedMentionsIn(text, selected).toList();
-    final previous = thread == null
-        ? null
-        : _threadReplies.isEmpty
-        ? thread
-        : _threadReplies.last;
-    if (previous == null || !isWorkspaceAgentSender(previous.senderPubkey)) {
-      return mentions;
-    }
-    final agentId = previous.senderPubkey.substring('agent:'.length);
-    final agent = _activeAgents
-        .where((agent) => agent.id == agentId)
-        .firstOrNull;
-    if (agent == null || mentions.any((mention) => mention.id == agentId)) {
-      return mentions;
-    }
-    return [
-      ...mentions,
-      WorkspaceMention(kind: 'agent', id: agentId, label: agent.name),
-    ];
-  }
+    List<WorkspaceMention> selected,
+  ) => workspaceSelectedMentionsIn(text, selected).toList();
 
   void _select(_WorkspaceSection section, String id) {
     _closeDrawer();
