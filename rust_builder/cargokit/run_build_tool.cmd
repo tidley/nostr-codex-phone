@@ -5,14 +5,6 @@ setlocal ENABLEDELAYEDEXPANSION
 
 SET BASEDIR=%~dp0
 
-if exist "%ProgramFiles%\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
-    call "%ProgramFiles%\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvars64.bat" >nul
-) else (
-    for /f "usebackq delims=" %%I in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do call "%%I\VC\Auxiliary\Build\vcvars64.bat" >nul
-)
-set "CC=%VCToolsInstallDir%bin\Hostx64\x64\cl.exe"
-set "CXX=%VCToolsInstallDir%bin\Hostx64\x64\cl.exe"
-
 if not exist "%CARGOKIT_TOOL_TEMP_DIR%" (
     mkdir "%CARGOKIT_TOOL_TEMP_DIR%"
 )
