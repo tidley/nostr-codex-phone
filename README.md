@@ -115,7 +115,7 @@ Common `.nostr-codex/.env.server` values:
 ```bash
 NOSTR_SECRET_KEY='nsec...optional worker key...'
 NOSTR_PEER_PUBKEY='npub...phone public key...'
-NOSTR_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://nostr.mom'
+NOSTR_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://nostr.mom,wss://relay.primal.net,wss://purplepag.es'
 
 AGENT_BACKEND='opencode'
 OPENCODE_BIN='opencode'

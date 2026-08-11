@@ -18,6 +18,7 @@ pub struct WorkspaceChannel {
 pub struct WorkspaceMember {
     pub pubkey: String,
     pub display_name: String,
+    pub is_admin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +109,7 @@ impl WorkspaceStore {
         }
         let conn = Self::open_connection(path)?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS workspace_members (pubkey TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '', joined_at INTEGER NOT NULL);
+            "CREATE TABLE IF NOT EXISTS workspace_members (pubkey TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '', is_admin INTEGER NOT NULL DEFAULT 0, joined_at INTEGER NOT NULL);
                CREATE TABLE IF NOT EXISTS workspace_channels (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
                  CREATE TABLE IF NOT EXISTS workspace_messages (id TEXT PRIMARY KEY, channel_id TEXT, recipient_pubkey TEXT, sender_pubkey TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', mentions_json TEXT NOT NULL DEFAULT '[]', parent_id TEXT, also_send_to_main INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
                    CHECK ((channel_id IS NOT NULL) != (recipient_pubkey IS NOT NULL)));
@@ -156,6 +157,18 @@ impl WorkspaceStore {
         if !has_display_name {
             conn.execute(
                 "ALTER TABLE workspace_members ADD COLUMN display_name TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        let has_admin_role = conn
+            .prepare("PRAGMA table_info(workspace_members)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|column| column == "is_admin");
+        if !has_admin_role {
+            conn.execute(
+                "ALTER TABLE workspace_members ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
         }
@@ -335,15 +348,24 @@ impl WorkspaceStore {
         )?)
     }
 
+    pub fn is_admin(&self, pubkey: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_members WHERE pubkey = ?1 AND is_admin = 1)",
+            [pubkey.trim()],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn members(&self) -> Result<Vec<WorkspaceMember>> {
         let mut statement = self.conn.prepare(
-            "SELECT pubkey, display_name FROM workspace_members ORDER BY joined_at, pubkey",
+            "SELECT pubkey, display_name, is_admin FROM workspace_members ORDER BY joined_at, pubkey",
         )?;
         let members = statement
             .query_map([], |row| {
                 Ok(WorkspaceMember {
                     pubkey: row.get(0)?,
                     display_name: row.get(1)?,
+                    is_admin: row.get(2)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()
@@ -368,9 +390,32 @@ impl WorkspaceStore {
         {
             bail!("member is not a workspace member");
         }
+        let is_admin = self.is_admin(&pubkey)?;
         Ok(WorkspaceMember {
             pubkey,
             display_name: display_name.to_string(),
+            is_admin,
+        })
+    }
+
+    pub fn set_member_admin(&self, pubkey: &str, is_admin: bool) -> Result<WorkspaceMember> {
+        let pubkey = required("member pubkey", pubkey)?;
+        if self.conn.execute(
+            "UPDATE workspace_members SET is_admin = ?2 WHERE pubkey = ?1",
+            params![pubkey, is_admin],
+        )? == 0
+        {
+            bail!("member is not a workspace member");
+        }
+        let display_name = self.conn.query_row(
+            "SELECT display_name FROM workspace_members WHERE pubkey = ?1",
+            [&pubkey],
+            |row| row.get(0),
+        )?;
+        Ok(WorkspaceMember {
+            pubkey,
+            display_name,
+            is_admin,
         })
     }
 
@@ -1453,6 +1498,7 @@ mod tests {
             vec![WorkspaceMember {
                 pubkey: "member".to_string(),
                 display_name: "Ada".to_string(),
+                is_admin: false,
             }]
         );
     }

@@ -56,6 +56,13 @@ const _callStunServers = [
   'stun:stun.cloudflare.com:3478',
   'stun:global.stun.twilio.com:3478',
 ];
+const _fipsRendezvousRelays = [
+  'wss://relay.damus.io',
+  'wss://nos.lol',
+  'wss://nostr.mom',
+  'wss://relay.primal.net',
+  'wss://purplepag.es',
+];
 const _fipsContactCallId = 'workspace-fips-presence';
 const _allowedLinkSchemes = {'http', 'https', 'mailto', 'tel', 'nostr'};
 var _appVersion = 'unknown';
@@ -3868,6 +3875,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     return target != null && !target.id.startsWith('workspace-');
   }
 
+  bool get _canManageWorkspaceAgents =>
+      _activeWorkspaceHasLocalWorkerTarget ||
+      _workspace.memberAdmins.contains(_ownPubkeyHex);
+
   _WorkspaceWorkerState get _activeWorkspaceWorker =>
       _workspaceWorkers.putIfAbsent(
         _workspaceWorkerKey.toLowerCase(),
@@ -4488,6 +4499,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   List<String> _inboxRelays(Iterable<String> selectedRelays) {
     final relays = <String>{
+      ..._fipsRendezvousRelays,
       for (final relay in selectedRelays) relay.trim(),
       for (final target in _repoTargets)
         ...target.relays.map((relay) => relay.trim()),
@@ -4737,6 +4749,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (message.kind == 'workspace_update') {
       final workerKey = _workspaceWorkerKeyForIncoming(message);
       if (workerKey == null) return false;
+      if (workerKey != _workspaceWorkerKey) return true;
       final worker = _workspaceWorkerForKey(workerKey);
       try {
         final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
@@ -5019,6 +5032,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         onResult(result);
         return true;
       }
+      // A duplicate or late status result must refresh the cache only. Without
+      // its original request callback it would repeatedly push the Host page.
+      if (result.tool == 'system_status') return true;
       if (!fromCatchUp) {
         if (result.tool == 'model_list' && result.error == null) {
           unawaited(_openModelPicker(result));
@@ -5043,7 +5059,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
 
     if (_workspaceWorkerKeyForIncoming(message) != null) {
-      _recordDiagnostic('Ignored residual workspace transport message');
+      // Relay catch-up replays old workspace control and error frames at
+      // startup. Their request context is gone, so they must not flood Network.
       return true;
     }
 
@@ -7323,7 +7340,8 @@ Return a concise catch-up summary of what happened after that point: completed w
           sessions: _repoTargets,
           spaces: _computerServiceTargets,
           activeSpace: _computerServiceTarget,
-          canManageAgents: _activeWorkspaceHasLocalWorkerTarget,
+          canManageAgents: _canManageWorkspaceAgents,
+          canManageMembers: _activeWorkspaceHasLocalWorkerTarget,
           onSwitchSpace: (target) =>
               unawaited(_selectComputerServiceTarget(target)),
           onLeaveSpace: (target) =>
@@ -7378,8 +7396,11 @@ Return a concise catch-up summary of what happened after that point: completed w
           inviteCode: _workspaceInviteCode,
           memberStatus: _activeWorkspaceHasLocalWorkerTarget
               ? 'Owner'
+              : _workspace.memberAdmins.contains(_ownPubkeyHex)
+              ? 'Admin'
               : _workspaceMemberStatus,
           workspace: _workspace,
+          focusedConversationKey: _workspaceFocusedConversationKey,
           unreadCounts: _workspaceUnreadCounts,
           threadUnreadCounts: _workspaceThreadUnreadCounts,
           ownPubkey: _ownPubkeyHex ?? '',

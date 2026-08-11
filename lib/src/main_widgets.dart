@@ -559,6 +559,7 @@ class _TeamWorkspace extends StatefulWidget {
     required this.spaces,
     required this.activeSpace,
     required this.canManageAgents,
+    required this.canManageMembers,
     required this.onSwitchSpace,
     required this.onLeaveSpace,
     required this.onOpenSessions,
@@ -580,6 +581,7 @@ class _TeamWorkspace extends StatefulWidget {
     required this.inviteCode,
     required this.memberStatus,
     required this.workspace,
+    required this.focusedConversationKey,
     required this.ownPubkey,
     required this.localSenderIds,
     required this.fipsConnectedPeers,
@@ -621,6 +623,7 @@ class _TeamWorkspace extends StatefulWidget {
   final List<RepoTarget> spaces;
   final RepoTarget? activeSpace;
   final bool canManageAgents;
+  final bool canManageMembers;
   final ValueChanged<RepoTarget> onSwitchSpace;
   final ValueChanged<RepoTarget> onLeaveSpace;
   final VoidCallback onOpenSessions;
@@ -652,6 +655,7 @@ class _TeamWorkspace extends StatefulWidget {
   final String? inviteCode;
   final String memberStatus;
   final WorkspaceState workspace;
+  final String focusedConversationKey;
   final String ownPubkey;
   final Set<String> localSenderIds;
   final Set<String> fipsConnectedPeers;
@@ -818,6 +822,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   @override
   void initState() {
     super.initState();
+    _restoreFocusedConversation();
     _composer.addListener(_onComposerChanged);
     _composerFocus.addListener(_onComposerChanged);
     _threadComposer.addListener(_onComposerChanged);
@@ -826,6 +831,32 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     widget.fileBrowser.addListener(_onFileBrowserChanged);
     widget.filePreview.addListener(_onFileBrowserChanged);
     unawaited(widget.onRequest({'action': 'list'}));
+  }
+
+  @override
+  void didUpdateWidget(covariant _TeamWorkspace oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.focusedConversationKey != widget.focusedConversationKey ||
+        _active == 'workspace') {
+      _restoreFocusedConversation();
+    }
+  }
+
+  void _restoreFocusedConversation() {
+    final focused = widget.focusedConversationKey;
+    if (focused.isEmpty || focused == 'workspace') return;
+    if (widget.workspace.channels.any((channel) => channel.id == focused)) {
+      _section = _WorkspaceSection.channel;
+      _active = focused;
+      return;
+    }
+    for (final peer in widget.workspace.directPeers(widget.ownPubkey)) {
+      if (WorkspaceState.directKey(widget.ownPubkey, peer) == focused) {
+        _section = _WorkspaceSection.direct;
+        _active = peer;
+        return;
+      }
+    }
   }
 
   @override
@@ -1364,6 +1395,17 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   void _closeDrawer() => _scaffoldKey.currentState?.closeDrawer();
 
+  void _closeThread() {
+    if (_thread == null) return;
+    setState(() {
+      _saveThreadDraft();
+      _thread = null;
+      _alsoSendToMain = false;
+      _threadFullWindow = false;
+    });
+    widget.onCloseThread();
+  }
+
   @override
   Widget build(BuildContext context) {
     final typing = _activeTyping;
@@ -1467,15 +1509,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             widget.onOpenThread(conversationKey, message.id);
           }
         },
-        onCloseThread: () {
-          setState(() {
-            _saveThreadDraft();
-            _thread = null;
-            _alsoSendToMain = false;
-            _threadFullWindow = false;
-          });
-          widget.onCloseThread();
-        },
+        onCloseThread: _closeThread,
         onToggleReaction: (message, emoji) => widget.onRequest({
           'action': 'toggle_reaction',
           'parent_id': message.id,
@@ -1533,6 +1567,13 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         displayName: widget.displayName,
         memberAliases: widget.memberAliases,
         memberNames: widget.memberNames,
+        memberAdmins: widget.workspace.memberAdmins,
+        canManageMembers: widget.canManageMembers,
+        onSetMemberAdmin: (pubkey, isAdmin) => widget.onRequest({
+          'action': 'set_member_admin',
+          'member_pubkey': pubkey,
+          'member_is_admin': isAdmin,
+        }),
         onOpenDirect: (pubkey) => _select(_WorkspaceSection.direct, pubkey),
         onDisplayNameChanged: widget.onDisplayNameChanged,
         onMemberAliasChanged: widget.onMemberAliasChanged,
@@ -1602,15 +1643,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         alsoSendToMain: _alsoSendToMain,
         onAlsoSendToMainChanged: (value) =>
             setState(() => _alsoSendToMain = value),
-        onClose: () {
-          setState(() {
-            _saveThreadDraft();
-            _thread = null;
-            _alsoSendToMain = false;
-            _threadFullWindow = false;
-          });
-          widget.onCloseThread();
-        },
+        onClose: _closeThread,
         onToggleReaction: (message, emoji) => widget.onRequest({
           'action': 'toggle_reaction',
           'parent_id': message.id,
@@ -1669,7 +1702,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final showFiles = _filesSelected && filesPane != null;
     final fullSidePane = _filesFullWindow || _threadFullWindow;
     final windowWidth = MediaQuery.sizeOf(context).width;
-    final persistentChromeWidth = wide ? _sidebarWidth + 7 : 0;
+    final persistentChromeWidth = wide ? _sidebarWidth + 1 : 0;
     final canShowInlineSidePane =
         showSidePane &&
         medium &&
@@ -1690,6 +1723,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     // pane replaces it instead of squeezing both panes into unusable columns.
     final showSingleSidePane =
         showSidePane && !fullSidePane && !canShowInlineSidePane;
+    final canDismissNarrowThread = showSingleSidePane && _thread != null;
     final sidePane = _WorkspaceSidePanel(
       thread: _thread != null ? contextPane : null,
       files: filesPane,
@@ -1704,22 +1738,45 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       }),
     );
 
-    return Scaffold(
+    final narrowSidePane = canDismissNarrowThread
+        ? GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onHorizontalDragEnd: (details) {
+              if ((details.primaryVelocity ?? 0) > 300) _closeThread();
+            },
+            child: sidePane,
+          )
+        : sidePane;
+
+    return PopScope<void>(
+      canPop: !canDismissNarrowThread,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && canDismissNarrowThread) _closeThread();
+      },
+      child: Scaffold(
       key: _scaffoldKey,
       backgroundColor: Theme.of(
         context,
       ).extension<_WorkspacePalette>()!.background,
       appBar: wide
           ? null
-          : AppBar(
-              title: const Text('Ribbit'),
-              actions: [
-                IconButton(
-                  onPressed: widget.onOpenSettings,
-                  icon: const Icon(Icons.tune_outlined),
+            : AppBar(
+                title: Text(
+                  _title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-              ],
-            ),
+                actions: [
+                  IconButton(
+                    onPressed: () => unawaited(
+                      _conversationWidgetKey.currentState
+                          ?._showMobileConversationActions(),
+                    ),
+                    icon: const Icon(Icons.more_vert),
+                    tooltip: 'Conversation actions',
+                  ),
+                ],
+              ),
       drawer: wide ? null : Drawer(child: SafeArea(child: sidebar)),
       body: SafeArea(
         child: Row(
@@ -1734,12 +1791,11 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                   );
                 }),
               ),
-            if (wide) const VerticalDivider(width: 1),
             Expanded(
               child: fullSidePane
                   ? sidePane
                   : showSingleSidePane
-                  ? sidePane
+                  ? narrowSidePane
                   : conversation,
             ),
             if (canShowInlineSidePane) ...[
@@ -1766,6 +1822,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             ],
           ],
         ),
+      ),
       ),
     );
   }
@@ -2305,7 +2362,11 @@ class SidebarPaneResizeHandle extends StatelessWidget {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onHorizontalDragUpdate: (details) => onResize(details.delta.dx),
-        child: const SizedBox(width: 6, height: double.infinity),
+        child: Container(
+          width: 1,
+          height: double.infinity,
+          color: Theme.of(context).colorScheme.outlineVariant,
+        ),
       ),
     ),
   );
@@ -2601,7 +2662,7 @@ class _WorkspaceSidebar extends StatelessWidget {
                     onTap: () =>
                         onSelect(_WorkspaceSection.channel, channel.id),
                   ),
-                const SizedBox(height: 18),
+                const SizedBox(height: 22),
                 Row(
                   children: [
                     Expanded(
@@ -2654,8 +2715,8 @@ class _WorkspaceSidebar extends StatelessWidget {
                     ),
                     onTap: () => onSelect(_WorkspaceSection.direct, member),
                   ),
+                const SizedBox(height: 22),
                 if (canManageAgents) ...[
-                  const SizedBox(height: 18),
                   Text(
                     'Sessions',
                     style: Theme.of(
@@ -2669,7 +2730,7 @@ class _WorkspaceSidebar extends StatelessWidget {
                       session.displayName,
                       onTap: onSessions,
                     ),
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 22),
                 ],
                 Text(
                   'Workspace',
@@ -2690,7 +2751,7 @@ class _WorkspaceSidebar extends StatelessWidget {
                   selected: section == _WorkspaceSection.access,
                   onTap: () => onSelect(_WorkspaceSection.access, 'access'),
                 ),
-                const SizedBox(height: 18),
+                const SizedBox(height: 22),
                 Text(
                   'Maintenance',
                   style: Theme.of(
@@ -2776,6 +2837,9 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.displayName,
     required this.memberAliases,
     required this.memberNames,
+    required this.memberAdmins,
+    required this.canManageMembers,
+    required this.onSetMemberAdmin,
     required this.onOpenDirect,
     required this.onDisplayNameChanged,
     required this.onMemberAliasChanged,
@@ -2851,6 +2915,9 @@ class _WorkspaceConversation extends StatefulWidget {
   final String displayName;
   final Map<String, String> memberAliases;
   final Map<String, String> memberNames;
+  final Set<String> memberAdmins;
+  final bool canManageMembers;
+  final Future<void> Function(String pubkey, bool isAdmin) onSetMemberAdmin;
   final ValueChanged<String> onOpenDirect;
   final ValueChanged<String> onDisplayNameChanged;
   final void Function(String pubkey, String alias) onMemberAliasChanged;
@@ -3052,6 +3119,164 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     }
   }
 
+  Future<void> _showMobileConversationActions() async {
+    final directCall = widget.section == _WorkspaceSection.direct;
+    final channelCall = widget.section == _WorkspaceSection.channel;
+    final callPhase = directCall
+        ? widget.callPeerPubkey == null || widget.callPeerPubkey == widget.directPeer
+              ? widget.callPhase
+              : _CallPhase.idle
+        : widget.groupCallChannelId == null ||
+              widget.groupCallChannelId == widget.channelId
+        ? widget.groupCallPhase
+        : _CallPhase.idle;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (widget.onManageAgents != null)
+              ListTile(
+                leading: const Icon(Icons.person_add_alt_1_outlined),
+                title: const Text('Manage agents'),
+                onTap: () => Navigator.pop(context, 'agents'),
+              ),
+            ListTile(
+              leading: Icon(
+                _searchOpen ? Icons.search_off_outlined : Icons.search,
+              ),
+              title: Text(_searchOpen ? 'Close search' : 'Search messages'),
+              onTap: () => Navigator.pop(context, 'search'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.arrow_upward_outlined),
+              title: const Text('Reload last messages'),
+              onTap: () => Navigator.pop(context, 'reload'),
+            ),
+            if (channelCall)
+              ListTile(
+                leading: const Icon(Icons.folder_open_outlined),
+                title: const Text('Browse repository files'),
+                onTap: () => Navigator.pop(context, 'files'),
+              ),
+            if (channelCall)
+              ListTile(
+                leading: const Icon(Icons.edit_note_outlined),
+                title: const Text('Edit agent brief'),
+                onTap: () => Navigator.pop(context, 'brief'),
+              ),
+            if (_supportsLiveCalls && (directCall || channelCall)) ...[
+              const Divider(height: 1),
+              if (callPhase == _CallPhase.idle)
+                ListTile(
+                  leading: const Icon(Icons.call_outlined),
+                  title: const Text('Start call'),
+                  onTap: () => Navigator.pop(context, 'call'),
+                ),
+              if (callPhase == _CallPhase.incoming) ...[
+                ListTile(
+                  leading: const Icon(Icons.call_outlined),
+                  title: const Text('Answer call'),
+                  onTap: () => Navigator.pop(context, 'answer'),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.call_end_outlined),
+                  title: const Text('Reject call'),
+                  onTap: () => Navigator.pop(context, 'reject'),
+                ),
+              ],
+              if (callPhase == _CallPhase.outgoing ||
+                  callPhase == _CallPhase.connecting ||
+                  callPhase == _CallPhase.active)
+                ListTile(
+                  leading: const Icon(Icons.call_end_outlined),
+                  title: const Text('Hang up'),
+                  onTap: () => Navigator.pop(context, 'hangup'),
+                ),
+              if (callPhase == _CallPhase.active) ...[
+                ListTile(
+                  leading: const Icon(Icons.volume_up_outlined),
+                  title: const Text('Audio only'),
+                  onTap: () => Navigator.pop(context, 'audio'),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.videocam_outlined),
+                  title: const Text('Use camera'),
+                  onTap: () => Navigator.pop(context, 'camera'),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.screen_share_outlined),
+                  title: const Text('Share screen'),
+                  onTap: () => Navigator.pop(context, 'screen'),
+                ),
+              ],
+            ],
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.tune_outlined),
+              title: const Text('Settings'),
+              onTap: () => Navigator.pop(context, 'settings'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case 'agents':
+        widget.onManageAgents?.call();
+        break;
+      case 'search':
+        setState(() {
+          _searchOpen = !_searchOpen;
+          if (!_searchOpen) {
+            _searchController.clear();
+            _searchQuery = '';
+          }
+        });
+        break;
+      case 'reload':
+        widget.onReload();
+        break;
+      case 'files':
+        await widget.onOpenFiles();
+        break;
+      case 'brief':
+        await _editConversationPreprompt();
+        break;
+      case 'call':
+        if (directCall) {
+          widget.onStartCall(widget.directPeer!);
+        } else {
+          await widget.onStartChannelCall(widget.channelId!);
+        }
+        break;
+      case 'answer':
+        directCall ? widget.onAcceptCall() : widget.onAcceptGroupCall();
+        break;
+      case 'reject':
+        directCall ? widget.onRejectCall() : widget.onRejectGroupCall();
+        break;
+      case 'hangup':
+        directCall ? widget.onHangupCall() : widget.onHangupGroupCall();
+        break;
+      case 'audio':
+        widget.onMediaSourceChanged(_CallMediaSource.audioOnly);
+        break;
+      case 'camera':
+        widget.onMediaSourceChanged(_CallMediaSource.camera);
+        break;
+      case 'screen':
+        widget.onMediaSourceChanged(_CallMediaSource.screen);
+        break;
+      case 'settings':
+        widget.onOpenSettings();
+        break;
+    }
+  }
+
   void _queueScrollToLatest() {
     if (_scrollQueued) return;
     _scrollQueued = true;
@@ -3098,6 +3323,9 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         displayName: widget.displayName,
         memberAliases: widget.memberAliases,
         memberNames: widget.memberNames,
+        memberAdmins: widget.memberAdmins,
+        canManageMembers: widget.canManageMembers,
+        onSetMemberAdmin: widget.onSetMemberAdmin,
         onOpenDirect: widget.onOpenDirect,
         onDisplayNameChanged: widget.onDisplayNameChanged,
         onMemberAliasChanged: widget.onMemberAliasChanged,
@@ -3115,11 +3343,13 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     final palette = Theme.of(context).extension<_WorkspacePalette>()!;
     final visibleMessages = _visibleMessages;
     final searching = _searchQuery.trim().isNotEmpty;
+    final compactHeader = MediaQuery.sizeOf(context).width < 720;
     return ColoredBox(
       color: palette.content,
       child: Column(
         children: [
-          Container(
+          if (!compactHeader)
+            Container(
             color: palette.sidebar.withValues(alpha: 0.48),
             padding: const EdgeInsets.fromLTRB(24, 18, 20, 14),
             child: Column(
@@ -3239,7 +3469,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
               ],
             ),
           ),
-          const Divider(height: 1),
+          if (!compactHeader) const Divider(height: 1),
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {
@@ -3254,7 +3484,12 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                 }
                 return ListView.builder(
                   controller: _scrollController,
-                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
+                  padding: EdgeInsets.fromLTRB(
+                    compactHeader ? 16 : 24,
+                    20,
+                    compactHeader ? 16 : 24,
+                    12,
+                  ),
                   itemCount: visibleMessages.length + 1,
                   itemBuilder: (context, index) {
                     if (index == 0) {
@@ -3615,17 +3850,6 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 _timestamp(context, grouped: true),
-                if (widget.threadActivityLabel case final label?) ...[
-                  const SizedBox(width: 4),
-                  Tooltip(
-                    message: label,
-                    child: Icon(
-                      Icons.more_horiz,
-                      size: 16,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-                  ),
-                ],
               ],
             ),
           ),
@@ -3647,13 +3871,33 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
                 ),
             ],
           ),
-        if (widget.threadReplyCount > 0)
-          TextButton.icon(
-            onPressed: widget.onThread,
-            icon: const Icon(Icons.forum_outlined, size: 16),
-            label: Text(
-              '${widget.threadReplyCount} ${widget.threadReplyCount == 1 ? 'reply' : 'replies'}${widget.threadUnreadCount > 0 ? ' · ${widget.threadUnreadCount} new' : ''}',
-            ),
+        if (widget.threadReplyCount > 0 || widget.threadActivityLabel != null)
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (widget.threadReplyCount > 0)
+                TextButton.icon(
+                  onPressed: widget.onThread,
+                  icon: const Icon(Icons.forum_outlined, size: 16),
+                  label: Text(
+                    '${widget.threadReplyCount} ${widget.threadReplyCount == 1 ? 'reply' : 'replies'}${widget.threadUnreadCount > 0 ? ' · ${widget.threadUnreadCount} new' : ''}',
+                  ),
+                ),
+              if (widget.threadActivityLabel case final label?)
+                Tooltip(
+                  message: label,
+                  child: TextButton(
+                    onPressed: widget.onThread,
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(40, 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                    ),
+                    child: _ThreadWorkingDots(
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                ),
+            ],
           ),
         for (final attachment in widget.message.attachments)
           TextButton.icon(
@@ -3834,6 +4078,63 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow> {
   );
 }
 
+class _ThreadWorkingDots extends StatefulWidget {
+  const _ThreadWorkingDots({required this.color});
+
+  final Color color;
+
+  @override
+  State<_ThreadWorkingDots> createState() => _ThreadWorkingDotsState();
+}
+
+class _ThreadWorkingDotsState extends State<_ThreadWorkingDots>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _controller.stop();
+    } else if (!_controller.isAnimating) {
+      _controller.repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: _controller,
+    builder: (context, _) => Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(3, (index) {
+        final phase = (_controller.value - (index * 0.18)) % 1;
+        final opacity = MediaQuery.disableAnimationsOf(context)
+            ? 1.0
+            : 0.35 + (0.65 * (1 - (phase - 0.5).abs() * 2));
+        return Padding(
+          padding: EdgeInsets.only(right: index == 2 ? 0 : 3),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: widget.color.withValues(alpha: opacity),
+              shape: BoxShape.circle,
+            ),
+            child: const SizedBox.square(dimension: 5),
+          ),
+        );
+      }),
+    ),
+  );
+}
+
 /// A stable frog tint keeps participants recognizable without storing UI state.
 class _WorkspaceFrogAvatar extends StatelessWidget {
   const _WorkspaceFrogAvatar({
@@ -3869,22 +4170,23 @@ class _WorkspaceFrogAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final circleRadius = radius - 2;
     final colors =
         _colors[workspaceAvatarColorIndex(identity, label, _colors.length)];
     return CircleAvatar(
-      radius: radius,
+      radius: circleRadius,
       backgroundColor: colors.$1,
       child: bot
           ? CustomPaint(
-              size: Size.square(radius * 1.6),
+              size: Size.square(circleRadius * 1.75),
               painter: _WorkspaceBotAvatarPainter(colors.$2),
             )
           : ColorFiltered(
               colorFilter: ColorFilter.mode(colors.$2, BlendMode.srcIn),
               child: Image.asset(
                 'assets/branding/ribbet-mark.png',
-                width: radius * 1.85,
-                height: radius * 1.85,
+                width: circleRadius * 2.2,
+                height: circleRadius * 2.2,
                 filterQuality: FilterQuality.medium,
               ),
             ),
@@ -5985,6 +6287,9 @@ class _PeopleDirectory extends StatefulWidget {
     required this.displayName,
     required this.memberAliases,
     required this.memberNames,
+    required this.memberAdmins,
+    required this.canManageMembers,
+    required this.onSetMemberAdmin,
     required this.onOpenDirect,
     required this.onDisplayNameChanged,
     required this.onMemberAliasChanged,
@@ -5994,6 +6299,9 @@ class _PeopleDirectory extends StatefulWidget {
   final String displayName;
   final Map<String, String> memberAliases;
   final Map<String, String> memberNames;
+  final Set<String> memberAdmins;
+  final bool canManageMembers;
+  final Future<void> Function(String pubkey, bool isAdmin) onSetMemberAdmin;
   final ValueChanged<String> onOpenDirect;
   final ValueChanged<String> onDisplayNameChanged;
   final void Function(String pubkey, String alias) onMemberAliasChanged;
@@ -6102,13 +6410,31 @@ class _PeopleDirectoryState extends State<_PeopleDirectory> {
               label: _memberLabel(person),
             ),
             title: Text(_memberLabel(person)),
-            subtitle: Text(person == widget.ownPubkey ? 'You' : 'Member'),
+            subtitle: Text(
+              person == widget.ownPubkey
+                  ? 'You${widget.memberAdmins.contains(person) ? ' · Admin' : ''}'
+                  : widget.memberAdmins.contains(person)
+                  ? 'Admin'
+                  : 'Member',
+            ),
             trailing: person == widget.ownPubkey
                 ? null
-                : IconButton(
-                    icon: const Icon(Icons.edit_outlined),
-                    tooltip: 'Set local name',
-                    onPressed: () => _editAlias(person),
+                : Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (widget.canManageMembers && !person.startsWith('agent:'))
+                        Switch.adaptive(
+                          value: widget.memberAdmins.contains(person),
+                          onChanged: (isAdmin) => unawaited(
+                            widget.onSetMemberAdmin(person, isAdmin),
+                          ),
+                        ),
+                      IconButton(
+                        icon: const Icon(Icons.edit_outlined),
+                        tooltip: 'Set local name',
+                        onPressed: () => _editAlias(person),
+                      ),
+                    ],
                   ),
             onTap: person == widget.ownPubkey
                 ? null
@@ -6333,28 +6659,7 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: const Text('Network'),
-      actions: [
-        Tooltip(
-          message: 'Copy diagnostics',
-          child: TextButton.icon(
-            onPressed: _copyDiagnostics,
-            icon: const Icon(Icons.copy_outlined, size: 18),
-            label: const Text('Copy'),
-          ),
-        ),
-        Tooltip(
-          message: 'Clear diagnostics',
-          child: TextButton.icon(
-            onPressed: () => widget.diagnostics.value = const [],
-            icon: const Icon(Icons.delete_outline, size: 18),
-            label: const Text('Clear'),
-          ),
-        ),
-        const SizedBox(width: 8),
-      ],
-    ),
+    appBar: AppBar(title: const Text('Network')),
     body: ValueListenableBuilder<_WorkspaceFipsHeartbeat>(
       valueListenable: widget.fipsHeartbeat,
       builder: (context, heartbeat, _) => ValueListenableBuilder<List<String>>(
@@ -6395,100 +6700,142 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
           final contentWidth = ((MediaQuery.sizeOf(context).width - 960) / 2)
               .clamp(16.0, double.infinity)
               .toDouble();
+          final transportPanel = _DiagnosticPanel(
+            title: 'Transport',
+            child: ValueListenableBuilder<bool>(
+              valueListenable: widget.fipsEnabled,
+              builder: (context, enabled, _) => Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          enabled ? 'FIPS preferred' : 'Nostr only',
+                          style: theme.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          enabled
+                              ? 'Direct route to worker with Nostr fallback'
+                              : 'Nostr messages only',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Switch(
+                    value: enabled,
+                    onChanged: widget.onFipsEnabledChanged,
+                  ),
+                ],
+              ),
+            ),
+          );
+          final topologyPanel = _DiagnosticPanel(
+            title: 'FIPS topology',
+            child: ValueListenableBuilder<List<String>>(
+              valueListenable: widget.fipsPeers,
+              builder: (context, peers, _) => _FipsMeshMap(
+                worker: widget.fipsPeerNpub,
+                peers: peers,
+                contactNameForPubkey: widget.contactNameForPubkey,
+                active: active,
+                onRefresh: _refreshFipsMesh,
+                refreshing: _refreshingFipsMesh,
+              ),
+            ),
+          );
+          final connectionPanel = _DiagnosticPanel(
+            title: 'Connection',
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final status = _DiagnosticConnectionStatus(
+                  stateLabel: stateLabel,
+                  stateColor: stateColor,
+                  active: active,
+                );
+                final metrics = _DiagnosticMetrics(
+                  liveFor: liveFor,
+                  lastHeartbeat: lastHeartbeat,
+                  heartbeatCount: heartbeat.count,
+                  transport: active ? 'FIPS' : 'Nostr',
+                );
+                return constraints.maxWidth < 560
+                    ? Column(
+                        children: [status, const SizedBox(height: 18), metrics],
+                      )
+                    : Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(child: status),
+                          const SizedBox(width: 28),
+                          Expanded(child: metrics),
+                        ],
+                      );
+              },
+            ),
+          );
           return ListView(
             padding: EdgeInsets.fromLTRB(contentWidth, 16, contentWidth, 32),
             children: [
-              _DiagnosticPanel(
-                title: 'Transport',
-                child: ValueListenableBuilder<bool>(
-                  valueListenable: widget.fipsEnabled,
-                  builder: (context, enabled, _) => Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              enabled ? 'FIPS preferred' : 'Nostr only',
-                              style: theme.textTheme.titleSmall?.copyWith(
-                                fontWeight: FontWeight.w700,
-                              ),
+              LayoutBuilder(
+                builder: (context, constraints) => constraints.maxWidth < 720
+                    ? Column(
+                        children: [
+                          transportPanel,
+                          const SizedBox(height: 28),
+                          topologyPanel,
+                          const SizedBox(height: 28),
+                          connectionPanel,
+                        ],
+                      )
+                    : Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(child: connectionPanel),
+                          const SizedBox(width: 48),
+                          Expanded(
+                            child: Column(
+                              children: [
+                                transportPanel,
+                                const SizedBox(height: 28),
+                                topologyPanel,
+                              ],
                             ),
-                            const SizedBox(height: 2),
-                            Text(
-                              enabled
-                                  ? 'Direct route to worker with Nostr fallback'
-                                  : 'Nostr messages only',
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Switch(
-                        value: enabled,
-                        onChanged: widget.onFipsEnabledChanged,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 28),
-              _DiagnosticPanel(
-                title: 'FIPS topology',
-                child: ValueListenableBuilder<List<String>>(
-                  valueListenable: widget.fipsPeers,
-                  builder: (context, peers, _) => _FipsMeshMap(
-                    worker: widget.fipsPeerNpub,
-                    peers: peers,
-                    contactNameForPubkey: widget.contactNameForPubkey,
-                    active: active,
-                    onRefresh: _refreshFipsMesh,
-                    refreshing: _refreshingFipsMesh,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 28),
-              _DiagnosticPanel(
-                title: 'Connection',
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    final status = _DiagnosticConnectionStatus(
-                      stateLabel: stateLabel,
-                      stateColor: stateColor,
-                      active: active,
-                    );
-                    final metrics = _DiagnosticMetrics(
-                      liveFor: liveFor,
-                      lastHeartbeat: lastHeartbeat,
-                      heartbeatCount: heartbeat.count,
-                      transport: active ? 'FIPS' : 'Nostr',
-                    );
-                    return Column(
-                      children: [
-                        if (constraints.maxWidth < 560) ...[
-                          status,
-                          const SizedBox(height: 18),
-                          metrics,
-                        ] else
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(child: status),
-                              const SizedBox(width: 28),
-                              Expanded(child: metrics),
-                            ],
                           ),
-                      ],
-                    );
-                  },
-                ),
+                        ],
+                      ),
               ),
               const SizedBox(height: 28),
               _DiagnosticPanel(
                 title: 'Activity',
+                action: Wrap(
+                  spacing: 4,
+                  children: [
+                    Tooltip(
+                      message: 'Copy diagnostics',
+                      child: TextButton.icon(
+                        onPressed: _copyDiagnostics,
+                        icon: const Icon(Icons.copy_outlined, size: 18),
+                        label: const Text('Copy'),
+                      ),
+                    ),
+                    Tooltip(
+                      message: 'Clear diagnostics',
+                      child: TextButton.icon(
+                        onPressed: () => widget.diagnostics.value = const [],
+                        icon: const Icon(Icons.delete_outline, size: 18),
+                        label: const Text('Clear'),
+                      ),
+                    ),
+                  ],
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -6553,22 +6900,34 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
 }
 
 class _DiagnosticPanel extends StatelessWidget {
-  const _DiagnosticPanel({required this.title, required this.child});
+  const _DiagnosticPanel({
+    required this.title,
+    required this.child,
+    this.action,
+  });
 
   final String title;
   final Widget child;
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final panelAction = action;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          title,
-          style: theme.textTheme.titleSmall?.copyWith(
-            fontWeight: FontWeight.w700,
-          ),
+        Row(
+          children: [
+            Text(
+              title,
+              style: theme.textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const Spacer(),
+            panelAction ?? const SizedBox.shrink(),
+          ],
         ),
         const SizedBox(height: 12),
         child,
