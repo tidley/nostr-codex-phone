@@ -2262,10 +2262,9 @@ async fn process_workspace_request(
             let mut profile = workspace_agent_profile_from_request(&request, codex_config)?;
             let folder_scope = conversation_scoped
                 .then(|| {
-                    if request.folder_scope.is_empty() && request.agent_preset.is_some() {
-                        // Presets are intentionally quick to add. Their default
-                        // scope is the worker root, while custom agents still
-                        // require an explicit folder selection.
+                    if request.folder_scope.is_empty() {
+                        // The custom-agent dialog's "Worker default" option
+                        // intentionally omits a scope, just like presets.
                         canonical_conversation_folder_scope(
                             &[codex_config.working_dir.to_string_lossy().into_owned()],
                             codex_config,
