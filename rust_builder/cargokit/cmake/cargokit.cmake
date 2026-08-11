@@ -43,6 +43,9 @@ function(apply_cargokit target manifest_dir lib_name any_symbol_name)
         "CARGOKIT_TOOL_TEMP_DIR=${CARGOKIT_TEMP_DIR}/tool"
         "CARGOKIT_ROOT_PROJECT_DIR=${CMAKE_SOURCE_DIR}"
     )
+    if(DEFINED ENV{LIBOPUS_LIB_DIR})
+        list(APPEND CARGOKIT_ENV "LIBOPUS_LIB_DIR=$ENV{LIBOPUS_LIB_DIR}")
+    endif()
 
     if (WIN32)
         set(SCRIPT_EXTENSION ".cmd")
