@@ -1248,13 +1248,16 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         }
 
         if let Some(request) = invite_creation_request(&message) {
-            if config.owner_peer_hex.as_deref() != Some(&message.sender_pubkey_hex) {
+            if config.owner_peer_hex.as_deref() != Some(&message.sender_pubkey_hex)
+                && !config.workspace.is_admin(&message.sender_pubkey_hex)?
+            {
                 let _ = config
                     .messenger
                     .send_wire_to_pubkey(
                         &message.sender_pubkey_hex,
                         WireMessage::invite_rejected(InviteRejected {
-                            reason: "Only the workspace owner can create invites.".to_string(),
+                            reason: "Only workspace owners and admins can create invites."
+                                .to_string(),
                         }),
                     )
                     .await;
