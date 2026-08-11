@@ -33,6 +33,9 @@ jobs:
         env:
           # audiopus_sys bundles an Opus CMake project that still requests 3.5.
           CMAKE_POLICY_VERSION_MINIMUM: 3.5
+      - name: Reuse bundled Opus library
+        shell: pwsh
+        run: $opus = Get-ChildItem -Path rust/target/release/build -Filter opus.lib -Recurse | Select-Object -First 1; if ($null -eq $opus) { throw 'Bundled Opus library was not produced' }; "LIBOPUS_LIB_DIR=$($opus.Directory.Parent.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - run: flutter build windows --release -v
         env:
           CMAKE_POLICY_VERSION_MINIMUM: 3.5
