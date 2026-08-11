@@ -7034,6 +7034,7 @@ fn read_meminfo() -> Option<HashMap<String, u64>> {
     Some(values)
 }
 
+#[cfg(unix)]
 fn root_filesystem_status() -> Option<serde_json::Value> {
     let path = std::ffi::CString::new("/").ok()?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -7043,6 +7044,11 @@ fn root_filesystem_status() -> Option<serde_json::Value> {
         let available = stat.f_bavail.saturating_mul(stat.f_frsize);
         serde_json::json!({"mount": "/", "total_bytes": total, "available_bytes": available, "used_bytes": total.saturating_sub(available)})
     })
+}
+
+#[cfg(not(unix))]
+fn root_filesystem_status() -> Option<serde_json::Value> {
+    None
 }
 
 fn read_disk_io() -> serde_json::Value {
