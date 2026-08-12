@@ -1155,13 +1155,19 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             continue;
         }
 
-        if !accept_or_claim_owner(
-            &config.worker_env,
-            &mut config.owner_peer_hex,
-            &config.allowed_owner_hexes,
-            &config.pairing_secret,
-            &message,
-        ) {
+        // Workspace admins use their own Nostr identities. Let persisted admins
+        // through the legacy owner gate so they can perform admin actions such
+        // as generating invitations.
+        let is_workspace_admin = config.workspace.is_admin(&message.sender_pubkey_hex)?;
+        if !is_workspace_admin
+            && !accept_or_claim_owner(
+                &config.worker_env,
+                &mut config.owner_peer_hex,
+                &config.allowed_owner_hexes,
+                &config.pairing_secret,
+                &message,
+            )
+        {
             continue;
         }
 
@@ -1581,10 +1587,26 @@ fn invite_creation_request(message: &IncomingMessage) -> Option<CreateInvite> {
     } else {
         &message.text
     };
-    match parse_wire_message(raw).ok()? {
-        WireMessage::CreateInvite { create_invite } => Some(create_invite),
-        _ => None,
+    create_invite_from_json(raw, 0)
+}
+
+fn create_invite_from_json(raw: &str, depth: u8) -> Option<CreateInvite> {
+    if depth > 2 {
+        return None;
     }
+    if let Ok(WireMessage::CreateInvite { create_invite }) = parse_wire_message(raw) {
+        return Some(create_invite);
+    }
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let object = value.as_object()?;
+    for field in ["query", "message"] {
+        if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+            if let Some(create_invite) = create_invite_from_json(value, depth + 1) {
+                return Some(create_invite);
+            }
+        }
+    }
+    None
 }
 
 fn invite_redemption_code(message: &IncomingMessage) -> Option<String> {
@@ -9966,6 +9988,17 @@ mod tests {
         ));
         assert!(!is_repo_list_request("/repo"));
         assert!(!is_repo_list_request("list repos"));
+    }
+
+    #[test]
+    fn parses_wrapped_workspace_invite_creation_requests() {
+        let request = create_invite_from_json(
+            r#"{"query":"{\"create_invite\":{\"expires_in_seconds\":900}}"}"#,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(request.expires_in_seconds, Some(900));
     }
 
     #[test]
