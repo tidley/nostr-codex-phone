@@ -1694,7 +1694,10 @@ async fn process_workspace_request(
     agent_queues: &mut WorkspaceAgentQueues,
     fips_capabilities: &Arc<Mutex<HashMap<String, (String, Instant)>>>,
 ) -> Result<()> {
-    if workspace_action_requires_admin(&request.action) && !workspace.is_admin(sender)? {
+    if workspace_action_requires_admin(&request.action)
+        && owner != Some(sender)
+        && !workspace.is_admin(sender)?
+    {
         bail!("Only workspace admins can manage agents.");
     }
     if let Some(channel_id) = request.channel_id.as_deref() {
@@ -9295,6 +9298,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["desktop", "owner", "phone"],
         );
+        assert!(workspace.is_admin("owner").unwrap());
+        assert!(!workspace.is_admin("phone").unwrap());
     }
 
     #[test]
