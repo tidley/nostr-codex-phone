@@ -922,12 +922,16 @@ async fn create_opencode_session(config: &CodexConfig) -> Result<String> {
     args.extend([
         "--title".into(),
         "Nostr workspace agent".into(),
-        "Initialize this dedicated workspace session. Reply only READY.".into(),
+        workspace_agent_session_initialization_prompt(),
     ]);
     let output = run_opencode_cli(config, args, None).await?;
     parse_opencode_json_output(&String::from_utf8_lossy(&output.stdout))?
         .session_id
         .ok_or_else(|| anyhow!("OpenCode did not emit a session ID while creating a session"))
+}
+
+fn workspace_agent_session_initialization_prompt() -> String {
+    "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to 50. You will then receive that many recent messages before replying. This setup applies to all following messages in this session. Reply only READY to acknowledge it.".into()
 }
 
 async fn run_opencode_cli(
@@ -1692,6 +1696,14 @@ mod tests {
         assert_eq!(parsed.session_id.as_deref(), Some("ses_Abc123"));
         assert_eq!(parsed.response, "Done.");
         assert_eq!(parsed.token_usage, None);
+    }
+
+    #[test]
+    fn initializes_workspace_sessions_with_the_history_protocol() {
+        let prompt = workspace_agent_session_initialization_prompt();
+
+        assert!(prompt.contains("[[WORKSPACE_HISTORY: N]]"));
+        assert!(prompt.contains("Reply only READY"));
     }
 
     #[test]
