@@ -1732,7 +1732,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           if (mounted) _select(_WorkspaceSection.channel, 'workspace');
         },
         inviteCode: widget.inviteCode,
-        canCreateInvite: widget.canManageAgents,
+        canCreateInvite:
+            widget.canManageMembers || widget.memberStatus == 'Owner',
         memberStatus: widget.memberStatus,
         onCreateInvite: widget.onCreateInvite,
         members: widget.workspace.members,
