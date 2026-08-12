@@ -1061,7 +1061,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _active = firstChannel.id;
       return;
     }
-    final firstPeer = widget.workspace.directPeers(widget.ownPubkey).firstOrNull;
+    final firstPeer = widget.workspace
+        .directPeers(widget.ownPubkey)
+        .firstOrNull;
     if (firstPeer != null) {
       _section = _WorkspaceSection.direct;
       _active = firstPeer;
@@ -4708,6 +4710,11 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     final searching = _searchQuery.trim().isNotEmpty;
     final compactHeader = MediaQuery.sizeOf(context).width < 720;
     final activityToastWidth = MediaQuery.sizeOf(context).width * 0.95;
+    final hasDesktopActivityToast =
+        !compactHeader &&
+        (_unreadThreadReplyCount > 0 ||
+            widget.typingLabels.isNotEmpty ||
+            _cancelledAgentIds.isNotEmpty);
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.keyF, control: true):
@@ -4894,7 +4901,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                             compactHeader ? 16 : 24,
                             20,
                             compactHeader ? 16 : 24,
-                            12,
+                            hasDesktopActivityToast ? 64 : 12,
                           ),
                           itemCount: visibleMessages.length + 1,
                           itemBuilder: (context, index) {
@@ -5070,14 +5077,11 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                         ),
                       ),
                     ),
-                  if (!compactHeader &&
-                      (_unreadThreadReplyCount > 0 ||
-                          widget.typingLabels.isNotEmpty ||
-                          _cancelledAgentIds.isNotEmpty))
+                  if (hasDesktopActivityToast)
                     Positioned(
                       left: compactHeader ? 16 : 24,
                       right: compactHeader ? 16 : 24,
-                      bottom: 8,
+                      bottom: 16,
                       child: Align(
                         alignment: Alignment.center,
                         child: ConstrainedBox(
