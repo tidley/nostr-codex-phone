@@ -17,6 +17,7 @@ esac
 # The code tree is read-only by default. Rebinding the selected working
 # directory grants the agent the minimum write access needed to make changes.
 args=(
+  --die-with-parent
   --ro-bind / /
   --bind "$workdir" "$workdir"
   --dev-bind /dev /dev

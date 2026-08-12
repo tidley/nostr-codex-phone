@@ -9339,6 +9339,14 @@ mod tests {
         assert!(low_information_transcript_response("turn the lights off").is_none());
     }
 
+    #[test]
+    fn treats_timed_out_agent_turns_as_failures_not_cancellations() {
+        assert!(!is_agent_cancelled_error(&anyhow!(
+            "OpenCode timed out after 300s"
+        )));
+        assert!(is_agent_cancelled_error(&anyhow!("OpenCode cancelled")));
+    }
+
     fn legacy_voice_message(sha256: &str) -> IncomingMessage {
         IncomingMessage {
             sender_pubkey: "npub-sender".to_string(),
