@@ -1002,13 +1002,13 @@ async fn run_opencode_cli_with_cancel(
     let status = tokio::select! {
         status = child.wait() => status.context("failed to wait for OpenCode output"),
         _ = wait_for_cancel(cancel_token), if cancel_token.is_some() => {
-            stop_opencode_scope(scope_name.as_deref()).await;
             let _ = child.kill().await;
+            stop_opencode_scope(scope_name.as_deref()).await;
             Err(anyhow!("OpenCode cancelled"))
         }
         _ = sleep(config.timeout) => {
-            stop_opencode_scope(scope_name.as_deref()).await;
             let _ = child.kill().await;
+            stop_opencode_scope(scope_name.as_deref()).await;
             Err(anyhow!("OpenCode timed out after {}s", config.timeout.as_secs()))
         }
     }?;
@@ -1045,14 +1045,24 @@ async fn stop_opencode_scope(scope_name: Option<&str>) {
     };
     let unit_name = format!("{scope_name}.scope");
     match Command::new("systemctl")
-        .args(["--user", "stop", &unit_name])
+        .args([
+            "--user",
+            "kill",
+            "--kill-who=all",
+            "--signal=KILL",
+            &unit_name,
+        ])
         .status()
         .await
     {
         Ok(status) if status.success() => {}
-        Ok(status) => warn!(%scope_name, %status, "failed to stop OpenCode systemd scope"),
-        Err(err) => warn!(%scope_name, "failed to stop OpenCode systemd scope: {err}"),
+        Ok(status) => warn!(%scope_name, %status, "failed to kill OpenCode systemd scope"),
+        Err(err) => warn!(%scope_name, "failed to kill OpenCode systemd scope: {err}"),
     }
+    let _ = Command::new("systemctl")
+        .args(["--user", "stop", "--no-block", &unit_name])
+        .status()
+        .await;
 }
 
 fn parse_opencode_model_list(output: &str) -> Result<Vec<OpenCodeModelInfo>> {
