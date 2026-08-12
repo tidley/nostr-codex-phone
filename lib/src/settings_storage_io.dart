@@ -32,50 +32,79 @@ class _FlutterSecureSettingsStorage implements SecureSettingsStorage {
 
 /// Uses Secret Service normally, with a user-only file fallback if it is locked.
 class SettingsStorage {
-  SettingsStorage({
+  factory SettingsStorage({
     SecureSettingsStorage? secureStorage,
     Future<Directory> Function()? applicationSupportDirectory,
-  }) : _secureStorage = secureStorage ?? const _FlutterSecureSettingsStorage(),
-       _applicationSupportDirectory =
-           applicationSupportDirectory ?? getApplicationSupportDirectory;
+  }) {
+    if (secureStorage == null && applicationSupportDirectory == null) {
+      return _shared;
+    }
+    return SettingsStorage._(
+      secureStorage: secureStorage ?? const _FlutterSecureSettingsStorage(),
+      applicationSupportDirectory:
+          applicationSupportDirectory ?? getApplicationSupportDirectory,
+    );
+  }
+
+  SettingsStorage._({
+    required SecureSettingsStorage secureStorage,
+    required Future<Directory> Function() applicationSupportDirectory,
+  }) : _secureStorage = secureStorage,
+       _applicationSupportDirectory = applicationSupportDirectory;
+
+  static final _shared = SettingsStorage._(
+    secureStorage: const _FlutterSecureSettingsStorage(),
+    applicationSupportDirectory: getApplicationSupportDirectory,
+  );
 
   final SecureSettingsStorage _secureStorage;
   final Future<Directory> Function() _applicationSupportDirectory;
   bool _useLinuxFallback = false;
   Future<void> _fallbackOperations = Future.value();
+  Future<void> _operations = Future.value();
   final Map<String, String?> _knownValues = {};
 
-  Future<String?> read({required String key}) async {
+  Future<String?> read({required String key}) => _serialize(() async {
     final value = await _run(
       () => _secureStorage.read(key: key),
       () async => (await _readFallback())[key],
     );
     _knownValues[key] = value;
     return value;
-  }
+  });
 
-  Future<void> write({required String key, required String? value}) async {
-    if (_knownValues[key] == value && _knownValues.containsKey(key)) return;
-    await _run(() => _secureStorage.write(key: key, value: value), () async {
-        final values = await _readFallback();
-        if (value == null) {
-          values.remove(key);
-        } else {
-          values[key] = value;
-        }
-        await _writeFallback(values);
+  Future<void> write({required String key, required String? value}) =>
+      _serialize(() async {
+        if (_knownValues[key] == value && _knownValues.containsKey(key)) return;
+        await _run(
+          () => _secureStorage.write(key: key, value: value),
+          () async {
+            final values = await _readFallback();
+            if (value == null) {
+              values.remove(key);
+            } else {
+              values[key] = value;
+            }
+            await _writeFallback(values);
+          },
+        );
+        _knownValues[key] = value;
       });
-    _knownValues[key] = value;
-  }
 
-  Future<void> delete({required String key}) async {
+  Future<void> delete({required String key}) => _serialize(() async {
     if (_knownValues[key] == null && _knownValues.containsKey(key)) return;
     await _run(() => _secureStorage.delete(key: key), () async {
-        final values = await _readFallback();
-        values.remove(key);
-        await _writeFallback(values);
-      });
+      final values = await _readFallback();
+      values.remove(key);
+      await _writeFallback(values);
+    });
     _knownValues[key] = null;
+  });
+
+  Future<T> _serialize<T>(Future<T> Function() operation) {
+    final result = _operations.then((_) => operation());
+    _operations = result.then<void>((_) {}, onError: (_, _) {});
+    return result;
   }
 
   Future<T> _run<T>(
