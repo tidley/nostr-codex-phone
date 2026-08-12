@@ -4010,6 +4010,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   bool get _canManageWorkspaceAgents =>
+      _activeWorkspaceHasLocalWorkerTarget ||
       _workspace.memberAdmins.contains(_ownPubkeyHex);
 
   _WorkspaceWorkerState get _activeWorkspaceWorker =>
