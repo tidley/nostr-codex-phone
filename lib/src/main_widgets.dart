@@ -559,6 +559,7 @@ class _TeamWorkspace extends StatefulWidget {
     required this.spaces,
     required this.activeSpace,
     required this.hasUnreadOtherSpaces,
+    required this.otherWorkspaceAttentionVersion,
     required this.canManageAgents,
     required this.canManageMembers,
     required this.canRemoveMembers,
@@ -631,6 +632,7 @@ class _TeamWorkspace extends StatefulWidget {
   final List<RepoTarget> spaces;
   final RepoTarget? activeSpace;
   final bool hasUnreadOtherSpaces;
+  final int otherWorkspaceAttentionVersion;
   final bool canManageAgents;
   final bool canManageMembers;
   final bool canRemoveMembers;
@@ -1196,6 +1198,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   List<WorkspaceMention> _mentionOptionsFor(TextEditingController composer) {
     final options = <WorkspaceMention>[
       for (final member in _conversationMembers)
+        if (member != widget.ownPubkey)
         WorkspaceMention(
           kind: 'member',
           id: member,
@@ -1559,6 +1562,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       spaces: widget.spaces,
       activeSpace: widget.activeSpace,
       hasUnreadOtherSpaces: widget.hasUnreadOtherSpaces,
+      otherWorkspaceAttentionVersion: widget.otherWorkspaceAttentionVersion,
       canManageAgents: widget.canManageAgents,
       onSwitchSpace: widget.onSwitchSpace,
       onLeaveSpace: widget.onLeaveSpace,
@@ -2662,6 +2666,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.spaces,
     required this.activeSpace,
     required this.hasUnreadOtherSpaces,
+    required this.otherWorkspaceAttentionVersion,
     required this.canManageAgents,
     required this.onSwitchSpace,
     required this.onLeaveSpace,
@@ -2696,6 +2701,7 @@ class _WorkspaceSidebar extends StatelessWidget {
   final List<RepoTarget> spaces;
   final RepoTarget? activeSpace;
   final bool hasUnreadOtherSpaces;
+  final int otherWorkspaceAttentionVersion;
   final bool canManageAgents;
   final ValueChanged<RepoTarget> onSwitchSpace;
   final ValueChanged<RepoTarget> onLeaveSpace;
@@ -2946,9 +2952,15 @@ class _WorkspaceSidebar extends StatelessWidget {
                                     activeSpace?.displayName ??
                                     'Select workspace',
                                 unread: hasUnreadOtherSpaces,
+                                pulse: otherWorkspaceAttentionVersion,
                                 attentionColor: const Color(0xff35d6a0),
                                 style: Theme.of(context).textTheme.titleMedium
-                                    ?.copyWith(fontWeight: FontWeight.bold),
+                                    ?.copyWith(
+                                      fontWeight: FontWeight.bold,
+                                      color: fipsConnected
+                                          ? const Color(0xff35d6a0)
+                                          : null,
+                                    ),
                               ),
                             ),
                             const SizedBox(width: 4),
@@ -3254,12 +3266,14 @@ class _UnreadConversationLabel extends StatefulWidget {
     required this.unread,
     this.style,
     this.attentionColor,
+    this.pulse = 0,
   });
 
   final String label;
   final bool unread;
   final TextStyle? style;
   final Color? attentionColor;
+  final int pulse;
 
   @override
   State<_UnreadConversationLabel> createState() =>
@@ -3271,7 +3285,7 @@ class _UnreadConversationLabelState extends State<_UnreadConversationLabel>
   late final AnimationController _controller;
 
   void _syncAnimation() {
-    if (widget.unread) {
+    if (widget.unread && widget.pulse == 0) {
       _controller.repeat(reverse: true);
     } else {
       _controller
@@ -3293,7 +3307,11 @@ class _UnreadConversationLabelState extends State<_UnreadConversationLabel>
   @override
   void didUpdateWidget(covariant _UnreadConversationLabel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.unread != widget.unread) _syncAnimation();
+    if (oldWidget.pulse != widget.pulse) {
+      _controller.forward(from: 0);
+    } else if (oldWidget.unread != widget.unread) {
+      _syncAnimation();
+    }
   }
 
   @override
@@ -3307,6 +3325,17 @@ class _UnreadConversationLabelState extends State<_UnreadConversationLabel>
     animation: _controller,
     builder: (context, _) {
       final attentionColor = widget.attentionColor;
+      final baseColor = widget.style?.color ??
+          Theme.of(context).colorScheme.onSurface;
+      final pulseColor = widget.pulse == 0
+          ? null
+          : Color.lerp(
+              attentionColor ?? baseColor,
+              Colors.white,
+              _controller.value <= 0.5
+                  ? _controller.value * 2
+                  : (1 - _controller.value) * 2,
+            );
       final style = attentionColor == null
           ? widget.style?.copyWith(
                   color: widget.style?.color?.withValues(
@@ -3324,23 +3353,24 @@ class _UnreadConversationLabelState extends State<_UnreadConversationLabel>
                   fontWeight: widget.unread ? FontWeight.w600 : null,
                 )
           : widget.style?.copyWith(
-                  color: widget.unread
+                  color: pulseColor ??
+                      (widget.unread
                       ? Color.lerp(
-                          widget.style?.color ??
-                              Theme.of(context).colorScheme.onSurface,
+                          baseColor,
                           attentionColor,
                           _controller.value,
                         )
-                      : widget.style?.color,
+                      : widget.style?.color),
                 ) ??
                 TextStyle(
-                  color: widget.unread
+                  color: pulseColor ??
+                      (widget.unread
                       ? Color.lerp(
-                          Theme.of(context).colorScheme.onSurface,
+                          baseColor,
                           attentionColor,
                           _controller.value,
                         )
-                      : null,
+                      : null),
                 );
       return Text(
         widget.label,

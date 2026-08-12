@@ -135,6 +135,7 @@ class _WorkspaceWorkerState {
   Timer? cacheSaveTimer;
   final Map<String, int> unreadCounts = {};
   final Map<String, int> threadUnreadCounts = {};
+  int attentionVersion = 0;
   String? openThreadKey;
   String focusedConversationKey = 'workspace';
 
@@ -4038,6 +4039,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           target.pubkey,
         ).unreadCounts.values.any((count) => count > 0),
   );
+  int get _otherWorkspaceAttentionVersion => _computerServiceTargets
+      .where((target) => target.id != _computerServiceTarget?.id)
+      .fold(0, (latest, target) {
+        final attention = _workspaceWorkerForKey(target.pubkey).attentionVersion;
+        return latest > attention ? latest : attention;
+      });
   String get _workspaceFocusedConversationKey =>
       _activeWorkspaceWorker.focusedConversationKey;
   set _workspaceFocusedConversationKey(String value) =>
@@ -4982,6 +4989,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               if (!focused) {
                 worker.unreadCounts[conversationKey] =
                     (worker.unreadCounts[conversationKey] ?? 0) + 1;
+                if (workerKey != _workspaceWorkerKey) {
+                  worker.attentionVersion++;
+                }
                 if (isWorkspaceAgentSender(workspaceMessage.senderPubkey)) {
                   inactiveAgentConversationKey = conversationKey;
                 }
@@ -7510,6 +7520,7 @@ Return a concise catch-up summary of what happened after that point: completed w
           spaces: _computerServiceTargets,
           activeSpace: _computerServiceTarget,
           hasUnreadOtherSpaces: _hasUnreadOtherWorkspaces,
+          otherWorkspaceAttentionVersion: _otherWorkspaceAttentionVersion,
           canManageAgents: _canManageWorkspaceAgents,
           canManageMembers: _workspace.memberAdmins.contains(_ownPubkeyHex),
           canRemoveMembers: _canManageWorkspaceAgents,
