@@ -18,6 +18,37 @@ Map<String, String> decodeWorkspaceMemberAliases(String? raw) {
   }
 }
 
+class WorkspaceConversationPreference {
+  const WorkspaceConversationPreference({
+    this.pinned = false,
+    this.archived = false,
+  });
+
+  final bool pinned;
+  final bool archived;
+
+  Map<String, bool> toJson() => {'pinned': pinned, 'archived': archived};
+}
+
+Map<String, WorkspaceConversationPreference>
+decodeWorkspaceConversationPreferences(String? raw) {
+  if (raw == null || raw.isEmpty) return {};
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) return {};
+    return {
+      for (final entry in decoded.entries)
+        if (entry.key.toString().trim().isNotEmpty && entry.value is Map)
+          entry.key.toString().trim(): WorkspaceConversationPreference(
+            pinned: entry.value['pinned'] == true,
+            archived: entry.value['archived'] == true,
+          ),
+    };
+  } catch (_) {
+    return {};
+  }
+}
+
 class _WorkspaceHistoryTransfer {
   _WorkspaceHistoryTransfer(this.total);
 
@@ -62,6 +93,37 @@ _WorkspaceHistoryTransferAction? _historyTransferAction(String? value) {
 bool isWorkspaceAgentSender(String senderPubkey) =>
     senderPubkey.trim().toLowerCase().startsWith('agent:');
 
+String? workspaceThreadTopic(Iterable<WorkspaceMessage> replies) {
+  for (final reply in replies.toList().reversed) {
+    if (!isWorkspaceAgentSender(reply.senderPubkey)) continue;
+    final match = RegExp(
+      r'^\s*\[\[THREAD_TOPIC:\s*([^\]\r\n]+)\]\]',
+      caseSensitive: false,
+    ).firstMatch(reply.body);
+    if (match == null) return null;
+    final topic = match
+        .group(1)!
+        .trim()
+        .split(RegExp(r'\s+'))
+        .take(3)
+        .join(' ');
+    if (topic.isNotEmpty) return topic;
+  }
+  return null;
+}
+
+String workspaceDisplayMessageText(String value) => value.replaceFirst(
+  RegExp(r'^\s*\[\[THREAD_TOPIC:\s*[^\]\r\n]+\]\]\s*', caseSensitive: false),
+  '',
+);
+
+bool isWorkspaceEmptyAgentMessage(WorkspaceMessage message) =>
+    isWorkspaceAgentSender(message.senderPubkey) &&
+    workspaceDisplayMessageText(message.body).trim().isEmpty;
+
+bool isWorkspaceThreadTopicRequest(WorkspaceMessage message) =>
+    message.body.trim().startsWith('[[THREAD_TOPIC_REQUEST]]');
+
 bool isWorkspaceLocalSender(
   String senderPubkey,
   Iterable<String> localSenderIds,
@@ -95,17 +157,54 @@ int workspaceAvatarColorIndex(String identity, String name, int colorCount) {
 }
 
 class WorkspaceChannel {
-  const WorkspaceChannel({required this.id, required this.name});
+  const WorkspaceChannel({
+    required this.id,
+    required this.name,
+    this.createdBy = '',
+    this.members = const [],
+  });
   final String id;
   final String name;
+  final String createdBy;
+  final List<WorkspaceChannelMember> members;
 
   factory WorkspaceChannel.fromJson(Map<String, dynamic> json) =>
       WorkspaceChannel(
         id: json['id']?.toString() ?? '',
         name: json['name']?.toString() ?? '',
+        createdBy: json['created_by']?.toString() ?? '',
+        members: (json['members'] as List? ?? const [])
+            .whereType<Map>()
+            .map(
+              (member) => WorkspaceChannelMember.fromJson(
+                Map<String, dynamic>.from(member),
+              ),
+            )
+            .where((member) => member.pubkey.isNotEmpty)
+            .toList(growable: false),
       );
 
-  Map<String, Object> toJson() => {'id': id, 'name': name};
+  Map<String, Object> toJson() => {
+    'id': id,
+    'name': name,
+    'created_by': createdBy,
+    'members': members.map((member) => member.toJson()).toList(growable: false),
+  };
+}
+
+class WorkspaceChannelMember {
+  const WorkspaceChannelMember({required this.pubkey, this.isAdmin = false});
+
+  final String pubkey;
+  final bool isAdmin;
+
+  factory WorkspaceChannelMember.fromJson(Map<String, dynamic> json) =>
+      WorkspaceChannelMember(
+        pubkey: json['pubkey']?.toString().trim() ?? '',
+        isAdmin: json['is_admin'] == true,
+      );
+
+  Map<String, Object> toJson() => {'pubkey': pubkey, 'is_admin': isAdmin};
 }
 
 /// Ephemeral channel-call metadata carried by group call control messages.
@@ -153,6 +252,7 @@ class WorkspaceMessage {
     this.recipientPubkey,
     this.parentId,
     this.alsoSendToMain = false,
+    this.pinned = false,
     this.attachments = const [],
     this.mentions = const [],
     this.reactions = const [],
@@ -164,6 +264,7 @@ class WorkspaceMessage {
   final String body;
   final String? parentId;
   final bool alsoSendToMain;
+  final bool pinned;
   final List<BridgeAudioReference> attachments;
   final List<WorkspaceMention> mentions;
   final List<WorkspaceReaction> reactions;
@@ -178,6 +279,7 @@ class WorkspaceMessage {
         body: json['body']?.toString() ?? '',
         parentId: json['parent_id']?.toString(),
         alsoSendToMain: json['also_send_to_main'] == true,
+        pinned: json['pinned'] == true,
         attachments: _attachments(json['attachments']),
         mentions: _mentions(json['mentions']),
         reactions: _reactions(json['reactions']),
@@ -192,6 +294,7 @@ class WorkspaceMessage {
     'body': body,
     if (parentId != null) 'parent_id': parentId,
     'also_send_to_main': alsoSendToMain,
+    'pinned': pinned,
     'attachments': attachments
         .map(
           (attachment) => {
@@ -503,11 +606,13 @@ class WorkspaceConversationAgent {
 class WorkspaceConversationPreprompt {
   const WorkspaceConversationPreprompt({
     required this.preprompt,
+    this.folderScope = const [],
     this.channelId,
     this.memberPubkey,
     this.peerPubkey,
   });
   final String preprompt;
+  final List<String> folderScope;
   final String? channelId;
   final String? memberPubkey;
   final String? peerPubkey;
@@ -515,6 +620,10 @@ class WorkspaceConversationPreprompt {
   factory WorkspaceConversationPreprompt.fromJson(Map<String, dynamic> json) =>
       WorkspaceConversationPreprompt(
         preprompt: json['preprompt']?.toString() ?? '',
+        folderScope: (json['folder_scope'] as List? ?? const [])
+            .map((path) => path.toString().trim())
+            .where((path) => path.isNotEmpty)
+            .toList(growable: false),
         channelId: json['channel_id']?.toString(),
         memberPubkey: json['member_pubkey']?.toString(),
         peerPubkey: json['peer_pubkey']?.toString(),
@@ -522,6 +631,7 @@ class WorkspaceConversationPreprompt {
 
   Map<String, Object?> toJson() => {
     'preprompt': preprompt,
+    'folder_scope': folderScope,
     if (channelId != null) 'channel_id': channelId,
     if (memberPubkey != null) 'member_pubkey': memberPubkey,
     if (peerPubkey != null) 'peer_pubkey': peerPubkey,
@@ -749,6 +859,7 @@ class WorkspaceState {
     );
     if (isSnapshot ||
         isSnapshotHeader ||
+        data['action'] == 'agent_created' ||
         data['action'] == 'conversation_agents_updated' ||
         data['action'] == 'agent_deleted') {
       conversationAgents = incomingConversationAgents;
@@ -781,8 +892,12 @@ class WorkspaceState {
     }
     final incomingMembers = _members(data['members']);
     if (incomingMembers.isNotEmpty) {
-      if (isSnapshot || isSnapshotHeader) {
+      if (isSnapshot ||
+          isSnapshotHeader ||
+          data['action'] == 'member_removed') {
         members = incomingMembers.keys.toList();
+        memberNames.clear();
+        memberAdmins.clear();
       } else {
         final knownMembers = members.toSet()..addAll(incomingMembers.keys);
         members = knownMembers.toList();
@@ -906,6 +1021,24 @@ class WorkspaceState {
     return '';
   }
 
+  List<String> conversationFolderScope({
+    required String? channelId,
+    required String ownPubkey,
+    required String? peerPubkey,
+  }) {
+    for (final prompt in conversationPreprompts) {
+      if (channelId != null && prompt.channelId == channelId) {
+        return prompt.folderScope;
+      }
+      if (channelId == null &&
+          {prompt.memberPubkey, prompt.peerPubkey}.contains(ownPubkey) &&
+          {prompt.memberPubkey, prompt.peerPubkey}.contains(peerPubkey)) {
+        return prompt.folderScope;
+      }
+    }
+    return const [];
+  }
+
   List<String> directPeers(String ownPubkey) {
     final peers = <String>{};
     for (final conversation in messages.values) {
@@ -924,8 +1057,14 @@ class WorkspaceState {
   }
 
   int channelHumanMemberCount(String channelId) {
-    if (!channels.any((channel) => channel.id == channelId)) return 0;
-    return members.where((member) => !member.startsWith('agent:')).length;
+    for (final channel in channels) {
+      if (channel.id == channelId) {
+        return channel.members
+            .where((member) => !member.pubkey.startsWith('agent:'))
+            .length;
+      }
+    }
+    return 0;
   }
 
   static String _directKey(String one, String? two) =>

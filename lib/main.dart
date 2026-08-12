@@ -85,12 +85,14 @@ enum _CallMediaSource { audioOnly, camera, screen }
 class _WorkspaceFipsHeartbeat {
   const _WorkspaceFipsHeartbeat({
     this.connectionState = 'disconnected',
+    this.connectionStartedAt,
     this.connectedAt,
     this.lastHeartbeatAt,
     this.count = 0,
   });
 
   final String connectionState;
+  final DateTime? connectionStartedAt;
   final DateTime? connectedAt;
   final DateTime? lastHeartbeatAt;
   final int count;
@@ -566,7 +568,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _recentSessionIdsStorageKey = 'recent_session_ids_v1';
   static const _workspaceDisplayNameStorageKey = 'workspace_display_name';
   static const _workspaceMemberAliasesStorageKey = 'workspace_member_aliases';
+  static const _workspaceConversationPreferencesStorageKey =
+      'workspace_conversation_preferences';
+  static const _workspaceLocalMessagePinsStorageKey =
+      'workspace_local_message_pins';
   static const _workspaceFipsEnabledStorageKey = 'workspace_fips_enabled';
+  static const _lastWorkspaceLocationStorageKey = 'last_workspace_location_v1';
   static const _profileStorageKeys = <String>[
     _secretKeyStorageKey,
     _peerPubkeyStorageKey,
@@ -603,7 +610,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _recentSessionIdsStorageKey,
     _workspaceDisplayNameStorageKey,
     _workspaceMemberAliasesStorageKey,
+    _workspaceConversationPreferencesStorageKey,
+    _workspaceLocalMessagePinsStorageKey,
     _workspaceFipsEnabledStorageKey,
+    _lastWorkspaceLocationStorageKey,
   ];
   static const _recentMessagesWindow = Duration(days: 4);
   static const _maxConversationMessages = 200;
@@ -744,6 +754,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   bool _workspaceVoicePending = false;
   String _workspaceDisplayName = '';
   Map<String, String> _workspaceMemberAliases = {};
+  Map<String, WorkspaceConversationPreference>
+  _workspaceConversationPreferences = {};
+  Set<String> _workspaceLocalMessagePins = {};
 
   bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
 
@@ -979,6 +992,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     for (final workerKey in _workspaceWorkers.keys) {
       unawaited(_saveWorkspaceCache(workerKey: workerKey));
     }
+    unawaited(_saveLastWorkspaceLocation());
     _inactiveReplyNoticeTimer?.cancel();
     _inactiveReplyNotice?.remove();
     _inactiveReplyNoticeController?.dispose();
@@ -1018,6 +1032,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       unawaited(_saveWorkspaceCache());
+      unawaited(_saveLastWorkspaceLocation());
       _seenIncomingEventIdsSaveTimer?.cancel();
       unawaited(_saveSeenIncomingEventIds());
     }
@@ -1102,8 +1117,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final workspaceMemberAliases = await _storage.read(
       key: _workspaceMemberAliasesStorageKey,
     );
+    final workspaceConversationPreferences = await _storage.read(
+      key: _workspaceConversationPreferencesStorageKey,
+    );
+    final workspaceLocalMessagePins = await _storage.read(
+      key: _workspaceLocalMessagePinsStorageKey,
+    );
     final workspaceFipsEnabled = await _storage.read(
       key: _workspaceFipsEnabledStorageKey,
+    );
+    final lastWorkspaceLocation = await _storage.read(
+      key: _lastWorkspaceLocationStorageKey,
     );
 
     final migratedRelays = relays?.replaceAll(',', '\n') ?? defaultRelays;
@@ -1125,6 +1149,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final selectedTarget =
         _targetById(targets, selectedRepoTarget) ??
         (targets.isNotEmpty ? targets.first : null);
+    final location = _decodeLastWorkspaceLocation(lastWorkspaceLocation);
 
     if (!mounted) return;
     setState(() {
@@ -1132,6 +1157,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _repoTargets = targets;
       _computerServiceTargets = serviceTargets;
       _computerServiceTarget = serviceTarget;
+      _showTeamWorkspace = location['page'] != 'sessions';
+      if (serviceTarget != null && location['worker_id'] == serviceTarget.id) {
+        final worker = _workspaceWorkerForKey(serviceTarget.pubkey);
+        worker.focusedConversationKey =
+            location['conversation_key'] ?? 'workspace';
+        worker.openThreadKey = location['thread_key'];
+      }
       _selectedRepoTargetId = selectedTarget?.id;
       _targetNameController.text = selectedTarget?.name ?? '';
       _peerPubkeyController.text =
@@ -1210,6 +1242,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _workspaceMemberAliases = decodeWorkspaceMemberAliases(
         workspaceMemberAliases,
       );
+      _workspaceConversationPreferences =
+          decodeWorkspaceConversationPreferences(
+            workspaceConversationPreferences,
+          );
+      _workspaceLocalMessagePins = _decodeStringList(
+        workspaceLocalMessagePins,
+      ).toSet();
       // Workspace FIPS depends on the native QUIC bridge. Browser sessions use
       // the already authenticated Nostr route until a web transport exists.
       _workspaceFipsEnabled.value =
@@ -1323,7 +1362,48 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       key: _workspaceMemberAliasesStorageKey,
       value: jsonEncode(_workspaceMemberAliases),
     ),
+    _storage.write(
+      key: _workspaceConversationPreferencesStorageKey,
+      value: jsonEncode({
+        for (final entry in _workspaceConversationPreferences.entries)
+          entry.key: entry.value.toJson(),
+      }),
+    ),
+    _storage.write(
+      key: _workspaceLocalMessagePinsStorageKey,
+      value: jsonEncode(_workspaceLocalMessagePins.toList()..sort()),
+    ),
   ]);
+
+  Map<String, String> _decodeLastWorkspaceLocation(String? raw) {
+    if (raw == null || raw.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return {};
+      return {
+        for (final entry in decoded.entries)
+          if (entry.value?.toString().trim().isNotEmpty == true)
+            entry.key.toString(): entry.value.toString().trim(),
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<void> _saveLastWorkspaceLocation() {
+    final target = _computerServiceTarget;
+    if (target == null) return Future.value();
+    final worker = _activeWorkspaceWorker;
+    return _storage.write(
+      key: _lastWorkspaceLocationStorageKey,
+      value: jsonEncode({
+        'page': _showTeamWorkspace ? 'workspace' : 'sessions',
+        'worker_id': target.id,
+        'conversation_key': worker.focusedConversationKey,
+        if (worker.openThreadKey != null) 'thread_key': worker.openThreadKey,
+      }),
+    );
+  }
 
   void _setWorkspaceDisplayName(String value) {
     final displayName = value.trim();
@@ -1347,6 +1427,45 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _workspaceMemberAliases.remove(pubkey);
       } else {
         _workspaceMemberAliases[pubkey] = alias;
+      }
+    });
+    unawaited(_saveWorkspaceIdentity());
+  }
+
+  String _workspacePreferenceKey(String conversationKey) =>
+      '${_computerServiceTarget?.pubkey ?? ''}:$conversationKey';
+
+  void _setWorkspaceConversationPreference(
+    String conversationKey, {
+    bool? pinned,
+    bool? archived,
+  }) {
+    final key = _workspacePreferenceKey(conversationKey);
+    final current =
+        _workspaceConversationPreferences[key] ??
+        const WorkspaceConversationPreference();
+    final next = WorkspaceConversationPreference(
+      pinned: pinned ?? current.pinned,
+      archived: archived ?? current.archived,
+    );
+    setState(() {
+      if (!next.pinned && !next.archived) {
+        _workspaceConversationPreferences.remove(key);
+      } else {
+        _workspaceConversationPreferences[key] = next;
+      }
+    });
+    unawaited(_saveWorkspaceIdentity());
+  }
+
+  String _workspaceLocalMessagePinKey(String messageId) =>
+      '${_computerServiceTarget?.pubkey ?? ''}:$messageId';
+
+  void _toggleWorkspaceLocalMessagePin(String messageId) {
+    final key = _workspaceLocalMessagePinKey(messageId);
+    setState(() {
+      if (!_workspaceLocalMessagePins.add(key)) {
+        _workspaceLocalMessagePins.remove(key);
       }
     });
     unawaited(_saveWorkspaceIdentity());
@@ -3887,7 +4006,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   bool get _canManageWorkspaceAgents =>
-      _activeWorkspaceHasLocalWorkerTarget ||
       _workspace.memberAdmins.contains(_ownPubkeyHex);
 
   _WorkspaceWorkerState get _activeWorkspaceWorker =>
@@ -3908,6 +4026,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _activeWorkspaceWorker.unreadCounts;
   Map<String, int> get _workspaceThreadUnreadCounts =>
       _activeWorkspaceWorker.threadUnreadCounts;
+  bool get _hasUnreadOtherWorkspaces => _computerServiceTargets.any(
+    (target) =>
+        target.id != _computerServiceTarget?.id &&
+        _workspaceWorkerForKey(
+          target.pubkey,
+        ).unreadCounts.values.any((count) => count > 0),
+  );
   String get _workspaceFocusedConversationKey =>
       _activeWorkspaceWorker.focusedConversationKey;
   set _workspaceFocusedConversationKey(String value) =>
@@ -4829,15 +4954,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           if (isMessageCreated) {
             for (final workspaceMessage in addedMessages) {
               if (isWorkspaceLocalSender(workspaceMessage.senderPubkey, {
-                _ownPubkey ?? '',
-                _ownPubkeyHex ?? '',
-              })) {
+                    _ownPubkey ?? '',
+                    _ownPubkeyHex ?? '',
+                  }) ||
+                  isWorkspaceEmptyAgentMessage(workspaceMessage)) {
                 continue;
               }
               final conversationKey = worker.workspace
                   .conversationKeyForMessage(workspaceMessage);
-              if (workspaceMessage.parentId != null &&
-                  isWorkspaceAgentSender(workspaceMessage.senderPubkey)) {
+              if (workspaceMessage.parentId != null) {
                 final threadKey =
                     '$conversationKey:${workspaceMessage.parentId}';
                 if (worker.openThreadKey != threadKey) {
@@ -5273,12 +5398,31 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     String workerKey,
     String conversationKey,
   ) {
+    final workspace = _workspaceWorkerForKey(workerKey).workspace;
+    final conversationName =
+        workspace.channelName(conversationKey) ??
+        _workspaceDirectConversationName(workspace, conversationKey);
     _showInactiveReplyPopup(
-      sessionName: 'Workspace',
+      sessionName: conversationName,
       onTap: () => unawaited(
         _openInactiveWorkspaceConversation(workerKey, conversationKey),
       ),
     );
+  }
+
+  String _workspaceDirectConversationName(
+    WorkspaceState workspace,
+    String conversationKey,
+  ) {
+    final ownPubkey = _ownPubkeyHex ?? '';
+    for (final peer in workspace.directPeers(ownPubkey)) {
+      if (WorkspaceState.directKey(ownPubkey, peer) == conversationKey) {
+        return _workspaceMemberAliases[peer] ??
+            workspace.memberNames[peer] ??
+            compactIdentifier(peer);
+      }
+    }
+    return 'Conversation';
   }
 
   void _showInactiveReplyPopup({
@@ -7359,13 +7503,18 @@ Return a concise catch-up summary of what happened after that point: completed w
           sessions: _repoTargets,
           spaces: _computerServiceTargets,
           activeSpace: _computerServiceTarget,
+          hasUnreadOtherSpaces: _hasUnreadOtherWorkspaces,
           canManageAgents: _canManageWorkspaceAgents,
-          canManageMembers: _activeWorkspaceHasLocalWorkerTarget,
+          canManageMembers: _workspace.memberAdmins.contains(_ownPubkeyHex),
+          canRemoveMembers: _canManageWorkspaceAgents,
           onSwitchSpace: (target) =>
               unawaited(_selectComputerServiceTarget(target)),
           onLeaveSpace: (target) =>
               unawaited(_leaveComputerServiceTarget(target)),
-          onOpenSessions: () => setState(() => _showTeamWorkspace = false),
+          onOpenSessions: () {
+            setState(() => _showTeamWorkspace = false);
+            unawaited(_saveLastWorkspaceLocation());
+          },
           onOpenSettings: () => unawaited(_openSettings()),
           onEnterInviteCode: () => unawaited(_enterWorkspaceInviteCode()),
           diagnostics: _activeWorkspaceWorker.diagnostics,
@@ -7379,6 +7528,8 @@ Return a concise catch-up summary of what happened after that point: completed w
                 fipsPeerNpub:
                     _connectedPeerPubkey ?? _peerPubkeyController.text.trim(),
                 contactNameForPubkey: _callParticipantName,
+                onRefreshWorkspace: () =>
+                    _sendWorkspaceRequest({'action': 'refresh'}),
                 onRefreshFipsMesh: () =>
                     _sendWorkspaceRequest({'action': 'fips_mesh'}),
                 onFipsEnabledChanged: _setWorkspaceFipsEnabled,
@@ -7427,6 +7578,22 @@ Return a concise catch-up summary of what happened after that point: completed w
           localSenderIds: {_ownPubkey ?? '', _ownPubkeyHex ?? ''},
           displayName: _workspaceDisplayName,
           memberAliases: _workspaceMemberAliases,
+          conversationPreferences: {
+            for (final entry in _workspaceConversationPreferences.entries)
+              if (entry.key.startsWith(
+                '${_computerServiceTarget?.pubkey ?? ''}:',
+              ))
+                entry.key.substring(
+                  '${_computerServiceTarget?.pubkey ?? ''}:'.length,
+                ): entry.value,
+          },
+          localMessagePinIds: {
+            for (final key in _workspaceLocalMessagePins)
+              if (key.startsWith('${_computerServiceTarget?.pubkey ?? ''}:'))
+                key.substring(
+                  '${_computerServiceTarget?.pubkey ?? ''}:'.length,
+                ),
+          },
           memberNames: {
             ..._workspace.memberNames,
             if ((_ownPubkeyHex ?? '').isNotEmpty &&
@@ -7440,17 +7607,32 @@ Return a concise catch-up summary of what happened after that point: completed w
           },
           onDisplayNameChanged: _setWorkspaceDisplayName,
           onMemberAliasChanged: _setWorkspaceMemberAlias,
-          onFocusConversation: (conversationKey) => setState(() {
-            _workspaceFocusedConversationKey = conversationKey;
-            _workspaceUnreadCounts.remove(conversationKey);
+          onConversationPreferenceChanged: _setWorkspaceConversationPreference,
+          onToggleLocalMessagePin: _toggleWorkspaceLocalMessagePin,
+          onRemoveMember: (pubkey) => _sendWorkspaceRequest({
+            'action': 'remove_member',
+            'member_pubkey': pubkey,
           }),
-          onOpenThread: (conversationKey, parentId) => setState(() {
-            final threadKey = '$conversationKey:$parentId';
-            _activeWorkspaceWorker.openThreadKey = threadKey;
-            _workspaceThreadUnreadCounts.remove(threadKey);
-          }),
-          onCloseThread: () =>
-              setState(() => _activeWorkspaceWorker.openThreadKey = null),
+          onFocusConversation: (conversationKey) {
+            setState(() {
+              _workspaceFocusedConversationKey = conversationKey;
+              _workspaceUnreadCounts.remove(conversationKey);
+            });
+            unawaited(_saveLastWorkspaceLocation());
+          },
+          onOpenThread: (conversationKey, parentId) {
+            setState(() {
+              final threadKey = '$conversationKey:$parentId';
+              _workspaceFocusedConversationKey = conversationKey;
+              _activeWorkspaceWorker.openThreadKey = threadKey;
+              _workspaceThreadUnreadCounts.remove(threadKey);
+            });
+            unawaited(_saveLastWorkspaceLocation());
+          },
+          onCloseThread: () {
+            setState(() => _activeWorkspaceWorker.openThreadKey = null);
+            unawaited(_saveLastWorkspaceLocation());
+          },
           onRequest: _sendWorkspaceRequest,
           onLoadFolderChoices: _requestRepoChoices,
           onTyping: _sendWorkspaceTyping,
@@ -7517,7 +7699,10 @@ Return a concise catch-up summary of what happened after that point: completed w
         actions: [
           IconButton(
             tooltip: 'Open workspace',
-            onPressed: () => setState(() => _showTeamWorkspace = true),
+            onPressed: () {
+              setState(() => _showTeamWorkspace = true);
+              unawaited(_saveLastWorkspaceLocation());
+            },
             icon: const Icon(Icons.dashboard_outlined),
           ),
           IconButton(
@@ -7761,7 +7946,6 @@ Return a concise catch-up summary of what happened after that point: completed w
         // FIPS confirms a local write, not delivery to the worker. Mirror
         // durable messages through Nostr so a dead direct route cannot lose a
         // message that the composer already displayed optimistically.
-        _recordDiagnostic('Mirroring workspace message through Nostr');
       } catch (error) {
         _recordDiagnostic(
           'FIPS workspace send failed; recovering with Nostr: $error',
@@ -8287,9 +8471,15 @@ Return a concise catch-up summary of what happened after that point: completed w
     session.connectionState = state;
     if (state != 'active') session.peers.value = const [];
     final previous = session.heartbeat.value;
-    if (state == 'connected' || state == 'active') {
+    if (state == 'connecting' || state == 'reconnecting') {
       session.heartbeat.value = _WorkspaceFipsHeartbeat(
         connectionState: state,
+        connectionStartedAt: DateTime.now(),
+      );
+    } else if (state == 'connected' || state == 'active') {
+      session.heartbeat.value = _WorkspaceFipsHeartbeat(
+        connectionState: state,
+        connectionStartedAt: previous.connectionStartedAt,
         connectedAt: previous.connectedAt ?? DateTime.now(),
         lastHeartbeatAt: previous.lastHeartbeatAt,
         count: previous.count,
@@ -8307,6 +8497,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         // Notify the diagnostics panel so elapsed times stay live.
         session.heartbeat.value = _WorkspaceFipsHeartbeat(
           connectionState: heartbeat.connectionState,
+          connectionStartedAt: heartbeat.connectionStartedAt,
           connectedAt: heartbeat.connectedAt,
           lastHeartbeatAt: heartbeat.lastHeartbeatAt,
           count: heartbeat.count,
@@ -8324,6 +8515,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     final previous = session.heartbeat.value;
     session.heartbeat.value = _WorkspaceFipsHeartbeat(
       connectionState: 'active',
+      connectionStartedAt: previous.connectionStartedAt,
       connectedAt: previous.connectedAt ?? DateTime.now(),
       lastHeartbeatAt: DateTime.now(),
       count: previous.count + 1,

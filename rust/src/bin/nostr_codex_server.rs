@@ -40,10 +40,10 @@ use rust_lib_nostr_codex_phone::protocol::{
     parse_media_bundle_query, parse_wire_message, AudioReference, CreateInvite, InviteAccepted,
     InviteCreated, InviteRejected, MediaBundle, MediaReference, OpenCodeSessionList,
     OpenCodeSessionListEntry, RedeemInvite, RepoList, RepoListEntry, RepoListRoot, TargetInvite,
-    TargetParent, ToolResult, WireMessage, WorkspaceAgentPayload, WorkspaceChannelPayload,
-    WorkspaceConversationAgentPayload, WorkspaceConversationPrepromptPayload,
-    WorkspaceMemberPayload, WorkspaceMentionPayload, WorkspaceMessagePayload, WorkspaceRequest,
-    WorkspaceTypingPayload, WorkspaceUpdate,
+    TargetParent, ToolResult, WireMessage, WorkspaceAgentPayload, WorkspaceChannelMemberPayload,
+    WorkspaceChannelPayload, WorkspaceConversationAgentPayload,
+    WorkspaceConversationPrepromptPayload, WorkspaceMemberPayload, WorkspaceMentionPayload,
+    WorkspaceMessagePayload, WorkspaceRequest, WorkspaceTypingPayload, WorkspaceUpdate,
 };
 use rust_lib_nostr_codex_phone::transcribe::{
     download_blossom_attachment, download_blossom_audio, transcribe_audio, AudioConfig,
@@ -346,6 +346,7 @@ struct WorkspaceAgentJob {
 struct WorkspaceAgentQueues {
     senders: HashMap<WorkspaceAgentQueueKey, mpsc::Sender<WorkspaceAgentJob>>,
     turn_locks: HashMap<String, Arc<Mutex<()>>>,
+    active_turns: Arc<Mutex<HashMap<String, CodexCancelToken>>>,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
     outbound: WorkspaceOutbound,
@@ -362,6 +363,7 @@ impl WorkspaceAgentQueues {
         Self {
             senders: HashMap::new(),
             turn_locks: HashMap::new(),
+            active_turns: Arc::new(Mutex::new(HashMap::new())),
             workspace_path,
             messenger,
             outbound,
@@ -391,6 +393,7 @@ impl WorkspaceAgentQueues {
                 agent_id.clone(),
                 conversation,
                 turn_lock,
+                Arc::clone(&self.active_turns),
                 self.workspace_path.clone(),
                 Arc::clone(&self.messenger),
                 self.outbound.clone(),
@@ -1683,6 +1686,7 @@ fn workspace_action_requires_admin(action: &str) -> bool {
             | "create_conversation_agent"
             | "rename_agent"
             | "restart_agent_session"
+            | "abort_agent_task"
             | "update_agent_profile"
             | "delete_agent"
             | "add_conversation_agent"
@@ -1704,14 +1708,32 @@ async fn process_workspace_request(
     agent_queues: &mut WorkspaceAgentQueues,
     fips_capabilities: &Arc<Mutex<HashMap<String, (String, Instant)>>>,
 ) -> Result<()> {
-    if workspace_action_requires_admin(&request.action)
-        && owner != Some(sender)
-        && !workspace.is_admin(sender)?
-    {
-        bail!("Only workspace owners and admins can manage agents.");
+    if workspace_action_requires_admin(&request.action) && !workspace.is_admin(sender)? {
+        bail!("Only workspace admins can manage agents.");
+    }
+    if let Some(channel_id) = request.channel_id.as_deref() {
+        if matches!(
+            request.action.as_str(),
+            "add_channel_member" | "remove_channel_member"
+        ) {
+            if !workspace.is_channel_admin(channel_id, sender)? {
+                bail!("Only channel admins can manage channel members.");
+            }
+        } else if matches!(request.action.as_str(), "rename_channel" | "delete_channel") {
+            if !workspace.is_channel_admin(channel_id, sender)? {
+                bail!("Only channel admins can manage this conversation.");
+            }
+        } else if request.action != "create_channel"
+            && !workspace.is_channel_member(channel_id, sender)?
+        {
+            bail!("You are not a member of this channel.");
+        }
     }
     if request.action == "set_member_admin" && owner != Some(sender) {
         bail!("Only the workspace owner can manage member roles.");
+    }
+    if request.action == "remove_member" && owner != Some(sender) && !workspace.is_admin(sender)? {
+        bail!("Only workspace owners and admins can remove members.");
     }
     let update = match request.action.as_str() {
         "typing" => {
@@ -1744,7 +1766,9 @@ async fn process_workspace_request(
                 }),
             };
             if request.channel_id.is_some() {
-                for member in workspace.members()? {
+                for member in
+                    workspace.channel_members(request.channel_id.as_deref().unwrap_or_default())?
+                {
                     if member.pubkey != sender {
                         messenger
                             .send_ephemeral_wire_to(
@@ -1875,20 +1899,41 @@ async fn process_workspace_request(
             return Ok(());
         }
         "create_channel" => {
+            let default_folder;
+            let scope = if request.folder_scope.is_empty() {
+                default_folder = canonical_worker_root_dir()?.to_string_lossy().into_owned();
+                std::slice::from_ref(&default_folder)
+            } else {
+                &request.folder_scope
+            };
+            let folder_scope = canonical_conversation_folder_scope(scope, codex_config)?;
             let channel = workspace
                 .create_channel(request.channel_name.as_deref().unwrap_or_default(), sender)?;
+            workspace.set_conversation_preprompt(
+                Some(&channel.id),
+                None,
+                None,
+                request.body.as_deref().unwrap_or_default(),
+                &folder_scope,
+            )?;
             let update = WorkspaceUpdate {
                 action: "channel_created".to_string(),
                 revision: workspace.revision()?,
-                channels: vec![channel_payload(channel)],
+                channels: vec![channel_payload(workspace, channel)?],
                 members: vec![],
                 messages: vec![],
                 agents: vec![],
                 conversation_agents: vec![],
-                conversation_preprompts: vec![],
+                conversation_preprompts: workspace
+                    .conversation_preprompts()?
+                    .into_iter()
+                    .map(conversation_preprompt_payload)
+                    .collect(),
                 typing: None,
             };
-            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            outbound
+                .send(messenger, sender, WireMessage::workspace_update(update))
+                .await?;
             return Ok(());
         }
         "rename_channel" => {
@@ -1903,7 +1948,7 @@ async fn process_workspace_request(
                 &WorkspaceUpdate {
                     action: "channel_renamed".to_string(),
                     revision: workspace.revision()?,
-                    channels: vec![channel_payload(channel)],
+                    channels: vec![channel_payload(workspace, channel)?],
                     members: vec![],
                     messages: vec![],
                     agents: vec![],
@@ -1917,6 +1962,22 @@ async fn process_workspace_request(
         }
         "delete_channel" => {
             workspace.delete_channel(request.channel_id.as_deref().unwrap_or_default())?;
+            broadcast_workspace_snapshots(workspace, messenger, outbound).await?;
+            return Ok(());
+        }
+        "add_channel_member" => {
+            workspace.add_channel_member(
+                request.channel_id.as_deref().unwrap_or_default(),
+                request.member_pubkey.as_deref().unwrap_or_default(),
+            )?;
+            broadcast_workspace_snapshots(workspace, messenger, outbound).await?;
+            return Ok(());
+        }
+        "remove_channel_member" => {
+            workspace.remove_channel_member(
+                request.channel_id.as_deref().unwrap_or_default(),
+                request.member_pubkey.as_deref().unwrap_or_default(),
+            )?;
             broadcast_workspace_snapshots(workspace, messenger, outbound).await?;
             return Ok(());
         }
@@ -1955,6 +2016,7 @@ async fn process_workspace_request(
                 channel_id.is_none().then_some(sender),
                 recipient,
                 request.body.as_deref().unwrap_or_default(),
+                &canonical_conversation_folder_scope_or_empty(&request.folder_scope, codex_config)?,
             )?;
             let update = WorkspaceUpdate {
                 action: "conversation_preprompt_updated".to_string(),
@@ -2070,7 +2132,10 @@ async fn process_workspace_request(
             };
             queue_workspace_update(
                 workspace,
-                workspace.members()?.into_iter().map(|member| member.pubkey),
+                workspace
+                    .channel_members(request.channel_id.as_deref().unwrap_or_default())?
+                    .into_iter()
+                    .map(|member| member.pubkey),
                 &update,
             )
             .await?;
@@ -2154,15 +2219,14 @@ async fn process_workspace_request(
             let channel_id = request.channel_id.as_deref().unwrap_or_default();
             let call_id = request.call_id.as_deref().unwrap_or_default();
             let participants = &request.participant_pubkeys;
-            if !workspace.has_channel(channel_id)? {
-                bail!("channel does not exist");
-            }
             if !participants.iter().any(|participant| participant == sender)
-                || participants
-                    .iter()
-                    .any(|participant| !workspace.is_member(participant).unwrap_or(false))
+                || participants.iter().any(|participant| {
+                    !workspace
+                        .is_channel_member(channel_id, participant)
+                        .unwrap_or(false)
+                })
             {
-                bail!("group call participants must be workspace members and include the sender");
+                bail!("group call participants must be channel members and include the sender");
             }
             for recipient in participants
                 .iter()
@@ -2210,7 +2274,62 @@ async fn process_workspace_request(
                 typing: None,
             };
             if update.messages[0].channel_id.is_some() {
-                broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+                for member in workspace
+                    .channel_members(update.messages[0].channel_id.as_deref().unwrap_or_default())?
+                {
+                    outbound
+                        .send(
+                            messenger,
+                            &member.pubkey,
+                            WireMessage::workspace_update(update.clone()),
+                        )
+                        .await?;
+                }
+            } else {
+                for member in [
+                    sender,
+                    update.messages[0]
+                        .recipient_pubkey
+                        .as_deref()
+                        .unwrap_or_default(),
+                ] {
+                    outbound
+                        .send(
+                            messenger,
+                            member,
+                            WireMessage::workspace_update(update.clone()),
+                        )
+                        .await?;
+                }
+            }
+            return Ok(());
+        }
+        "toggle_pin" => {
+            let message =
+                workspace.toggle_pin(sender, request.parent_id.as_deref().unwrap_or_default())?;
+            let update = WorkspaceUpdate {
+                action: "message_updated".to_string(),
+                revision: workspace.revision()?,
+                channels: vec![],
+                members: vec![],
+                messages: vec![message_payload(message)],
+                agents: vec![],
+                conversation_agents: vec![],
+                conversation_preprompts: vec![],
+                typing: None,
+            };
+            if update.messages[0].channel_id.is_some() {
+                for member in workspace
+                    .channel_members(update.messages[0].channel_id.as_deref().unwrap_or_default())?
+                {
+                    outbound
+                        .send(
+                            messenger,
+                            &member.pubkey,
+                            WireMessage::workspace_update(update.clone()),
+                        )
+                        .await?;
+                }
             } else {
                 for member in [
                     sender,
@@ -2268,10 +2387,20 @@ async fn process_workspace_request(
                     if request.folder_scope.is_empty() {
                         // The custom-agent dialog's "Worker default" option
                         // intentionally omits a scope, just like presets.
-                        canonical_conversation_folder_scope(
-                            &[codex_config.working_dir.to_string_lossy().into_owned()],
-                            codex_config,
-                        )
+                        let default_scope = workspace.conversation_folder_scope(
+                            request.channel_id.as_deref(),
+                            request.channel_id.is_none().then_some(sender),
+                            request.recipient_pubkey.as_deref(),
+                        )?;
+                        let default_folder;
+                        let scope = if default_scope.is_empty() {
+                            default_folder =
+                                canonical_worker_root_dir()?.to_string_lossy().into_owned();
+                            std::slice::from_ref(&default_folder)
+                        } else {
+                            &default_scope
+                        };
+                        canonical_conversation_folder_scope(scope, codex_config)
                     } else {
                         canonical_conversation_folder_scope(&request.folder_scope, codex_config)
                     }
@@ -2351,6 +2480,35 @@ async fn process_workspace_request(
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
+        "remove_member" => {
+            let member = request.member_pubkey.as_deref().unwrap_or_default();
+            if owner == Some(member) {
+                bail!("The workspace owner cannot be removed.");
+            }
+            workspace.remove_member(member)?;
+            outbound.fips_routes.lock().await.remove(member);
+            fips_capabilities
+                .lock()
+                .await
+                .retain(|_, (capability_member, _)| capability_member.as_str() != member);
+            let update = WorkspaceUpdate {
+                action: "member_removed".to_string(),
+                revision: workspace.revision()?,
+                channels: vec![],
+                members: workspace
+                    .members()?
+                    .into_iter()
+                    .map(member_payload)
+                    .collect(),
+                messages: vec![],
+                agents: vec![],
+                conversation_agents: vec![],
+                conversation_preprompts: vec![],
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            return Ok(());
+        }
         "rename_agent" => {
             let agent = workspace.rename_agent(
                 request.agent_id.as_deref().unwrap_or_default(),
@@ -2398,6 +2556,24 @@ async fn process_workspace_request(
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            return Ok(());
+        }
+        "abort_agent_task" => {
+            let agent_id = request.agent_id.as_deref().unwrap_or_default();
+            let _agent = workspace
+                .agents()?
+                .into_iter()
+                .find(|agent| agent.id == agent_id)
+                .ok_or_else(|| anyhow::anyhow!("agent does not exist"))?;
+            if let Some(cancel_token) = agent_queues
+                .active_turns
+                .lock()
+                .await
+                .get(agent_id)
+                .cloned()
+            {
+                cancel_token.cancel();
+            }
             return Ok(());
         }
         "update_agent_profile" => {
@@ -3168,10 +3344,10 @@ fn workspace_snapshot(workspace: &WorkspaceStore, member: &str) -> Result<Worksp
         action: "snapshot".to_string(),
         revision: workspace.revision()?,
         channels: workspace
-            .channels()?
+            .channels_for_member(member)?
             .into_iter()
-            .map(channel_payload)
-            .collect(),
+            .map(|channel| channel_payload(workspace, channel))
+            .collect::<Result<_>>()?,
         agents: workspace.agents()?.into_iter().map(agent_payload).collect(),
         conversation_agents: workspace
             .conversation_agents()?
@@ -3302,9 +3478,9 @@ async fn send_agent_typing(
             expires_at,
         }),
     };
-    let recipients: Vec<String> = if channel_id.is_some() {
+    let recipients: Vec<String> = if let Some(channel_id) = channel_id {
         workspace
-            .members()?
+            .channel_members(channel_id)?
             .into_iter()
             .map(|member| member.pubkey)
             .collect()
@@ -3339,6 +3515,7 @@ async fn run_workspace_agent_with_typing(
     body: &str,
     config: &CodexConfig,
     session_id: &str,
+    active_turns: &Arc<Mutex<HashMap<String, CodexCancelToken>>>,
 ) -> Result<CodexRunResult> {
     const TYPING_LEASE: Duration = Duration::from_secs(6);
     if let Err(err) = send_agent_typing(
@@ -3359,11 +3536,16 @@ async fn run_workspace_agent_with_typing(
     let mut renew = interval(Duration::from_secs(3));
     renew.set_missed_tick_behavior(MissedTickBehavior::Delay);
     renew.tick().await;
+    let cancel_token = CodexCancelToken::new();
+    active_turns
+        .lock()
+        .await
+        .insert(agent.id.clone(), cancel_token.clone());
     let mut run = Box::pin(run_codex_session_with_cancel_and_events(
         body,
         config,
         Some(session_id),
-        None,
+        Some(&cancel_token),
         None,
     ));
     let result = loop {
@@ -3383,6 +3565,7 @@ async fn run_workspace_agent_with_typing(
     {
         warn!(agent = %agent.id, "failed to clear agent typing state: {err:#}");
     }
+    active_turns.lock().await.remove(&agent.id);
     result
 }
 
@@ -3393,6 +3576,7 @@ fn initialize_workspace_members(
 ) -> Result<()> {
     if let Some(owner) = owner {
         workspace.add_member(owner)?;
+        workspace.set_member_admin(owner, true)?;
     }
     // Existing trusted worker recipients are workspace members on first start.
     // This preserves established owner/peer access when workspace storage is added.
@@ -3403,14 +3587,24 @@ fn initialize_workspace_members(
 }
 
 fn channel_payload(
+    workspace: &WorkspaceStore,
     channel: rust_lib_nostr_codex_phone::workspace::WorkspaceChannel,
-) -> WorkspaceChannelPayload {
-    WorkspaceChannelPayload {
+) -> Result<WorkspaceChannelPayload> {
+    let members = workspace
+        .channel_members(&channel.id)?
+        .into_iter()
+        .map(|member| WorkspaceChannelMemberPayload {
+            pubkey: member.pubkey,
+            is_admin: member.is_admin,
+        })
+        .collect();
+    Ok(WorkspaceChannelPayload {
         id: channel.id,
         name: channel.name,
         created_by: channel.created_by,
         created_at: channel.created_at,
-    }
+        members,
+    })
 }
 
 fn member_payload(
@@ -3433,6 +3627,7 @@ fn message_payload(message: WorkspaceMessage) -> WorkspaceMessagePayload {
         mentions: message.mentions,
         parent_id: message.parent_id,
         also_send_to_main: message.also_send_to_main,
+        pinned: message.pinned,
         reactions: message.reactions,
         created_at: message.created_at,
     }
@@ -3602,17 +3797,18 @@ fn conversation_preprompt_payload(
         member_pubkey: preprompt.member_pubkey,
         peer_pubkey: preprompt.peer_pubkey,
         preprompt: preprompt.preprompt,
+        folder_scope: preprompt.folder_scope,
     }
 }
 
 fn canonical_conversation_folder_scope(
     requested_scope: &[String],
-    codex_config: &CodexConfig,
+    _codex_config: &CodexConfig,
 ) -> Result<Vec<String>> {
     if requested_scope.is_empty() || requested_scope.len() > 20 {
         bail!("select between one and 20 folders for conversation access");
     }
-    let allowed_roots = canonical_allowed_workdir_roots(&codex_config.working_dir)?;
+    let allowed_roots = vec![canonical_conversation_root_dir()?];
     let mut scope = Vec::with_capacity(requested_scope.len());
     for requested in requested_scope {
         let path = PathBuf::from(requested.trim());
@@ -3629,6 +3825,17 @@ fn canonical_conversation_folder_scope(
         }
     }
     Ok(scope)
+}
+
+fn canonical_conversation_folder_scope_or_empty(
+    requested_scope: &[String],
+    codex_config: &CodexConfig,
+) -> Result<Vec<String>> {
+    if requested_scope.is_empty() {
+        Ok(Vec::new())
+    } else {
+        canonical_conversation_folder_scope(requested_scope, codex_config)
+    }
 }
 
 fn direct_membership_matches(
@@ -3703,6 +3910,7 @@ async fn workspace_agent_queue_worker(
     agent_id: String,
     conversation: WorkspaceConversation,
     turn_lock: Arc<Mutex<()>>,
+    active_turns: Arc<Mutex<HashMap<String, CodexCancelToken>>>,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
     outbound: WorkspaceOutbound,
@@ -3720,6 +3928,7 @@ async fn workspace_agent_queue_worker(
             &agent_id,
             &conversation,
             &job.trigger_message_id,
+            &active_turns,
         )
         .await
         {
@@ -3736,6 +3945,7 @@ async fn process_workspace_agent_job(
     agent_id: &str,
     conversation: &WorkspaceConversation,
     trigger_message_id: &str,
+    active_turns: &Arc<Mutex<HashMap<String, CodexCancelToken>>>,
 ) -> Result<()> {
     let workspace = WorkspaceStore::open_existing(workspace_path)?;
     let Some(message) = workspace.message_by_id(trigger_message_id)? else {
@@ -3760,6 +3970,7 @@ async fn process_workspace_agent_job(
                 Some(reply_parent_id),
                 &message.body,
                 &message.mentions,
+                active_turns,
             )
             .await
         }
@@ -3776,6 +3987,7 @@ async fn process_workspace_agent_job(
                 Some(reply_parent_id),
                 &message.body,
                 &message.mentions,
+                active_turns,
             )
             .await
         }
@@ -3908,6 +4120,7 @@ async fn route_conversation_agents(
     parent_id: Option<&str>,
     body: &str,
     mentions: &[WorkspaceMentionPayload],
+    active_turns: &Arc<Mutex<HashMap<String, CodexCancelToken>>>,
 ) -> Result<()> {
     let memberships = workspace.conversation_agents()?;
     let preprompts = workspace.conversation_preprompts()?;
@@ -3986,11 +4199,16 @@ async fn route_conversation_agents(
             &scoped_body,
             &agent_config,
             &active_session_id,
+            active_turns,
         )
         .await
         {
             Ok(result) if !result.response.trim().is_empty() => result,
             Ok(_) => continue,
+            Err(err) if is_agent_cancelled_error(&err) => {
+                info!(agent = %agent.id, "workspace agent task cancelled");
+                continue;
+            }
             Err(err) if agent.restart_on_failure => {
                 warn!(agent = %agent.id, "workspace agent response failed; restarting dedicated session: {err:#}");
                 let (new_session_id, status, session_error) =
@@ -4056,6 +4274,7 @@ async fn route_conversation_agents(
                     &scoped_body,
                     &agent_config,
                     &active_session_id,
+                    active_turns,
                 )
                 .await
                 {
@@ -4093,6 +4312,7 @@ async fn route_conversation_agents(
                 &prompt,
                 &agent_config,
                 &active_session_id,
+                active_turns,
             )
             .await
             {
@@ -4170,7 +4390,7 @@ async fn route_conversation_agents(
         };
         let recipients = if channel_id.is_some() {
             workspace
-                .members()?
+                .channel_members(channel_id.unwrap_or_default())?
                 .into_iter()
                 .map(|member| member.pubkey)
                 .collect()
@@ -5691,7 +5911,7 @@ fn opencode_model_list_request_id(request: &str) -> Option<String> {
 }
 
 fn build_repo_list(requested_path: Option<&str>) -> Result<RepoList> {
-    let worker_root = canonical_worker_root_dir()?;
+    let worker_root = canonical_conversation_root_dir()?;
     let requested = requested_path.unwrap_or("").trim();
     if requested.split('/').any(|part| part == "..") {
         bail!("folder path cannot contain ..");
@@ -5714,6 +5934,14 @@ fn build_repo_list(requested_path: Option<&str>) -> Result<RepoList> {
 
 fn list_repo_root(worker_root: &Path, root: &Path) -> Result<RepoListRoot> {
     let mut repos = Vec::new();
+    if root == worker_root {
+        repos.push(RepoListEntry {
+            name: "Workspace root".to_string(),
+            path: worker_root.to_string_lossy().to_string(),
+            relative_path: ".".to_string(),
+            is_git_repo: worker_root.join(".git").is_dir(),
+        });
+    }
     for entry in fs::read_dir(root)
         .with_context(|| format!("failed to read repo root `{}`", root.display()))?
     {
@@ -5818,6 +6046,20 @@ fn canonical_worker_root_dir() -> Result<PathBuf> {
     };
     root.canonicalize()
         .with_context(|| format!("failed to resolve worker root `{}`", root.display()))
+}
+
+fn canonical_conversation_root_dir() -> Result<PathBuf> {
+    let worker_root = canonical_worker_root_dir()?;
+    worker_root
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("worker root has no parent"))?
+        .canonicalize()
+        .with_context(|| {
+            format!(
+                "failed to resolve parent workspace directory `{}`",
+                worker_root.display()
+            )
+        })
 }
 
 fn canonical_spawn_root_dir(current_workdir: &Path) -> Result<PathBuf> {
@@ -8657,6 +8899,11 @@ fn is_codex_cancelled_error(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains("Codex cancelled")
 }
 
+fn is_agent_cancelled_error(err: &anyhow::Error) -> bool {
+    let message = format!("{err:#}");
+    message.contains("Codex cancelled") || message.contains("OpenCode cancelled")
+}
+
 fn is_opencode_busy_error(err: &anyhow::Error) -> bool {
     format!("{err:#}").contains("OpenCode is still busy after")
 }
@@ -8916,6 +9163,18 @@ mod tests {
             repositories_in_folder_scope(&[root.path().to_string_lossy().to_string()]).unwrap(),
             vec![nested_repo.to_string_lossy().to_string()],
         );
+    }
+
+    #[test]
+    fn repository_list_includes_its_root_and_directories() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("phone")).unwrap();
+
+        let entries = list_repo_root(root.path(), root.path()).unwrap().repos;
+
+        assert_eq!(entries[0].relative_path, ".");
+        assert_eq!(entries[0].path, root.path().to_string_lossy().to_string());
+        assert_eq!(entries[1].relative_path, "phone");
     }
 
     #[test]
@@ -9717,6 +9976,9 @@ mod tests {
         workspace.add_member("other").unwrap();
         let channel = workspace.create_channel("general", "owner").unwrap();
         workspace
+            .add_channel_member(&channel.id, "desktop")
+            .unwrap();
+        workspace
             .add_channel_message("owner", &channel.id, "team", &[], &[], None)
             .unwrap();
         workspace
@@ -9726,13 +9988,16 @@ mod tests {
             .add_direct_message("owner", "other", "not for desktop", &[], &[], None)
             .unwrap();
         workspace
-            .set_conversation_preprompt(Some(&channel.id), None, None, "Review carefully.")
+            .set_conversation_preprompt(Some(&channel.id), None, None, "Review carefully.", &[])
             .unwrap();
 
         let snapshot = workspace_snapshot(&workspace, "desktop").unwrap();
 
         assert_eq!(snapshot.action, "snapshot");
-        assert_eq!(snapshot.channels, vec![channel_payload(channel)]);
+        assert_eq!(
+            snapshot.channels,
+            vec![channel_payload(&workspace, channel).unwrap()]
+        );
         assert_eq!(snapshot.members.len(), 3);
         assert_eq!(snapshot.conversation_preprompts.len(), 1);
         assert_eq!(
