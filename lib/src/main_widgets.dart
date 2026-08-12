@@ -876,7 +876,7 @@ class _TeamWorkspace extends StatefulWidget {
 class _TeamWorkspaceState extends State<_TeamWorkspace> {
   static const _sidebarMinWidth = 220.0;
   static const _sidebarMaxWidth = 360.0;
-  static const _threadPaneMinWidth = 220.0;
+  static const _threadPaneMinWidth = 360.0;
   static const _threadPaneMaxWidth = 1100.0;
   static const _conversationMinWidth = 360.0;
   final _composer = TextEditingController();
@@ -1573,6 +1573,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     WorkspaceMessage? thread,
   }) {
     final mentions = workspaceSelectedMentionsIn(text, selected).toList();
+    if (thread != null && mentions.any((mention) => mention.kind == 'member')) {
+      return mentions;
+    }
     final previous = thread == null
         ? null
         : _threadReplies.reversed
@@ -4870,6 +4873,29 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                 ),
               ),
             if (!compactHeader) const Divider(height: 1),
+            if (compactHeader && _searchOpen)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: TextField(
+                  controller: _searchController,
+                  focusNode: _searchFocus,
+                  autofocus: true,
+                  onChanged: _onSearchChanged,
+                  decoration: InputDecoration(
+                    isDense: true,
+                    prefixIcon: const Icon(Icons.search),
+                    hintText: 'Search messages and people',
+                    suffixIcon: _searchQuery.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: 'Clear search',
+                            onPressed: _clearSearch,
+                            icon: const Icon(Icons.close),
+                          ),
+                    border: const OutlineInputBorder(),
+                  ),
+                ),
+              ),
             Expanded(
               child: Stack(
                 children: [
@@ -5871,8 +5897,14 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
     );
     return LayoutBuilder(
       builder: (context, constraints) {
-        final maxBubbleWidth = math
+        final minimumBubbleWidth = MediaQuery.sizeOf(context).width < 720
+            ? 144.0
+            : 300.0;
+        final availableBubbleWidth = math
             .min(constraints.maxWidth * 0.9, 820)
+            .toDouble();
+        final maxBubbleWidth = math
+            .max(minimumBubbleWidth, availableBubbleWidth)
             .toDouble();
         final leadingWidth = widget.isLocalSender
             ? 0.0
@@ -5905,9 +5937,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
             .toDouble();
         // Short bodies still need room for the author, timestamp, and thread
         // controls. A compact floor prevents them from becoming tall slivers.
-        final minBubbleWidth = math
-            .min(maxBubbleWidth, constraints.maxWidth < 560 ? 144.0 : 200.0)
-            .toDouble();
+        final minBubbleWidth = minimumBubbleWidth;
         final bubbleWidth = math
             .min(
               maxBubbleWidth,
@@ -7129,43 +7159,39 @@ class _WorkspaceMentionOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final height = (mentionOptions.length * 56.0).clamp(56.0, 144.0);
-    return Stack(
-      clipBehavior: Clip.none,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        child,
         if (mentionOptions.isNotEmpty)
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 56,
-            child: SizedBox(
-              height: height,
-              child: Material(
-                elevation: 4,
-                borderRadius: BorderRadius.circular(10),
-                clipBehavior: Clip.antiAlias,
-                child: ListView(
-                  padding: EdgeInsets.zero,
-                  children: [
-                    for (final mention in mentionOptions)
-                      ListTile(
-                        dense: true,
-                        leading: Icon(
-                          mention.kind == 'agent'
-                              ? Icons.smart_toy_outlined
-                              : Icons.person_outline,
-                        ),
-                        title: Text('@${mention.label}'),
-                        subtitle: Text(
-                          mention.kind == 'agent' ? 'Agent' : 'Member',
-                        ),
-                        onTap: () => onMentionSelected(mention),
+          SizedBox(
+            height: height,
+            width: double.infinity,
+            child: Material(
+              elevation: 4,
+              borderRadius: BorderRadius.circular(10),
+              clipBehavior: Clip.antiAlias,
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  for (final mention in mentionOptions)
+                    ListTile(
+                      dense: true,
+                      leading: Icon(
+                        mention.kind == 'agent'
+                            ? Icons.smart_toy_outlined
+                            : Icons.person_outline,
                       ),
-                  ],
-                ),
+                      title: Text('@${mention.label}'),
+                      subtitle: Text(
+                        mention.kind == 'agent' ? 'Agent' : 'Member',
+                      ),
+                      onTap: () => onMentionSelected(mention),
+                    ),
+                ],
               ),
             ),
           ),
+        child,
       ],
     );
   }

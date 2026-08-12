@@ -3603,15 +3603,12 @@ async fn run_workspace_agent_with_typing(
                 }
                 stage = Some(next_stage);
                 last_stage_sent = Instant::now();
-                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), true).await {
+                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), false).await {
                     warn!(agent = %agent.id, "failed to send agent progress state: {err:#}");
                 }
             }
             _ = renew.tick() => {
-                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), true).await {
-                    warn!(agent = %agent.id, "failed to refresh agent typing state: {err:#}");
-                }
-                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, None, Some(TYPING_LEASE), false).await {
+                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), false).await {
                     warn!(agent = %agent.id, "failed to refresh agent typing state: {err:#}");
                 }
             }
@@ -8793,6 +8790,10 @@ impl CodexStatusReporter {
 
 fn codex_status_from_event(event: &serde_json::Value) -> Option<(String, bool)> {
     match event.get("type").and_then(serde_json::Value::as_str) {
+        Some("step_start") => Some(("OpenCode is planning its next step.".to_string(), false)),
+        Some("text") => Some(("OpenCode is drafting a response.".to_string(), false)),
+        Some("tool_use") => Some(("OpenCode is using a tool.".to_string(), true)),
+        Some("step_finish") => Some(("OpenCode finished a step.".to_string(), true)),
         Some("session.status") => match event
             .pointer("/properties/status/type")
             .and_then(serde_json::Value::as_str)
@@ -9681,6 +9682,10 @@ mod tests {
 
     #[test]
     fn maps_opencode_events_to_statuses() {
+        let step_start = serde_json::json!({"type": "step_start"});
+        let text = serde_json::json!({"type": "text"});
+        let tool_use = serde_json::json!({"type": "tool_use"});
+        let step_finish = serde_json::json!({"type": "step_finish"});
         let busy = serde_json::json!({
             "type": "session.status",
             "properties": {"status": {"type": "busy"}}
@@ -9690,6 +9695,22 @@ mod tests {
             "properties": {"part": {"type": "tool", "tool": "read", "state": {"status": "running", "title": "Inspect workspace routing"}}}
         });
 
+        assert_eq!(
+            codex_status_from_event(&step_start),
+            Some(("OpenCode is planning its next step.".to_string(), false))
+        );
+        assert_eq!(
+            codex_status_from_event(&text),
+            Some(("OpenCode is drafting a response.".to_string(), false))
+        );
+        assert_eq!(
+            codex_status_from_event(&tool_use),
+            Some(("OpenCode is using a tool.".to_string(), true))
+        );
+        assert_eq!(
+            codex_status_from_event(&step_finish),
+            Some(("OpenCode finished a step.".to_string(), true))
+        );
         assert_eq!(
             codex_status_from_event(&busy).map(|(message, _)| message),
             Some("OpenCode is working.".to_string())

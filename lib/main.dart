@@ -147,6 +147,18 @@ class _WorkspaceWorkerState {
   }
 }
 
+class _InactiveReplyNoticeState {
+  const _InactiveReplyNoticeState({
+    required this.entry,
+    required this.controller,
+    required this.timer,
+  });
+
+  final OverlayEntry entry;
+  final AnimationController controller;
+  final Timer timer;
+}
+
 class _GroupCallState {
   _GroupCallState({
     required this.callId,
@@ -652,9 +664,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Timer? _conversationHistorySaveTimer;
   Timer? _seenIncomingEventIdsSaveTimer;
   late final AnimationController _menuNotificationPulseController;
-  OverlayEntry? _inactiveReplyNotice;
-  AnimationController? _inactiveReplyNoticeController;
-  Timer? _inactiveReplyNoticeTimer;
+  final _inactiveReplyNotices = <String, _InactiveReplyNoticeState>{};
 
   bool _loadingSettings = true;
   bool _connecting = false;
@@ -999,9 +1009,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       unawaited(_saveWorkspaceCache(workerKey: workerKey));
     }
     unawaited(_saveLastWorkspaceLocation());
-    _inactiveReplyNoticeTimer?.cancel();
-    _inactiveReplyNotice?.remove();
-    _inactiveReplyNoticeController?.dispose();
+    for (final notice in _inactiveReplyNotices.values) {
+      notice.timer.cancel();
+      notice.entry.remove();
+      notice.controller.dispose();
+    }
+    _inactiveReplyNotices.clear();
     _incomingCallOverlay?.remove();
     unawaited(_stopTtsEngines());
     _chatScrollController.removeListener(_updateChatScrollPosition);
@@ -5433,6 +5446,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (workspaceWorker != null) {
       final worker = _workspaceWorkerForKey(workspaceWorker.pubkey);
       _showInactiveReplyPopup(
+        noticeKey: 'worker:${workspaceWorker.pubkey}',
         sessionName: workspaceWorker.displayName,
         onTap: () => unawaited(
           _openInactiveWorkspaceConversation(
@@ -5444,6 +5458,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       return;
     }
     _showInactiveReplyPopup(
+      noticeKey: 'session:$conversationKey',
       sessionName: target?.displayName ?? 'another session',
       onTap: () => unawaited(_selectRepoTarget(conversationKey)),
     );
@@ -5458,6 +5473,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         workspace.channelName(conversationKey) ??
         _workspaceDirectConversationName(workspace, conversationKey);
     _showInactiveReplyPopup(
+      noticeKey: 'worker:$workerKey:$conversationKey',
       sessionName: conversationName,
       onTap: () => unawaited(
         _openInactiveWorkspaceConversation(workerKey, conversationKey),
@@ -5481,11 +5497,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   void _showInactiveReplyPopup({
+    required String noticeKey,
     required String sessionName,
     required VoidCallback onTap,
   }) {
     if (!_inactiveReplyPopupEnabled || !mounted) return;
-    _dismissInactiveReplyNotice(immediately: true);
+    _dismissInactiveReplyNotice(noticeKey, immediately: true);
 
     final overlay = Overlay.of(context, rootOverlay: true);
     late final OverlayEntry notice;
@@ -5498,19 +5515,23 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       builder: (context) => _InactiveReplyNotice(
         animation: controller,
         sessionName: sessionName,
+        bottomOffset: 92 + (_inactiveReplyNotices.length * 76),
         onTap: () {
-          _dismissInactiveReplyNotice();
+          _dismissInactiveReplyNotice(noticeKey);
           onTap();
         },
       ),
     );
-    _inactiveReplyNotice = notice;
-    _inactiveReplyNoticeController = controller;
     overlay.insert(notice);
     controller.forward();
-    _inactiveReplyNoticeTimer = Timer(
+    final timer = Timer(
       const Duration(seconds: 4),
-      _dismissInactiveReplyNotice,
+      () => _dismissInactiveReplyNotice(noticeKey),
+    );
+    _inactiveReplyNotices[noticeKey] = _InactiveReplyNoticeState(
+      entry: notice,
+      controller: controller,
+      timer: timer,
     );
   }
 
@@ -5533,22 +5554,21 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     });
   }
 
-  void _dismissInactiveReplyNotice({bool immediately = false}) {
-    _inactiveReplyNoticeTimer?.cancel();
-    _inactiveReplyNoticeTimer = null;
-    final notice = _inactiveReplyNotice;
-    final controller = _inactiveReplyNoticeController;
-    _inactiveReplyNotice = null;
-    _inactiveReplyNoticeController = null;
-    if (notice == null || controller == null) return;
+  void _dismissInactiveReplyNotice(
+    String noticeKey, {
+    bool immediately = false,
+  }) {
+    final notice = _inactiveReplyNotices.remove(noticeKey);
+    if (notice == null) return;
+    notice.timer.cancel();
     if (immediately) {
-      notice.remove();
-      controller.dispose();
+      notice.entry.remove();
+      notice.controller.dispose();
       return;
     }
-    controller.reverse().whenComplete(() {
-      notice.remove();
-      controller.dispose();
+    notice.controller.reverse().whenComplete(() {
+      notice.entry.remove();
+      notice.controller.dispose();
     });
   }
 

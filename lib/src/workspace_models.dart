@@ -844,11 +844,28 @@ class WorkspaceState {
     }
     final incomingTyping = data['typing'];
     if (incomingTyping is Map) {
-      final status = WorkspaceTyping.fromJson(
+      var status = WorkspaceTyping.fromJson(
         Map<String, dynamic>.from(incomingTyping),
       );
       final key = _typingKey(status);
       if (status.senderPubkey.isNotEmpty && status.expiresAt > 0) {
+        final previous = typing[key];
+        // FIPS progress and Nostr lease updates can arrive out of order. A
+        // generic lease must not erase a newer, useful agent progress stage.
+        if (status.stage == null && previous?.stage != null) {
+          status = WorkspaceTyping(
+            senderPubkey: status.senderPubkey,
+            agentId: status.agentId,
+            agentName: status.agentName,
+            stage: previous!.stage,
+            channelId: status.channelId,
+            recipientPubkey: status.recipientPubkey,
+            memberPubkey: status.memberPubkey,
+            peerPubkey: status.peerPubkey,
+            parentId: status.parentId,
+            expiresAt: status.expiresAt,
+          );
+        }
         typing[key] = status;
       } else {
         typing.remove(key);
