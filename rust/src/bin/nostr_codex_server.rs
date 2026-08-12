@@ -86,6 +86,7 @@ const WORKSPACE_FIPS_TRANSFER_CHUNK_SIZE: usize = 64;
 const WORKSPACE_SNAPSHOT_MESSAGE_LIMIT: usize = 20;
 const WORKSPACE_HISTORY_REQUEST_MAX: usize = 50;
 const WORKSPACE_HISTORY_REQUEST_ATTEMPTS: usize = 3;
+const WORKSPACE_AGENT_SESSION_CONTEXT: &str = "workspace-history-protocol-v1";
 const WORKSPACE_FIPS_CAPABILITY_BYTES: usize = 32;
 const WORKSPACE_FIPS_CAPABILITY_TTL: Duration = Duration::from_secs(90);
 const WORKSPACE_FIPS_PROTOCOL_VERSION: u8 = 1;
@@ -4199,9 +4200,9 @@ async fn route_conversation_agents(
             .unwrap_or_default();
         let thread_context =
             workspace_thread_context(workspace, parent_id, channel_id, member, peer)?;
-        let (session_context, prompt) = match conversation_scope_prompt(folder_scope, &agent_config)
-        {
-            Ok(scope) => (
+        let prompt = match conversation_scope_prompt(folder_scope, &agent_config) {
+            Ok(scope) => format!(
+                "{}\n\n{}",
                 conversation_agent_session_prompt(preprompt, &scope),
                 conversation_agent_prompt(&thread_context, body),
             ),
@@ -4211,7 +4212,9 @@ async fn route_conversation_agents(
             }
         };
         let mut active_session_id = session_id.to_string();
-        if workspace.agent_session_context(&agent.id)?.as_deref() != Some(&session_context) {
+        if workspace.agent_session_context(&agent.id)?.as_deref()
+            != Some(WORKSPACE_AGENT_SESSION_CONTEXT)
+        {
             match run_workspace_agent_with_typing(
                 workspace,
                 messenger,
@@ -4220,14 +4223,15 @@ async fn route_conversation_agents(
                 member,
                 peer,
                 parent_id,
-                &session_context,
+                &conversation_agent_initialization_prompt(),
                 &agent_config,
                 &active_session_id,
                 active_turns,
             )
             .await
             {
-                Ok(_) => workspace.set_agent_session_context(&agent.id, &session_context)?,
+                Ok(_) => workspace
+                    .set_agent_session_context(&agent.id, WORKSPACE_AGENT_SESSION_CONTEXT)?,
                 Err(err) => {
                     warn!(agent = %agent.id, "workspace agent session initialization failed: {err:#}");
                     continue;
@@ -4309,25 +4313,6 @@ async fn route_conversation_agents(
                     },
                 )
                 .await?;
-                if let Err(err) = run_workspace_agent_with_typing(
-                    workspace,
-                    messenger,
-                    &agent,
-                    channel_id,
-                    member,
-                    peer,
-                    parent_id,
-                    &session_context,
-                    &agent_config,
-                    &active_session_id,
-                    active_turns,
-                )
-                .await
-                {
-                    warn!(agent = %agent.id, "workspace agent session initialization failed after restart: {err:#}");
-                    continue;
-                }
-                workspace.set_agent_session_context(&agent.id, &session_context)?;
                 match run_workspace_agent_with_typing(
                     workspace,
                     messenger,
@@ -4514,10 +4499,13 @@ fn conversation_agent_session_prompt(preprompt: &str, scope: &str) -> String {
     if !scope.is_empty() {
         sections.push(scope.to_string());
     }
-    sections.push(format!(
-        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying. This setup applies to all following messages in this session. Reply only READY to acknowledge it."
-    ));
     sections.join("\n\n")
+}
+
+fn conversation_agent_initialization_prompt() -> String {
+    format!(
+        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying. This setup applies to all following messages in this session. Reply only READY to acknowledge it."
+    )
 }
 
 fn conversation_agent_prompt(thread_context: &str, body: &str) -> String {
@@ -9248,16 +9236,24 @@ mod tests {
     }
 
     #[test]
-    fn conversation_session_setup_precedes_user_message() {
+    fn conversation_prompt_keeps_scoped_context_with_the_user_message() {
         let session_prompt =
             conversation_agent_session_prompt("Review carefully.", "Folder scope.");
         let prompt =
             conversation_agent_prompt("ResearchBot: Proposed implementation.", "Fix the bug.");
         assert!(session_prompt.starts_with("Review carefully.\n\nFolder scope."));
-        assert!(session_prompt.contains("[[WORKSPACE_HISTORY: N]]"));
+        assert!(!session_prompt.contains("[[WORKSPACE_HISTORY: N]]"));
         assert!(!prompt.contains("[[WORKSPACE_HISTORY: N]]"));
         assert!(prompt.contains("Thread context:\nResearchBot: Proposed implementation."));
         assert!(prompt.ends_with("User message:\nFix the bug."));
+    }
+
+    #[test]
+    fn initializes_sessions_with_the_workspace_history_protocol() {
+        let prompt = conversation_agent_initialization_prompt();
+
+        assert!(prompt.contains("[[WORKSPACE_HISTORY: N]]"));
+        assert!(prompt.contains("Reply only READY"));
     }
 
     #[test]
