@@ -43,14 +43,20 @@ class SettingsStorage {
   final Future<Directory> Function() _applicationSupportDirectory;
   bool _useLinuxFallback = false;
   Future<void> _fallbackOperations = Future.value();
+  final Map<String, String?> _knownValues = {};
 
-  Future<String?> read({required String key}) => _run(
-    () => _secureStorage.read(key: key),
-    () async => (await _readFallback())[key],
-  );
+  Future<String?> read({required String key}) async {
+    final value = await _run(
+      () => _secureStorage.read(key: key),
+      () async => (await _readFallback())[key],
+    );
+    _knownValues[key] = value;
+    return value;
+  }
 
-  Future<void> write({required String key, required String? value}) =>
-      _run(() => _secureStorage.write(key: key, value: value), () async {
+  Future<void> write({required String key, required String? value}) async {
+    if (_knownValues[key] == value && _knownValues.containsKey(key)) return;
+    await _run(() => _secureStorage.write(key: key, value: value), () async {
         final values = await _readFallback();
         if (value == null) {
           values.remove(key);
@@ -59,13 +65,18 @@ class SettingsStorage {
         }
         await _writeFallback(values);
       });
+    _knownValues[key] = value;
+  }
 
-  Future<void> delete({required String key}) =>
-      _run(() => _secureStorage.delete(key: key), () async {
+  Future<void> delete({required String key}) async {
+    if (_knownValues[key] == null && _knownValues.containsKey(key)) return;
+    await _run(() => _secureStorage.delete(key: key), () async {
         final values = await _readFallback();
         values.remove(key);
         await _writeFallback(values);
       });
+    _knownValues[key] = null;
+  }
 
   Future<T> _run<T>(
     Future<T> Function() secureOperation,
