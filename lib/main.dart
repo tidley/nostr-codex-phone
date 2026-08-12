@@ -73,6 +73,7 @@ bool get _isAndroid =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 bool get _isIOS => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
 bool get _isLinux => !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+bool get _supportsTts => !_isLinux;
 bool get _supportsCameraQrScan => _isAndroid || _isIOS;
 bool get _supportsLiveCalls => _isAndroid || _isLinux;
 
@@ -997,7 +998,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _inactiveReplyNotice?.remove();
     _inactiveReplyNoticeController?.dispose();
     _incomingCallOverlay?.remove();
-    _tts.stop();
+    unawaited(_stopTtsEngines());
     _chatScrollController.removeListener(_updateChatScrollPosition);
     _chatScrollController.dispose();
     _secretKeyController.dispose();
@@ -3800,6 +3801,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _loadTtsOptions() async {
+    if (!_supportsTts) return;
     try {
       final languages = _cleanStringList(await _tts.getLanguages);
       final engines = _isAndroid
@@ -3822,6 +3824,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _applyTtsSettings() async {
+    if (!_supportsTts) return;
     try {
       final engine = _cleanStoredString(_ttsEngine);
       if (_isAndroid && engine != null) {
@@ -3907,6 +3910,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   }
 
   Future<void> _stopTtsEngines() async {
+    if (!_supportsTts) return;
     await _ignoreTtsFailure(() => _tts.pause());
     await _ignoreTtsFailure(() => _tts.stop());
     await _nativeAndroidTtsStop();
@@ -5617,6 +5621,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     String? messageEventId,
     String? conversationKey,
   }) async {
+    if (!_supportsTts) return;
     if (!manual && _autoSpeakSuppressed) return;
     if (!manual &&
         conversationKey != null &&

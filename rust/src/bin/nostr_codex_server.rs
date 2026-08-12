@@ -96,7 +96,6 @@ const WORKSPACE_FIPS_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKSPACE_FIPS_SERVICE_PORT: u16 = 49_160;
 const WORKSPACE_FIPS_ROUTE_CAPACITY: usize = 128;
 const WORKSPACE_FIPS_ASSEMBLER_CAPACITY: usize = 256;
-const WORKSPACE_AGENT_QUEUE_CAPACITY: usize = 16;
 const SYSTEM_STATUS_HISTORY_MAX_BYTES: usize = 10 * 1024 * 1024;
 const SYSTEM_STATUS_SAMPLE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const AGENT_SCOPE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
@@ -344,8 +343,7 @@ struct WorkspaceAgentJob {
 }
 
 struct WorkspaceAgentQueues {
-    senders: HashMap<WorkspaceAgentQueueKey, mpsc::Sender<WorkspaceAgentJob>>,
-    turn_locks: HashMap<String, Arc<Mutex<()>>>,
+    senders: HashMap<WorkspaceAgentQueueKey, mpsc::UnboundedSender<WorkspaceAgentJob>>,
     active_turns: Arc<Mutex<HashMap<String, CodexCancelToken>>>,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
@@ -362,7 +360,6 @@ impl WorkspaceAgentQueues {
     ) -> Self {
         Self {
             senders: HashMap::new(),
-            turn_locks: HashMap::new(),
             active_turns: Arc::new(Mutex::new(HashMap::new())),
             workspace_path,
             messenger,
@@ -382,17 +379,13 @@ impl WorkspaceAgentQueues {
             conversation: conversation.clone(),
         };
         let sender = self.senders.entry(key).or_insert_with(|| {
-            let (sender, receiver) = mpsc::channel(WORKSPACE_AGENT_QUEUE_CAPACITY);
-            let turn_lock = Arc::clone(
-                self.turn_locks
-                    .entry(agent_id.clone())
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
-            );
+            // A mentioned message is durable in the workspace store. Do not lose its
+            // turn merely because an agent is still working through earlier messages.
+            let (sender, receiver) = mpsc::unbounded_channel();
             tokio::task::spawn_local(workspace_agent_queue_worker(
                 receiver,
                 agent_id.clone(),
                 conversation,
-                turn_lock,
                 Arc::clone(&self.active_turns),
                 self.workspace_path.clone(),
                 Arc::clone(&self.messenger),
@@ -401,15 +394,8 @@ impl WorkspaceAgentQueues {
             ));
             sender
         });
-        if let Err(err) = sender.try_send(WorkspaceAgentJob { trigger_message_id }) {
-            match err {
-                mpsc::error::TrySendError::Full(job) => {
-                    warn!(agent = %agent_id, trigger = %job.trigger_message_id, "workspace agent queue is full; dropping turn")
-                }
-                mpsc::error::TrySendError::Closed(job) => {
-                    warn!(agent = %agent_id, trigger = %job.trigger_message_id, "workspace agent queue stopped; dropping turn")
-                }
-            }
+        if let Err(err) = sender.send(WorkspaceAgentJob { trigger_message_id }) {
+            warn!(agent = %agent_id, trigger = %err.0.trigger_message_id, "workspace agent queue stopped; dropping turn");
         }
     }
 }
@@ -3906,10 +3892,9 @@ fn enqueue_conversation_agents(
 }
 
 async fn workspace_agent_queue_worker(
-    mut receiver: mpsc::Receiver<WorkspaceAgentJob>,
+    mut receiver: mpsc::UnboundedReceiver<WorkspaceAgentJob>,
     agent_id: String,
     conversation: WorkspaceConversation,
-    turn_lock: Arc<Mutex<()>>,
     active_turns: Arc<Mutex<HashMap<String, CodexCancelToken>>>,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
@@ -3917,9 +3902,6 @@ async fn workspace_agent_queue_worker(
     codex_config: CodexConfig,
 ) {
     while let Some(job) = receiver.recv().await {
-        // Different conversations may dequeue concurrently, but OpenCode sessions
-        // for one agent must never receive overlapping turns.
-        let _turn = turn_lock.lock().await;
         if let Err(err) = process_workspace_agent_job(
             &workspace_path,
             messenger.as_ref(),
@@ -4124,12 +4106,46 @@ async fn route_conversation_agents(
 ) -> Result<()> {
     let memberships = workspace.conversation_agents()?;
     let preprompts = workspace.conversation_preprompts()?;
-    for agent in workspace.agents_for_conversation(channel_id, member, peer)? {
+    for mut agent in workspace.agents_for_conversation(channel_id, member, peer)? {
         if only_agent_id.is_some_and(|agent_id| agent.id != agent_id) {
             continue;
         }
         if !conversation_agent_is_targeted(&agent.id, mentions) {
             continue;
+        }
+        if agent.session_status != "ready" && agent.restart_on_failure {
+            let agent_config = match codex_config_for_workspace_agent_record(codex_config, &agent) {
+                Ok(config) => config,
+                Err(err) => {
+                    warn!(agent = %agent.id, "workspace agent configuration is invalid: {err:#}");
+                    continue;
+                }
+            };
+            let (session_id, status, session_error) =
+                provision_workspace_agent_session(&agent_config).await;
+            agent = workspace.update_agent_session(
+                &agent.id,
+                session_id.as_deref(),
+                &status,
+                session_error.as_deref(),
+            )?;
+            broadcast_workspace_update(
+                workspace,
+                messenger,
+                outbound,
+                &WorkspaceUpdate {
+                    action: "agent_session_restarted".to_string(),
+                    revision: workspace.revision()?,
+                    channels: vec![],
+                    members: vec![],
+                    messages: vec![],
+                    agents: vec![agent_payload(agent.clone())],
+                    conversation_agents: vec![],
+                    conversation_preprompts: vec![],
+                    typing: None,
+                },
+            )
+            .await?;
         }
         let Some(session_id) = (agent.session_status == "ready")
             .then_some(agent.opencode_session_id.as_deref())
@@ -4180,14 +4196,41 @@ async fn route_conversation_agents(
             .unwrap_or_default();
         let thread_context =
             workspace_thread_context(workspace, parent_id, channel_id, member, peer)?;
-        let scoped_body = match conversation_scope_prompt(folder_scope, &agent_config) {
-            Ok(scope) => conversation_agent_prompt(preprompt, &scope, &thread_context, body),
+        let (session_context, prompt) = match conversation_scope_prompt(folder_scope, &agent_config)
+        {
+            Ok(scope) => (
+                conversation_agent_session_prompt(preprompt, &scope),
+                conversation_agent_prompt(&thread_context, body),
+            ),
             Err(err) => {
                 warn!(agent = %agent.id, "conversation folder scope is invalid: {err:#}");
                 continue;
             }
         };
         let mut active_session_id = session_id.to_string();
+        if workspace.agent_session_context(&agent.id)?.as_deref() != Some(&session_context) {
+            match run_workspace_agent_with_typing(
+                workspace,
+                messenger,
+                &agent,
+                channel_id,
+                member,
+                peer,
+                parent_id,
+                &session_context,
+                &agent_config,
+                &active_session_id,
+                active_turns,
+            )
+            .await
+            {
+                Ok(_) => workspace.set_agent_session_context(&agent.id, &session_context)?,
+                Err(err) => {
+                    warn!(agent = %agent.id, "workspace agent session initialization failed: {err:#}");
+                    continue;
+                }
+            }
+        }
         let mut result = match run_workspace_agent_with_typing(
             workspace,
             messenger,
@@ -4196,7 +4239,7 @@ async fn route_conversation_agents(
             member,
             peer,
             parent_id,
-            &scoped_body,
+            &prompt,
             &agent_config,
             &active_session_id,
             active_turns,
@@ -4263,6 +4306,25 @@ async fn route_conversation_agents(
                     },
                 )
                 .await?;
+                if let Err(err) = run_workspace_agent_with_typing(
+                    workspace,
+                    messenger,
+                    &agent,
+                    channel_id,
+                    member,
+                    peer,
+                    parent_id,
+                    &session_context,
+                    &agent_config,
+                    &active_session_id,
+                    active_turns,
+                )
+                .await
+                {
+                    warn!(agent = %agent.id, "workspace agent session initialization failed after restart: {err:#}");
+                    continue;
+                }
+                workspace.set_agent_session_context(&agent.id, &session_context)?;
                 match run_workspace_agent_with_typing(
                     workspace,
                     messenger,
@@ -4271,7 +4333,7 @@ async fn route_conversation_agents(
                     member,
                     peer,
                     parent_id,
-                    &scoped_body,
+                    &prompt,
                     &agent_config,
                     &active_session_id,
                     active_turns,
@@ -4441,12 +4503,7 @@ fn direct_preprompt_matches(
         && preprompt.peer_pubkey.as_deref() == Some(participants[1])
 }
 
-fn conversation_agent_prompt(
-    preprompt: &str,
-    scope: &str,
-    thread_context: &str,
-    body: &str,
-) -> String {
+fn conversation_agent_session_prompt(preprompt: &str, scope: &str) -> String {
     let mut sections = Vec::new();
     if !preprompt.is_empty() {
         sections.push(preprompt.to_string());
@@ -4455,8 +4512,13 @@ fn conversation_agent_prompt(
         sections.push(scope.to_string());
     }
     sections.push(format!(
-        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying."
+        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying. This setup applies to all following messages in this session. Reply only READY to acknowledge it."
     ));
+    sections.join("\n\n")
+}
+
+fn conversation_agent_prompt(thread_context: &str, body: &str) -> String {
+    let mut sections = Vec::new();
     if !thread_context.is_empty() {
         sections.push(format!("Thread context:\n{thread_context}"));
     }
@@ -9079,6 +9141,7 @@ mod tests {
             parent_id: None,
             also_send_to_main: false,
             reactions: vec![],
+            pinned: false,
             created_at: 0,
         };
         let conversation = WorkspaceConversation::Direct("alice".to_string(), "bob".to_string());
@@ -9134,22 +9197,18 @@ mod tests {
     }
 
     #[test]
-    fn workspace_agent_turn_queue_is_bounded_and_nonblocking() {
-        let (sender, _receiver) = mpsc::channel(WORKSPACE_AGENT_QUEUE_CAPACITY);
-        for index in 0..WORKSPACE_AGENT_QUEUE_CAPACITY {
+    fn workspace_agent_turn_queue_does_not_drop_backlogged_turns() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        for index in 0..32 {
             sender
-                .try_send(WorkspaceAgentJob {
+                .send(WorkspaceAgentJob {
                     trigger_message_id: index.to_string(),
                 })
                 .unwrap();
         }
 
-        assert!(matches!(
-            sender.try_send(WorkspaceAgentJob {
-                trigger_message_id: "overflow".to_string(),
-            }),
-            Err(mpsc::error::TrySendError::Full(_))
-        ));
+        assert_eq!(receiver.try_recv().unwrap().trigger_message_id, "0");
+        assert_eq!(receiver.try_recv().unwrap().trigger_message_id, "1");
     }
 
     #[test]
@@ -9186,15 +9245,14 @@ mod tests {
     }
 
     #[test]
-    fn conversation_preprompt_precedes_scope_and_user_message() {
-        let prompt = conversation_agent_prompt(
-            "Review carefully.",
-            "Folder scope.",
-            "ResearchBot: Proposed implementation.",
-            "Fix the bug.",
-        );
-        assert!(prompt.starts_with("Review carefully.\n\nFolder scope."));
-        assert!(prompt.contains("[[WORKSPACE_HISTORY: N]]"));
+    fn conversation_session_setup_precedes_user_message() {
+        let session_prompt =
+            conversation_agent_session_prompt("Review carefully.", "Folder scope.");
+        let prompt =
+            conversation_agent_prompt("ResearchBot: Proposed implementation.", "Fix the bug.");
+        assert!(session_prompt.starts_with("Review carefully.\n\nFolder scope."));
+        assert!(session_prompt.contains("[[WORKSPACE_HISTORY: N]]"));
+        assert!(!prompt.contains("[[WORKSPACE_HISTORY: N]]"));
         assert!(prompt.contains("Thread context:\nResearchBot: Proposed implementation."));
         assert!(prompt.ends_with("User message:\nFix the bug."));
     }

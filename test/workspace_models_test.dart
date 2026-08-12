@@ -470,7 +470,15 @@ void main() {
         'workspace_update': {
           'action': 'snapshot',
           'channels': [
-            {'id': 'channel-1', 'name': 'engineering'},
+            {
+              'id': 'channel-1',
+              'name': 'engineering',
+              'members': [
+                {'pubkey': 'owner'},
+                {'pubkey': 'member'},
+                {'pubkey': 'agent:review-bot'},
+              ],
+            },
           ],
           'members': ['owner', 'member'],
           'messages': [
@@ -628,7 +636,15 @@ void main() {
         'workspace_update': {
           'action': 'snapshot',
           'channels': [
-            {'id': 'channel-1', 'name': 'engineering'},
+            {
+              'id': 'channel-1',
+              'name': 'engineering',
+              'members': [
+                {'pubkey': 'owner'},
+                {'pubkey': 'member'},
+                {'pubkey': 'agent:review-bot'},
+              ],
+            },
           ],
           'members': ['owner', 'member', 'agent:review-bot'],
           'agents': [
