@@ -5642,9 +5642,12 @@ async fn process_repo_list_request(
 ) {
     match build_repo_list(path) {
         Ok(repo_list) => {
-            if let Err(err) = messenger
-                .send_wire_to_pubkey(owner_pubkey_hex, WireMessage::repo_list(repo_list))
-                .await
+            if let Err(err) = send_application_wire(
+                messenger,
+                owner_pubkey_hex,
+                WireMessage::repo_list(repo_list),
+            )
+            .await
             {
                 error!("failed to send repo list DM: {err:#}");
             }
