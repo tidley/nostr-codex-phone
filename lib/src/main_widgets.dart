@@ -1403,9 +1403,10 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final mentions = workspaceSelectedMentionsIn(text, selected).toList();
     final previous = thread == null
         ? null
-        : _threadReplies.isEmpty
-        ? thread
-        : _threadReplies.last;
+        : _threadReplies.reversed
+              .where((message) => isWorkspaceAgentSender(message.senderPubkey))
+              .firstOrNull ??
+          thread;
     if (previous == null || !isWorkspaceAgentSender(previous.senderPubkey)) {
       return mentions;
     }
@@ -1545,11 +1546,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   Widget build(BuildContext context) {
     final typing = _activeTyping;
     final threadTyping = _activeThreadTyping;
-    final toastTyping = _thread == null
-        ? typing
-        : typing
-              .where((status) => status.parentId != _thread!.id)
-              .toList(growable: false);
+    final toastTyping = typing;
     final activityLabels = _conversationActivityLabels();
     _scheduleTypingExpiry(widget.workspace.typing.values.toList());
     final wide = MediaQuery.sizeOf(context).width >= 1080;
@@ -1566,6 +1563,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       onSwitchSpace: widget.onSwitchSpace,
       onLeaveSpace: widget.onLeaveSpace,
       channels: widget.workspace.channels,
+      workspace: widget.workspace,
       members: widget.workspace.directPeers(widget.ownPubkey),
       ownPubkey: widget.ownPubkey,
       displayName: widget.displayName,
@@ -1976,7 +1974,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       }),
     );
 
-    final narrowSidePane = canDismissNarrowThread
+    final narrowSidePane = canDismissNarrowThread && medium
         ? GestureDetector(
             behavior: HitTestBehavior.opaque,
             onHorizontalDragEnd: (details) {
@@ -2667,6 +2665,7 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.onSwitchSpace,
     required this.onLeaveSpace,
     required this.channels,
+    required this.workspace,
     required this.members,
     required this.ownPubkey,
     required this.displayName,
@@ -2700,6 +2699,7 @@ class _WorkspaceSidebar extends StatelessWidget {
   final ValueChanged<RepoTarget> onSwitchSpace;
   final ValueChanged<RepoTarget> onLeaveSpace;
   final List<WorkspaceChannel> channels;
+  final WorkspaceState workspace;
   final List<String> members;
   final String ownPubkey;
   final String displayName;
@@ -2736,8 +2736,10 @@ class _WorkspaceSidebar extends StatelessWidget {
         (left, right) => _compareConversations(
           left.name,
           conversationPreferences[left.id],
+          _latestMessageAt(left.id),
           right.name,
           conversationPreferences[right.id],
+          _latestMessageAt(right.id),
         ),
       );
     final sortedMembers = members.toList()
@@ -2745,8 +2747,10 @@ class _WorkspaceSidebar extends StatelessWidget {
         (left, right) => _compareConversations(
           memberLabel(left),
           conversationPreferences[WorkspaceState.directKey(ownPubkey, left)],
+          _latestMessageAt(WorkspaceState.directKey(ownPubkey, left)),
           memberLabel(right),
           conversationPreferences[WorkspaceState.directKey(ownPubkey, right)],
+          _latestMessageAt(WorkspaceState.directKey(ownPubkey, right)),
         ),
       );
     final visibleChannels = sortedChannels
@@ -3218,15 +3222,29 @@ class _WorkspaceSidebar extends StatelessWidget {
   static int _compareConversations(
     String leftLabel,
     WorkspaceConversationPreference? left,
+    int leftLatestMessageAt,
     String rightLabel,
     WorkspaceConversationPreference? right,
+    int rightLatestMessageAt,
   ) {
     final pinOrder = (right?.pinned == true ? 1 : 0).compareTo(
       left?.pinned == true ? 1 : 0,
     );
     if (pinOrder != 0) return pinOrder;
+    if (left?.pinned == true) {
+      final recencyOrder = rightLatestMessageAt.compareTo(leftLatestMessageAt);
+      if (recencyOrder != 0) return recencyOrder;
+    }
     return leftLabel.toLowerCase().compareTo(rightLabel.toLowerCase());
   }
+
+  int _latestMessageAt(String conversationKey) =>
+      workspace.messages[conversationKey]?.fold<int>(
+        0,
+        (latest, message) =>
+            latest > message.createdAt ? latest : message.createdAt,
+      ) ??
+      0;
 }
 
 class _UnreadConversationLabel extends StatefulWidget {
@@ -3819,6 +3837,16 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         .toList(growable: false);
   }
 
+  List<WorkspaceMessage> get _pinnedMessages =>
+      widget.searchMessages
+          .where(
+            (message) =>
+                message.pinned ||
+                widget.localMessagePinIds.contains(message.id),
+          )
+          .toList(growable: false)
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
   WorkspaceMessage _threadSourceFor(WorkspaceMessage message) {
     final parentId = message.parentId;
     if (parentId == null) return message;
@@ -3831,6 +3859,13 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
   WorkspaceMessage? _threadSourceForId(String parentId) => widget.searchMessages
       .where((message) => message.id == parentId)
       .firstOrNull;
+
+  void _openMessageReference(String messageId) {
+    final message = widget.searchMessages
+        .where((candidate) => candidate.id == messageId)
+        .firstOrNull;
+    if (message != null) _openSearchResult(message);
+  }
 
   VoidCallback? _typingThreadOpener(WorkspaceTyping status) {
     final parentId = status.parentId;
@@ -4351,6 +4386,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     }
     final palette = Theme.of(context).extension<_WorkspacePalette>()!;
     final visibleMessages = _visibleMessages;
+    final pinnedMessages = _pinnedMessages;
     final searching = _searchQuery.trim().isNotEmpty;
     final compactHeader = MediaQuery.sizeOf(context).width < 720;
     final activityToastWidth = MediaQuery.sizeOf(context).width * 0.95;
@@ -4545,39 +4581,61 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                           itemCount: visibleMessages.length + 1,
                           itemBuilder: (context, index) {
                             if (index == visibleMessages.length) {
-                              if (widget.conversationPreprompt.isEmpty &&
-                                  widget.section == _WorkspaceSection.channel) {
-                                return Padding(
-                                  padding: const EdgeInsets.only(bottom: 16),
-                                  child: TextButton.icon(
-                                    onPressed: _editConversationPreprompt,
-                                    icon: const Icon(Icons.edit_note_outlined),
-                                    label: const Text('Add an agent brief'),
-                                  ),
-                                );
-                              }
-                              return Container(
-                                margin: const EdgeInsets.only(bottom: 20),
-                                padding: const EdgeInsets.all(14),
-                                decoration: BoxDecoration(
-                                  color: palette.sidebar.withValues(
-                                    alpha: 0.55,
-                                  ),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'Agent brief',
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.labelLarge,
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  if (pinnedMessages.isNotEmpty)
+                                    _PinnedMessagesPanel(
+                                      messages: pinnedMessages,
+                                      memberLabel: _memberLabel,
+                                      isLocallyPinned: (message) => widget
+                                          .localMessagePinIds
+                                          .contains(message.id),
+                                      onOpen: _openSearchResult,
                                     ),
-                                    const SizedBox(height: 5),
-                                    Text(widget.conversationPreprompt),
-                                  ],
-                                ),
+                                  if (widget.conversationPreprompt.isEmpty &&
+                                      widget.section ==
+                                          _WorkspaceSection.channel)
+                                    Padding(
+                                      padding: const EdgeInsets.only(
+                                        bottom: 16,
+                                      ),
+                                      child: TextButton.icon(
+                                        onPressed: _editConversationPreprompt,
+                                        icon: const Icon(
+                                          Icons.edit_note_outlined,
+                                        ),
+                                        label: const Text('Add an agent brief'),
+                                      ),
+                                    )
+                                  else if (widget
+                                      .conversationPreprompt
+                                      .isNotEmpty)
+                                    Container(
+                                      margin: const EdgeInsets.only(bottom: 20),
+                                      padding: const EdgeInsets.all(14),
+                                      decoration: BoxDecoration(
+                                        color: palette.sidebar.withValues(
+                                          alpha: 0.55,
+                                        ),
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            'Agent brief',
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.labelLarge,
+                                          ),
+                                          const SizedBox(height: 5),
+                                          Text(widget.conversationPreprompt),
+                                        ],
+                                      ),
+                                    ),
+                                ],
                               );
                             }
                             final messageIndex =
@@ -4623,13 +4681,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                                           widget.threadActivityLabels[m.id],
                                       threadTopic: widget.threadTopics[m.id],
                                       isThreadSource: widget.thread?.id == m.id,
-                                      showThreadConnector:
-                                          m.parentId != null ||
-                                          (widget.thread != null &&
-                                              MediaQuery.sizeOf(
-                                                    context,
-                                                  ).width >=
-                                                  720),
+                                      onOpenMessageReference:
+                                          _openMessageReference,
                                       onReact: (emoji) => unawaited(
                                         widget.onToggleReaction(m, emoji),
                                       ),
@@ -5117,6 +5170,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
     required this.fipsConnected,
     required this.onThread,
     required this.onReact,
+    required this.onOpenMessageReference,
     this.isLocallyPinned = false,
     this.onToggleLocalPin,
     this.onToggleSharedPin,
@@ -5127,7 +5181,6 @@ class _WorkspaceMessageRow extends StatefulWidget {
     this.threadTopic,
     this.showThreadAction = true,
     this.isThreadSource = false,
-    this.showThreadConnector = false,
   });
   final WorkspaceMessage message;
   final String authorName;
@@ -5136,6 +5189,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
   final bool fipsConnected;
   final VoidCallback onThread;
   final ValueChanged<String> onReact;
+  final ValueChanged<String> onOpenMessageReference;
   final bool isLocallyPinned;
   final VoidCallback? onToggleLocalPin;
   final VoidCallback? onToggleSharedPin;
@@ -5146,7 +5200,6 @@ class _WorkspaceMessageRow extends StatefulWidget {
   final String? threadTopic;
   final bool showThreadAction;
   final bool isThreadSource;
-  final bool showThreadConnector;
   @override
   State<_WorkspaceMessageRow> createState() => _WorkspaceMessageRowState();
 }
@@ -5259,6 +5312,11 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
               title: const Text('Copy'),
               onTap: () => Navigator.pop(context, 'copy'),
             ),
+            ListTile(
+              leading: const Icon(Icons.link_outlined),
+              title: const Text('Copy message reference'),
+              onTap: () => Navigator.pop(context, 'copy-reference'),
+            ),
             if (widget.showThreadAction)
               ListTile(
                 leading: const Icon(Icons.reply_outlined),
@@ -5304,6 +5362,10 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
     );
     if (action == 'copy') {
       await Clipboard.setData(ClipboardData(text: _messageText));
+    } else if (action == 'copy-reference') {
+      await Clipboard.setData(
+        ClipboardData(text: '[[message:${widget.message.id}]]'),
+      );
     } else if (action == 'thread') {
       widget.onThread();
     } else if (action == 'shared-pin') {
@@ -5344,7 +5406,16 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
             alignment: Alignment.centerRight,
             child: Padding(
               padding: const EdgeInsets.only(bottom: 4),
-              child: _timestamp(context, grouped: true),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (widget.threadTopic case final topic?) ...[
+                    Flexible(child: _threadTopicTag(context, topic)),
+                    const SizedBox(width: 6),
+                  ],
+                  _timestamp(context, grouped: true),
+                ],
+              ),
             ),
           ),
         if (!widget.groupedWithPrevious && !widget.isLocalSender)
@@ -5364,33 +5435,15 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                 ),
               ),
               const SizedBox(width: 8),
+              if (widget.threadTopic case final topic?) ...[
+                Flexible(child: _threadTopicTag(context, topic)),
+                const SizedBox(width: 6),
+              ],
               _timestamp(context, grouped: true),
             ],
           ),
         if (!widget.groupedWithPrevious && !widget.isLocalSender)
           const SizedBox(height: 3),
-        if (widget.threadTopic case final topic?)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 6),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: Theme.of(
-                  context,
-                ).colorScheme.primary.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                child: Text(
-                  topic,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: Theme.of(context).colorScheme.primary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-          ),
         if (widget.message.pinned || widget.isLocallyPinned)
           Padding(
             padding: const EdgeInsets.only(bottom: 6),
@@ -5414,6 +5467,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
           _WorkspaceMessageBody(
             text: _messageText,
             mentions: widget.message.mentions,
+            onOpenMessageReference: widget.onOpenMessageReference,
           ),
         if (widget.message.reactions.isNotEmpty)
           Wrap(
@@ -5616,6 +5670,15 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                                 ClipboardData(text: _messageText),
                               ),
                             ),
+                            IconButton(
+                              tooltip: 'Copy message reference',
+                              icon: const Icon(Icons.link_outlined, size: 18),
+                              onPressed: () => Clipboard.setData(
+                                ClipboardData(
+                                  text: '[[message:${widget.message.id}]]',
+                                ),
+                              ),
+                            ),
                             if (widget.showThreadAction)
                               IconButton(
                                 tooltip: 'Reply in thread',
@@ -5671,26 +5734,6 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
             ),
           ),
         );
-        if (widget.isThreadSource &&
-            widget.showThreadConnector &&
-            !widget.isLocalSender) {
-          return Row(
-            children: [
-              bubble,
-              Expanded(
-                child: Align(
-                  alignment: Alignment.center,
-                  child: Container(
-                    height: 1,
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.primary.withValues(alpha: 0.35),
-                  ),
-                ),
-              ),
-            ],
-          );
-        }
         return Align(
           alignment: widget.isLocalSender
               ? Alignment.centerRight
@@ -5710,6 +5753,25 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
       color: Theme.of(
         context,
       ).colorScheme.onSurface.withValues(alpha: grouped ? 0.42 : 0.52),
+    ),
+  );
+
+  Widget _threadTopicTag(BuildContext context, String topic) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.12),
+      borderRadius: BorderRadius.circular(999),
+    ),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      child: Text(
+        topic,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+          color: Theme.of(context).colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
     ),
   );
 }
@@ -5904,16 +5966,22 @@ class _WorkspaceBotAvatarPainter extends CustomPainter {
 }
 
 class _WorkspaceMessageBody extends StatefulWidget {
-  const _WorkspaceMessageBody({required this.text, required this.mentions});
+  const _WorkspaceMessageBody({
+    required this.text,
+    required this.mentions,
+    required this.onOpenMessageReference,
+  });
   final String text;
   final List<WorkspaceMention> mentions;
+  final ValueChanged<String> onOpenMessageReference;
 
   @override
   State<_WorkspaceMessageBody> createState() => _WorkspaceMessageBodyState();
 }
 
 class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
-  static const _collapsedLines = 20;
+  static const _previewLines = 10;
+  static const _expandThresholdLines = 15;
   bool _expanded = false;
 
   @override
@@ -5924,7 +5992,7 @@ class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
         text: TextSpan(text: widget.text, style: style),
         textDirection: Directionality.of(context),
         textScaler: MediaQuery.textScalerOf(context),
-        maxLines: _collapsedLines,
+        maxLines: _expandThresholdLines,
       )..layout(maxWidth: constraints.maxWidth);
       final truncated = painter.didExceedMaxLines;
       return Column(
@@ -5934,7 +6002,8 @@ class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
           _WorkspaceMessageText(
             text: widget.text,
             mentions: widget.mentions,
-            maxLines: truncated && !_expanded ? _collapsedLines : null,
+            onOpenMessageReference: widget.onOpenMessageReference,
+            maxLines: truncated && !_expanded ? _previewLines : null,
           ),
           if (truncated)
             TextButton(
@@ -5955,14 +6024,43 @@ class _WorkspaceMessageText extends StatelessWidget {
   const _WorkspaceMessageText({
     required this.text,
     required this.mentions,
+    required this.onOpenMessageReference,
     this.maxLines,
   });
   final String text;
   final List<WorkspaceMention> mentions;
+  final ValueChanged<String> onOpenMessageReference;
   final int? maxLines;
 
   @override
   Widget build(BuildContext context) {
+    final blocks = RegExp(r'```[^\r\n]*\r?\n([\s\S]*?)```').allMatches(text);
+    if (blocks.isEmpty) return _buildPlainText(context, text, maxLines);
+
+    final children = <Widget>[];
+    var offset = 0;
+    for (final block in blocks) {
+      final before = text.substring(offset, block.start).trim();
+      if (before.isNotEmpty) {
+        children.add(_buildPlainText(context, before, null));
+        children.add(const SizedBox(height: 8));
+      }
+      children.add(_WorkspaceCodeBlock(code: block.group(1)!.trimRight()));
+      offset = block.end;
+    }
+    final after = text.substring(offset).trim();
+    if (after.isNotEmpty) {
+      children.add(const SizedBox(height: 8));
+      children.add(_buildPlainText(context, after, null));
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
+    );
+  }
+
+  Widget _buildPlainText(BuildContext context, String value, int? maxLines) {
     final recognizedMentions = {
       for (final mention in mentions) mention.label: mention,
     };
@@ -5973,25 +6071,43 @@ class _WorkspaceMessageText extends StatelessWidget {
       r'@\[([^\]\r\n]+)\]\((?:member|agent):[^\)\s]+\)',
       r'\*\*[^*\r\n]+\*\*',
       r'`[^`\r\n]+`',
+      r'\[\[message:([^\]\r\n]+)\]\]',
       r'(?<!\w)(?:[~\w.-]+/)+[~\w.-]+',
       if (labels.isNotEmpty)
         '(?<!\\w)@(?:${labels.map(RegExp.escape).join('|')})(?![\\w-])',
     ];
-    final matches = RegExp(patterns.join('|')).allMatches(text);
+    final matches = RegExp(patterns.join('|')).allMatches(value);
     if (matches.isEmpty) {
       return maxLines == null
-          ? SelectableText(text)
-          : Text(text, maxLines: maxLines, overflow: TextOverflow.ellipsis);
+          ? SelectableText(value)
+          : Text(value, maxLines: maxLines, overflow: TextOverflow.ellipsis);
     }
     final style = DefaultTextStyle.of(context).style;
     final spans = <InlineSpan>[];
     var offset = 0;
     for (final match in matches) {
       if (match.start > offset) {
-        spans.add(TextSpan(text: text.substring(offset, match.start)));
+        spans.add(TextSpan(text: value.substring(offset, match.start)));
       }
       final mention = match.group(1);
       final token = match.group(0)!;
+      if (token.startsWith('[[message:')) {
+        final messageId = match.group(1)!;
+        spans.add(
+          TextSpan(
+            text: 'message reference',
+            style: style.copyWith(
+              color: Theme.of(context).colorScheme.primary,
+              fontWeight: FontWeight.w600,
+              decoration: TextDecoration.underline,
+            ),
+            recognizer: TapGestureRecognizer()
+              ..onTap = () => onOpenMessageReference(messageId),
+          ),
+        );
+        offset = match.end;
+        continue;
+      }
       final recognizedMention =
           mention ??
           (token.startsWith('@')
@@ -6051,7 +6167,9 @@ class _WorkspaceMessageText extends StatelessWidget {
       }
       offset = match.end;
     }
-    if (offset < text.length) spans.add(TextSpan(text: text.substring(offset)));
+    if (offset < value.length) {
+      spans.add(TextSpan(text: value.substring(offset)));
+    }
     final span = TextSpan(style: style, children: spans);
     return maxLines == null
         ? SelectableText.rich(span)
@@ -6060,6 +6178,33 @@ class _WorkspaceMessageText extends StatelessWidget {
             maxLines: maxLines,
             overflow: TextOverflow.ellipsis,
           );
+  }
+}
+
+class _WorkspaceCodeBlock extends StatelessWidget {
+  const _WorkspaceCodeBlock({required this.code});
+  final String code;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xff0b211d),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: SelectableText(
+        code,
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+          color: colors.primaryContainer,
+          fontFamily: 'monospace',
+          fontSize: 13,
+          height: 1.45,
+        ),
+      ),
+    );
   }
 }
 
@@ -6207,6 +6352,7 @@ class _WorkspaceContext extends StatelessWidget {
     fipsConnected: false,
     onThread: () {},
     onReact: (emoji) => unawaited(onToggleReaction(message, emoji)),
+    onOpenMessageReference: (_) {},
     threadReplyCount: 0,
     threadUnreadCount: 0,
     onOpenAttachment: onOpenAttachment,
@@ -6932,6 +7078,62 @@ class _ContextLine extends StatelessWidget {
         Icon(icon, size: 19),
         const SizedBox(width: 10),
         Expanded(child: Text(text)),
+      ],
+    ),
+  );
+}
+
+class _PinnedMessagesPanel extends StatelessWidget {
+  const _PinnedMessagesPanel({
+    required this.messages,
+    required this.memberLabel,
+    required this.isLocallyPinned,
+    required this.onOpen,
+  });
+
+  final List<WorkspaceMessage> messages;
+  final String Function(String pubkey) memberLabel;
+  final bool Function(WorkspaceMessage message) isLocallyPinned;
+  final ValueChanged<WorkspaceMessage> onOpen;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.only(bottom: 16),
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(10),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Pinned messages',
+          style: Theme.of(context).textTheme.labelLarge,
+        ),
+        const SizedBox(height: 6),
+        for (final message in messages)
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+              message.pinned || !isLocallyPinned(message)
+                  ? Icons.push_pin_outlined
+                  : Icons.bookmark_outline,
+              size: 18,
+            ),
+            title: Text(
+              memberLabel(message.senderPubkey),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(
+              workspaceDisplayMessageText(message.body),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            onTap: () => onOpen(message),
+          ),
       ],
     ),
   );
@@ -14652,6 +14854,7 @@ class _MessageTileState extends State<_MessageTile>
                 Expanded(
                   child: MarkdownBody(
                     data: widget.message.text,
+                    styleSheet: _markdownStyleSheet(context, userSide),
                     imageBuilder: (uri, title, alt) =>
                         _buildMarkdownImage(context, uri, title, alt),
                     selectable: !widget.stopSpeakingOnTap,
@@ -14664,6 +14867,7 @@ class _MessageTileState extends State<_MessageTile>
           else
             MarkdownBody(
               data: widget.message.text,
+              styleSheet: _markdownStyleSheet(context, userSide),
               imageBuilder: (uri, title, alt) =>
                   _buildMarkdownImage(context, uri, title, alt),
               selectable: !widget.stopSpeakingOnTap,
@@ -14688,6 +14892,49 @@ class _MessageTileState extends State<_MessageTile>
           onTap: canFlashOnTap ? _handleTap : null,
           child: tile,
         ),
+      ),
+    );
+  }
+
+  MarkdownStyleSheet _markdownStyleSheet(BuildContext context, bool userSide) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final quoteColor = userSide
+        ? colors.onPrimaryContainer.withValues(alpha: 0.10)
+        : colors.surfaceContainerHighest;
+    final quoteTextColor = userSide
+        ? colors.onPrimaryContainer
+        : colors.onSurface;
+    final codeBackground = userSide
+        ? colors.onPrimaryContainer.withValues(alpha: 0.14)
+        : const Color(0xff0b211d);
+    final codeTextColor = userSide
+        ? colors.onPrimaryContainer
+        : const Color(0xffb7f4dc);
+
+    return MarkdownStyleSheet.fromTheme(theme).copyWith(
+      blockquote: theme.textTheme.bodyMedium?.copyWith(color: quoteTextColor),
+      blockquotePadding: const EdgeInsets.symmetric(
+        horizontal: 12,
+        vertical: 8,
+      ),
+      blockquoteDecoration: BoxDecoration(
+        color: quoteColor,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      codeblockPadding: const EdgeInsets.symmetric(
+        horizontal: 12,
+        vertical: 10,
+      ),
+      codeblockDecoration: BoxDecoration(
+        color: codeBackground,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      code: theme.textTheme.bodyMedium?.copyWith(
+        color: codeTextColor,
+        fontFamily: 'monospace',
+        fontSize: 13,
+        height: 1.45,
       ),
     );
   }
