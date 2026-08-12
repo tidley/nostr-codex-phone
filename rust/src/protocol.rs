@@ -238,6 +238,8 @@ pub struct WorkspaceRequest {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub also_send_to_main: bool,
+    #[serde(default)]
+    pub pinned: bool,
     /// Client supports FIPS reliable-stream workspace snapshot delivery.
     #[serde(default)]
     pub fips_snapshot: bool,
@@ -424,6 +426,8 @@ pub struct WorkspaceConversationPrepromptPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_pubkey: Option<String>,
     pub preprompt: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_scope: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,6 +476,15 @@ pub struct WorkspaceChannelPayload {
     pub name: String,
     pub created_by: String,
     pub created_at: i64,
+    #[serde(default)]
+    pub members: Vec<WorkspaceChannelMemberPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceChannelMemberPayload {
+    pub pubkey: String,
+    #[serde(default)]
+    pub is_admin: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceMessagePayload {
@@ -490,6 +503,8 @@ pub struct WorkspaceMessagePayload {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub also_send_to_main: bool,
+    #[serde(default)]
+    pub pinned: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<WorkspaceReactionPayload>,
     pub created_at: i64,
@@ -1473,7 +1488,7 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
         {
             Ok(())
         }
-        "restart_agent_session"
+        "restart_agent_session" | "abort_agent_task"
             if request
                 .agent_id
                 .as_deref()
@@ -1502,6 +1517,18 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
                 .channel_name
                 .as_deref()
                 .is_some_and(|name| !name.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        "add_channel_member" | "remove_channel_member"
+            if request
+                .channel_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && request
+                    .member_pubkey
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()) =>
         {
             Ok(())
         }
@@ -1542,6 +1569,14 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
                 && request.reaction.as_deref().is_some_and(|emoji| {
                     !emoji.trim().is_empty() && emoji.chars().count() <= 16
                 }) =>
+        {
+            Ok(())
+        }
+        "toggle_pin"
+            if request
+                .parent_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty()) =>
         {
             Ok(())
         }

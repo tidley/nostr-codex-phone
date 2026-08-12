@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::protocol::{MediaReference, WorkspaceMentionPayload, WorkspaceReactionPayload};
 use anyhow::{bail, Context, Result};
 use rand::{rngs::OsRng, RngCore};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceChannel {
@@ -12,6 +12,12 @@ pub struct WorkspaceChannel {
     pub name: String,
     pub created_by: String,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceChannelMember {
+    pub pubkey: String,
+    pub is_admin: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +38,7 @@ pub struct WorkspaceMessage {
     pub mentions: Vec<WorkspaceMentionPayload>,
     pub parent_id: Option<String>,
     pub also_send_to_main: bool,
+    pub pinned: bool,
     pub reactions: Vec<WorkspaceReactionPayload>,
     pub created_at: i64,
 }
@@ -88,6 +95,7 @@ pub struct WorkspaceConversationPreprompt {
     pub member_pubkey: Option<String>,
     pub peer_pubkey: Option<String>,
     pub preprompt: String,
+    pub folder_scope: Vec<String>,
 }
 
 pub struct WorkspaceStore {
@@ -111,7 +119,7 @@ impl WorkspaceStore {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS workspace_members (pubkey TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '', is_admin INTEGER NOT NULL DEFAULT 0, joined_at INTEGER NOT NULL);
                CREATE TABLE IF NOT EXISTS workspace_channels (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
-                 CREATE TABLE IF NOT EXISTS workspace_messages (id TEXT PRIMARY KEY, channel_id TEXT, recipient_pubkey TEXT, sender_pubkey TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', mentions_json TEXT NOT NULL DEFAULT '[]', parent_id TEXT, also_send_to_main INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+                  CREATE TABLE IF NOT EXISTS workspace_messages (id TEXT PRIMARY KEY, channel_id TEXT, recipient_pubkey TEXT, sender_pubkey TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', mentions_json TEXT NOT NULL DEFAULT '[]', parent_id TEXT, also_send_to_main INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
                    CHECK ((channel_id IS NOT NULL) != (recipient_pubkey IS NOT NULL)));
                   CREATE TABLE IF NOT EXISTS workspace_message_reactions (message_id TEXT NOT NULL REFERENCES workspace_messages(id), emoji TEXT NOT NULL, sender_pubkey TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (message_id, emoji, sender_pubkey));
                   CREATE TABLE IF NOT EXISTS workspace_notification_outbox (id INTEGER PRIMARY KEY, recipient TEXT NOT NULL, payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
@@ -121,7 +129,7 @@ impl WorkspaceStore {
                     folder_scope_json TEXT NOT NULL DEFAULT '[]',
                     PRIMARY KEY (agent_id, channel_id, member_pubkey, peer_pubkey),
                     CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
-                 CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL,
+                 CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL, folder_scope_json TEXT NOT NULL DEFAULT '[]',
                     PRIMARY KEY (channel_id, member_pubkey, peer_pubkey),
                     CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
                 CREATE INDEX IF NOT EXISTS workspace_messages_channel ON workspace_messages(channel_id, created_at);
@@ -148,6 +156,11 @@ impl WorkspaceStore {
     }
 
     fn migrate(conn: Connection) -> Result<Self> {
+        let has_channel_members = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_channel_members')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
         let has_display_name = conn
             .prepare("PRAGMA table_info(workspace_members)")?
             .query_map([], |row| row.get::<_, String>(1))?
@@ -208,6 +221,18 @@ impl WorkspaceStore {
                 [],
             )?;
         }
+        let has_pinned = conn
+            .prepare("PRAGMA table_info(workspace_messages)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|column| column == "pinned");
+        if !has_pinned {
+            conn.execute(
+                "ALTER TABLE workspace_messages ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         let agent_columns = conn
             .prepare("PRAGMA table_info(workspace_agents)")?
             .query_map([], |row| row.get::<_, String>(1))?
@@ -263,6 +288,25 @@ impl WorkspaceStore {
                 [],
             )?;
         }
+        let conversation_preprompt_columns = conn
+            .prepare("PRAGMA table_info(workspace_conversation_preprompts)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !conversation_preprompt_columns
+            .iter()
+            .any(|column| column == "folder_scope_json")
+        {
+            conn.execute(
+                "ALTER TABLE workspace_conversation_preprompts ADD COLUMN folder_scope_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
+        // Channels created before per-channel membership were visible to every
+        // workspace member. Preserve that access when upgrading existing stores.
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS workspace_channel_members (channel_id TEXT NOT NULL REFERENCES workspace_channels(id), pubkey TEXT NOT NULL REFERENCES workspace_members(pubkey), is_admin INTEGER NOT NULL DEFAULT 0, joined_at INTEGER NOT NULL, PRIMARY KEY (channel_id, pubkey));")?;
+        if !has_channel_members {
+            conn.execute_batch("INSERT OR IGNORE INTO workspace_channel_members (channel_id, pubkey, joined_at) SELECT c.id, m.pubkey, c.created_at FROM workspace_channels c CROSS JOIN workspace_members m; UPDATE workspace_channel_members SET is_admin = 1 WHERE (channel_id, pubkey) IN (SELECT id, created_by FROM workspace_channels);")?;
+        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS workspace_metadata (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
              INSERT OR IGNORE INTO workspace_metadata (key, value) VALUES ('revision', 0);
@@ -270,7 +314,10 @@ impl WorkspaceStore {
              CREATE TRIGGER IF NOT EXISTS workspace_members_revision_update AFTER UPDATE ON workspace_members BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
              CREATE TRIGGER IF NOT EXISTS workspace_channels_revision_insert AFTER INSERT ON workspace_channels BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
              CREATE TRIGGER IF NOT EXISTS workspace_channels_revision_update AFTER UPDATE ON workspace_channels BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
-             CREATE TRIGGER IF NOT EXISTS workspace_channels_revision_delete AFTER DELETE ON workspace_channels BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_channels_revision_delete AFTER DELETE ON workspace_channels BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_channel_members_revision_insert AFTER INSERT ON workspace_channel_members BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_channel_members_revision_update AFTER UPDATE ON workspace_channel_members BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_channel_members_revision_delete AFTER DELETE ON workspace_channel_members BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
              CREATE TRIGGER IF NOT EXISTS workspace_messages_revision_insert AFTER INSERT ON workspace_messages BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
              CREATE TRIGGER IF NOT EXISTS workspace_messages_revision_update AFTER UPDATE ON workspace_messages BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
              CREATE TRIGGER IF NOT EXISTS workspace_messages_revision_delete AFTER DELETE ON workspace_messages BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
@@ -419,6 +466,22 @@ impl WorkspaceStore {
         })
     }
 
+    pub fn remove_member(&self, pubkey: &str) -> Result<()> {
+        let pubkey = required("member pubkey", pubkey)?;
+        self.conn.execute(
+            "DELETE FROM workspace_channel_members WHERE pubkey = ?1",
+            [&pubkey],
+        )?;
+        if self
+            .conn
+            .execute("DELETE FROM workspace_members WHERE pubkey = ?1", [&pubkey])?
+            == 0
+        {
+            bail!("member is not a workspace member");
+        }
+        Ok(())
+    }
+
     pub fn create_channel(&self, name: &str, created_by: &str) -> Result<WorkspaceChannel> {
         let name = required("channel name", name)?.to_ascii_lowercase();
         if !name
@@ -433,7 +496,13 @@ impl WorkspaceStore {
             created_by: required("creator", created_by)?,
             created_at: now(),
         };
-        self.conn.execute("INSERT INTO workspace_channels (id, name, created_by, created_at) VALUES (?1, ?2, ?3, ?4)", params![channel.id, channel.name, channel.created_by, channel.created_at])?;
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute("INSERT INTO workspace_channels (id, name, created_by, created_at) VALUES (?1, ?2, ?3, ?4)", params![channel.id, channel.name, channel.created_by, channel.created_at])?;
+        transaction.execute(
+            "INSERT INTO workspace_channel_members (channel_id, pubkey, is_admin, joined_at) VALUES (?1, ?2, 1, ?3)",
+            params![channel.id, channel.created_by, channel.created_at],
+        )?;
+        transaction.commit()?;
         Ok(channel)
     }
 
@@ -444,6 +513,68 @@ impl WorkspaceStore {
             .collect::<rusqlite::Result<_>>()
             .map_err(Into::into);
         channels
+    }
+
+    pub fn channels_for_member(&self, pubkey: &str) -> Result<Vec<WorkspaceChannel>> {
+        let mut statement = self.conn.prepare("SELECT c.id, c.name, c.created_by, c.created_at FROM workspace_channels c JOIN workspace_channel_members cm ON cm.channel_id = c.id WHERE cm.pubkey = ?1 ORDER BY c.created_at, c.name")?;
+        let channels = statement
+            .query_map([required("member pubkey", pubkey)?], channel_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(channels)
+    }
+
+    pub fn channel_members(&self, channel_id: &str) -> Result<Vec<WorkspaceChannelMember>> {
+        self.require_channel(channel_id)?;
+        let mut statement = self.conn.prepare("SELECT pubkey, is_admin FROM workspace_channel_members WHERE channel_id = ?1 ORDER BY joined_at, pubkey")?;
+        let members = statement
+            .query_map([channel_id], |row| {
+                Ok(WorkspaceChannelMember {
+                    pubkey: row.get(0)?,
+                    is_admin: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(members)
+    }
+
+    pub fn is_channel_member(&self, channel_id: &str, pubkey: &str) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM workspace_channel_members WHERE channel_id = ?1 AND pubkey = ?2)", params![channel_id.trim(), pubkey.trim()], |row| row.get(0))?)
+    }
+
+    pub fn is_channel_admin(&self, channel_id: &str, pubkey: &str) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM workspace_channel_members WHERE channel_id = ?1 AND pubkey = ?2 AND is_admin = 1)", params![channel_id.trim(), pubkey.trim()], |row| row.get(0))?)
+    }
+
+    pub fn add_channel_member(&self, channel_id: &str, pubkey: &str) -> Result<()> {
+        let channel_id = required("channel id", channel_id)?;
+        let pubkey = required("member pubkey", pubkey)?;
+        self.require_channel(&channel_id)?;
+        if !self.is_member(&pubkey)? {
+            bail!("member is not a workspace member");
+        }
+        self.conn.execute("INSERT OR IGNORE INTO workspace_channel_members (channel_id, pubkey, joined_at) VALUES (?1, ?2, ?3)", params![channel_id, pubkey, now()])?;
+        Ok(())
+    }
+
+    pub fn remove_channel_member(&self, channel_id: &str, pubkey: &str) -> Result<()> {
+        let channel_id = required("channel id", channel_id)?;
+        let pubkey = required("member pubkey", pubkey)?;
+        let created_by: String = self.conn.query_row(
+            "SELECT created_by FROM workspace_channels WHERE id = ?1",
+            [&channel_id],
+            |row| row.get(0),
+        )?;
+        if pubkey == created_by {
+            bail!("the conversation creator cannot be removed");
+        }
+        if self.conn.execute(
+            "DELETE FROM workspace_channel_members WHERE channel_id = ?1 AND pubkey = ?2",
+            params![channel_id, pubkey],
+        )? == 0
+        {
+            bail!("member is not in this channel");
+        }
+        Ok(())
     }
 
     pub fn rename_channel(&self, channel_id: &str, name: &str) -> Result<WorkspaceChannel> {
@@ -486,6 +617,10 @@ impl WorkspaceStore {
         )?;
         self.conn.execute(
             "DELETE FROM workspace_conversation_preprompts WHERE channel_id = ?1",
+            [channel_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM workspace_channel_members WHERE channel_id = ?1",
             [channel_id],
         )?;
         self.conn
@@ -761,7 +896,7 @@ impl WorkspaceStore {
     }
 
     pub fn conversation_preprompts(&self) -> Result<Vec<WorkspaceConversationPreprompt>> {
-        let mut statement = self.conn.prepare("SELECT channel_id, member_pubkey, peer_pubkey, preprompt FROM workspace_conversation_preprompts ORDER BY channel_id, member_pubkey, peer_pubkey")?;
+        let mut statement = self.conn.prepare("SELECT channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json FROM workspace_conversation_preprompts ORDER BY channel_id, member_pubkey, peer_pubkey")?;
         let preprompts = statement
             .query_map([], conversation_preprompt_from_row)?
             .collect::<rusqlite::Result<_>>()?;
@@ -774,6 +909,7 @@ impl WorkspaceStore {
         member: Option<&str>,
         peer: Option<&str>,
         preprompt: &str,
+        folder_scope: &[String],
     ) -> Result<()> {
         if preprompt.chars().count() > 4_000 {
             bail!("conversation pre-prompt may not exceed 4000 characters");
@@ -794,10 +930,38 @@ impl WorkspaceStore {
         };
         let preprompt = preprompt.trim();
         self.conn.execute("DELETE FROM workspace_conversation_preprompts WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3", params![channel_id, member, peer])?;
-        if !preprompt.is_empty() {
-            self.conn.execute("INSERT INTO workspace_conversation_preprompts (channel_id, member_pubkey, peer_pubkey, preprompt) VALUES (?1, ?2, ?3, ?4)", params![channel_id, member, peer, preprompt])?;
+        if !preprompt.is_empty() || !folder_scope.is_empty() {
+            self.conn.execute("INSERT INTO workspace_conversation_preprompts (channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json) VALUES (?1, ?2, ?3, ?4, ?5)", params![channel_id, member, peer, preprompt, serde_json::to_string(folder_scope)?])?;
         }
         Ok(())
+    }
+
+    pub fn conversation_folder_scope(
+        &self,
+        channel_id: Option<&str>,
+        member: Option<&str>,
+        peer: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let scope = match (channel_id, member, peer) {
+            (Some(channel_id), None, None) => self.conn.query_row(
+                "SELECT folder_scope_json FROM workspace_conversation_preprompts WHERE channel_id = ?1 AND member_pubkey IS NULL AND peer_pubkey IS NULL",
+                [channel_id],
+                |row| row.get::<_, String>(0),
+            ).optional()?,
+            (None, Some(member), Some(peer)) => {
+                let (member, peer) = direct_participants(member, peer)?;
+                self.conn.query_row(
+                    "SELECT folder_scope_json FROM workspace_conversation_preprompts WHERE channel_id IS NULL AND member_pubkey = ?1 AND peer_pubkey = ?2",
+                    params![member, peer],
+                    |row| row.get::<_, String>(0),
+                ).optional()?
+            }
+            _ => bail!("conversation must be a channel or a direct message"),
+        };
+        Ok(scope
+            .as_deref()
+            .and_then(|scope| serde_json::from_str(scope).ok())
+            .unwrap_or_default())
     }
 
     pub fn add_conversation_agent(
@@ -933,6 +1097,9 @@ impl WorkspaceStore {
         message_id: Option<&str>,
     ) -> Result<WorkspaceMessage> {
         self.require_channel(channel_id)?;
+        if !sender.starts_with("agent:") && !self.is_channel_member(channel_id, sender)? {
+            bail!("sender is not a channel member");
+        }
         self.add_message(
             sender,
             Some(channel_id),
@@ -1041,6 +1208,7 @@ impl WorkspaceStore {
             mentions: mentions.to_vec(),
             parent_id: parent_id.map(|id| required("parent id", id)).transpose()?,
             also_send_to_main,
+            pinned: false,
             reactions: vec![],
             created_at: now(),
         };
@@ -1056,7 +1224,7 @@ impl WorkspaceStore {
                 &message.sender_pubkey,
             )?;
         }
-        self.conn.execute("INSERT INTO workspace_messages (id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", params![message.id, message.channel_id, message.recipient_pubkey, message.sender_pubkey, message.body, serde_json::to_string(&message.attachments)?, serde_json::to_string(&message.mentions)?, message.parent_id, message.also_send_to_main, message.created_at])?;
+        self.conn.execute("INSERT INTO workspace_messages (id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)", params![message.id, message.channel_id, message.recipient_pubkey, message.sender_pubkey, message.body, serde_json::to_string(&message.attachments)?, serde_json::to_string(&message.mentions)?, message.parent_id, message.also_send_to_main, message.pinned, message.created_at])?;
         Ok(message)
     }
 
@@ -1074,7 +1242,7 @@ impl WorkspaceStore {
     pub fn snapshot_messages(&self, member: &str) -> Result<Vec<WorkspaceMessage>> {
         let member = required("member pubkey", member)?;
         self.messages(
-            "channel_id IS NOT NULL OR sender_pubkey = ?1 OR recipient_pubkey = ?1 OR (sender_pubkey LIKE 'agent:%' AND substr(sender_pubkey, 7) IN (SELECT agent_id FROM workspace_conversation_agents WHERE member_pubkey = ?1 OR peer_pubkey = ?1))",
+            "channel_id IN (SELECT channel_id FROM workspace_channel_members WHERE pubkey = ?1) OR sender_pubkey = ?1 OR recipient_pubkey = ?1 OR (sender_pubkey LIKE 'agent:%' AND substr(sender_pubkey, 7) IN (SELECT agent_id FROM workspace_conversation_agents WHERE member_pubkey = ?1 OR peer_pubkey = ?1))",
             [&member],
         )
     }
@@ -1114,12 +1282,34 @@ impl WorkspaceStore {
         self.message(&message_id)
     }
 
+    pub fn toggle_pin(&self, sender: &str, message_id: &str) -> Result<WorkspaceMessage> {
+        let sender = required("sender", sender)?;
+        let message_id = required("message id", message_id)?;
+        let message = self.message(&message_id)?;
+        if message.channel_id.is_some() {
+            if !self
+                .is_channel_member(message.channel_id.as_deref().unwrap_or_default(), &sender)?
+            {
+                bail!("message belongs to another channel");
+            }
+        } else if message.sender_pubkey != sender
+            && message.recipient_pubkey.as_deref() != Some(sender.as_str())
+        {
+            bail!("message belongs to another direct conversation");
+        }
+        self.conn.execute(
+            "UPDATE workspace_messages SET pinned = NOT pinned WHERE id = ?1",
+            [message_id.as_str()],
+        )?;
+        self.message(&message_id)
+    }
+
     fn messages<P: rusqlite::Params>(
         &self,
         predicate: &str,
         params: P,
     ) -> Result<Vec<WorkspaceMessage>> {
-        let query = format!("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, created_at FROM workspace_messages WHERE {predicate} ORDER BY created_at, id");
+        let query = format!("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, created_at FROM workspace_messages WHERE {predicate} ORDER BY created_at, id");
         let mut statement = self.conn.prepare(&query)?;
         let mut messages: Vec<WorkspaceMessage> = statement
             .query_map(params, message_from_row)?
@@ -1133,7 +1323,7 @@ impl WorkspaceStore {
     pub fn message_by_id(&self, id: &str) -> Result<Option<WorkspaceMessage>> {
         let message = self
             .conn
-            .query_row("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, created_at FROM workspace_messages WHERE id = ?1", [id], message_from_row)
+            .query_row("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, created_at FROM workspace_messages WHERE id = ?1", [id], message_from_row)
             .optional()?;
         message
             .map(|mut message| {
@@ -1215,7 +1405,6 @@ impl WorkspaceStore {
     }
 }
 
-use rusqlite::OptionalExtension;
 fn channel_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceChannel> {
     Ok(WorkspaceChannel {
         id: row.get(0)?,
@@ -1235,8 +1424,9 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceMessag
         mentions: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
         parent_id: row.get(7)?,
         also_send_to_main: row.get(8)?,
+        pinned: row.get(9)?,
         reactions: Vec::new(),
-        created_at: row.get(9)?,
+        created_at: row.get(10)?,
     })
 }
 fn conversation_agent_from_row(
@@ -1258,6 +1448,7 @@ fn conversation_preprompt_from_row(
         member_pubkey: row.get(1)?,
         peer_pubkey: row.get(2)?,
         preprompt: row.get(3)?,
+        folder_scope: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
     })
 }
 fn direct_participants(member: &str, peer: &str) -> Result<(String, String)> {
@@ -1297,6 +1488,7 @@ mod tests {
         store.add_member("owner").unwrap();
         store.add_member("member").unwrap();
         let channel = store.create_channel("engineering", "owner").unwrap();
+        store.add_channel_member(&channel.id, "member").unwrap();
         let parent = store
             .add_channel_message("owner", &channel.id, "hello", &[], &[], None)
             .unwrap();
@@ -1311,6 +1503,35 @@ mod tests {
             .unwrap()
             .iter()
             .any(|message| message.parent_id.as_deref() == Some(parent.id.as_str())));
+    }
+
+    #[test]
+    fn deletes_only_the_selected_conversation() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        store.add_member("member").unwrap();
+        let deleted_channel = store.create_channel("engineering", "owner").unwrap();
+        let retained_channel = store.create_channel("general", "owner").unwrap();
+        store
+            .add_channel_message("owner", &deleted_channel.id, "delete me", &[], &[], None)
+            .unwrap();
+        store
+            .add_channel_message("owner", &retained_channel.id, "keep me", &[], &[], None)
+            .unwrap();
+        store
+            .add_direct_message("owner", "member", "delete this too", &[], &[], None)
+            .unwrap();
+
+        store.delete_channel(&deleted_channel.id).unwrap();
+        store.delete_direct_conversation("owner", "member").unwrap();
+
+        assert!(!store.has_channel(&deleted_channel.id).unwrap());
+        assert!(store.has_channel(&retained_channel.id).unwrap());
+        assert_eq!(
+            store.channel_messages(&retained_channel.id).unwrap().len(),
+            1
+        );
+        assert!(store.direct_messages("owner", "member").unwrap().is_empty());
     }
 
     #[test]
@@ -1355,6 +1576,7 @@ mod tests {
         store.add_member("owner").unwrap();
         store.add_member("member").unwrap();
         let channel = store.create_channel("engineering", "owner").unwrap();
+        store.add_channel_member(&channel.id, "member").unwrap();
         let parent = store
             .add_channel_message("owner", &channel.id, "hello", &[], &[], None)
             .unwrap();
@@ -1445,6 +1667,7 @@ mod tests {
         store.add_member("member").unwrap();
         store.add_member("other").unwrap();
         let channel = store.create_channel("engineering", "owner").unwrap();
+        store.add_channel_member(&channel.id, "member").unwrap();
         let channel_message = store
             .add_channel_message("owner", &channel.id, "team", &[], &[], None)
             .unwrap();
@@ -1463,6 +1686,43 @@ mod tests {
             .iter()
             .any(|message| message.id == member_message.id));
         assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn persists_per_channel_membership_and_creator_admin_role() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        store.add_member("owner").unwrap();
+        store.add_member("member").unwrap();
+        store.add_member("other").unwrap();
+        let channel = store.create_channel("private", "owner").unwrap();
+        assert!(store.is_channel_member(&channel.id, "owner").unwrap());
+        assert!(store.is_channel_admin(&channel.id, "owner").unwrap());
+        assert!(!store.is_channel_member(&channel.id, "member").unwrap());
+        store.add_channel_member(&channel.id, "member").unwrap();
+        drop(store);
+
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        assert_eq!(
+            store.channels_for_member("member").unwrap(),
+            vec![channel.clone()]
+        );
+        assert!(store.channels_for_member("other").unwrap().is_empty());
+        assert_eq!(store.channel_members(&channel.id).unwrap().len(), 2);
+        assert!(store.remove_channel_member(&channel.id, "owner").is_err());
+        store.remove_channel_member(&channel.id, "member").unwrap();
+        assert!(!store.is_channel_member(&channel.id, "member").unwrap());
+    }
+
+    #[test]
+    fn migrates_existing_channels_with_existing_member_access() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(path.path()).unwrap();
+        conn.execute_batch("CREATE TABLE workspace_members (pubkey TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '', is_admin INTEGER NOT NULL DEFAULT 0, joined_at INTEGER NOT NULL); CREATE TABLE workspace_channels (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL, created_at INTEGER NOT NULL); INSERT INTO workspace_members VALUES ('owner', '', 0, 1), ('member', '', 0, 1); INSERT INTO workspace_channels VALUES ('channel', 'general', 'owner', 1);").unwrap();
+        drop(conn);
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        assert!(store.is_channel_member("channel", "member").unwrap());
+        assert!(store.is_channel_admin("channel", "owner").unwrap());
     }
     #[test]
     fn rejects_unrelated_direct_thread_and_non_members() {
@@ -1501,6 +1761,19 @@ mod tests {
                 is_admin: false,
             }]
         );
+    }
+
+    #[test]
+    fn removes_workspace_members() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        store.add_member("member").unwrap();
+
+        store.remove_member("member").unwrap();
+
+        assert!(store.is_member("owner").unwrap());
+        assert!(!store.is_member("member").unwrap());
+        assert!(store.remove_member("member").is_err());
     }
 
     #[test]
@@ -1671,10 +1944,10 @@ mod tests {
         store.add_member("member").unwrap();
         let channel = store.create_channel("engineering", "owner").unwrap();
         store
-            .set_conversation_preprompt(Some(&channel.id), None, None, "Review carefully.")
+            .set_conversation_preprompt(Some(&channel.id), None, None, "Review carefully.", &[])
             .unwrap();
         store
-            .set_conversation_preprompt(None, Some("member"), Some("owner"), "Be concise.")
+            .set_conversation_preprompt(None, Some("member"), Some("owner"), "Be concise.", &[])
             .unwrap();
         drop(store);
 
@@ -1694,7 +1967,7 @@ mod tests {
 
         let store = WorkspaceStore::open(path.path()).unwrap();
         store
-            .set_conversation_preprompt(Some(&channel.id), None, None, "")
+            .set_conversation_preprompt(Some(&channel.id), None, None, "", &[])
             .unwrap();
         assert_eq!(store.conversation_preprompts().unwrap().len(), 1);
     }

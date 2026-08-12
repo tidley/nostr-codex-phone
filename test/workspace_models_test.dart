@@ -19,6 +19,16 @@ void main() {
     expect(defaultFolder.workdir, isNull);
   });
 
+  test('decodes persisted conversation pin and archive preferences', () {
+    final preferences = decodeWorkspaceConversationPreferences(
+      '{"channel":{"pinned":true,"archived":false},"direct":{"archived":true}}',
+    );
+
+    expect(preferences['channel']!.pinned, isTrue);
+    expect(preferences['channel']!.archived, isFalse);
+    expect(preferences['direct']!.archived, isTrue);
+  });
+
   test(
     'classifies local and agent senders without depending on display names',
     () {
@@ -76,6 +86,60 @@ void main() {
     expect(isWorkspaceMessageGroupedWithPrevious(threaded, second), isFalse);
   });
 
+  test('recognizes agent messages with no displayable content', () {
+    const empty = WorkspaceMessage(
+      id: 'empty',
+      senderPubkey: 'agent:scout',
+      body: ' \n ',
+      createdAt: 1,
+      channelId: 'workspace',
+    );
+    const topicOnly = WorkspaceMessage(
+      id: 'topic-only',
+      senderPubkey: 'agent:scout',
+      body: '[[THREAD_TOPIC: Deploy]]',
+      createdAt: 2,
+      channelId: 'workspace',
+    );
+    const member = WorkspaceMessage(
+      id: 'member',
+      senderPubkey: 'member',
+      body: ' \n ',
+      createdAt: 3,
+      channelId: 'workspace',
+    );
+
+    expect(isWorkspaceEmptyAgentMessage(empty), isTrue);
+    expect(isWorkspaceEmptyAgentMessage(topicOnly), isTrue);
+    expect(isWorkspaceEmptyAgentMessage(member), isFalse);
+  });
+
+  test('uses an agent topic marker with no more than three words', () {
+    const followUp = WorkspaceMessage(
+      id: 'follow-up',
+      senderPubkey: 'owner',
+      body: 'Please include the logs.',
+      createdAt: 2,
+      channelId: 'channel-1',
+      parentId: 'root',
+    );
+    const agentReply = WorkspaceMessage(
+      id: 'reply',
+      senderPubkey: 'agent:builder',
+      body:
+          '[[THREAD_TOPIC: Deployment logs review details]]\nI found the issue.',
+      createdAt: 3,
+      channelId: 'channel-1',
+      parentId: 'root',
+    );
+
+    expect(workspaceThreadTopic([followUp]), isNull);
+    expect(
+      workspaceThreadTopic([followUp, agentReply]),
+      'Deployment logs review',
+    );
+  });
+
   test('workspace state merges persisted updates without fake records', () {
     final state = WorkspaceState();
     state.apply({
@@ -115,34 +179,63 @@ void main() {
     expect(state.messages['channel-1']![1].parentId, 'message-1');
   });
 
-  test('workspace state retains member admin roles from updates and snapshots', () {
+  test(
+    'workspace state retains member admin roles from updates and snapshots',
+    () {
+      final state = WorkspaceState()
+        ..apply({
+          'workspace_update': {
+            'action': 'snapshot',
+            'members': [
+              {'pubkey': 'owner', 'is_admin': false},
+              {'pubkey': 'member', 'display_name': 'Member', 'is_admin': true},
+            ],
+          },
+        });
+
+      expect(state.memberAdmins, {'member'});
+      expect(state.toSnapshotJson()['members'], [
+        {'pubkey': 'owner', 'display_name': '', 'is_admin': false},
+        {'pubkey': 'member', 'display_name': 'Member', 'is_admin': true},
+      ]);
+
+      state.apply({
+        'workspace_update': {
+          'action': 'member_role_updated',
+          'members': [
+            {'pubkey': 'member', 'display_name': 'Member', 'is_admin': false},
+          ],
+        },
+      });
+
+      expect(state.memberAdmins, isEmpty);
+    },
+  );
+
+  test('workspace state removes a member from a membership update', () {
     final state = WorkspaceState()
       ..apply({
         'workspace_update': {
           'action': 'snapshot',
           'members': [
-            {'pubkey': 'owner', 'is_admin': false},
-            {'pubkey': 'member', 'display_name': 'Member', 'is_admin': true},
+            {'pubkey': 'owner', 'is_admin': true},
+            {'pubkey': 'member', 'display_name': 'Member', 'is_admin': false},
           ],
         },
       });
 
-    expect(state.memberAdmins, {'member'});
-    expect(state.toSnapshotJson()['members'], [
-      {'pubkey': 'owner', 'display_name': '', 'is_admin': false},
-      {'pubkey': 'member', 'display_name': 'Member', 'is_admin': true},
-    ]);
-
     state.apply({
       'workspace_update': {
-        'action': 'member_role_updated',
+        'action': 'member_removed',
         'members': [
-          {'pubkey': 'member', 'display_name': 'Member', 'is_admin': false},
+          {'pubkey': 'owner', 'is_admin': true},
         ],
       },
     });
 
-    expect(state.memberAdmins, isEmpty);
+    expect(state.members, ['owner']);
+    expect(state.memberNames, isEmpty);
+    expect(state.memberAdmins, {'owner'});
   });
 
   test('workspace state reports only newly inserted messages', () {
@@ -249,6 +342,26 @@ void main() {
     });
 
     expect(agent.folderScope, ['/work/apps', '/work/tools']);
+  });
+
+  test('conversation folder scope selects its channel setting', () {
+    final state = WorkspaceState()
+      ..conversationPreprompts = [
+        const WorkspaceConversationPreprompt(
+          channelId: 'channel-1',
+          preprompt: 'Build it.',
+          folderScope: ['/work/phone'],
+        ),
+      ];
+
+    expect(
+      state.conversationFolderScope(
+        channelId: 'channel-1',
+        ownPubkey: 'owner',
+        peerPubkey: null,
+      ),
+      ['/work/phone'],
+    );
   });
 
   test('group call metadata accepts only a unique two-to-four member mesh', () {
@@ -506,6 +619,7 @@ void main() {
     expect(state.channels, hasLength(1));
     expect(state.channels.single.id, 'channel-1');
     expect(state.channels.single.name, 'engineering');
+    expect(state.channels.single.createdBy, 'owner');
   });
 
   test('channel member count excludes workspace agents', () {
@@ -709,11 +823,15 @@ void main() {
               'session_error': 'OpenCode is unavailable',
             },
           ],
+          'conversation_agents': [
+            {'agent_id': 'agent-1', 'channel_id': 'channel-1'},
+          ],
         },
       });
 
     expect(state.agents.single.sessionStatus, 'failed');
     expect(state.agents.single.sessionError, 'OpenCode is unavailable');
+    expect(state.conversationAgents.single.agentId, 'agent-1');
   });
 
   test('workspace state removes deleted agents and their memberships', () {
