@@ -11791,7 +11791,9 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
   bool _loadingFolders = false;
   String _searchQuery = '';
   String _currentPath = '';
+  String? _currentFolderPath;
   String? _selectedPath;
+  String? _selectedLabel;
   List<RepoChoice> _choices = const [];
 
   @override
@@ -11799,6 +11801,7 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
     super.initState();
     _choices = widget.initialChoices;
     _selectedPath = widget.selectedPath.isEmpty ? null : widget.selectedPath;
+    _selectedLabel = _selectedPath;
     unawaited(_loadFolders());
   }
 
@@ -11808,7 +11811,7 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
     super.dispose();
   }
 
-  Future<void> _loadFolders([String? path]) async {
+  Future<void> _loadFolders([String? path, String? folderPath]) async {
     setState(() => _loadingFolders = true);
     try {
       final choices = await widget.onLoadFolders(path);
@@ -11816,6 +11819,7 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
       setState(() {
         _choices = choices;
         _currentPath = path ?? '';
+        _currentFolderPath = folderPath;
       });
     } catch (error) {
       if (!mounted) return;
@@ -11836,9 +11840,7 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
             return choice.displayName.toLowerCase().contains(query) ||
                 choice.relativePath.toLowerCase().contains(query);
           }).toList();
-    final selectedChoice = _choices.where(
-      (choice) => choice.path == _selectedPath,
-    );
+    final canUseSelectedFolder = _selectedPath != null;
 
     return Scaffold(
       appBar: AppBar(
@@ -11906,7 +11908,10 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
                       : () {
                           final parts = _currentPath.split('/');
                           parts.removeLast();
-                          _loadFolders(parts.isEmpty ? null : parts.join('/'));
+                            _loadFolders(
+                              parts.isEmpty ? null : parts.join('/'),
+                              _parentFolderPath(_currentFolderPath),
+                            );
                         },
                   icon: const Icon(Icons.arrow_upward),
                 ),
@@ -11917,6 +11922,16 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
+                if (_currentFolderPath != null)
+                  TextButton(
+                    onPressed: _loadingFolders
+                        ? null
+                        : () => setState(() {
+                            _selectedPath = _currentFolderPath;
+                            _selectedLabel = _currentPath;
+                          }),
+                    child: const Text('Select this folder'),
+                  ),
               ],
             ),
           ),
@@ -11955,8 +11970,26 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(),
                           ),
-                          trailing: Radio<String>(value: choice.path),
-                          onTap: () => _loadFolders(choice.relativePath),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Radio<String>(value: choice.path),
+                              IconButton(
+                                tooltip: 'Open folder',
+                                onPressed: _loadingFolders
+                                    ? null
+                                    : () => _loadFolders(
+                                        choice.relativePath,
+                                        choice.path,
+                                      ),
+                                icon: const Icon(Icons.chevron_right),
+                              ),
+                            ],
+                          ),
+                          onTap: () => setState(() {
+                            _selectedPath = choice.path;
+                            _selectedLabel = choice.displayName;
+                          }),
                         );
                       },
                     ),
@@ -11968,15 +12001,14 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
           child: FilledButton.icon(
-            onPressed: selectedChoice.isEmpty
+            onPressed: !canUseSelectedFolder
                 ? null
                 : () {
-                    final choice = selectedChoice.first;
                     Navigator.pop(
                       context,
                       _WorkingFolderSelection(
-                        path: choice.path,
-                        label: choice.displayName,
+                        path: _selectedPath,
+                        label: _selectedLabel ?? _selectedPath,
                       ),
                     );
                   },
@@ -11986,6 +12018,12 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
         ),
       ),
     );
+  }
+
+  String? _parentFolderPath(String? path) {
+    if (path == null) return null;
+    final slash = path.lastIndexOf('/');
+    return slash <= 0 ? null : path.substring(0, slash);
   }
 }
 
