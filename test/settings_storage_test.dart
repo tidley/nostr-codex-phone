@@ -28,6 +28,23 @@ class _LockedSecureStorage implements SecureSettingsStorage {
   }
 }
 
+class _MemorySecureStorage implements SecureSettingsStorage {
+  int writeCalls = 0;
+  final values = <String, String?>{};
+
+  @override
+  Future<void> delete({required String key}) async => values.remove(key);
+
+  @override
+  Future<String?> read({required String key}) async => values[key];
+
+  @override
+  Future<void> write({required String key, required String? value}) async {
+    writeCalls++;
+    values[key] = value;
+  }
+}
+
 void main() {
   test('recognizes only the Linux Secret Service locked error', () {
     expect(
@@ -74,6 +91,16 @@ void main() {
     expect(secureStorage.readCalls, 0);
     expect(secureStorage.deleteCalls, 0);
   }, skip: !Platform.isLinux);
+
+  test('does not rewrite an unchanged secure setting', () async {
+    final secureStorage = _MemorySecureStorage();
+    final storage = SettingsStorage(secureStorage: secureStorage);
+
+    await storage.write(key: 'workspace-cache', value: 'unchanged');
+    await storage.write(key: 'workspace-cache', value: 'unchanged');
+
+    expect(secureStorage.writeCalls, 1);
+  });
 
   test(
     'uses the file fallback after a locked keyring delete',

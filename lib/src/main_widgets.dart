@@ -2251,7 +2251,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           ownPubkey: widget.ownPubkey,
           peerPubkey: isChannel ? null : _active,
           onRequest: widget.onRequest,
-          onLoadFolders: widget.onLoadFolderChoices,
+          onLoadFolders: widget.onLoadFolders,
           onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
           initialFolderChoices: widget.initialFolderChoices,
         ),
@@ -2281,7 +2281,7 @@ class _ConversationAgentsPage extends StatelessWidget {
   final String ownPubkey;
   final String? peerPubkey;
   final Future<void> Function(Map<String, Object?> request) onRequest;
-  final Future<List<RepoChoice>> Function() onLoadFolders;
+  final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
   final List<RepoChoice> initialFolderChoices;
 
@@ -2331,7 +2331,8 @@ class _ConversationAgentsPage extends StatelessWidget {
       context: context,
       builder: (_) => _FolderScopeDialog(
         initialSelected: membership.folderScope,
-        onLoadChoices: onLoadFolders,
+        initialChoices: initialFolderChoices,
+        onLoadFolders: onLoadFolders,
       ),
     );
     if (folders != null) {
@@ -2360,7 +2361,7 @@ class _ConversationAgentsPage extends StatelessWidget {
       builder: (_) => _AgentEditorDialog(
         onLoadOpenCodeModels: onLoadOpenCodeModels,
         initialFolderChoices: initialFolderChoices,
-        onLoadFolders: (_) => onLoadFolders(),
+        onLoadFolders: onLoadFolders,
         conversationScoped: true,
       ),
     );
@@ -2521,11 +2522,13 @@ class _ConversationAgentsPage extends StatelessWidget {
 
 class _FolderScopeDialog extends StatefulWidget {
   const _FolderScopeDialog({
-    required this.onLoadChoices,
+    required this.initialChoices,
+    required this.onLoadFolders,
     this.initialSelected = const [],
   });
 
-  final Future<List<RepoChoice>> Function() onLoadChoices;
+  final List<RepoChoice> initialChoices;
+  final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
   final List<String> initialSelected;
 
   @override
@@ -2533,61 +2536,46 @@ class _FolderScopeDialog extends StatefulWidget {
 }
 
 class _FolderScopeDialogState extends State<_FolderScopeDialog> {
-  late final Future<List<RepoChoice>> _choices = widget.onLoadChoices();
   late final _selected = widget.initialSelected.take(1).toSet();
+
+  Future<void> _chooseFolder() async {
+    final selection = await Navigator.of(context).push<_WorkingFolderSelection>(
+      MaterialPageRoute(
+        builder: (_) => _WorkingFolderPickerPage(
+          initialChoices: widget.initialChoices,
+          selectedPath: _selected.firstOrNull ?? '',
+          onLoadFolders: widget.onLoadFolders,
+        ),
+      ),
+    );
+    if (selection?.path == null || !mounted) return;
+    setState(() {
+      _selected
+        ..clear()
+        ..add(selection!.path!);
+    });
+  }
 
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: const Text('Working folder'),
     content: SizedBox(
       width: 460,
-      child: FutureBuilder<List<RepoChoice>>(
-        future: _choices,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const SizedBox(
-              height: 160,
-              child: Center(child: CircularProgressIndicator()),
-            );
-          }
-          if (snapshot.hasError) {
-            return const Text('Could not load folders from the worker.');
-          }
-          final folders = snapshot.data ?? const <RepoChoice>[];
-          if (folders.isEmpty) return const Text('No folders are available.');
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Select the folder where this conversation agent can work.',
-              ),
-              const SizedBox(height: 12),
-              SizedBox(
-                height: 300,
-                child: ListView(
-                  shrinkWrap: true,
-                  children: [
-                    for (final folder in folders)
-                      CheckboxListTile(
-                        value: _selected.contains(folder.path),
-                        title: Text(folder.displayName),
-                        subtitle: Text(
-                          folder.isGitRepo ? 'Repository folder' : 'Folder',
-                        ),
-                        onChanged: (selected) => setState(() {
-                          _selected.clear();
-                          if (selected == true) {
-                            _selected.add(folder.path);
-                          }
-                        }),
-                      ),
-                  ],
-                ),
-              ),
-            ],
-          );
-        },
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Select the folder where this conversation agent can work.'),
+          const SizedBox(height: 12),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.folder_outlined),
+            title: Text(_selected.firstOrNull ?? 'Choose a folder'),
+            subtitle: const Text('Open folders to choose a subfolder.'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _chooseFolder,
+          ),
+        ],
       ),
     ),
     actions: [
@@ -3726,7 +3714,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
       context: context,
       builder: (_) => _FolderScopeDialog(
         initialSelected: widget.conversationFolderScope,
-        onLoadChoices: () => widget.onLoadFolders(null),
+        initialChoices: widget.initialFolderChoices,
+        onLoadFolders: widget.onLoadFolders,
       ),
     );
     if (folders != null) await widget.onEditConversationFolder(folders);
@@ -7327,7 +7316,8 @@ class _AgentsPageState extends State<_AgentsPage> {
       context: context,
       builder: (_) => _FolderScopeDialog(
         initialSelected: membership.folderScope,
-        onLoadChoices: () => widget.onLoadFolders(null),
+        initialChoices: widget.initialFolderChoices,
+        onLoadFolders: widget.onLoadFolders,
       ),
     );
     if (scope == null) return;
