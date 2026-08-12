@@ -249,6 +249,10 @@ static WORKSPACE_OUTBOUND: once_cell::sync::Lazy<StdMutex<Option<WorkspaceOutbou
     once_cell::sync::Lazy::new(|| StdMutex::new(None));
 
 impl WorkspaceOutbound {
+    async fn has_fips_route(&self, member: &str) -> bool {
+        self.fips_routes.lock().await.contains_key(member)
+    }
+
     async fn send(
         &self,
         messenger: &NostrMessenger,
@@ -3436,6 +3440,7 @@ async fn send_agent_typing(
     parent_id: Option<&str>,
     stage: Option<&str>,
     expires_in: Option<Duration>,
+    fips_only: bool,
 ) -> Result<()> {
     let expires_at = expires_in
         .map(|duration| {
@@ -3483,6 +3488,25 @@ async fn send_agent_typing(
     };
     let duration = expires_in.unwrap_or(Duration::from_secs(1));
     for recipient in recipients {
+        let outbound = WORKSPACE_OUTBOUND
+            .lock()
+            .expect("workspace outbound registry lock poisoned")
+            .clone();
+        if let Some(outbound) = outbound {
+            if outbound.has_fips_route(&recipient).await {
+                outbound
+                    .send(
+                        messenger,
+                        &recipient,
+                        WireMessage::workspace_update(update.clone()),
+                    )
+                    .await?;
+                continue;
+            }
+        }
+        if fips_only {
+            continue;
+        }
         messenger
             .send_ephemeral_wire_to(
                 PublicKey::parse(&recipient)?,
@@ -3518,6 +3542,7 @@ async fn run_workspace_agent_with_typing(
         parent_id,
         None,
         Some(TYPING_LEASE),
+        false,
     )
     .await
     {
@@ -3531,25 +3556,47 @@ async fn run_workspace_agent_with_typing(
         .lock()
         .await
         .insert(agent.id.clone(), cancel_token.clone());
+    let (event_sender, mut events) = mpsc::unbounded_channel();
+    let mut stage = None;
+    let mut last_stage_sent = Instant::now() - CODEX_STATUS_MIN_INTERVAL;
+    let mut events_open = true;
     let mut run = Box::pin(run_codex_session_with_cancel_and_events(
         body,
         config,
         Some(session_id),
         Some(&cancel_token),
-        None,
+        Some(event_sender),
     ));
     let result = loop {
         tokio::select! {
             result = &mut run => break result,
+            event = events.recv(), if events_open => {
+                let Some(event) = event else {
+                    events_open = false;
+                    continue;
+                };
+                let Some((next_stage, force)) = codex_status_from_event(&event) else { continue; };
+                if stage.as_deref() == Some(next_stage.as_str()) || (!force && last_stage_sent.elapsed() < CODEX_STATUS_MIN_INTERVAL) {
+                    continue;
+                }
+                stage = Some(next_stage);
+                last_stage_sent = Instant::now();
+                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), true).await {
+                    warn!(agent = %agent.id, "failed to send agent progress state: {err:#}");
+                }
+            }
             _ = renew.tick() => {
-                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, None, Some(TYPING_LEASE)).await {
+                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), true).await {
+                    warn!(agent = %agent.id, "failed to refresh agent typing state: {err:#}");
+                }
+                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, None, Some(TYPING_LEASE), false).await {
                     warn!(agent = %agent.id, "failed to refresh agent typing state: {err:#}");
                 }
             }
         }
     };
     if let Err(err) = send_agent_typing(
-        workspace, messenger, agent, channel_id, member, peer, parent_id, None, None,
+        workspace, messenger, agent, channel_id, member, peer, parent_id, None, None, false,
     )
     .await
     {
@@ -9615,7 +9662,7 @@ mod tests {
         });
         let tool = serde_json::json!({
             "type": "message.part.updated",
-            "properties": {"part": {"type": "tool", "state": {"status": "running"}}}
+            "properties": {"part": {"type": "tool", "tool": "read", "state": {"status": "running", "title": "Inspect workspace routing"}}}
         });
 
         assert_eq!(
@@ -9624,7 +9671,7 @@ mod tests {
         );
         assert_eq!(
             codex_status_from_event(&tool).map(|(message, _)| message),
-            Some("OpenCode: running tool.".to_string())
+            Some("OpenCode: running Inspect workspace routing.".to_string())
         );
     }
 
