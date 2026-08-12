@@ -4,11 +4,13 @@ class _InactiveReplyNotice extends StatelessWidget {
   const _InactiveReplyNotice({
     required this.animation,
     required this.sessionName,
+    required this.bottomOffset,
     required this.onTap,
   });
 
   final Animation<double> animation;
   final String sessionName;
+  final double bottomOffset;
   final VoidCallback onTap;
 
   @override
@@ -31,7 +33,7 @@ class _InactiveReplyNotice extends StatelessWidget {
           child: FadeTransition(
             opacity: curved,
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 92),
+              padding: EdgeInsets.fromLTRB(16, 0, 16, bottomOffset),
               child: Material(
                 color: Colors.transparent,
                 child: InkWell(
