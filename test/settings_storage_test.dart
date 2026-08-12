@@ -102,6 +102,18 @@ void main() {
     expect(secureStorage.writeCalls, 1);
   });
 
+  test('serializes duplicate concurrent secure writes', () async {
+    final secureStorage = _MemorySecureStorage();
+    final storage = SettingsStorage(secureStorage: secureStorage);
+
+    await Future.wait([
+      storage.write(key: 'workspace-cache', value: 'unchanged'),
+      storage.write(key: 'workspace-cache', value: 'unchanged'),
+    ]);
+
+    expect(secureStorage.writeCalls, 1);
+  });
+
   test(
     'uses the file fallback after a locked keyring delete',
     () async {
