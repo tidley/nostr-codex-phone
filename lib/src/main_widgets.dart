@@ -1,5 +1,156 @@
 part of '../main.dart';
 
+class _WorkspaceEntryPage extends StatefulWidget {
+  const _WorkspaceEntryPage({
+    required this.initialName,
+    required this.canScan,
+    required this.onCreate,
+    required this.onPasteInvite,
+    required this.onScanInvite,
+    required this.onOpenSettings,
+  });
+
+  final String initialName;
+  final bool canScan;
+  final Future<void> Function(String name) onCreate;
+  final Future<void> Function() onPasteInvite;
+  final Future<void> Function() onScanInvite;
+  final VoidCallback onOpenSettings;
+
+  @override
+  State<_WorkspaceEntryPage> createState() => _WorkspaceEntryPageState();
+}
+
+class _WorkspaceEntryPageState extends State<_WorkspaceEntryPage> {
+  late final TextEditingController _name = TextEditingController(
+    text: widget.initialName,
+  );
+  bool _creating = false;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  Future<void> _create() async {
+    setState(() => _creating = true);
+    await widget.onCreate(_name.text);
+    if (mounted) setState(() => _creating = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final palette = theme.extension<_WorkspacePalette>()!;
+    return Scaffold(
+      backgroundColor: palette.background,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Icon(Icons.hub_outlined, size: 52, color: palette.brand),
+                  const SizedBox(height: 20),
+                  Text(
+                    'Your team starts here.',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.headlineMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Create a workspace identity, or join a workspace your team has already shared.',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodyLarge?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(
+                            'Create a workspace',
+                            style: theme.textTheme.titleLarge,
+                          ),
+                          const SizedBox(height: 6),
+                          const Text(
+                            'Choose the name your teammates will see.',
+                          ),
+                          const SizedBox(height: 18),
+                          TextField(
+                            controller: _name,
+                            autofocus: true,
+                            textInputAction: TextInputAction.done,
+                            onSubmitted: (_) => _creating ? null : _create(),
+                            decoration: const InputDecoration(
+                              labelText: 'Workspace name',
+                              hintText: 'For example, Design crew',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          FilledButton.icon(
+                            onPressed: _creating ? null : _create,
+                            icon: const Icon(Icons.arrow_forward),
+                            label: Text(
+                              _creating ? 'Creating...' : 'Create workspace',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 18),
+                    child: Row(
+                      children: [
+                        Expanded(child: Divider()),
+                        Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 12),
+                          child: Text('OR'),
+                        ),
+                        Expanded(child: Divider()),
+                      ],
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: widget.onPasteInvite,
+                    icon: const Icon(Icons.content_paste_go_outlined),
+                    label: const Text('Paste workspace invite'),
+                  ),
+                  if (widget.canScan) ...[
+                    const SizedBox(height: 10),
+                    OutlinedButton.icon(
+                      onPressed: widget.onScanInvite,
+                      icon: const Icon(Icons.qr_code_scanner),
+                      label: const Text('Scan workspace invite'),
+                    ),
+                  ],
+                  const SizedBox(height: 20),
+                  TextButton(
+                    onPressed: widget.onOpenSettings,
+                    child: const Text('Set up a computer service instead'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SessionDrawer extends StatelessWidget {
   const _SessionDrawer({
     required this.targets,
@@ -537,7 +688,8 @@ class _WorkspaceDraft {
 class _WorkspacePanelState {
   const _WorkspacePanelState({
     required this.threadId,
-    required this.width,
+    required this.widthFraction,
+    required this.sidebarCollapsed,
     required this.alsoSendToMain,
     required this.filesSelected,
     this.fileBrowser,
@@ -545,7 +697,8 @@ class _WorkspacePanelState {
   });
 
   final String? threadId;
-  final double width;
+  final double widthFraction;
+  final bool sidebarCollapsed;
   final bool alsoSendToMain;
   final bool filesSelected;
   final FileBrowserResult? fileBrowser;
@@ -558,6 +711,8 @@ class _TeamWorkspace extends StatefulWidget {
     required this.sessions,
     required this.spaces,
     required this.activeSpace,
+    required this.sidebarSections,
+    required this.onSidebarSectionChanged,
     required this.hasUnreadOtherSpaces,
     required this.otherWorkspaceAttentionVersion,
     required this.canManageAgents,
@@ -631,6 +786,8 @@ class _TeamWorkspace extends StatefulWidget {
   final List<RepoTarget> sessions;
   final List<RepoTarget> spaces;
   final RepoTarget? activeSpace;
+  final Map<String, bool> sidebarSections;
+  final void Function(String section, bool expanded) onSidebarSectionChanged;
   final bool hasUnreadOtherSpaces;
   final int otherWorkspaceAttentionVersion;
   final bool canManageAgents;
@@ -749,7 +906,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   var _showingMentionOptions = false;
   DateTime? _lastTypingLease;
   _WorkspaceSection _section = _WorkspaceSection.channel;
-  String _active = 'workspace';
+  String _active = '';
   WorkspaceMessage? _thread;
   bool _alsoSendToMain = false;
   bool _filesSelected = false;
@@ -757,7 +914,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   bool _threadFullWindow = false;
   bool _sidebarCollapsed = false;
   double _sidebarWidth = 280;
-  double _threadPaneWidth = 340;
+  double _threadPaneWidthFraction = 0.5;
 
   String? get _conversationKey => _conversationKeyFor(_section, _active);
 
@@ -876,7 +1033,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   void didUpdateWidget(covariant _TeamWorkspace oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.focusedConversationKey != widget.focusedConversationKey ||
-        _active == 'workspace') {
+        _active.isEmpty) {
       _restoreFocusedConversation();
     }
     if (oldWidget.openThreadKey != widget.openThreadKey || _thread == null) {
@@ -886,7 +1043,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   void _restoreFocusedConversation() {
     final focused = widget.focusedConversationKey;
-    if (focused.isEmpty || focused == 'workspace') return;
     if (widget.workspace.channels.any((channel) => channel.id == focused)) {
       _section = _WorkspaceSection.channel;
       _active = focused;
@@ -898,6 +1054,17 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         _active = peer;
         return;
       }
+    }
+    final firstChannel = widget.workspace.channels.firstOrNull;
+    if (firstChannel != null) {
+      _section = _WorkspaceSection.channel;
+      _active = firstChannel.id;
+      return;
+    }
+    final firstPeer = widget.workspace.directPeers(widget.ownPubkey).firstOrNull;
+    if (firstPeer != null) {
+      _section = _WorkspaceSection.direct;
+      _active = firstPeer;
     }
   }
 
@@ -1199,11 +1366,11 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final options = <WorkspaceMention>[
       for (final member in _conversationMembers)
         if (member != widget.ownPubkey)
-        WorkspaceMention(
-          kind: 'member',
-          id: member,
-          label: _memberLabel(member),
-        ),
+          WorkspaceMention(
+            kind: 'member',
+            id: member,
+            label: _memberLabel(member),
+          ),
       for (final agent in _activeAgents)
         WorkspaceMention(kind: 'agent', id: agent.id, label: agent.name),
     ];
@@ -1407,9 +1574,11 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final previous = thread == null
         ? null
         : _threadReplies.reversed
-              .where((message) => isWorkspaceAgentSender(message.senderPubkey))
-              .firstOrNull ??
-          thread;
+                  .where(
+                    (message) => isWorkspaceAgentSender(message.senderPubkey),
+                  )
+                  .firstOrNull ??
+              thread;
     if (previous == null || !isWorkspaceAgentSender(previous.senderPubkey)) {
       return mentions;
     }
@@ -1434,7 +1603,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _saveThreadDraft();
       _panelStates[previousKey] = _WorkspacePanelState(
         threadId: _thread?.id,
-        width: _threadPaneWidth,
+        widthFraction: _threadPaneWidthFraction,
+        sidebarCollapsed: _sidebarCollapsed,
         alsoSendToMain: _alsoSendToMain,
         filesSelected: _filesSelected,
         fileBrowser: widget.fileBrowser.value,
@@ -1448,7 +1618,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _section = section;
       _active = id;
       _thread = nextThread;
-      _threadPaneWidth = nextPanelState?.width ?? 340;
+      _threadPaneWidthFraction = nextPanelState?.widthFraction ?? 0.5;
+      _sidebarCollapsed = nextPanelState?.sidebarCollapsed ?? false;
       _alsoSendToMain = nextPanelState?.alsoSendToMain ?? false;
       _filesSelected = nextPanelState?.filesSelected ?? false;
       _filesFullWindow = false;
@@ -1545,6 +1716,24 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     widget.onCloseThread();
   }
 
+  void _toggleSidebarCollapsed() {
+    setState(() {
+      _sidebarCollapsed = !_sidebarCollapsed;
+      final key = _conversationKey;
+      if (key != null) {
+        _panelStates[key] = _WorkspacePanelState(
+          threadId: _thread?.id,
+          widthFraction: _threadPaneWidthFraction,
+          sidebarCollapsed: _sidebarCollapsed,
+          alsoSendToMain: _alsoSendToMain,
+          filesSelected: _filesSelected,
+          fileBrowser: widget.fileBrowser.value,
+          filePreview: widget.filePreview.value,
+        );
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final typing = _activeTyping;
@@ -1552,8 +1741,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final toastTyping = typing;
     final activityLabels = _conversationActivityLabels();
     _scheduleTypingExpiry(widget.workspace.typing.values.toList());
-    final wide = MediaQuery.sizeOf(context).width >= 1080;
     final medium = MediaQuery.sizeOf(context).width >= 720;
+    final wide = medium;
     final sidebar = _WorkspaceSidebar(
       section: _section,
       selected: _section == _WorkspaceSection.channel ? _active : null,
@@ -1561,6 +1750,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       sessions: widget.sessions,
       spaces: widget.spaces,
       activeSpace: widget.activeSpace,
+      sidebarSections: widget.sidebarSections,
+      onSidebarSectionChanged: widget.onSidebarSectionChanged,
       hasUnreadOtherSpaces: widget.hasUnreadOtherSpaces,
       otherWorkspaceAttentionVersion: widget.otherWorkspaceAttentionVersion,
       canManageAgents: widget.canManageAgents,
@@ -1587,8 +1778,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         _closeDrawer();
         widget.onOpenSettings();
       },
-      onToggleCollapsed: () =>
-          setState(() => _sidebarCollapsed = !_sidebarCollapsed),
+      onToggleCollapsed: _toggleSidebarCollapsed,
       onDiagnostics: widget.onOpenDiagnostics,
       onWorkerConsole: widget.onOpenWorkerConsole,
       onRefresh: () => unawaited(widget.onRequest({'action': 'refresh'})),
@@ -1666,6 +1856,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             if (_thread?.id != message.id) {
               _saveThreadDraft();
               _thread = message;
+              _threadPaneWidthFraction = 0.5;
               _restoreThreadDraft();
             }
             _alsoSendToMain = false;
@@ -1733,7 +1924,18 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
               'recipient_pubkey': _active,
             });
           }
-          if (mounted) _select(_WorkspaceSection.channel, 'workspace');
+          if (!mounted) return;
+          final nextChannel = widget.workspace.channels
+              .where((channel) => channel.id != _active)
+              .firstOrNull;
+          if (nextChannel != null) {
+            _select(_WorkspaceSection.channel, nextChannel.id);
+          } else {
+            final nextPeer = widget.workspace
+                .directPeers(widget.ownPubkey)
+                .firstOrNull;
+            if (nextPeer != null) _select(_WorkspaceSection.direct, nextPeer);
+          }
         },
         inviteCode: widget.inviteCode,
         canCreateInvite:
@@ -1954,10 +2156,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final maxSidePaneWidth =
         (windowWidth - persistentChromeWidth - _conversationMinWidth - 10)
             .clamp(_threadPaneMinWidth, _threadPaneMaxWidth);
-    final sidePaneWidth = _threadPaneWidth.clamp(
-      _threadPaneMinWidth,
-      maxSidePaneWidth,
-    );
+    final availableMessageWidth = windowWidth - persistentChromeWidth - 10;
+    final sidePaneWidth = (availableMessageWidth * _threadPaneWidthFraction)
+        .clamp(_threadPaneMinWidth, maxSidePaneWidth);
     // Keep the active conversation readable. On a narrow window the detail
     // pane replaces it instead of squeezing both panes into unusable columns.
     final showSingleSidePane =
@@ -2042,8 +2243,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                           child: Align(
                             alignment: Alignment.topCenter,
                             child: IconButton(
-                              onPressed: () =>
-                                  setState(() => _sidebarCollapsed = false),
+                              onPressed: _toggleSidebarCollapsed,
                               icon: const Icon(Icons.menu),
                               tooltip: 'Expand sidebar',
                             ),
@@ -2070,15 +2270,17 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
               if (canShowInlineSidePane) ...[
                 ThreadPaneResizeHandle(
                   onResize: (delta) => setState(() {
-                    _threadPaneWidth = (_threadPaneWidth + delta).clamp(
-                      _threadPaneMinWidth,
-                      maxSidePaneWidth,
-                    );
+                    _threadPaneWidthFraction =
+                        ((sidePaneWidth + delta) / availableMessageWidth).clamp(
+                          0.0,
+                          1.0,
+                        );
                     final key = _conversationKey;
                     if (key != null) {
                       _panelStates[key] = _WorkspacePanelState(
                         threadId: _thread?.id,
-                        width: _threadPaneWidth,
+                        widthFraction: _threadPaneWidthFraction,
+                        sidebarCollapsed: _sidebarCollapsed,
                         alsoSendToMain: _alsoSendToMain,
                         filesSelected: _filesSelected,
                         fileBrowser: widget.fileBrowser.value,
@@ -2166,9 +2368,16 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     };
   }
 
-  String _typingLabel(WorkspaceTyping status) => status.agentId != null
-      ? '${status.agentName ?? _memberLabel(status.senderPubkey)} is working...'
-      : '${_memberLabel(status.senderPubkey)} is typing...';
+  String _typingLabel(WorkspaceTyping status) {
+    final name = status.agentName ?? _memberLabel(status.senderPubkey);
+    if (status.agentId != null) {
+      final stage = status.stage?.trim();
+      return stage == null || stage.isEmpty
+          ? '$name is working...'
+          : '$name: $stage';
+    }
+    return '$name is typing...';
+  }
 
   void _scheduleTypingExpiry(List<WorkspaceTyping> typing) {
     _typingExpiryTimer?.cancel();
@@ -2187,25 +2396,58 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   Future<void> _createChannel(BuildContext context) async {
     final controller = TextEditingController();
+    String? validationError;
+    String? validate(String value) {
+      final name = value.trim();
+      if (name.isEmpty) return 'Enter a conversation name';
+      if (!RegExp(r'^[A-Za-z0-9-]+$').hasMatch(name)) {
+        return 'Use letters, numbers, and hyphens only';
+      }
+      return null;
+    }
+
     final name = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('New conversation'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'engineering'),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('New conversation'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            textInputAction: TextInputAction.done,
+            onChanged: (value) =>
+                setDialogState(() => validationError = validate(value)),
+            onSubmitted: (value) {
+              final error = validate(value);
+              if (error != null) {
+                setDialogState(() => validationError = error);
+                return;
+              }
+              Navigator.pop(context, value);
+            },
+            decoration: InputDecoration(
+              hintText: 'engineering',
+              errorText: validationError,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final error = validate(controller.text);
+                if (error != null) {
+                  setDialogState(() => validationError = error);
+                  return;
+                }
+                Navigator.pop(context, controller.text);
+              },
+              child: const Text('Create'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('Create'),
-          ),
-        ],
       ),
     );
     controller.dispose();
@@ -2565,7 +2807,9 @@ class _FolderScopeDialogState extends State<_FolderScopeDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Select the folder where this conversation agent can work.'),
+          const Text(
+            'Select the folder where this conversation agent can work.',
+          ),
           const SizedBox(height: 12),
           ListTile(
             contentPadding: EdgeInsets.zero,
@@ -2606,10 +2850,16 @@ class SidebarPaneResizeHandle extends StatelessWidget {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onHorizontalDragUpdate: (details) => onResize(details.delta.dx),
-        child: Container(
-          width: 1,
+        child: SizedBox(
+          width: 12,
           height: double.infinity,
-          color: Theme.of(context).colorScheme.outlineVariant,
+          child: Center(
+            child: Container(
+              width: 1,
+              height: double.infinity,
+              color: Theme.of(context).colorScheme.outlineVariant,
+            ),
+          ),
         ),
       ),
     ),
@@ -2653,6 +2903,8 @@ class _WorkspaceSidebar extends StatelessWidget {
     required this.sessions,
     required this.spaces,
     required this.activeSpace,
+    required this.sidebarSections,
+    required this.onSidebarSectionChanged,
     required this.hasUnreadOtherSpaces,
     required this.otherWorkspaceAttentionVersion,
     required this.canManageAgents,
@@ -2688,6 +2940,8 @@ class _WorkspaceSidebar extends StatelessWidget {
   final List<RepoTarget> sessions;
   final List<RepoTarget> spaces;
   final RepoTarget? activeSpace;
+  final Map<String, bool> sidebarSections;
+  final void Function(String section, bool expanded) onSidebarSectionChanged;
   final bool hasUnreadOtherSpaces;
   final int otherWorkspaceAttentionVersion;
   final bool canManageAgents;
@@ -2843,14 +3097,7 @@ class _WorkspaceSidebar extends StatelessWidget {
         onTap: onTap,
       );
       if (action == null) return listItem();
-      var hovered = false;
-      return StatefulBuilder(
-        builder: (context, setState) => MouseRegion(
-          onEnter: (_) => setState(() => hovered = true),
-          onExit: (_) => setState(() => hovered = false),
-          child: listItem(showAction: hovered),
-        ),
-      );
+      return _SidebarHoverActions(itemBuilder: listItem);
     }
 
     Widget conversationAction(
@@ -2966,6 +3213,10 @@ class _WorkspaceSidebar extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 _SidebarSection(
+                  id: 'conversations',
+                  expanded: sidebarSections['conversations'] ?? true,
+                  onExpandedChanged: (expanded) =>
+                      onSidebarSectionChanged('conversations', expanded),
                   title: 'Conversations',
                   icon: Icons.forum_outlined,
                   action: IconButton(
@@ -3011,6 +3262,10 @@ class _WorkspaceSidebar extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 _SidebarSection(
+                  id: 'direct-messages',
+                  expanded: sidebarSections['direct-messages'] ?? true,
+                  onExpandedChanged: (expanded) =>
+                      onSidebarSectionChanged('direct-messages', expanded),
                   title: 'Direct messages',
                   icon: Icons.chat_bubble_outline,
                   action: IconButton(
@@ -3087,6 +3342,10 @@ class _WorkspaceSidebar extends StatelessWidget {
                     archivedMembers.isNotEmpty) ...[
                   const SizedBox(height: 16),
                   _SidebarSection(
+                    id: 'archived',
+                    expanded: sidebarSections['archived'] ?? true,
+                    onExpandedChanged: (expanded) =>
+                        onSidebarSectionChanged('archived', expanded),
                     title: 'Archived',
                     icon: Icons.inventory_2_outlined,
                     children: [
@@ -3144,6 +3403,10 @@ class _WorkspaceSidebar extends StatelessWidget {
                 const SizedBox(height: 16),
                 if (canManageAgents) ...[
                   _SidebarSection(
+                    id: 'sessions',
+                    expanded: sidebarSections['sessions'] ?? true,
+                    onExpandedChanged: (expanded) =>
+                        onSidebarSectionChanged('sessions', expanded),
                     title: 'Sessions',
                     icon: Icons.terminal_outlined,
                     children: [
@@ -3158,6 +3421,10 @@ class _WorkspaceSidebar extends StatelessWidget {
                   const SizedBox(height: 16),
                 ],
                 _SidebarSection(
+                  id: 'workspace',
+                  expanded: sidebarSections['workspace'] ?? true,
+                  onExpandedChanged: (expanded) =>
+                      onSidebarSectionChanged('workspace', expanded),
                   title: 'Workspace',
                   icon: Icons.workspaces_outline,
                   children: [
@@ -3177,6 +3444,10 @@ class _WorkspaceSidebar extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 _SidebarSection(
+                  id: 'maintenance',
+                  expanded: sidebarSections['maintenance'] ?? true,
+                  onExpandedChanged: (expanded) =>
+                      onSidebarSectionChanged('maintenance', expanded),
                   title: 'Maintenance',
                   icon: Icons.build_outlined,
                   children: [
@@ -3248,6 +3519,26 @@ class _WorkspaceSidebar extends StatelessWidget {
       0;
 }
 
+class _SidebarHoverActions extends StatefulWidget {
+  const _SidebarHoverActions({required this.itemBuilder});
+
+  final Widget Function({bool showAction}) itemBuilder;
+
+  @override
+  State<_SidebarHoverActions> createState() => _SidebarHoverActionsState();
+}
+
+class _SidebarHoverActionsState extends State<_SidebarHoverActions> {
+  var _hovered = false;
+
+  @override
+  Widget build(BuildContext context) => MouseRegion(
+    onEnter: (_) => setState(() => _hovered = true),
+    onExit: (_) => setState(() => _hovered = false),
+    child: widget.itemBuilder(showAction: _hovered),
+  );
+}
+
 class _UnreadConversationLabel extends StatefulWidget {
   const _UnreadConversationLabel({
     required this.label,
@@ -3313,8 +3604,8 @@ class _UnreadConversationLabelState extends State<_UnreadConversationLabel>
     animation: _controller,
     builder: (context, _) {
       final attentionColor = widget.attentionColor;
-      final baseColor = widget.style?.color ??
-          Theme.of(context).colorScheme.onSurface;
+      final baseColor =
+          widget.style?.color ?? Theme.of(context).colorScheme.onSurface;
       final pulseColor = widget.pulse == 0
           ? null
           : Color.lerp(
@@ -3341,24 +3632,26 @@ class _UnreadConversationLabelState extends State<_UnreadConversationLabel>
                   fontWeight: widget.unread ? FontWeight.w600 : null,
                 )
           : widget.style?.copyWith(
-                  color: pulseColor ??
+                  color:
+                      pulseColor ??
                       (widget.unread
-                      ? Color.lerp(
-                          baseColor,
-                          attentionColor,
-                          _controller.value,
-                        )
-                      : widget.style?.color),
+                          ? Color.lerp(
+                              baseColor,
+                              attentionColor,
+                              _controller.value,
+                            )
+                          : widget.style?.color),
                 ) ??
                 TextStyle(
-                  color: pulseColor ??
+                  color:
+                      pulseColor ??
                       (widget.unread
-                      ? Color.lerp(
-                          baseColor,
-                          attentionColor,
-                          _controller.value,
-                        )
-                      : null),
+                          ? Color.lerp(
+                              baseColor,
+                              attentionColor,
+                              _controller.value,
+                            )
+                          : null),
                 );
       return Text(
         widget.label,
@@ -3372,12 +3665,18 @@ class _UnreadConversationLabelState extends State<_UnreadConversationLabel>
 
 class _SidebarSection extends StatefulWidget {
   const _SidebarSection({
+    required this.id,
+    required this.expanded,
+    required this.onExpandedChanged,
     required this.title,
     required this.icon,
     required this.children,
     this.action,
   });
 
+  final String id;
+  final bool expanded;
+  final ValueChanged<bool> onExpandedChanged;
   final String title;
   final IconData icon;
   final List<Widget> children;
@@ -3388,10 +3687,9 @@ class _SidebarSection extends StatefulWidget {
 }
 
 class _SidebarSectionState extends State<_SidebarSection> {
-  var _expanded = true;
   var _hovered = false;
 
-  void _toggle() => setState(() => _expanded = !_expanded);
+  void _toggle() => widget.onExpandedChanged(!widget.expanded);
 
   @override
   Widget build(BuildContext context) {
@@ -3411,7 +3709,7 @@ class _SidebarSectionState extends State<_SidebarSection> {
                 children: [
                   Icon(
                     _hovered
-                        ? (_expanded
+                        ? (widget.expanded
                               ? Icons.keyboard_arrow_down
                               : Icons.keyboard_arrow_right)
                         : widget.icon,
@@ -3433,7 +3731,7 @@ class _SidebarSectionState extends State<_SidebarSection> {
             ),
           ),
         ),
-        if (_expanded) ...[const SizedBox(height: 6), ...widget.children],
+        if (widget.expanded) ...[const SizedBox(height: 6), ...widget.children],
       ],
     );
   }
@@ -6207,21 +6505,20 @@ class _WorkspaceCodeBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: const Color(0xff0b211d),
+        color: const Color(0xff102b25),
         borderRadius: BorderRadius.circular(8),
       ),
       child: SelectableText(
         code,
         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-          color: colors.primaryContainer,
+          color: const Color(0xffd5ffec),
           fontFamily: 'monospace',
-          fontSize: 13,
-          height: 1.45,
+          fontSize: 14,
+          height: 1.55,
         ),
       ),
     );
@@ -6466,31 +6763,6 @@ class _WorkspaceContext extends StatelessWidget {
                   ),
                 ),
               ),
-              Row(
-                children: [
-                  Expanded(
-                    child: CheckboxListTile(
-                      contentPadding: EdgeInsets.zero,
-                      value: alsoSendToMain,
-                      onChanged: (value) =>
-                          onAlsoSendToMainChanged(value ?? false),
-                      title: const Text('Send to main'),
-                      controlAffinity: ListTileControlAffinity.leading,
-                    ),
-                  ),
-                  if (typingLabels.isNotEmpty)
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 160),
-                      child: Text(
-                        typingLabels.join(' · '),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        textAlign: TextAlign.end,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ),
-                ],
-              ),
               WorkspaceComposer(
                 composer: composer,
                 composerFocus: composerFocus,
@@ -6505,6 +6777,36 @@ class _WorkspaceContext extends StatelessWidget {
                 onVoicePressed: onVoicePressed,
                 voiceDurationLabel: voiceDurationLabel,
                 onCancelVoiceRecording: onCancelVoiceRecording,
+              ),
+              Row(
+                children: [
+                  Checkbox(
+                    value: alsoSendToMain,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    visualDensity: VisualDensity.compact,
+                    onChanged: (value) =>
+                        onAlsoSendToMainChanged(value ?? false),
+                  ),
+                  GestureDetector(
+                    onTap: () => onAlsoSendToMainChanged(!alsoSendToMain),
+                    child: Text(
+                      'Send to main',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                  const Spacer(),
+                  if (typingLabels.isNotEmpty)
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 160),
+                      child: Text(
+                        typingLabels.join(' · '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.end,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                ],
               ),
             ],
           ),
@@ -7127,10 +7429,7 @@ class _PinnedMessagesPanel extends StatelessWidget {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Pinned messages',
-          style: Theme.of(context).textTheme.labelLarge,
-        ),
+        Text('Pinned messages', style: Theme.of(context).textTheme.labelLarge),
         const SizedBox(height: 6),
         for (final message in messages)
           ListTile(
@@ -11822,7 +12121,7 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
     _choices = widget.initialChoices;
     _selectedPath = widget.selectedPath.isEmpty ? null : widget.selectedPath;
     _selectedLabel = _selectedPath;
-    unawaited(_loadFolders());
+    if (_choices.isEmpty) unawaited(_loadFolders());
   }
 
   @override
@@ -11928,10 +12227,10 @@ class _WorkingFolderPickerPageState extends State<_WorkingFolderPickerPage> {
                       : () {
                           final parts = _currentPath.split('/');
                           parts.removeLast();
-                            _loadFolders(
-                              parts.isEmpty ? null : parts.join('/'),
-                              _parentFolderPath(_currentFolderPath),
-                            );
+                          _loadFolders(
+                            parts.isEmpty ? null : parts.join('/'),
+                            _parentFolderPath(_currentFolderPath),
+                          );
                         },
                   icon: const Icon(Icons.arrow_upward),
                 ),
@@ -14966,10 +15265,10 @@ class _MessageTileState extends State<_MessageTile>
         : colors.onSurface;
     final codeBackground = userSide
         ? colors.onPrimaryContainer.withValues(alpha: 0.14)
-        : const Color(0xff0b211d);
+        : const Color(0xff102b25);
     final codeTextColor = userSide
         ? colors.onPrimaryContainer
-        : const Color(0xffb7f4dc);
+        : const Color(0xffd5ffec);
 
     return MarkdownStyleSheet.fromTheme(theme).copyWith(
       blockquote: theme.textTheme.bodyMedium?.copyWith(color: quoteTextColor),
@@ -14992,8 +15291,8 @@ class _MessageTileState extends State<_MessageTile>
       code: theme.textTheme.bodyMedium?.copyWith(
         color: codeTextColor,
         fontFamily: 'monospace',
-        fontSize: 13,
-        height: 1.45,
+        fontSize: 14,
+        height: 1.55,
       ),
     );
   }

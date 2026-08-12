@@ -137,7 +137,7 @@ class _WorkspaceWorkerState {
   final Map<String, int> threadUnreadCounts = {};
   int attentionVersion = 0;
   String? openThreadKey;
-  String focusedConversationKey = 'workspace';
+  String focusedConversationKey = '';
 
   void dispose() {
     cacheSaveTimer?.cancel();
@@ -572,6 +572,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _workspaceMemberAliasesStorageKey = 'workspace_member_aliases';
   static const _workspaceConversationPreferencesStorageKey =
       'workspace_conversation_preferences';
+  static const _workspaceSidebarSectionsStorageKey =
+      'workspace_sidebar_sections';
   static const _workspaceLocalMessagePinsStorageKey =
       'workspace_local_message_pins';
   static const _workspaceFipsEnabledStorageKey = 'workspace_fips_enabled';
@@ -613,6 +615,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _workspaceDisplayNameStorageKey,
     _workspaceMemberAliasesStorageKey,
     _workspaceConversationPreferencesStorageKey,
+    _workspaceSidebarSectionsStorageKey,
     _workspaceLocalMessagePinsStorageKey,
     _workspaceFipsEnabledStorageKey,
     _lastWorkspaceLocationStorageKey,
@@ -759,6 +762,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Map<String, WorkspaceConversationPreference>
   _workspaceConversationPreferences = {};
   Set<String> _workspaceLocalMessagePins = {};
+  final Map<String, Map<String, bool>> _workspaceSidebarSections = {};
 
   bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
 
@@ -1122,6 +1126,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final workspaceConversationPreferences = await _storage.read(
       key: _workspaceConversationPreferencesStorageKey,
     );
+    final workspaceSidebarSections = await _storage.read(
+      key: _workspaceSidebarSectionsStorageKey,
+    );
     final workspaceLocalMessagePins = await _storage.read(
       key: _workspaceLocalMessagePinsStorageKey,
     );
@@ -1162,8 +1169,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _showTeamWorkspace = location['page'] != 'sessions';
       if (serviceTarget != null && location['worker_id'] == serviceTarget.id) {
         final worker = _workspaceWorkerForKey(serviceTarget.pubkey);
-        worker.focusedConversationKey =
-            location['conversation_key'] ?? 'workspace';
+        worker.focusedConversationKey = location['conversation_key'] ?? '';
         worker.openThreadKey = location['thread_key'];
       }
       _selectedRepoTargetId = selectedTarget?.id;
@@ -1248,6 +1254,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           decodeWorkspaceConversationPreferences(
             workspaceConversationPreferences,
           );
+      _workspaceSidebarSections
+        ..clear()
+        ..addAll(_decodeWorkspaceSidebarSections(workspaceSidebarSections));
       _workspaceLocalMessagePins = _decodeStringList(
         workspaceLocalMessagePins,
       ).toSet();
@@ -1372,10 +1381,35 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       }),
     ),
     _storage.write(
+      key: _workspaceSidebarSectionsStorageKey,
+      value: jsonEncode(_workspaceSidebarSections),
+    ),
+    _storage.write(
       key: _workspaceLocalMessagePinsStorageKey,
       value: jsonEncode(_workspaceLocalMessagePins.toList()..sort()),
     ),
   ]);
+
+  Map<String, Map<String, bool>> _decodeWorkspaceSidebarSections(String? raw) {
+    if (raw == null || raw.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return {};
+      return {
+        for (final workspace in decoded.entries)
+          if (workspace.key.toString().trim().isNotEmpty &&
+              workspace.value is Map)
+            workspace.key.toString().trim(): {
+              for (final section in (workspace.value as Map).entries)
+                if (section.key.toString().trim().isNotEmpty &&
+                    section.value is bool)
+                  section.key.toString().trim(): section.value as bool,
+            },
+      };
+    } catch (_) {
+      return {};
+    }
+  }
 
   Map<String, String> _decodeLastWorkspaceLocation(String? raw) {
     if (raw == null || raw.isEmpty) return {};
@@ -4042,7 +4076,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   int get _otherWorkspaceAttentionVersion => _computerServiceTargets
       .where((target) => target.id != _computerServiceTarget?.id)
       .fold(0, (latest, target) {
-        final attention = _workspaceWorkerForKey(target.pubkey).attentionVersion;
+        final attention = _workspaceWorkerForKey(
+          target.pubkey,
+        ).attentionVersion;
         return latest > attention ? latest : attention;
       });
   String get _workspaceFocusedConversationKey =>
@@ -4326,10 +4362,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         await _sendPairingSecretIfNeeded(parent);
   }
 
-  Future<bool> _ensureConnectedToWorkspaceService(RepoTarget target) async {
+  Future<bool> _ensureConnectedToWorkspaceService(
+    RepoTarget target, {
+    bool requireNostr = false,
+  }) async {
     final peer = target.pubkey.trim();
     if (peer.isEmpty) return false;
-    if (_workspaceFipsConnectionState == 'active' &&
+    if (!requireNostr &&
+        _workspaceFipsConnectionState == 'active' &&
         _workspaceWorkerKey == peer) {
       return true;
     }
@@ -7511,6 +7551,17 @@ Return a concise catch-up summary of what happened after that point: completed w
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
+    if (_computerServiceTarget == null) {
+      return _WorkspaceEntryPage(
+        initialName: _workspaceDisplayName,
+        canScan: _supportsCameraQrScan,
+        onCreate: _startWorkspace,
+        onPasteInvite: _enterWorkspaceInviteCode,
+        onScanInvite: _scanRepoTargetQr,
+        onOpenSettings: () => unawaited(_openSettings()),
+      );
+    }
+
     if (_showTeamWorkspace) {
       return ValueListenableBuilder<_WorkspaceFipsHeartbeat>(
         valueListenable: _workspaceFipsHeartbeat,
@@ -7519,6 +7570,17 @@ Return a concise catch-up summary of what happened after that point: completed w
           sessions: _repoTargets,
           spaces: _computerServiceTargets,
           activeSpace: _computerServiceTarget,
+          sidebarSections: _workspaceSidebarSections.putIfAbsent(
+            _computerServiceTarget?.pubkey ?? '',
+            () => {},
+          ),
+          onSidebarSectionChanged: (section, expanded) => setState(() {
+            _workspaceSidebarSections.putIfAbsent(
+              _computerServiceTarget?.pubkey ?? '',
+              () => {},
+            )[section] = expanded;
+            unawaited(_saveWorkspaceIdentity());
+          }),
           hasUnreadOtherSpaces: _hasUnreadOtherWorkspaces,
           otherWorkspaceAttentionVersion: _otherWorkspaceAttentionVersion,
           canManageAgents: _canManageWorkspaceAgents,
@@ -7892,7 +7954,10 @@ Return a concise catch-up summary of what happened after that point: completed w
 
   Future<void> _createWorkspaceInvite() async {
     final target = _computerServiceTarget;
-    if (target == null || !await _ensureConnectedToWorkspaceService(target)) {
+    // Invite replies are delivered on Nostr, even when workspace messages use
+    // the active FIPS transport.
+    if (target == null ||
+        !await _ensureConnectedToWorkspaceService(target, requireNostr: true)) {
       return;
     }
     _workspaceInviteTimer?.cancel();
@@ -9708,5 +9773,21 @@ Return a concise catch-up summary of what happened after that point: completed w
     controller.dispose();
     if (!mounted || code == null || code.trim().isEmpty) return;
     await _redeemWorkspaceInvite(code);
+  }
+
+  Future<void> _startWorkspace(String name) async {
+    final workspaceName = name.trim();
+    if (workspaceName.isEmpty) {
+      _showError('Enter a workspace name');
+      return;
+    }
+    if (_secretKeyController.text.trim().isEmpty) {
+      await _generateKey();
+      if (_secretKeyController.text.trim().isEmpty) return;
+    }
+    _setWorkspaceDisplayName(workspaceName);
+    if (mounted) {
+      setState(() => _status = 'Workspace name saved');
+    }
   }
 }
