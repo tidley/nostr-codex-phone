@@ -59,6 +59,8 @@ class SettingsStorage {
 
   final SecureSettingsStorage _secureStorage;
   final Future<Directory> Function() _applicationSupportDirectory;
+  bool get _avoidLinuxSecretService =>
+      Platform.isLinux && _secureStorage is _FlutterSecureSettingsStorage;
   bool _useLinuxFallback = false;
   Future<void> _fallbackOperations = Future.value();
   Future<void> _operations = Future.value();
@@ -111,7 +113,12 @@ class SettingsStorage {
     Future<T> Function() secureOperation,
     Future<T> Function() fallbackOperation,
   ) async {
-    if (_useLinuxFallback) return _runFallback(fallbackOperation);
+    // flutter_secure_storage's Linux Secret Service backend repeatedly
+    // re-registers collection items on some GNOME sessions. The app-support
+    // fallback is owner-only, avoids that churn, and persists the same values.
+    if (_avoidLinuxSecretService || _useLinuxFallback) {
+      return _runFallback(fallbackOperation);
+    }
     try {
       return await secureOperation();
     } on PlatformException catch (error) {
