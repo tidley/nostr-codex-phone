@@ -10,6 +10,7 @@ bool isLinuxKeyringLocked(Object error) =>
 
 abstract interface class SecureSettingsStorage {
   Future<String?> read({required String key});
+  Future<Map<String, String>> readAll();
   Future<void> write({required String key, required String? value});
   Future<void> delete({required String key});
 }
@@ -23,6 +24,9 @@ class _FlutterSecureSettingsStorage implements SecureSettingsStorage {
   Future<String?> read({required String key}) => _storage.read(key: key);
 
   @override
+  Future<Map<String, String>> readAll() => _storage.readAll();
+
+  @override
   Future<void> write({required String key, required String? value}) =>
       _storage.write(key: key, value: value);
 
@@ -32,6 +36,7 @@ class _FlutterSecureSettingsStorage implements SecureSettingsStorage {
 
 /// Uses Secret Service normally, with a user-only file fallback if it is locked.
 class SettingsStorage {
+  static const _linuxMigrationKey = '_linux_secret_service_migrated_v2';
   factory SettingsStorage({
     SecureSettingsStorage? secureStorage,
     Future<Directory> Function()? applicationSupportDirectory,
@@ -116,7 +121,11 @@ class SettingsStorage {
     // flutter_secure_storage's Linux Secret Service backend repeatedly
     // re-registers collection items on some GNOME sessions. The app-support
     // fallback is owner-only, avoids that churn, and persists the same values.
-    if (_avoidLinuxSecretService || _useLinuxFallback) {
+    if (_avoidLinuxSecretService) {
+      await _migrateLinuxSecretService();
+      return _runFallback(fallbackOperation);
+    }
+    if (_useLinuxFallback) {
       return _runFallback(fallbackOperation);
     }
     try {
@@ -126,6 +135,19 @@ class SettingsStorage {
       _useLinuxFallback = true;
       return _runFallback(fallbackOperation);
     }
+  }
+
+  Future<void> _migrateLinuxSecretService() async {
+    final values = await _readFallback();
+    if (values[_linuxMigrationKey] == '1') return;
+    try {
+      final legacy = await _secureStorage.readAll();
+      values.addAll(legacy);
+    } on PlatformException {
+      // A locked or unavailable keyring must not block the local store.
+    }
+    values[_linuxMigrationKey] = '1';
+    await _writeFallback(values);
   }
 
   Future<T> _runFallback<T>(Future<T> Function() operation) {
