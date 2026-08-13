@@ -3603,7 +3603,12 @@ async fn run_workspace_agent_with_typing(
                     continue;
                 };
                 let Some((next_stage, force)) = codex_status_from_event(&event) else { continue; };
-                if history_stage.as_deref() != Some(next_stage.as_str()) {
+                // Completion notices are event boundaries, not work that takes
+                // time. Keeping them as stages shifts the preceding command's
+                // duration onto the notice.
+                let record_in_history = !next_stage.starts_with("OpenCode finished ")
+                    && !next_stage.ends_with(" failed.");
+                if record_in_history && history_stage.as_deref() != Some(next_stage.as_str()) {
                     if let Some(started_at) = stage_started_at {
                         if let Some(previous) = work_history.last_mut() {
                             *previous = format_work_history_item(previous, started_at.elapsed());
