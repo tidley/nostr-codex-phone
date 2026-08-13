@@ -928,8 +928,7 @@ async fn create_opencode_session(config: &CodexConfig) -> Result<String> {
         workspace_agent_session_initialization_prompt(),
     ]);
     let output = run_opencode_cli(config, args, None).await?;
-    parse_opencode_json_output(&String::from_utf8_lossy(&output.stdout))?
-        .session_id
+    parse_opencode_session_id(&String::from_utf8_lossy(&output.stdout))?
         .ok_or_else(|| anyhow!("OpenCode did not emit a session ID while creating a session"))
 }
 
@@ -1120,6 +1119,20 @@ fn parse_opencode_json_output(stdout: &str) -> Result<CodexRunResult> {
             work_history: vec![],
         })
         .ok_or_else(|| anyhow!("OpenCode completed but produced no text response"))
+}
+
+fn parse_opencode_session_id(stdout: &str) -> Result<Option<String>> {
+    let mut session_id = None;
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let value: Value = serde_json::from_str(line)
+            .with_context(|| format!("OpenCode emitted invalid JSONL event: {line}"))?;
+        find_opencode_session_id(&value, &mut session_id);
+    }
+    Ok(session_id)
 }
 
 // Only a completed event with both numeric fields is safe to account for.
@@ -1710,6 +1723,19 @@ mod tests {
         assert!(prompt.contains("[[WORKSPACE_HISTORY: N]]"));
         assert!(prompt.contains("Do not acknowledge this setup"));
         assert!(!prompt.contains("Reply only READY"));
+    }
+
+    #[test]
+    fn finds_an_opencode_session_without_a_text_response() {
+        assert_eq!(
+            parse_opencode_session_id(
+                r#"{"type":"session.created","properties":{"info":{"id":"ses_Abc123"}}}
+{"type":"turn.completed"}"#
+            )
+            .unwrap()
+            .as_deref(),
+            Some("ses_Abc123")
+        );
     }
 
     #[test]
