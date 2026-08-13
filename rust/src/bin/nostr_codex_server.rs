@@ -86,7 +86,7 @@ const WORKSPACE_FIPS_TRANSFER_CHUNK_SIZE: usize = 64;
 const WORKSPACE_SNAPSHOT_MESSAGE_LIMIT: usize = 20;
 const WORKSPACE_HISTORY_REQUEST_MAX: usize = 50;
 const WORKSPACE_HISTORY_REQUEST_ATTEMPTS: usize = 3;
-const WORKSPACE_AGENT_SESSION_CONTEXT: &str = "workspace-history-protocol-v1";
+const WORKSPACE_AGENT_SESSION_CONTEXT: &str = "workspace-history-protocol-v2";
 const WORKSPACE_FIPS_CAPABILITY_BYTES: usize = 32;
 const WORKSPACE_FIPS_CAPABILITY_TTL: Duration = Duration::from_secs(90);
 const WORKSPACE_FIPS_PROTOCOL_VERSION: u8 = 1;
@@ -337,18 +337,13 @@ fn workspace_agent_job_matches_trigger(
         && WorkspaceConversation::from_message(message).as_ref() == Some(conversation)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct WorkspaceAgentQueueKey {
-    agent_id: String,
-    conversation: WorkspaceConversation,
-}
-
 struct WorkspaceAgentJob {
+    conversation: WorkspaceConversation,
     trigger_message_id: String,
 }
 
 struct WorkspaceAgentQueues {
-    senders: HashMap<WorkspaceAgentQueueKey, mpsc::UnboundedSender<WorkspaceAgentJob>>,
+    senders: HashMap<String, mpsc::UnboundedSender<WorkspaceAgentJob>>,
     active_turns: Arc<Mutex<HashMap<String, CodexCancelToken>>>,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
@@ -379,18 +374,13 @@ impl WorkspaceAgentQueues {
         conversation: WorkspaceConversation,
         trigger_message_id: String,
     ) {
-        let key = WorkspaceAgentQueueKey {
-            agent_id: agent_id.clone(),
-            conversation: conversation.clone(),
-        };
-        let sender = self.senders.entry(key).or_insert_with(|| {
+        let sender = self.senders.entry(agent_id.clone()).or_insert_with(|| {
             // A mentioned message is durable in the workspace store. Do not lose its
             // turn merely because an agent is still working through earlier messages.
             let (sender, receiver) = mpsc::unbounded_channel();
             tokio::task::spawn_local(workspace_agent_queue_worker(
                 receiver,
                 agent_id.clone(),
-                conversation,
                 Arc::clone(&self.active_turns),
                 self.workspace_path.clone(),
                 Arc::clone(&self.messenger),
@@ -399,7 +389,10 @@ impl WorkspaceAgentQueues {
             ));
             sender
         });
-        if let Err(err) = sender.send(WorkspaceAgentJob { trigger_message_id }) {
+        if let Err(err) = sender.send(WorkspaceAgentJob {
+            conversation,
+            trigger_message_id,
+        }) {
             warn!(agent = %agent_id, trigger = %err.0.trigger_message_id, "workspace agent queue stopped; dropping turn");
         }
     }
@@ -1855,6 +1848,7 @@ async fn process_workspace_request(
                     pubkey,
                     display_name: String::new(),
                     is_admin: false,
+                    joined_at: 0,
                 })
                 .collect();
             info!(
@@ -1903,6 +1897,7 @@ async fn process_workspace_request(
                             pubkey: sender.to_string(),
                             display_name: String::new(),
                             is_admin: false,
+                            joined_at: 0,
                         }],
                         messages: vec![],
                         agents: vec![],
@@ -2436,7 +2431,7 @@ async fn process_workspace_request(
             let agent = workspace.create_agent_with_profile(
                 request.agent_name.as_deref().unwrap_or_default(),
                 request.agent_role.as_deref().unwrap_or_default(),
-                request.agent_traits.as_deref().unwrap_or_default(),
+                &new_workspace_agent_traits(request.agent_traits.as_deref().unwrap_or_default()),
                 &request.agent_skills,
                 request.agent_preset.as_deref(),
                 profile,
@@ -3580,6 +3575,7 @@ async fn run_workspace_agent_with_typing(
         .insert(agent.id.clone(), cancel_token.clone());
     let (event_sender, mut events) = mpsc::unbounded_channel();
     let mut stage = None;
+    let mut work_history = Vec::new();
     let mut last_stage_sent = Instant::now() - CODEX_STATUS_MIN_INTERVAL;
     let mut events_open = true;
     let mut run = Box::pin(run_codex_session_with_cancel_and_events(
@@ -3598,6 +3594,9 @@ async fn run_workspace_agent_with_typing(
                     continue;
                 };
                 let Some((next_stage, force)) = codex_status_from_event(&event) else { continue; };
+                if work_history.last() != Some(&next_stage) {
+                    work_history.push(next_stage.clone());
+                }
                 if stage.as_deref() == Some(next_stage.as_str()) || (!force && last_stage_sent.elapsed() < CODEX_STATUS_MIN_INTERVAL) {
                     continue;
                 }
@@ -3622,7 +3621,10 @@ async fn run_workspace_agent_with_typing(
         warn!(agent = %agent.id, "failed to clear agent typing state: {err:#}");
     }
     active_turns.lock().await.remove(&agent.id);
-    result
+    result.map(|mut result| {
+        result.work_history = work_history;
+        result
+    })
 }
 
 fn initialize_workspace_members(
@@ -3670,6 +3672,7 @@ fn member_payload(
         pubkey: member.pubkey,
         display_name: member.display_name,
         is_admin: member.is_admin,
+        joined_at: member.joined_at,
     }
 }
 fn message_payload(message: WorkspaceMessage) -> WorkspaceMessagePayload {
@@ -3685,6 +3688,7 @@ fn message_payload(message: WorkspaceMessage) -> WorkspaceMessagePayload {
         also_send_to_main: message.also_send_to_main,
         pinned: message.pinned,
         reactions: message.reactions,
+        work_history: message.work_history,
         created_at: message.created_at,
     }
 }
@@ -3964,7 +3968,6 @@ fn enqueue_conversation_agents(
 async fn workspace_agent_queue_worker(
     mut receiver: mpsc::UnboundedReceiver<WorkspaceAgentJob>,
     agent_id: String,
-    conversation: WorkspaceConversation,
     active_turns: Arc<Mutex<HashMap<String, CodexCancelToken>>>,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
@@ -3978,7 +3981,7 @@ async fn workspace_agent_queue_worker(
             &outbound,
             &codex_config,
             &agent_id,
-            &conversation,
+            &job.conversation,
             &job.trigger_message_id,
             &active_turns,
         )
@@ -4289,7 +4292,7 @@ async fn route_conversation_agents(
                 member,
                 peer,
                 parent_id,
-                &conversation_agent_initialization_prompt(),
+                &conversation_agent_initialization_prompt(&agent.traits),
                 &agent_config,
                 &active_session_id,
                 active_turns,
@@ -4473,7 +4476,7 @@ async fn route_conversation_agents(
             .await?;
         }
         let also_send_to_main = parent_id.is_none();
-        let message = match channel_id {
+        let mut message = match channel_id {
             Some(channel_id) => workspace.add_channel_message_with_main(
                 &format!("agent:{}", agent.id),
                 channel_id,
@@ -4493,6 +4496,8 @@ async fn route_conversation_agents(
                 also_send_to_main,
             )?,
         };
+        workspace.set_message_work_history(&message.id, &result.work_history)?;
+        message.work_history = result.work_history;
         let update = WorkspaceUpdate {
             action: "message_created".to_string(),
             revision: workspace.revision()?,
@@ -4568,9 +4573,22 @@ fn conversation_agent_session_prompt(preprompt: &str, scope: &str) -> String {
     sections.join("\n\n")
 }
 
-fn conversation_agent_initialization_prompt() -> String {
+fn new_workspace_agent_traits(traits: &str) -> String {
+    const UK_ENGLISH: &str = "Use UK English spelling in all written responses.";
+    let traits = traits.trim();
+    if traits.is_empty() {
+        UK_ENGLISH.to_string()
+    } else {
+        format!("{traits}\n{UK_ENGLISH}")
+    }
+}
+
+fn conversation_agent_initialization_prompt(agent_traits: &str) -> String {
+    let traits = agent_traits.trim();
+    let traits = (!traits.is_empty()).then(|| format!("\n\nAgent instructions:\n{traits}"));
     format!(
-        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying. This setup applies to all following messages in this session. Reply only READY to acknowledge it."
+        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying. This setup applies to all following messages in this session. Do not acknowledge this setup or reply with `READY`; wait for and answer the next user message.{}",
+        traits.unwrap_or_default(),
     )
 }
 
@@ -8790,9 +8808,21 @@ impl CodexStatusReporter {
 
 fn codex_status_from_event(event: &serde_json::Value) -> Option<(String, bool)> {
     match event.get("type").and_then(serde_json::Value::as_str) {
-        Some("step_start") => Some(("OpenCode is planning its next step.".to_string(), false)),
+        Some("step_start") => Some((
+            format!(
+                "OpenCode: {}.",
+                opencode_event_detail(event, "planning its next step")
+            ),
+            false,
+        )),
         Some("text") => Some(("OpenCode is drafting a response.".to_string(), false)),
-        Some("tool_use") => Some(("OpenCode is using a tool.".to_string(), true)),
+        Some("tool_use") => Some((
+            format!(
+                "OpenCode: running {}.",
+                opencode_event_detail(event, "a tool")
+            ),
+            true,
+        )),
         Some("step_finish") => Some(("OpenCode finished a step.".to_string(), true)),
         Some("session.status") => match event
             .pointer("/properties/status/type")
@@ -8820,24 +8850,11 @@ fn codex_status_from_event(event: &serde_json::Value) -> Option<(String, bool)> 
                     let state = part
                         .pointer("/state/status")
                         .and_then(serde_json::Value::as_str)?;
-                    let title = part
-                        .pointer("/state/title")
-                        .and_then(serde_json::Value::as_str)
-                        .or_else(|| part.get("tool").and_then(serde_json::Value::as_str))
-                        .unwrap_or("tool");
+                    let title = opencode_event_detail(event, "a tool");
                     match state {
-                        "running" => Some((
-                            format!("OpenCode: running {}.", status_detail(Some(title))),
-                            false,
-                        )),
-                        "completed" => Some((
-                            format!("OpenCode: finished {}.", status_detail(Some(title))),
-                            true,
-                        )),
-                        "error" => Some((
-                            format!("OpenCode: {} failed.", status_detail(Some(title))),
-                            true,
-                        )),
+                        "running" => Some((format!("OpenCode: running {title}."), false)),
+                        "completed" => Some((format!("OpenCode: finished {title}."), true)),
+                        "error" => Some((format!("OpenCode: {title} failed."), true)),
                         _ => None,
                     }
                 }
@@ -8878,6 +8895,39 @@ fn codex_status_from_event(event: &serde_json::Value) -> Option<(String, bool)> 
         }
         _ => None,
     }
+}
+
+// OpenCode uses different event shapes across CLI versions. Prefer the task
+// title, then its command, so the phone can show useful work instead of stages.
+fn opencode_event_detail(event: &serde_json::Value, fallback: &str) -> String {
+    const TITLE_PATHS: &[&str] = &[
+        "/properties/part/state/title",
+        "/part/state/title",
+        "/properties/title",
+        "/title",
+    ];
+    const COMMAND_PATHS: &[&str] = &[
+        "/properties/part/state/input/command",
+        "/part/state/input/command",
+        "/properties/input/command",
+        "/input/command",
+        "/command",
+    ];
+
+    TITLE_PATHS
+        .iter()
+        .chain(COMMAND_PATHS)
+        .find_map(|path| event.pointer(path).and_then(serde_json::Value::as_str))
+        .map(|value| status_detail(Some(value)))
+        .or_else(|| {
+            event
+                .pointer("/properties/part/tool")
+                .or_else(|| event.pointer("/part/tool"))
+                .or_else(|| event.get("tool"))
+                .and_then(serde_json::Value::as_str)
+                .map(|value| status_detail(Some(value)))
+        })
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn status_detail(value: Option<&str>) -> String {
@@ -9205,6 +9255,7 @@ mod tests {
             parent_id: None,
             also_send_to_main: false,
             reactions: vec![],
+            work_history: vec![],
             pinned: false,
             created_at: 0,
         };
@@ -9266,6 +9317,7 @@ mod tests {
         for index in 0..32 {
             sender
                 .send(WorkspaceAgentJob {
+                    conversation: WorkspaceConversation::Channel("channel".to_string()),
                     trigger_message_id: index.to_string(),
                 })
                 .unwrap();
@@ -9323,10 +9375,26 @@ mod tests {
 
     #[test]
     fn initializes_sessions_with_the_workspace_history_protocol() {
-        let prompt = conversation_agent_initialization_prompt();
+        let prompt = conversation_agent_initialization_prompt(
+            "Use UK English spelling in all written responses.",
+        );
 
         assert!(prompt.contains("[[WORKSPACE_HISTORY: N]]"));
-        assert!(prompt.contains("Reply only READY"));
+        assert!(prompt.contains("Do not acknowledge this setup"));
+        assert!(!prompt.contains("Reply only READY"));
+        assert!(prompt.contains("Use UK English spelling"));
+    }
+
+    #[test]
+    fn new_workspace_agents_use_uk_english() {
+        assert_eq!(
+            new_workspace_agent_traits(""),
+            "Use UK English spelling in all written responses.",
+        );
+        assert_eq!(
+            new_workspace_agent_traits("Be concise."),
+            "Be concise.\nUse UK English spelling in all written responses.",
+        );
     }
 
     #[test]
@@ -9694,10 +9762,14 @@ mod tests {
             "type": "message.part.updated",
             "properties": {"part": {"type": "tool", "tool": "read", "state": {"status": "running", "title": "Inspect workspace routing"}}}
         });
+        let command = serde_json::json!({
+            "type": "message.part.updated",
+            "properties": {"part": {"type": "tool", "state": {"status": "running", "input": {"command": "flutter analyze lib/main.dart"}}}}
+        });
 
         assert_eq!(
             codex_status_from_event(&step_start),
-            Some(("OpenCode is planning its next step.".to_string(), false))
+            Some(("OpenCode: planning its next step.".to_string(), false))
         );
         assert_eq!(
             codex_status_from_event(&text),
@@ -9705,7 +9777,7 @@ mod tests {
         );
         assert_eq!(
             codex_status_from_event(&tool_use),
-            Some(("OpenCode is using a tool.".to_string(), true))
+            Some(("OpenCode: running a tool.".to_string(), true))
         );
         assert_eq!(
             codex_status_from_event(&step_finish),
@@ -9718,6 +9790,10 @@ mod tests {
         assert_eq!(
             codex_status_from_event(&tool).map(|(message, _)| message),
             Some("OpenCode: running Inspect workspace routing.".to_string())
+        );
+        assert_eq!(
+            codex_status_from_event(&command).map(|(message, _)| message),
+            Some("OpenCode: running flutter analyze lib/main.dart.".to_string())
         );
     }
 
