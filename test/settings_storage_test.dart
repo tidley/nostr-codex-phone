@@ -22,6 +22,11 @@ class _LockedSecureStorage implements SecureSettingsStorage {
   }
 
   @override
+  Future<Map<String, String>> readAll() async {
+    throw PlatformException(code: 'KeyringLocked');
+  }
+
+  @override
   Future<void> write({required String key, required String? value}) async {
     writeCalls++;
     throw PlatformException(code: 'KeyringLocked');
@@ -37,6 +42,12 @@ class _MemorySecureStorage implements SecureSettingsStorage {
 
   @override
   Future<String?> read({required String key}) async => values[key];
+
+  @override
+  Future<Map<String, String>> readAll() async => {
+    for (final entry in values.entries)
+      if (entry.value != null) entry.key: entry.value!,
+  };
 
   @override
   Future<void> write({required String key, required String? value}) async {
