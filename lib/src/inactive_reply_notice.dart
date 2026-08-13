@@ -41,7 +41,9 @@ class _InactiveReplyNotice extends StatelessWidget {
                   borderRadius: BorderRadius.circular(18),
                   child: Ink(
                     decoration: BoxDecoration(
-                      color: colorScheme.surfaceContainerHigh,
+                      color: colorScheme.surfaceContainerHigh.withValues(
+                        alpha: 0.76,
+                      ),
                       borderRadius: BorderRadius.circular(18),
                       border: Border.all(
                         color: colorScheme.primary.withValues(alpha: 0.68),
