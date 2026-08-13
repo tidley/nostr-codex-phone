@@ -99,6 +99,7 @@ pub struct CodexRunResult {
     pub response: String,
     pub session_id: Option<String>,
     pub token_usage: Option<CodexTokenUsage>,
+    pub work_history: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +284,7 @@ pub async fn run_codex_session_with_cancel_and_events(
                 response,
                 session_id: None,
                 token_usage: None,
+                work_history: vec![],
             });
     }
 
@@ -372,6 +374,7 @@ async fn run_opencode_session(
         response: parsed.response,
         session_id: parsed.session_id.or(Some(session_id)),
         token_usage: parsed.token_usage,
+        work_history: vec![],
     })
 }
 
@@ -931,7 +934,7 @@ async fn create_opencode_session(config: &CodexConfig) -> Result<String> {
 }
 
 fn workspace_agent_session_initialization_prompt() -> String {
-    "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to 50. You will then receive that many recent messages before replying. This setup applies to all following messages in this session. Reply only READY to acknowledge it.".into()
+    "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to 50. You will then receive that many recent messages before replying. This setup applies to all following messages in this session. Do not acknowledge this setup or reply with `READY`; wait for and answer the next user message.".into()
 }
 
 async fn run_opencode_cli(
@@ -1114,6 +1117,7 @@ fn parse_opencode_json_output(stdout: &str) -> Result<CodexRunResult> {
             response,
             session_id,
             token_usage,
+            work_history: vec![],
         })
         .ok_or_else(|| anyhow!("OpenCode completed but produced no text response"))
 }
@@ -1478,6 +1482,7 @@ fn parse_codex_json_output(stdout: &str) -> Result<CodexRunResult> {
             response,
             session_id,
             token_usage,
+            work_history: vec![],
         });
     }
 
@@ -1703,7 +1708,8 @@ mod tests {
         let prompt = workspace_agent_session_initialization_prompt();
 
         assert!(prompt.contains("[[WORKSPACE_HISTORY: N]]"));
-        assert!(prompt.contains("Reply only READY"));
+        assert!(prompt.contains("Do not acknowledge this setup"));
+        assert!(!prompt.contains("Reply only READY"));
     }
 
     #[test]

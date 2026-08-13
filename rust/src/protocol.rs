@@ -437,6 +437,8 @@ pub struct WorkspaceMemberPayload {
     pub display_name: String,
     #[serde(default)]
     pub is_admin: bool,
+    #[serde(default)]
+    pub joined_at: i64,
 }
 
 #[derive(Deserialize)]
@@ -463,6 +465,7 @@ where
                         pubkey,
                         display_name: String::new(),
                         is_admin: false,
+                        joined_at: 0,
                     })
                 }
             })
@@ -507,6 +510,8 @@ pub struct WorkspaceMessagePayload {
     pub pinned: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<WorkspaceReactionPayload>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work_history: Vec<String>,
     pub created_at: i64,
 }
 

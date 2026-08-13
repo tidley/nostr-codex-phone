@@ -25,6 +25,7 @@ pub struct WorkspaceMember {
     pub pubkey: String,
     pub display_name: String,
     pub is_admin: bool,
+    pub joined_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,7 @@ pub struct WorkspaceMessage {
     pub also_send_to_main: bool,
     pub pinned: bool,
     pub reactions: Vec<WorkspaceReactionPayload>,
+    pub work_history: Vec<String>,
     pub created_at: i64,
 }
 
@@ -120,7 +122,7 @@ impl WorkspaceStore {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS workspace_members (pubkey TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '', is_admin INTEGER NOT NULL DEFAULT 0, joined_at INTEGER NOT NULL);
                CREATE TABLE IF NOT EXISTS workspace_channels (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
-                  CREATE TABLE IF NOT EXISTS workspace_messages (id TEXT PRIMARY KEY, channel_id TEXT, recipient_pubkey TEXT, sender_pubkey TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', mentions_json TEXT NOT NULL DEFAULT '[]', parent_id TEXT, also_send_to_main INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+                   CREATE TABLE IF NOT EXISTS workspace_messages (id TEXT PRIMARY KEY, channel_id TEXT, recipient_pubkey TEXT, sender_pubkey TEXT NOT NULL, body TEXT NOT NULL, attachments_json TEXT NOT NULL DEFAULT '[]', mentions_json TEXT NOT NULL DEFAULT '[]', parent_id TEXT, also_send_to_main INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, work_history_json TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL,
                    CHECK ((channel_id IS NOT NULL) != (recipient_pubkey IS NOT NULL)));
                   CREATE TABLE IF NOT EXISTS workspace_message_reactions (message_id TEXT NOT NULL REFERENCES workspace_messages(id), emoji TEXT NOT NULL, sender_pubkey TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (message_id, emoji, sender_pubkey));
                   CREATE TABLE IF NOT EXISTS workspace_notification_outbox (id INTEGER PRIMARY KEY, recipient TEXT NOT NULL, payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
@@ -231,6 +233,18 @@ impl WorkspaceStore {
         if !has_pinned {
             conn.execute(
                 "ALTER TABLE workspace_messages ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        let has_work_history = conn
+            .prepare("PRAGMA table_info(workspace_messages)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|column| column == "work_history_json");
+        if !has_work_history {
+            conn.execute(
+                "ALTER TABLE workspace_messages ADD COLUMN work_history_json TEXT NOT NULL DEFAULT '[]'",
                 [],
             )?;
         }
@@ -415,7 +429,7 @@ impl WorkspaceStore {
 
     pub fn members(&self) -> Result<Vec<WorkspaceMember>> {
         let mut statement = self.conn.prepare(
-            "SELECT pubkey, display_name, is_admin FROM workspace_members ORDER BY joined_at, pubkey",
+            "SELECT pubkey, display_name, is_admin, joined_at FROM workspace_members ORDER BY joined_at, pubkey",
         )?;
         let members = statement
             .query_map([], |row| {
@@ -423,6 +437,7 @@ impl WorkspaceStore {
                     pubkey: row.get(0)?,
                     display_name: row.get(1)?,
                     is_admin: row.get(2)?,
+                    joined_at: row.get(3)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()
@@ -448,10 +463,16 @@ impl WorkspaceStore {
             bail!("member is not a workspace member");
         }
         let is_admin = self.is_admin(&pubkey)?;
+        let joined_at = self.conn.query_row(
+            "SELECT joined_at FROM workspace_members WHERE pubkey = ?1",
+            [&pubkey],
+            |row| row.get(0),
+        )?;
         Ok(WorkspaceMember {
             pubkey,
             display_name: display_name.to_string(),
             is_admin,
+            joined_at,
         })
     }
 
@@ -464,15 +485,16 @@ impl WorkspaceStore {
         {
             bail!("member is not a workspace member");
         }
-        let display_name = self.conn.query_row(
-            "SELECT display_name FROM workspace_members WHERE pubkey = ?1",
+        let (display_name, joined_at) = self.conn.query_row(
+            "SELECT display_name, joined_at FROM workspace_members WHERE pubkey = ?1",
             [&pubkey],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         Ok(WorkspaceMember {
             pubkey,
             display_name,
             is_admin,
+            joined_at,
         })
     }
 
@@ -1248,6 +1270,7 @@ impl WorkspaceStore {
             also_send_to_main,
             pinned: false,
             reactions: vec![],
+            work_history: vec![],
             created_at: now(),
         };
         if message.body.is_empty() && message.attachments.is_empty() {
@@ -1264,6 +1287,14 @@ impl WorkspaceStore {
         }
         self.conn.execute("INSERT INTO workspace_messages (id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)", params![message.id, message.channel_id, message.recipient_pubkey, message.sender_pubkey, message.body, serde_json::to_string(&message.attachments)?, serde_json::to_string(&message.mentions)?, message.parent_id, message.also_send_to_main, message.pinned, message.created_at])?;
         Ok(message)
+    }
+
+    pub fn set_message_work_history(&self, id: &str, work_history: &[String]) -> Result<()> {
+        self.conn.execute(
+            "UPDATE workspace_messages SET work_history_json = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(work_history)?],
+        )?;
+        Ok(())
     }
 
     pub fn channel_messages(&self, channel_id: &str) -> Result<Vec<WorkspaceMessage>> {
@@ -1347,7 +1378,7 @@ impl WorkspaceStore {
         predicate: &str,
         params: P,
     ) -> Result<Vec<WorkspaceMessage>> {
-        let query = format!("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, created_at FROM workspace_messages WHERE {predicate} ORDER BY created_at, id");
+        let query = format!("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, work_history_json, created_at FROM workspace_messages WHERE {predicate} ORDER BY created_at, id");
         let mut statement = self.conn.prepare(&query)?;
         let mut messages: Vec<WorkspaceMessage> = statement
             .query_map(params, message_from_row)?
@@ -1361,7 +1392,7 @@ impl WorkspaceStore {
     pub fn message_by_id(&self, id: &str) -> Result<Option<WorkspaceMessage>> {
         let message = self
             .conn
-            .query_row("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, created_at FROM workspace_messages WHERE id = ?1", [id], message_from_row)
+            .query_row("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, work_history_json, created_at FROM workspace_messages WHERE id = ?1", [id], message_from_row)
             .optional()?;
         message
             .map(|mut message| {
@@ -1464,7 +1495,8 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceMessag
         also_send_to_main: row.get(8)?,
         pinned: row.get(9)?,
         reactions: Vec::new(),
-        created_at: row.get(10)?,
+        work_history: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
+        created_at: row.get(11)?,
     })
 }
 fn conversation_agent_from_row(
@@ -1797,6 +1829,7 @@ mod tests {
                 pubkey: "member".to_string(),
                 display_name: "Ada".to_string(),
                 is_admin: false,
+                joined_at: reopened.members().unwrap()[0].joined_at,
             }]
         );
     }

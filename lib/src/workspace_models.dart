@@ -256,6 +256,7 @@ class WorkspaceMessage {
     this.attachments = const [],
     this.mentions = const [],
     this.reactions = const [],
+    this.workHistory = const [],
   });
   final String id;
   final String? channelId;
@@ -268,6 +269,7 @@ class WorkspaceMessage {
   final List<BridgeAudioReference> attachments;
   final List<WorkspaceMention> mentions;
   final List<WorkspaceReaction> reactions;
+  final List<String> workHistory;
   final int createdAt;
 
   factory WorkspaceMessage.fromJson(Map<String, dynamic> json) =>
@@ -283,6 +285,10 @@ class WorkspaceMessage {
         attachments: _attachments(json['attachments']),
         mentions: _mentions(json['mentions']),
         reactions: _reactions(json['reactions']),
+        workHistory: (json['work_history'] as List? ?? const [])
+            .map((item) => item.toString())
+            .where((item) => item.isNotEmpty)
+            .toList(growable: false),
         createdAt: (json['created_at'] as num?)?.toInt() ?? 0,
       );
 
@@ -326,6 +332,7 @@ class WorkspaceMessage {
           },
         )
         .toList(growable: false),
+    'work_history': workHistory,
     'created_at': createdAt,
   };
 }
@@ -687,6 +694,7 @@ class WorkspaceState {
   List<String> members = [];
   final Map<String, String> memberNames = {};
   final Set<String> memberAdmins = {};
+  final Map<String, int> memberJoinedAt = {};
   final Map<String, List<WorkspaceMessage>> messages = {};
   List<WorkspaceAgent> agents = [];
   List<WorkspaceConversationAgent> conversationAgents = [];
@@ -700,6 +708,7 @@ class WorkspaceState {
     members = [];
     memberNames.clear();
     memberAdmins.clear();
+    memberJoinedAt.clear();
     messages.clear();
     agents = [];
     conversationAgents = [];
@@ -720,6 +729,7 @@ class WorkspaceState {
           'pubkey': member,
           'display_name': memberNames[member] ?? '',
           'is_admin': memberAdmins.contains(member),
+          'joined_at': memberJoinedAt[member] ?? 0,
         },
     ],
     'messages': [
@@ -832,6 +842,7 @@ class WorkspaceState {
       members = [];
       memberNames.clear();
       memberAdmins.clear();
+      memberJoinedAt.clear();
       if (!isSnapshotHeaderWithoutMessages) {
         messages
           ..clear()
@@ -915,6 +926,7 @@ class WorkspaceState {
         members = incomingMembers.keys.toList();
         memberNames.clear();
         memberAdmins.clear();
+        memberJoinedAt.clear();
       } else {
         final knownMembers = members.toSet()..addAll(incomingMembers.keys);
         members = knownMembers.toList();
@@ -929,6 +941,9 @@ class WorkspaceState {
           memberAdmins.add(entry.key);
         } else {
           memberAdmins.remove(entry.key);
+        }
+        if (entry.value.joinedAt > 0) {
+          memberJoinedAt[entry.key] = entry.value.joinedAt;
         }
       }
     }
@@ -1102,20 +1117,21 @@ class WorkspaceState {
     return _directKey(message.senderPubkey, message.recipientPubkey);
   }
 
-  static Map<String, ({String displayName, bool isAdmin})> _members(
-    Object? raw,
-  ) {
+  static Map<String, ({String displayName, bool isAdmin, int joinedAt})>
+  _members(Object? raw) {
     if (raw is! List) return {};
-    final members = <String, ({String displayName, bool isAdmin})>{};
+    final members =
+        <String, ({String displayName, bool isAdmin, int joinedAt})>{};
     for (final member in raw) {
       if (member is Map &&
           member['pubkey']?.toString().trim().isNotEmpty == true) {
         members[member['pubkey'].toString().trim()] = (
           displayName: member['display_name']?.toString().trim() ?? '',
           isAdmin: member['is_admin'] == true,
+          joinedAt: (member['joined_at'] as num?)?.toInt() ?? 0,
         );
       } else if (member is String && member.trim().isNotEmpty) {
-        members[member.trim()] = (displayName: '', isAdmin: false);
+        members[member.trim()] = (displayName: '', isAdmin: false, joinedAt: 0);
       }
     }
     return members;
