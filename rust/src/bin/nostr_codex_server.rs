@@ -4281,32 +4281,17 @@ async fn route_conversation_agents(
             }
         };
         let mut active_session_id = session_id.to_string();
-        if workspace.agent_session_context(&agent.id)?.as_deref()
-            != Some(WORKSPACE_AGENT_SESSION_CONTEXT)
-        {
-            match run_workspace_agent_with_typing(
-                workspace,
-                messenger,
-                &agent,
-                channel_id,
-                member,
-                peer,
-                parent_id,
-                &conversation_agent_initialization_prompt(&agent.traits),
-                &agent_config,
-                &active_session_id,
-                active_turns,
+        let needs_session_context = workspace.agent_session_context(&agent.id)?.as_deref()
+            != Some(WORKSPACE_AGENT_SESSION_CONTEXT);
+        let prompt = if needs_session_context {
+            format!(
+                "{}\n\n{}",
+                conversation_agent_initialization_prompt(&agent.traits),
+                prompt
             )
-            .await
-            {
-                Ok(_) => workspace
-                    .set_agent_session_context(&agent.id, WORKSPACE_AGENT_SESSION_CONTEXT)?,
-                Err(err) => {
-                    warn!(agent = %agent.id, "workspace agent session initialization failed: {err:#}");
-                    continue;
-                }
-            }
-        }
+        } else {
+            prompt
+        };
         let mut result = match run_workspace_agent_with_typing(
             workspace,
             messenger,
@@ -4322,7 +4307,13 @@ async fn route_conversation_agents(
         )
         .await
         {
-            Ok(result) if !result.response.trim().is_empty() => result,
+            Ok(result) if !result.response.trim().is_empty() => {
+                if needs_session_context {
+                    workspace
+                        .set_agent_session_context(&agent.id, WORKSPACE_AGENT_SESSION_CONTEXT)?;
+                }
+                result
+            }
             Ok(_) => continue,
             Err(err) if is_agent_cancelled_error(&err) => {
                 info!(agent = %agent.id, "workspace agent task cancelled");
@@ -4382,6 +4373,11 @@ async fn route_conversation_agents(
                     },
                 )
                 .await?;
+                let restarted_prompt = format!(
+                    "{}\n\n{}",
+                    conversation_agent_initialization_prompt(&agent.traits),
+                    prompt
+                );
                 match run_workspace_agent_with_typing(
                     workspace,
                     messenger,
@@ -4390,14 +4386,20 @@ async fn route_conversation_agents(
                     member,
                     peer,
                     parent_id,
-                    &prompt,
+                    &restarted_prompt,
                     &agent_config,
                     &active_session_id,
                     active_turns,
                 )
                 .await
                 {
-                    Ok(result) if !result.response.trim().is_empty() => result,
+                    Ok(result) if !result.response.trim().is_empty() => {
+                        workspace.set_agent_session_context(
+                            &agent.id,
+                            WORKSPACE_AGENT_SESSION_CONTEXT,
+                        )?;
+                        result
+                    }
                     Ok(_) => continue,
                     Err(restart_err) => {
                         warn!(agent = %agent.id, "workspace agent response failed after restart: {restart_err:#}");
@@ -4587,7 +4589,7 @@ fn conversation_agent_initialization_prompt(agent_traits: &str) -> String {
     let traits = agent_traits.trim();
     let traits = (!traits.is_empty()).then(|| format!("\n\nAgent instructions:\n{traits}"));
     format!(
-        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying. This setup applies to all following messages in this session. Do not acknowledge this setup or reply with `READY`; wait for and answer the next user message.{}",
+        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying. Ignore any earlier instruction to reply with `READY`; answer the user message that follows.{}",
         traits.unwrap_or_default(),
     )
 }
@@ -9380,7 +9382,7 @@ mod tests {
         );
 
         assert!(prompt.contains("[[WORKSPACE_HISTORY: N]]"));
-        assert!(prompt.contains("Do not acknowledge this setup"));
+        assert!(prompt.contains("Ignore any earlier instruction"));
         assert!(!prompt.contains("Reply only READY"));
         assert!(prompt.contains("Use UK English spelling"));
     }
