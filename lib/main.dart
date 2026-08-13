@@ -52,6 +52,7 @@ part 'src/inactive_reply_notice.dart';
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
+const _largePasteThresholdBytes = 10 * 1024;
 const _relayProbeTimeout = Duration(seconds: 4);
 const _callStunServers = [
   'stun:45.77.228.152:3478',
@@ -139,6 +140,7 @@ class _WorkspaceWorkerState {
   int attentionVersion = 0;
   String? openThreadKey;
   String focusedConversationKey = '';
+  final Map<String, _WorkspacePanelState> panelStates = {};
 
   void dispose() {
     cacheSaveTimer?.cancel();
@@ -2965,6 +2967,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     ConversationMessage message,
   ) {
     final messages = _messagesByTarget.putIfAbsent(conversationKey, () => []);
+    if (message.kind == 'status') {
+      final previousStatus = messages.indexWhere(
+        (existing) => existing.kind == 'status',
+      );
+      if (previousStatus >= 0) {
+        messages[previousStatus] = message;
+        _scheduleConversationHistorySave(conversationKey);
+        return;
+      }
+    }
     messages.insert(0, message);
     _scheduleConversationHistorySave(conversationKey);
     if (conversationKey == _activeConversationKey) {
@@ -5010,6 +5022,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         final isMessageCreated =
             update is Map && update['action'] == 'message_created';
         String? inactiveAgentConversationKey;
+        String? inactiveAgentThreadId;
         setState(() {
           final addedMessages = worker.workspace.apply(
             decoded,
@@ -5048,6 +5061,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                 }
                 if (isWorkspaceAgentSender(workspaceMessage.senderPubkey)) {
                   inactiveAgentConversationKey = conversationKey;
+                  inactiveAgentThreadId = workspaceMessage.parentId;
                 }
               }
             }
@@ -5059,6 +5073,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           _showInactiveWorkspaceReplyPopup(
             workerKey,
             inactiveAgentConversationKey!,
+            parentId: inactiveAgentThreadId,
           );
           _playInactiveSessionReplyAlert();
         }
@@ -5467,8 +5482,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   void _showInactiveWorkspaceReplyPopup(
     String workerKey,
-    String conversationKey,
-  ) {
+    String conversationKey, {
+    String? parentId,
+  }) {
     final workspace = _workspaceWorkerForKey(workerKey).workspace;
     final conversationName =
         workspace.channelName(conversationKey) ??
@@ -5477,7 +5493,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       noticeKey: 'worker:$workerKey:$conversationKey',
       sessionName: conversationName,
       onTap: () => unawaited(
-        _openInactiveWorkspaceConversation(workerKey, conversationKey),
+        _openInactiveWorkspaceConversation(
+          workerKey,
+          conversationKey,
+          parentId: parentId,
+        ),
       ),
     );
   }
@@ -5538,8 +5558,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<void> _openInactiveWorkspaceConversation(
     String workerKey,
-    String conversationKey,
-  ) async {
+    String conversationKey, {
+    String? parentId,
+  }) async {
     for (final target in _computerServiceTargets) {
       if (target.pubkey.trim().toLowerCase() == workerKey.toLowerCase()) {
         await _selectComputerServiceTarget(target);
@@ -5551,6 +5572,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       final worker = _workspaceWorkerForKey(workerKey);
       _showTeamWorkspace = true;
       worker.focusedConversationKey = conversationKey;
+      worker.openThreadKey = parentId == null
+          ? null
+          : '$conversationKey:$parentId';
       worker.unreadCounts.remove(conversationKey);
     });
   }
@@ -5788,10 +5812,24 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
     try {
       if (!await _ensureConnectedForSend()) return;
+      final isLargePaste =
+          utf8.encode(query).length >= _largePasteThresholdBytes;
+      BridgeAudioReference? attachment;
+      if (isLargePaste) {
+        setState(() => _status = 'Uploading large pasted text to Blossom...');
+        attachment = await _uploadLargeTextToBlossom(query);
+      }
       final eventId = await _sendWithAutoRecovery(
         label: 'query send',
-        sender: () =>
-            _sendQueryPreferFips(_buildQueryPayload(query, target: target)),
+        sender: () => _sendQueryPreferFips(
+          attachment == null
+              ? _buildQueryPayload(query, target: target)
+              : _buildMediaBundlePayload(
+                  attachment: attachment,
+                  caption: 'Large pasted text attached.',
+                  target: target,
+                ),
+        ),
       );
       if (!mounted) return;
       setState(() {
@@ -5800,7 +5838,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           ConversationMessage(
             direction: MessageDirection.outgoing,
             kind: 'query',
-            text: query,
+            text: attachment == null
+                ? query
+                : 'Large pasted text sent as an attachment (${_formatByteCount(utf8.encode(query).length)})',
             eventId: eventId,
             timestamp: DateTime.now(),
           ),
@@ -7222,6 +7262,32 @@ Return a concise catch-up summary of what happened after that point: completed w
     );
   }
 
+  Future<BridgeAudioReference> _uploadLargeTextToBlossom(String text) async {
+    if (kIsWeb) {
+      throw UnsupportedError(
+        'Large text attachments are unavailable in the browser',
+      );
+    }
+    final directory = await getTemporaryDirectory();
+    final timestamp = DateTime.now().microsecondsSinceEpoch;
+    final path = '${directory.path}/nostr_codex_paste_$timestamp.txt';
+    try {
+      await writeLocalTextFile(path, text);
+      return await _uploadAudioToBlossom(
+        path,
+        'pasted-text-$timestamp.txt',
+        'text/plain',
+      );
+    } finally {
+      unawaited(deleteLocalFile(path));
+    }
+  }
+
+  String _formatByteCount(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    return '${(bytes / 1024).toStringAsFixed(1)} KiB';
+  }
+
   String _inferContentType(String fileName, String? extension) {
     final normalizedExtension =
         extension?.trim().toLowerCase() ??
@@ -7512,13 +7578,18 @@ Return a concise catch-up summary of what happened after that point: completed w
     final loaded = _messagesByTarget.containsKey(target.id);
     final pending = _pendingReplyTargetIds.contains(target.id);
     final hasUnread = (_unreadCountsByTarget[target.id] ?? 0) > 0;
+    final fipsAttached = _activeWorkspaceWorker.fips.directPeers.contains(
+      target.pubkey,
+    );
     final statusColor = selected
         ? activeColor
+        : fipsAttached
+        ? const Color(0xff35d6a0)
         : connected || loaded
         ? loadedColor
         : theme.colorScheme.onSurfaceVariant;
     final textStyle = titleStyle?.copyWith(
-      color: compact ? titleStyle.color : statusColor,
+      color: compact && !fipsAttached ? titleStyle.color : statusColor,
       fontWeight: selected || connected ? FontWeight.bold : FontWeight.normal,
     );
 
@@ -7544,11 +7615,11 @@ Return a concise catch-up summary of what happened after that point: completed w
             ),
           ),
         Expanded(
-          child: Text(
-            target.displayName,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+          child: _UnreadConversationLabel(
+            label: target.displayName,
+            unread: hasUnread,
             style: textStyle,
+            attentionColor: const Color(0xffff9f1c),
           ),
         ),
         if (hasUnread) ...[
@@ -7672,6 +7743,7 @@ Return a concise catch-up summary of what happened after that point: completed w
           workspace: _workspace,
           focusedConversationKey: _workspaceFocusedConversationKey,
           openThreadKey: _activeWorkspaceWorker.openThreadKey,
+          panelStates: _activeWorkspaceWorker.panelStates,
           unreadCounts: _workspaceUnreadCounts,
           threadUnreadCounts: _workspaceThreadUnreadCounts,
           ownPubkey: _ownPubkeyHex ?? '',
@@ -7737,6 +7809,7 @@ Return a concise catch-up summary of what happened after that point: completed w
           onLoadFolderChoices: _requestRepoChoices,
           onTyping: _sendWorkspaceTyping,
           onAttach: _sendWorkspaceAttachment,
+          onSendLargeText: _sendWorkspaceLargeText,
           voiceResult: _workspaceVoiceResult,
           onVoiceTranscribe: _sendWorkspaceVoiceTranscription,
           onOpenAttachment: _downloadAndOpenWorkspaceAttachment,
@@ -7823,6 +7896,11 @@ Return a concise catch-up summary of what happened after that point: completed w
         unreadCountsByTarget: _unreadCountsByTarget,
         pendingReplyTargetIds: _pendingReplyTargetIds,
         loadedTargetIds: _messagesByTarget.keys.toSet(),
+        fipsAttachedTargetIds: {
+          for (final target in _repoTargets)
+            if (_activeWorkspaceWorker.fips.directPeers.contains(target.pubkey))
+              target.id,
+        },
         workingAnimationStyle: _workingAnimationStyle,
         workingAnimationSpeed: _workingAnimationSpeed,
         onSelectTarget: (targetId) => unawaited(_selectRepoTarget(targetId)),
@@ -7882,6 +7960,11 @@ Return a concise catch-up summary of what happened after that point: completed w
                                 return Padding(
                                   padding: const EdgeInsets.only(bottom: 10),
                                   child: _MessageTile(
+                                    key: message.kind == 'status'
+                                        ? const ValueKey('worker-status')
+                                        : ValueKey(
+                                            '${message.direction}:${message.kind}:${message.eventId}:${message.timestamp.microsecondsSinceEpoch}',
+                                          ),
                                     message: message,
                                     showResend: _isResendableMessage(message),
                                     speaking:
@@ -8035,9 +8118,6 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
     _addOptimisticWorkspaceMessage(request);
     final bootstrap = request['action'] == 'list_fallback';
-    final durableMessage =
-        request['action'] == 'send_channel_message' ||
-        request['action'] == 'send_direct_message';
     if (!bootstrap && _workspaceFipsConnectionState == 'active') {
       try {
         await fipsWorkspaceSendWire(
@@ -8045,10 +8125,9 @@ Return a concise catch-up summary of what happened after that point: completed w
           frame: jsonEncode({'workspace_request': request}),
           messageId: BigInt.from(++_workspaceFipsNextMessageId),
         );
-        if (!durableMessage) return;
-        // FIPS confirms a local write, not delivery to the worker. Mirror
-        // durable messages through Nostr so a dead direct route cannot lose a
-        // message that the composer already displayed optimistically.
+        // A live FIPS route is the only transport for all worker requests,
+        // including durable messages and their inline large-text payloads.
+        return;
       } catch (error) {
         _recordDiagnostic(
           'FIPS workspace send failed; recovering with Nostr: $error',
@@ -9647,6 +9726,36 @@ Return a concise catch-up summary of what happened after that point: completed w
       return true;
     } catch (error) {
       if (mounted) _showError('Workspace attachment failed: $error');
+      return false;
+    } finally {
+      if (mounted) setState(() => _sendingMedia = false);
+    }
+  }
+
+  Future<bool> _sendWorkspaceLargeText(
+    String text,
+    Map<String, Object?> request,
+  ) async {
+    if (_sendingMedia || !await _ensureConnectedToParentService()) return false;
+    setState(() {
+      _sendingMedia = true;
+      _status = 'Uploading large pasted text to Blossom...';
+    });
+    try {
+      if (_workspaceFipsConnectionState == 'active') {
+        // FIPS carries the complete text directly, so it never leaves the
+        // client-worker connection through a relay or Blossom server.
+        request['body'] = text;
+      } else {
+        final attachment = await _uploadLargeTextToBlossom(text);
+        request['body'] = 'Large pasted text attached.';
+        request['attachments'] = [_workspaceAttachmentPayload(attachment)];
+      }
+      await _sendWorkspaceRequest(request);
+      if (mounted) setState(() => _status = 'Large pasted text sent');
+      return true;
+    } catch (error) {
+      if (mounted) _showError('Large pasted text failed: $error');
       return false;
     } finally {
       if (mounted) setState(() => _sendingMedia = false);

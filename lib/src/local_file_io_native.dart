@@ -9,6 +9,9 @@ Future<void> deleteLocalFile(String path) async {
   } catch (_) {}
 }
 
+Future<void> writeLocalTextFile(String path, String contents) =>
+    File(path).writeAsString(contents);
+
 Future<Duration> probeWebSocketRelay(String relay) async {
   final stopwatch = Stopwatch()..start();
   final socket = await WebSocket.connect(relay);

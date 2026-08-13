@@ -85,6 +85,7 @@ const NOSTR_WORKSPACE_TRANSFER_MAX_BYTES: usize = 24 * 1024;
 const WORKSPACE_FIPS_TRANSFER_CHUNK_SIZE: usize = 64;
 const WORKSPACE_SNAPSHOT_MESSAGE_LIMIT: usize = 20;
 const WORKSPACE_HISTORY_REQUEST_MAX: usize = 50;
+const WORKSPACE_AGENT_PROMPT_CONTEXT_MAX_BYTES: usize = 32 * 1024;
 const WORKSPACE_HISTORY_REQUEST_ATTEMPTS: usize = 3;
 const WORKSPACE_AGENT_SESSION_CONTEXT: &str = "workspace-history-protocol-v2";
 const WORKSPACE_FIPS_CAPABILITY_BYTES: usize = 32;
@@ -276,9 +277,10 @@ impl WorkspaceOutbound {
             {
                 return Ok(());
             }
-            // A route can disappear between the registry lookup and its send.
-            // Deliver this update through Nostr instead of dropping it.
+            // A connected client-worker route is FIPS-only. Do not leak a
+            // message body or attachment reference onto the relay if it fails.
             self.fips_routes.lock().await.remove(member);
+            bail!("FIPS workspace route to {member} failed")
         }
         messenger
             .send_wire_to_pubkey(member, wire)
@@ -349,6 +351,7 @@ struct WorkspaceAgentQueues {
     messenger: Arc<NostrMessenger>,
     outbound: WorkspaceOutbound,
     codex_config: CodexConfig,
+    audio_config: AudioConfig,
 }
 
 impl WorkspaceAgentQueues {
@@ -357,6 +360,7 @@ impl WorkspaceAgentQueues {
         messenger: Arc<NostrMessenger>,
         outbound: WorkspaceOutbound,
         codex_config: CodexConfig,
+        audio_config: AudioConfig,
     ) -> Self {
         Self {
             senders: HashMap::new(),
@@ -365,6 +369,7 @@ impl WorkspaceAgentQueues {
             messenger,
             outbound,
             codex_config,
+            audio_config,
         }
     }
 
@@ -386,6 +391,7 @@ impl WorkspaceAgentQueues {
                 Arc::clone(&self.messenger),
                 self.outbound.clone(),
                 self.codex_config.clone(),
+                self.audio_config.clone(),
             ));
             sender
         });
@@ -1021,6 +1027,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         Arc::clone(&config.messenger),
         workspace_outbound.clone(),
         config.codex_config.clone(),
+        config.audio_config.clone(),
     );
     flush_workspace_notification_outbox(
         &config.workspace,
@@ -3575,7 +3582,9 @@ async fn run_workspace_agent_with_typing(
         .insert(agent.id.clone(), cancel_token.clone());
     let (event_sender, mut events) = mpsc::unbounded_channel();
     let mut stage = None;
-    let mut work_history = Vec::new();
+    let mut work_history: Vec<String> = Vec::new();
+    let mut stage_started_at: Option<Instant> = None;
+    let mut history_stage = None;
     let mut last_stage_sent = Instant::now() - CODEX_STATUS_MIN_INTERVAL;
     let mut events_open = true;
     let mut run = Box::pin(run_codex_session_with_cancel_and_events(
@@ -3594,8 +3603,15 @@ async fn run_workspace_agent_with_typing(
                     continue;
                 };
                 let Some((next_stage, force)) = codex_status_from_event(&event) else { continue; };
-                if work_history.last() != Some(&next_stage) {
+                if history_stage.as_deref() != Some(next_stage.as_str()) {
+                    if let Some(started_at) = stage_started_at {
+                        if let Some(previous) = work_history.last_mut() {
+                            *previous = format_work_history_item(previous, started_at.elapsed());
+                        }
+                    }
                     work_history.push(next_stage.clone());
+                    stage_started_at = Some(Instant::now());
+                    history_stage = Some(next_stage.clone());
                 }
                 if stage.as_deref() == Some(next_stage.as_str()) || (!force && last_stage_sent.elapsed() < CODEX_STATUS_MIN_INTERVAL) {
                     continue;
@@ -3622,9 +3638,27 @@ async fn run_workspace_agent_with_typing(
     }
     active_turns.lock().await.remove(&agent.id);
     result.map(|mut result| {
+        if let Some(started_at) = stage_started_at {
+            if let Some(last) = work_history.last_mut() {
+                *last = format_work_history_item(last, started_at.elapsed());
+            }
+        }
         result.work_history = work_history;
         result
     })
+}
+
+fn format_work_history_item(stage: &str, duration: Duration) -> String {
+    format!("{}\t{}", format_duration(duration), stage)
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    }
 }
 
 fn initialize_workspace_members(
@@ -3973,6 +4007,7 @@ async fn workspace_agent_queue_worker(
     messenger: Arc<NostrMessenger>,
     outbound: WorkspaceOutbound,
     codex_config: CodexConfig,
+    audio_config: AudioConfig,
 ) {
     while let Some(job) = receiver.recv().await {
         if let Err(err) = process_workspace_agent_job(
@@ -3980,6 +4015,7 @@ async fn workspace_agent_queue_worker(
             messenger.as_ref(),
             &outbound,
             &codex_config,
+            &audio_config,
             &agent_id,
             &job.conversation,
             &job.trigger_message_id,
@@ -3997,6 +4033,7 @@ async fn process_workspace_agent_job(
     messenger: &NostrMessenger,
     outbound: &WorkspaceOutbound,
     codex_config: &CodexConfig,
+    audio_config: &AudioConfig,
     agent_id: &str,
     conversation: &WorkspaceConversation,
     trigger_message_id: &str,
@@ -4009,6 +4046,8 @@ async fn process_workspace_agent_job(
     if !workspace_agent_job_matches_trigger(&message, conversation) {
         return Ok(());
     }
+    let body =
+        workspace_message_body_with_text_attachments(&message, audio_config, messenger).await;
     let reply_parent_id = workspace_agent_reply_parent_id(&message);
 
     match (&message.channel_id, &message.recipient_pubkey) {
@@ -4023,7 +4062,7 @@ async fn process_workspace_agent_job(
                 None,
                 None,
                 Some(reply_parent_id),
-                &message.body,
+                &body,
                 &message.mentions,
                 active_turns,
             )
@@ -4040,7 +4079,7 @@ async fn process_workspace_agent_job(
                 Some(&message.sender_pubkey),
                 Some(recipient),
                 Some(reply_parent_id),
-                &message.body,
+                &body,
                 &message.mentions,
                 active_turns,
             )
@@ -4048,6 +4087,37 @@ async fn process_workspace_agent_job(
         }
         _ => Ok(()),
     }
+}
+
+async fn workspace_message_body_with_text_attachments(
+    message: &WorkspaceMessage,
+    audio_config: &AudioConfig,
+    messenger: &NostrMessenger,
+) -> String {
+    let mut body = message.body.clone();
+    for attachment in &message.attachments {
+        if !is_text_media_type(&attachment.media_type) {
+            continue;
+        }
+        let Some(text) = extract_local_text_attachment(
+            attachment,
+            &mut None,
+            0,
+            &message.sender_pubkey,
+            audio_config,
+            messenger,
+        )
+        .await
+        else {
+            continue;
+        };
+        let name = attachment.name.as_deref().unwrap_or("attachment");
+        if !body.trim().is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(&format!("{name}:\n{text}"));
+    }
+    body
 }
 
 fn workspace_agent_reply_parent_id(message: &WorkspaceMessage) -> &str {
@@ -4589,7 +4659,7 @@ fn conversation_agent_initialization_prompt(agent_traits: &str) -> String {
     let traits = agent_traits.trim();
     let traits = (!traits.is_empty()).then(|| format!("\n\nAgent instructions:\n{traits}"));
     format!(
-        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying. Ignore any earlier instruction to reply with `READY`; answer the user message that follows.{}",
+        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying. Ignore any earlier instruction to reply with `READY`; answer the user message that follows. For implementation requests, do the work in this turn. Do not stop after stating a plan or ask for permission to proceed unless the user requested a plan or you have a concrete blocker.{}",
         traits.unwrap_or_default(),
     )
 }
@@ -4624,7 +4694,7 @@ fn workspace_thread_context(
         })
         .map(|message| format!("{}: {}", message.sender_pubkey, message.body))
         .collect::<Vec<_>>();
-    Ok(thread.join("\n"))
+    Ok(truncate_workspace_agent_prompt_context(thread.join("\n")))
 }
 
 fn workspace_history_request_count(response: &str) -> Option<usize> {
@@ -4664,9 +4734,20 @@ fn workspace_agent_history(
         if recent.is_empty() {
             "(No earlier messages.)".to_string()
         } else {
-            recent.join("\n")
+            truncate_workspace_agent_prompt_context(recent.join("\n"))
         }
     ))
+}
+
+fn truncate_workspace_agent_prompt_context(value: String) -> String {
+    if value.len() <= WORKSPACE_AGENT_PROMPT_CONTEXT_MAX_BYTES {
+        return value;
+    }
+    let mut end = WORKSPACE_AGENT_PROMPT_CONTEXT_MAX_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[Earlier context truncated.]", &value[..end])
 }
 
 fn repositories_in_folder_scope(folders: &[String]) -> Result<Vec<String>> {
@@ -5006,7 +5087,9 @@ async fn process_message(
                 return;
             }
 
-            if let Ok(media_bundle) = parse_media_bundle_query(&message.text) {
+            // `text` is only the human-readable bundle caption. Attachments
+            // remain in `raw_json`, so parse that to retain their references.
+            if let Ok(media_bundle) = parse_media_bundle_query(&message.raw_json) {
                 process_media_bundle_turn(
                     messenger,
                     memory,
@@ -8790,16 +8873,14 @@ impl CodexStatusReporter {
         messenger: &NostrMessenger,
         receiver_pubkey: &str,
         message: String,
-        force: bool,
+        _force: bool,
     ) {
         if self.last_message.as_deref() == Some(message.as_str()) {
             return;
         }
-        if !force {
-            if let Some(last_sent_at) = self.last_sent_at {
-                if last_sent_at.elapsed() < CODEX_STATUS_MIN_INTERVAL {
-                    return;
-                }
+        if let Some(last_sent_at) = self.last_sent_at {
+            if last_sent_at.elapsed() < Duration::from_secs(3) {
+                return;
             }
         }
         send_status(messenger, receiver_pubkey, &message).await;
@@ -9383,6 +9464,7 @@ mod tests {
 
         assert!(prompt.contains("[[WORKSPACE_HISTORY: N]]"));
         assert!(prompt.contains("Ignore any earlier instruction"));
+        assert!(prompt.contains("do the work in this turn"));
         assert!(!prompt.contains("Reply only READY"));
         assert!(prompt.contains("Use UK English spelling"));
     }
@@ -9396,6 +9478,19 @@ mod tests {
         assert_eq!(
             new_workspace_agent_traits("Be concise."),
             "Be concise.\nUse UK English spelling in all written responses.",
+        );
+    }
+
+    #[test]
+    fn agent_prompt_context_is_truncated_on_a_utf8_boundary() {
+        let value = format!("{}é", "a".repeat(WORKSPACE_AGENT_PROMPT_CONTEXT_MAX_BYTES));
+
+        assert_eq!(
+            truncate_workspace_agent_prompt_context(value),
+            format!(
+                "{}\n[Earlier context truncated.]",
+                "a".repeat(WORKSPACE_AGENT_PROMPT_CONTEXT_MAX_BYTES),
+            ),
         );
     }
 
