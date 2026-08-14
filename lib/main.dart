@@ -1857,11 +1857,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final selectionGeneration = ++_workspaceSelectionGeneration;
     unawaited(_saveWorkspaceCache());
     if (!mounted) return;
-    await _clearCall();
-    await _clearGroupCall();
-    if (!mounted || selectionGeneration != _workspaceSelectionGeneration) {
-      return;
-    }
     setState(() {
       _computerServiceTarget = target;
       _workspaceInviteTimer?.cancel();
@@ -4998,9 +4993,15 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         unawaited(Clipboard.setData(ClipboardData(text: createdInviteCode!)));
       }
       if (acceptedInvite) {
-        // Invite redemption only changes server-side membership. Request the
-        // initial snapshot now so a newly joined browser sees the workspace.
-        unawaited(_sendWorkspaceRequest({'action': 'list'}));
+        // The initial name is saved before an invite selects a workspace.
+        // Publish it once membership is confirmed, then load the workspace.
+        unawaited(() async {
+          await _sendWorkspaceRequest({
+            'action': 'set_profile',
+            'display_name': _workspaceDisplayName,
+          });
+          await _sendWorkspaceRequest({'action': 'list'});
+        }());
       }
       return true;
     }
@@ -5052,7 +5053,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         final isMessageCreated =
             update is Map && update['action'] == 'message_created';
         String? inactiveAgentConversationKey;
-        String? inactiveAgentThreadId;
         setState(() {
           final addedMessages = worker.workspace.apply(
             decoded,
@@ -5071,9 +5071,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               }
               final conversationKey = worker.workspace
                   .conversationKeyForMessage(workspaceMessage);
-              if (workspaceMessage.parentId != null) {
-                final threadKey =
-                    '$conversationKey:${workspaceMessage.parentId}';
+              final threadKey = workspaceMessage.parentId == null
+                  ? null
+                  : '$conversationKey:${workspaceMessage.parentId}';
+              if (threadKey != null) {
                 if (worker.openThreadKey != threadKey) {
                   worker.threadUnreadCounts[threadKey] =
                       (worker.threadUnreadCounts[threadKey] ?? 0) + 1;
@@ -5083,7 +5084,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                   _showTeamWorkspace &&
                   workerKey == _workspaceWorkerKey &&
                   conversationKey == worker.focusedConversationKey;
-              if (!focused) {
+              // An unread reply in a different thread should still mark the
+              // focused conversation as having activity in the sidebar.
+              if (!focused ||
+                  (threadKey != null && worker.openThreadKey != threadKey)) {
                 worker.unreadCounts[conversationKey] =
                     (worker.unreadCounts[conversationKey] ?? 0) + 1;
                 if (workerKey != _workspaceWorkerKey) {
@@ -5091,7 +5095,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                 }
                 if (isWorkspaceAgentSender(workspaceMessage.senderPubkey)) {
                   inactiveAgentConversationKey = conversationKey;
-                  inactiveAgentThreadId = workspaceMessage.parentId;
                 }
               }
             }
@@ -5100,11 +5103,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         });
         _scheduleWorkspaceCacheSave(workerKey: workerKey);
         if (inactiveAgentConversationKey != null) {
-          _showInactiveWorkspaceReplyPopup(
-            workerKey,
-            inactiveAgentConversationKey!,
-            parentId: inactiveAgentThreadId,
-          );
           _playInactiveSessionReplyAlert();
         }
       } catch (_) {
@@ -5517,43 +5515,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       sessionName: target?.displayName ?? 'another session',
       onTap: () => unawaited(_selectRepoTarget(conversationKey)),
     );
-  }
-
-  void _showInactiveWorkspaceReplyPopup(
-    String workerKey,
-    String conversationKey, {
-    String? parentId,
-  }) {
-    final workspace = _workspaceWorkerForKey(workerKey).workspace;
-    final conversationName =
-        workspace.channelName(conversationKey) ??
-        _workspaceDirectConversationName(workspace, conversationKey);
-    _showInactiveReplyPopup(
-      noticeKey: 'worker:$workerKey:$conversationKey',
-      sessionName: conversationName,
-      onTap: () => unawaited(
-        _openInactiveWorkspaceConversation(
-          workerKey,
-          conversationKey,
-          parentId: parentId,
-        ),
-      ),
-    );
-  }
-
-  String _workspaceDirectConversationName(
-    WorkspaceState workspace,
-    String conversationKey,
-  ) {
-    final ownPubkey = _ownPubkeyHex ?? '';
-    for (final peer in workspace.directPeers(ownPubkey)) {
-      if (WorkspaceState.directKey(ownPubkey, peer) == conversationKey) {
-        return _workspaceMemberAliases[peer] ??
-            workspace.memberNames[peer] ??
-            compactIdentifier(peer);
-      }
-    }
-    return 'Conversation';
   }
 
   void _showInactiveReplyPopup({
@@ -6479,6 +6440,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         selected.path,
         selected.fileName,
         selected.contentType,
+        bytes: selected.bytes,
         mediaUploadSessionId: uploadSessionId,
       );
       if (!mounted) return;
@@ -6619,12 +6581,12 @@ Return a concise catch-up summary of what happened after that point: completed w
     if (_sending || _sendingAudio || _sendingMedia || _recording) return;
 
     final selected = await _pickMediaAttachment();
-    final path = selected?.path.trim();
-    if (path == null || path.isEmpty) {
+    if (selected == null ||
+        (selected.path.trim().isEmpty && selected.bytes == null)) {
       return;
     }
 
-    final fileName = selected!.fileName;
+    final fileName = selected.fileName;
 
     setState(() {
       _clearPendingMediaAttachmentInMemory();
@@ -6661,6 +6623,33 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<MediaSelection?> _pickMediaAttachment() async {
+    if (kIsWeb) {
+      try {
+        final result = await FilePicker.platform.pickFiles(
+          type: FileType.any,
+          allowMultiple: false,
+          withData: true,
+        );
+        if (result == null || result.files.isEmpty) return null;
+
+        final file = result.files.first;
+        final bytes = file.bytes;
+        if (bytes == null || bytes.isEmpty) {
+          _showError('Could not read selected file');
+          return null;
+        }
+        return MediaSelection(
+          path: '',
+          bytes: bytes,
+          fileName: _normalizeName(file.name, 'attachment'),
+          extension: file.extension,
+          contentType: _inferContentType(file.name, file.extension),
+        );
+      } catch (error) {
+        _showError('Media picker failed: $error');
+        return null;
+      }
+    }
     final source = await _chooseMediaSource();
     if (source == null) return null;
 
@@ -7233,6 +7222,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     String path,
     String fileName,
     String contentType, {
+    Uint8List? bytes,
     int mediaUploadSessionId = 0,
   }) async {
     final servers = _selectedBlossomServers();
@@ -7260,6 +7250,7 @@ Return a concise catch-up summary of what happened after that point: completed w
                 secretKey: activeSecret,
                 serverUrl: server,
                 filePath: path,
+                fileBytes: bytes,
                 contentType: contentType,
                 fileName: fileName,
               ),
@@ -7693,195 +7684,191 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
 
     if (_showTeamWorkspace) {
-      return ValueListenableBuilder<_WorkspaceFipsHeartbeat>(
-        valueListenable: _workspaceFipsHeartbeat,
-        builder: (context, heartbeat, _) => _TeamWorkspace(
-          key: ValueKey(_computerServiceTarget?.id),
-          sessions: _repoTargets,
-          spaces: _computerServiceTargets,
-          activeSpace: _computerServiceTarget,
-          sidebarSections: _workspaceSidebarSections.putIfAbsent(
+      return _TeamWorkspace(
+        key: ValueKey(_computerServiceTarget?.id),
+        sessions: _repoTargets,
+        spaces: _computerServiceTargets,
+        activeSpace: _computerServiceTarget,
+        sidebarSections: _workspaceSidebarSections.putIfAbsent(
+          _computerServiceTarget?.pubkey ?? '',
+          () => {},
+        ),
+        onSidebarSectionChanged: (section, expanded) => setState(() {
+          _workspaceSidebarSections.putIfAbsent(
             _computerServiceTarget?.pubkey ?? '',
             () => {},
-          ),
-          onSidebarSectionChanged: (section, expanded) => setState(() {
-            _workspaceSidebarSections.putIfAbsent(
-              _computerServiceTarget?.pubkey ?? '',
-              () => {},
-            )[section] = expanded;
-            unawaited(_saveWorkspaceIdentity());
-          }),
-          hasUnreadOtherSpaces: _hasUnreadOtherWorkspaces,
-          otherWorkspaceAttentionVersion: _otherWorkspaceAttentionVersion,
-          canManageAgents: _canManageWorkspaceAgents,
-          canManageMembers: _workspace.memberAdmins.contains(_ownPubkeyHex),
-          canRemoveMembers: _canManageWorkspaceAgents,
-          onSwitchSpace: (target) =>
-              unawaited(_selectComputerServiceTarget(target)),
-          onLeaveSpace: (target) =>
-              unawaited(_leaveComputerServiceTarget(target)),
-          onOpenSessions: () {
-            setState(() => _showTeamWorkspace = false);
-            unawaited(_saveLastWorkspaceLocation());
-          },
-          onOpenSettings: () => unawaited(_openSettings()),
-          onEnterInviteCode: () => unawaited(_enterWorkspaceInviteCode()),
-          diagnostics: _activeWorkspaceWorker.diagnostics,
-          onOpenDiagnostics: () => Navigator.of(context).push<void>(
-            MaterialPageRoute(
-              builder: (_) => _ClientDiagnosticsPage(
-                diagnostics: _activeWorkspaceWorker.diagnostics,
-                fipsEnabled: _workspaceFipsEnabled,
-                fipsHeartbeat: _workspaceFipsHeartbeat,
-                fipsPeers: _workspaceFipsPeers,
-                fipsPeerNpub:
-                    _connectedPeerPubkey ?? _peerPubkeyController.text.trim(),
-                contactNameForPubkey: _callParticipantName,
-                onRefreshWorkspace: () =>
-                    _sendWorkspaceRequest({'action': 'refresh'}),
-                onRefreshFipsMesh: () =>
-                    _sendWorkspaceRequest({'action': 'fips_mesh'}),
-                onFipsEnabledChanged: _setWorkspaceFipsEnabled,
-              ),
+          )[section] = expanded;
+          unawaited(_saveWorkspaceIdentity());
+        }),
+        hasUnreadOtherSpaces: _hasUnreadOtherWorkspaces,
+        otherWorkspaceAttentionVersion: _otherWorkspaceAttentionVersion,
+        canManageAgents: _canManageWorkspaceAgents,
+        canManageMembers: _workspace.memberAdmins.contains(_ownPubkeyHex),
+        canRemoveMembers: _canManageWorkspaceAgents,
+        onSwitchSpace: (target) =>
+            unawaited(_selectComputerServiceTarget(target)),
+        onLeaveSpace: (target) =>
+            unawaited(_leaveComputerServiceTarget(target)),
+        onOpenSessions: () {
+          setState(() => _showTeamWorkspace = false);
+          unawaited(_saveLastWorkspaceLocation());
+        },
+        onOpenSettings: () => unawaited(_openSettings()),
+        onEnterInviteCode: () => unawaited(_enterWorkspaceInviteCode()),
+        diagnostics: _activeWorkspaceWorker.diagnostics,
+        onOpenDiagnostics: () => Navigator.of(context).push<void>(
+          MaterialPageRoute(
+            builder: (_) => _ClientDiagnosticsPage(
+              diagnostics: _activeWorkspaceWorker.diagnostics,
+              fipsEnabled: _workspaceFipsEnabled,
+              nostrConnected: _connected,
+              fipsHeartbeat: _workspaceFipsHeartbeat,
+              fipsPeers: _workspaceFipsPeers,
+              fipsPeerNpub:
+                  _connectedPeerPubkey ?? _peerPubkeyController.text.trim(),
+              contactNameForPubkey: _callParticipantName,
+              onRefreshWorkspace: () =>
+                  _sendWorkspaceRequest({'action': 'refresh'}),
+              onRefreshFipsMesh: () =>
+                  _sendWorkspaceRequest({'action': 'fips_mesh'}),
+              onFipsEnabledChanged: _setWorkspaceFipsEnabled,
             ),
           ),
-          fipsConnected: heartbeat.connectionState == 'active',
-          fipsConnectedSpaceIds: {
-            for (final target in _computerServiceTargets)
-              if (_workspaceWorkerForKey(target.pubkey).fips.connectionState ==
-                  'active')
-                target.id,
-          },
-          fipsConnectedPeers: _workspaceFips.directPeers,
-          onOpenWorkerConsole: () => unawaited(_openWorkerConsole()),
-          onOpenFiles: (conversationKey) => _sendToolRequest(
-            'file_browser',
-            workspaceConversationKey: conversationKey,
-          ),
-          fileBrowser: _workspaceFileBrowser,
-          filePreview: _workspaceFilePreview,
-          onBrowseFiles: (conversationKey, directory, path) => _sendToolRequest(
-            'file_browser',
-            extra: {'path': _fileBrowserPath(directory, path)},
-            visibleText: 'browse $path',
-            workspaceConversationKey: conversationKey,
-          ),
-          onReadWorkspaceFile: (conversationKey, directory, path) =>
-              _sendToolRequest(
-                'read_file',
-                extra: {'path': _fileBrowserPath(directory, path)},
-                visibleText: 'read $path',
-                workspacePanel: true,
-                workspaceConversationKey: conversationKey,
-              ),
-          workspaceRevision: _workspaceRevision,
-          onLoadOpenCodeModels: _loadOpenCodeModels,
-          initialFolderChoices: _cachedRepoChoices,
-          onLoadFolders: (path) => _requestRepoChoices(path: path),
-          inviteCode: _workspaceInviteCode,
-          memberStatus: _activeWorkspaceHasLocalWorkerTarget
-              ? 'Owner'
-              : _workspace.memberAdmins.contains(_ownPubkeyHex)
-              ? 'Admin'
-              : _workspaceMemberStatus,
-          workspace: _workspace,
-          conversationDrafts: _workspaceConversationDrafts.putIfAbsent(
-            _computerServiceTarget?.pubkey ?? '',
-            () => {},
-          ),
-          threadDrafts: _workspaceThreadDrafts.putIfAbsent(
-            _computerServiceTarget?.pubkey ?? '',
-            () => {},
-          ),
-          focusedConversationKey: _workspaceFocusedConversationKey,
-          openThreadKey: _activeWorkspaceWorker.openThreadKey,
-          panelStates: _activeWorkspaceWorker.panelStates,
-          unreadCounts: _workspaceUnreadCounts,
-          threadUnreadCounts: _workspaceThreadUnreadCounts,
-          ownPubkey: _ownPubkeyHex ?? '',
-          localSenderIds: {_ownPubkey ?? '', _ownPubkeyHex ?? ''},
-          displayName: _workspaceDisplayName,
-          memberAliases: _workspaceMemberAliases,
-          conversationPreferences: {
-            for (final entry in _workspaceConversationPreferences.entries)
-              if (entry.key.startsWith(
-                '${_computerServiceTarget?.pubkey ?? ''}:',
-              ))
-                entry.key.substring(
-                  '${_computerServiceTarget?.pubkey ?? ''}:'.length,
-                ): entry.value,
-          },
-          localMessagePinIds: {
-            for (final key in _workspaceLocalMessagePins)
-              if (key.startsWith('${_computerServiceTarget?.pubkey ?? ''}:'))
-                key.substring(
-                  '${_computerServiceTarget?.pubkey ?? ''}:'.length,
-                ),
-          },
-          memberNames: {
-            ..._workspace.memberNames,
-            if ((_ownPubkeyHex ?? '').isNotEmpty &&
-                _workspaceDisplayName.isNotEmpty &&
-                !_workspace.memberNames.containsKey(_ownPubkeyHex))
-              _ownPubkeyHex!: _workspaceDisplayName,
-            for (final target in _computerServiceTargets)
-              if (target.pubkey.trim().isNotEmpty)
-                target.pubkey:
-                    _workspace.memberNames[target.pubkey] ?? target.displayName,
-          },
-          onDisplayNameChanged: _setWorkspaceDisplayName,
-          onMemberAliasChanged: _setWorkspaceMemberAlias,
-          onConversationPreferenceChanged: _setWorkspaceConversationPreference,
-          onToggleLocalMessagePin: _toggleWorkspaceLocalMessagePin,
-          onRemoveMember: (pubkey) => _sendWorkspaceRequest({
-            'action': 'remove_member',
-            'member_pubkey': pubkey,
-          }),
-          onFocusConversation: (conversationKey) {
-            setState(() {
-              _workspaceFocusedConversationKey = conversationKey;
-              _workspaceUnreadCounts.remove(conversationKey);
-            });
-            unawaited(_saveLastWorkspaceLocation());
-          },
-          onOpenThread: (conversationKey, parentId) {
-            setState(() {
-              final threadKey = '$conversationKey:$parentId';
-              _workspaceFocusedConversationKey = conversationKey;
-              _activeWorkspaceWorker.openThreadKey = threadKey;
-              _workspaceThreadUnreadCounts.remove(threadKey);
-            });
-            unawaited(_saveLastWorkspaceLocation());
-          },
-          onCloseThread: () {
-            setState(() => _activeWorkspaceWorker.openThreadKey = null);
-            unawaited(_saveLastWorkspaceLocation());
-          },
-          onRequest: _sendWorkspaceRequest,
-          onLoadFolderChoices: _requestRepoChoices,
-          onTyping: _sendWorkspaceTyping,
-          onAttach: _sendWorkspaceAttachment,
-          onSendLargeText: _sendWorkspaceLargeText,
-          voiceResult: _workspaceVoiceResult,
-          onVoiceTranscribe: _sendWorkspaceVoiceTranscription,
-          onOpenAttachment: _downloadAndOpenWorkspaceAttachment,
-          onCreateInvite: _createWorkspaceInvite,
-          callPhase: _callPhase,
-          callPeerPubkey: _callPeerPubkey,
-          groupCallPhase: _groupCall?.phase ?? _CallPhase.idle,
-          groupCallChannelId: _groupCall?.channelId,
-          onStartCall: _startWorkspaceCall,
-          onStartChannelCall: _startChannelCall,
-          onAcceptCall: _acceptWorkspaceCall,
-          onRejectCall: _rejectWorkspaceCall,
-          onHangupCall: _hangupWorkspaceCall,
-          onAcceptGroupCall: _acceptGroupCall,
-          onRejectGroupCall: _hangupGroupCall,
-          onHangupGroupCall: _hangupGroupCall,
-          mediaSource: _callMediaSource,
-          onMediaSourceChanged: _setCallMediaSource,
-          dateFormat: _dateFormat,
         ),
+        fipsHeartbeat: _workspaceFipsHeartbeat,
+        fipsConnectedSpaceIds: {
+          for (final target in _computerServiceTargets)
+            if (_workspaceWorkerForKey(target.pubkey).fips.connectionState ==
+                'active')
+              target.id,
+        },
+        fipsConnectedPeers: _workspaceFips.directPeers,
+        onOpenWorkerConsole: () => unawaited(_openWorkerConsole()),
+        onOpenFiles: (conversationKey) => _sendToolRequest(
+          'file_browser',
+          workspaceConversationKey: conversationKey,
+        ),
+        fileBrowser: _workspaceFileBrowser,
+        filePreview: _workspaceFilePreview,
+        onBrowseFiles: (conversationKey, directory, path) => _sendToolRequest(
+          'file_browser',
+          extra: {'path': _fileBrowserPath(directory, path)},
+          visibleText: 'browse $path',
+          workspaceConversationKey: conversationKey,
+        ),
+        onReadWorkspaceFile: (conversationKey, directory, path) =>
+            _sendToolRequest(
+              'read_file',
+              extra: {'path': _fileBrowserPath(directory, path)},
+              visibleText: 'read $path',
+              workspacePanel: true,
+              workspaceConversationKey: conversationKey,
+            ),
+        workspaceRevision: _workspaceRevision,
+        onLoadOpenCodeModels: _loadOpenCodeModels,
+        initialFolderChoices: _cachedRepoChoices,
+        onLoadFolders: (path) => _requestRepoChoices(path: path),
+        inviteCode: _workspaceInviteCode,
+        memberStatus: _activeWorkspaceHasLocalWorkerTarget
+            ? 'Owner'
+            : _workspace.memberAdmins.contains(_ownPubkeyHex)
+            ? 'Admin'
+            : _workspaceMemberStatus,
+        workspace: _workspace,
+        conversationDrafts: _workspaceConversationDrafts.putIfAbsent(
+          _computerServiceTarget?.pubkey ?? '',
+          () => {},
+        ),
+        threadDrafts: _workspaceThreadDrafts.putIfAbsent(
+          _computerServiceTarget?.pubkey ?? '',
+          () => {},
+        ),
+        focusedConversationKey: _workspaceFocusedConversationKey,
+        openThreadKey: _activeWorkspaceWorker.openThreadKey,
+        panelStates: _activeWorkspaceWorker.panelStates,
+        unreadCounts: _workspaceUnreadCounts,
+        threadUnreadCounts: _workspaceThreadUnreadCounts,
+        ownPubkey: _ownPubkeyHex ?? '',
+        localSenderIds: {_ownPubkey ?? '', _ownPubkeyHex ?? ''},
+        displayName: _workspaceDisplayName,
+        memberAliases: _workspaceMemberAliases,
+        conversationPreferences: {
+          for (final entry in _workspaceConversationPreferences.entries)
+            if (entry.key.startsWith(
+              '${_computerServiceTarget?.pubkey ?? ''}:',
+            ))
+              entry.key.substring(
+                '${_computerServiceTarget?.pubkey ?? ''}:'.length,
+              ): entry.value,
+        },
+        localMessagePinIds: {
+          for (final key in _workspaceLocalMessagePins)
+            if (key.startsWith('${_computerServiceTarget?.pubkey ?? ''}:'))
+              key.substring('${_computerServiceTarget?.pubkey ?? ''}:'.length),
+        },
+        memberNames: {
+          ..._workspace.memberNames,
+          if ((_ownPubkeyHex ?? '').isNotEmpty &&
+              _workspaceDisplayName.isNotEmpty &&
+              !_workspace.memberNames.containsKey(_ownPubkeyHex))
+            _ownPubkeyHex!: _workspaceDisplayName,
+          for (final target in _computerServiceTargets)
+            if (target.pubkey.trim().isNotEmpty)
+              target.pubkey:
+                  _workspace.memberNames[target.pubkey] ?? target.displayName,
+        },
+        onDisplayNameChanged: _setWorkspaceDisplayName,
+        onMemberAliasChanged: _setWorkspaceMemberAlias,
+        onConversationPreferenceChanged: _setWorkspaceConversationPreference,
+        onToggleLocalMessagePin: _toggleWorkspaceLocalMessagePin,
+        onRemoveMember: (pubkey) => _sendWorkspaceRequest({
+          'action': 'remove_member',
+          'member_pubkey': pubkey,
+        }),
+        onFocusConversation: (conversationKey) {
+          setState(() {
+            _workspaceFocusedConversationKey = conversationKey;
+            _workspaceUnreadCounts.remove(conversationKey);
+          });
+          unawaited(_saveLastWorkspaceLocation());
+        },
+        onOpenThread: (conversationKey, parentId) {
+          setState(() {
+            final threadKey = '$conversationKey:$parentId';
+            _workspaceFocusedConversationKey = conversationKey;
+            _activeWorkspaceWorker.openThreadKey = threadKey;
+            _workspaceThreadUnreadCounts.remove(threadKey);
+          });
+          unawaited(_saveLastWorkspaceLocation());
+        },
+        onCloseThread: () {
+          setState(() => _activeWorkspaceWorker.openThreadKey = null);
+          unawaited(_saveLastWorkspaceLocation());
+        },
+        onRequest: _sendWorkspaceRequest,
+        onLoadFolderChoices: _requestRepoChoices,
+        onTyping: _sendWorkspaceTyping,
+        onAttach: _sendWorkspaceAttachment,
+        onSendLargeText: _sendWorkspaceLargeText,
+        voiceResult: _workspaceVoiceResult,
+        onVoiceTranscribe: _sendWorkspaceVoiceTranscription,
+        onOpenAttachment: _downloadAndOpenWorkspaceAttachment,
+        onCreateInvite: _createWorkspaceInvite,
+        callPhase: _callPhase,
+        callPeerPubkey: _callPeerPubkey,
+        groupCallPhase: _groupCall?.phase ?? _CallPhase.idle,
+        groupCallChannelId: _groupCall?.channelId,
+        onStartCall: _startWorkspaceCall,
+        onStartChannelCall: _startChannelCall,
+        onAcceptCall: _acceptWorkspaceCall,
+        onRejectCall: _rejectWorkspaceCall,
+        onHangupCall: _hangupWorkspaceCall,
+        onAcceptGroupCall: _acceptGroupCall,
+        onRejectGroupCall: _hangupGroupCall,
+        onHangupGroupCall: _hangupGroupCall,
+        mediaSource: _callMediaSource,
+        onMediaSourceChanged: _setCallMediaSource,
+        dateFormat: _dateFormat,
       );
     }
 

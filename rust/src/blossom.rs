@@ -37,6 +37,7 @@ pub struct BlossomUploadConfig {
     pub secret_key: String,
     pub server_url: String,
     pub file_path: String,
+    pub file_bytes: Option<Vec<u8>>,
     pub content_type: String,
     pub file_name: Option<String>,
 }
@@ -51,9 +52,12 @@ struct BlobDescriptor {
 }
 
 pub async fn upload_audio(config: BlossomUploadConfig) -> Result<AudioReference> {
-    let plaintext = tokio::fs::read(&config.file_path)
-        .await
-        .with_context(|| format!("failed to read audio file `{}`", config.file_path))?;
+    let plaintext = match config.file_bytes {
+        Some(bytes) => bytes,
+        None => tokio::fs::read(&config.file_path)
+            .await
+            .with_context(|| format!("failed to read audio file `{}`", config.file_path))?,
+    };
     if plaintext.is_empty() {
         return Err(anyhow!("audio file is empty"));
     }

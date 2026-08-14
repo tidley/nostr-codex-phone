@@ -342,6 +342,9 @@ fn workspace_agent_job_matches_trigger(
 struct WorkspaceAgentJob {
     conversation: WorkspaceConversation,
     trigger_message_id: String,
+    ephemeral_body: Option<String>,
+    mentions: Vec<WorkspaceMentionPayload>,
+    reply_parent_id: Option<String>,
 }
 
 struct WorkspaceAgentQueues {
@@ -379,6 +382,19 @@ impl WorkspaceAgentQueues {
         conversation: WorkspaceConversation,
         trigger_message_id: String,
     ) {
+        self.enqueue_job(
+            agent_id,
+            WorkspaceAgentJob {
+                conversation,
+                trigger_message_id,
+                ephemeral_body: None,
+                mentions: vec![],
+                reply_parent_id: None,
+            },
+        );
+    }
+
+    fn enqueue_job(&mut self, agent_id: String, job: WorkspaceAgentJob) {
         let sender = self.senders.entry(agent_id.clone()).or_insert_with(|| {
             // A mentioned message is durable in the workspace store. Do not lose its
             // turn merely because an agent is still working through earlier messages.
@@ -395,12 +411,53 @@ impl WorkspaceAgentQueues {
             ));
             sender
         });
-        if let Err(err) = sender.send(WorkspaceAgentJob {
-            conversation,
-            trigger_message_id,
-        }) {
+        if let Err(err) = sender.send(job) {
             warn!(agent = %agent_id, trigger = %err.0.trigger_message_id, "workspace agent queue stopped; dropping turn");
         }
+    }
+
+    fn enqueue_ephemeral_topic_request(
+        &mut self,
+        workspace: &WorkspaceStore,
+        sender: &str,
+        request: &WorkspaceRequest,
+    ) -> Result<()> {
+        let conversation = match request.channel_id.as_deref() {
+            Some(channel_id) => WorkspaceConversation::Channel(channel_id.to_string()),
+            None => {
+                let mut participants = [
+                    sender.to_string(),
+                    request
+                        .recipient_pubkey
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_string(),
+                ];
+                participants.sort();
+                WorkspaceConversation::Direct(participants[0].clone(), participants[1].clone())
+            }
+        };
+        let parent_id = request.parent_id.as_deref().unwrap_or_default().to_string();
+        let body = request.body.as_deref().unwrap_or_default().to_string();
+        for agent in workspace.agents_for_conversation(
+            request.channel_id.as_deref(),
+            request.channel_id.as_deref().is_none().then_some(sender),
+            request.recipient_pubkey.as_deref(),
+        )? {
+            if conversation_agent_is_targeted(&agent.id, &request.mentions) {
+                self.enqueue_job(
+                    agent.id,
+                    WorkspaceAgentJob {
+                        conversation: conversation.clone(),
+                        trigger_message_id: parent_id.clone(),
+                        ephemeral_body: Some(body.clone()),
+                        mentions: request.mentions.clone(),
+                        reply_parent_id: Some(parent_id.clone()),
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1732,8 +1789,8 @@ async fn process_workspace_request(
             request.action.as_str(),
             "add_channel_member" | "remove_channel_member"
         ) {
-            if !workspace.is_channel_admin(channel_id, sender)? {
-                bail!("Only channel admins can manage channel members.");
+            if !workspace.is_channel_admin(channel_id, sender)? && !workspace.is_admin(sender)? {
+                bail!("Only channel or workspace admins can manage channel members.");
             }
         } else if matches!(request.action.as_str(), "rename_channel" | "delete_channel") {
             if !workspace.is_channel_admin(channel_id, sender)? {
@@ -1752,6 +1809,10 @@ async fn process_workspace_request(
         bail!("Only workspace owners and admins can remove members.");
     }
     let update = match request.action.as_str() {
+        "request_thread_topic" => {
+            agent_queues.enqueue_ephemeral_topic_request(workspace, sender, &request)?;
+            return Ok(());
+        }
         "typing" => {
             let expires_in = request.expires_in_seconds.unwrap_or(4).clamp(1, 30);
             let expires_at = SystemTime::now()
@@ -3460,6 +3521,34 @@ async fn broadcast_workspace_update(
     Ok(())
 }
 
+async fn send_ephemeral_workspace_update(
+    messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
+    recipients: impl IntoIterator<Item = String>,
+    update: WorkspaceUpdate,
+) -> Result<()> {
+    for recipient in recipients {
+        if outbound.has_fips_route(&recipient).await {
+            outbound
+                .send(
+                    messenger,
+                    &recipient,
+                    WireMessage::workspace_update(update.clone()),
+                )
+                .await?;
+            continue;
+        }
+        messenger
+            .send_ephemeral_wire_to(
+                PublicKey::parse(&recipient)?,
+                WireMessage::workspace_update(update.clone()),
+                Duration::from_secs(30),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 async fn broadcast_workspace_snapshots(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
@@ -4039,8 +4128,7 @@ async fn workspace_agent_queue_worker(
             &codex_config,
             &audio_config,
             &agent_id,
-            &job.conversation,
-            &job.trigger_message_id,
+            &job,
             &active_turns,
         )
         .await
@@ -4057,15 +4145,52 @@ async fn process_workspace_agent_job(
     codex_config: &CodexConfig,
     audio_config: &AudioConfig,
     agent_id: &str,
-    conversation: &WorkspaceConversation,
-    trigger_message_id: &str,
+    job: &WorkspaceAgentJob,
     active_turns: &Arc<Mutex<HashMap<String, CodexCancelToken>>>,
 ) -> Result<()> {
     let workspace = WorkspaceStore::open_existing(workspace_path)?;
-    let Some(message) = workspace.message_by_id(trigger_message_id)? else {
+    if let Some(body) = job.ephemeral_body.as_deref() {
+        return match &job.conversation {
+            WorkspaceConversation::Channel(channel_id) => {
+                route_conversation_agents(
+                    &workspace,
+                    messenger,
+                    outbound,
+                    codex_config,
+                    Some(agent_id),
+                    Some(channel_id),
+                    None,
+                    None,
+                    job.reply_parent_id.as_deref(),
+                    body,
+                    &job.mentions,
+                    active_turns,
+                )
+                .await
+            }
+            WorkspaceConversation::Direct(member, peer) => {
+                route_conversation_agents(
+                    &workspace,
+                    messenger,
+                    outbound,
+                    codex_config,
+                    Some(agent_id),
+                    None,
+                    Some(member),
+                    Some(peer),
+                    job.reply_parent_id.as_deref(),
+                    body,
+                    &job.mentions,
+                    active_turns,
+                )
+                .await
+            }
+        };
+    }
+    let Some(message) = workspace.message_by_id(&job.trigger_message_id)? else {
         return Ok(());
     };
-    if !workspace_agent_job_matches_trigger(&message, conversation) {
+    if !workspace_agent_job_matches_trigger(&message, &job.conversation) {
         return Ok(());
     }
     let body =
@@ -4569,6 +4694,57 @@ async fn route_conversation_agents(
             )
             .await?;
         }
+        if is_thread_topic_response(&result.response) {
+            let update = WorkspaceUpdate {
+                action: "message_created".to_string(),
+                revision: workspace.revision()?,
+                channels: vec![],
+                members: vec![],
+                messages: vec![WorkspaceMessagePayload {
+                    id: format!(
+                        "ephemeral-topic-{}-{}",
+                        parent_id.unwrap_or_default(),
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                    ),
+                    channel_id: channel_id.map(str::to_string),
+                    recipient_pubkey: peer.map(str::to_string),
+                    sender_pubkey: format!("agent:{}", agent.id),
+                    body: result.response,
+                    attachments: vec![],
+                    mentions: vec![],
+                    parent_id: parent_id.map(str::to_string),
+                    also_send_to_main: false,
+                    pinned: false,
+                    reactions: vec![],
+                    work_history: vec![],
+                    created_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                }],
+                agents: vec![],
+                conversation_agents: vec![],
+                conversation_preprompts: vec![],
+                typing: None,
+            };
+            let recipients = if let Some(channel_id) = channel_id {
+                workspace
+                    .channel_members(channel_id)?
+                    .into_iter()
+                    .map(|member| member.pubkey)
+                    .collect()
+            } else {
+                vec![
+                    member.unwrap_or_default().to_string(),
+                    peer.unwrap_or_default().to_string(),
+                ]
+            };
+            send_ephemeral_workspace_update(messenger, outbound, recipients, update).await?;
+            continue;
+        }
         let also_send_to_main = parent_id.is_none();
         let mut message = match channel_id {
             Some(channel_id) => workspace.add_channel_message_with_main(
@@ -4619,6 +4795,17 @@ async fn route_conversation_agents(
         flush_workspace_notification_outbox(workspace, messenger, outbound).await;
     }
     Ok(())
+}
+
+fn is_thread_topic_response(response: &str) -> bool {
+    let response = response.trim();
+    let Some(topic) = response
+        .strip_prefix("[[THREAD_TOPIC:")
+        .and_then(|value| value.split_once("]]"))
+    else {
+        return false;
+    };
+    !topic.0.trim().is_empty() && topic.1.trim().is_empty()
 }
 
 fn conversation_scope_prompt(scope: &[String], config: &CodexConfig) -> Result<String> {
@@ -9391,6 +9578,15 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_topic_only_agent_responses() {
+        assert!(is_thread_topic_response("[[THREAD_TOPIC: Deployment]]"));
+        assert!(!is_thread_topic_response(
+            "[[THREAD_TOPIC: Deployment]]\nThe deployment is complete."
+        ));
+        assert!(!is_thread_topic_response("Deployment"));
+    }
+
+    #[test]
     fn parses_active_scope_metrics_from_an_opencode_session_description() {
         let metrics = parse_agent_scope_metrics(
             "Description=opencode run --format json --session ses_abc123\nActiveState=active\nMemoryCurrent=1048576\nCPUUsageNSec=9000\nTasksCurrent=7\nActiveEnterTimestampMonotonic=12000000\n",
@@ -9428,6 +9624,9 @@ mod tests {
                 .send(WorkspaceAgentJob {
                     conversation: WorkspaceConversation::Channel("channel".to_string()),
                     trigger_message_id: index.to_string(),
+                    ephemeral_body: None,
+                    mentions: vec![],
+                    reply_parent_id: None,
                 })
                 .unwrap();
         }

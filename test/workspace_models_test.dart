@@ -140,6 +140,58 @@ void main() {
     );
   });
 
+  test('does not include thread topic control messages in snapshots', () {
+    final state = WorkspaceState();
+    state.apply({
+      'workspace_update': {
+        'action': 'message_created',
+        'messages': [
+          {
+            'id': 'request',
+            'channel_id': 'channel-1',
+            'sender_pubkey': 'owner',
+            'body':
+                '[[THREAD_TOPIC_REQUEST]] Reply only with [[THREAD_TOPIC: one to three words]].',
+            'parent_id': 'root',
+            'created_at': 1,
+          },
+          {
+            'id': 'response',
+            'channel_id': 'channel-1',
+            'sender_pubkey': 'agent:builder',
+            'body': '[[THREAD_TOPIC: Deployment]]',
+            'parent_id': 'root',
+            'created_at': 2,
+          },
+          {
+            'id': 'message',
+            'channel_id': 'channel-1',
+            'sender_pubkey': 'owner',
+            'body': 'Keep this message.',
+            'created_at': 3,
+          },
+        ],
+      },
+    });
+
+    final snapshot = state.toSnapshotJson();
+    expect(snapshot['messages'], [
+      {
+        'id': 'message',
+        'channel_id': 'channel-1',
+        'sender_pubkey': 'owner',
+        'body': 'Keep this message.',
+        'also_send_to_main': false,
+        'pinned': false,
+        'attachments': <Object?>[],
+        'mentions': <Object?>[],
+        'reactions': <Object?>[],
+        'work_history': <Object?>[],
+        'created_at': 3,
+      },
+    ]);
+  });
+
   test('workspace state merges persisted updates without fake records', () {
     final state = WorkspaceState();
     state.apply({
@@ -833,6 +885,33 @@ void main() {
       });
 
     expect(state.agents.single.name, 'Navigator');
+  });
+
+  test('workspace snapshot without agents preserves the agent directory', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'agents': [
+            {'id': 'agent-1', 'name': 'Scout', 'role': 'Researcher'},
+          ],
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'messages': [
+            {
+              'id': 'message-1',
+              'channel_id': 'workspace',
+              'sender_pubkey': 'member',
+              'body': 'Partial relay snapshot',
+            },
+          ],
+        },
+      });
+
+    expect(state.agents.single.name, 'Scout');
   });
 
   test('workspace state applies agent provisioning failures', () {

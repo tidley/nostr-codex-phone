@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `active_session`, `build_ephemeral_fips_session`, `build_fips_call_session`, `build_workspace_fips_client`, `consume_relay_offer`, `fips_call_receive_media`, `fips_call_status`, `fips_group_call_receive_media`, `group_call_key`, `key_pair_from_keys`, `new`, `now_secs`, `prune_expired_relay_state`, `queue`, `take`, `validate_control_frame`, `validate_relay_tunnel`, `workspace_fips_app_envelope`, `workspace_snapshot_send_frame`, `workspace_transport_key`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RealtimeAudioPipeline`, `RelayTunnel`, `WorkspaceFipsClient`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PendingRelaySession`, `RealtimeAudioPipeline`, `RelayTunnel`, `WorkspaceFipsClient`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 List<String> nostrDefaultRelays() =>
@@ -452,6 +452,7 @@ class BridgeBlossomUploadConfig {
   final String secretKey;
   final String serverUrl;
   final String filePath;
+  final Uint8List? fileBytes;
   final String contentType;
   final String? fileName;
 
@@ -459,6 +460,7 @@ class BridgeBlossomUploadConfig {
     required this.secretKey,
     required this.serverUrl,
     required this.filePath,
+    this.fileBytes,
     required this.contentType,
     this.fileName,
   });
@@ -468,6 +470,7 @@ class BridgeBlossomUploadConfig {
       secretKey.hashCode ^
       serverUrl.hashCode ^
       filePath.hashCode ^
+      fileBytes.hashCode ^
       contentType.hashCode ^
       fileName.hashCode;
 
@@ -479,6 +482,7 @@ class BridgeBlossomUploadConfig {
           secretKey == other.secretKey &&
           serverUrl == other.serverUrl &&
           filePath == other.filePath &&
+          fileBytes == other.fileBytes &&
           contentType == other.contentType &&
           fileName == other.fileName;
 }

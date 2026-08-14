@@ -2175,14 +2175,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return BridgeBlossomUploadConfig(
       secretKey: dco_decode_String(arr[0]),
       serverUrl: dco_decode_String(arr[1]),
       filePath: dco_decode_String(arr[2]),
-      contentType: dco_decode_String(arr[3]),
-      fileName: dco_decode_opt_String(arr[4]),
+      fileBytes: dco_decode_opt_list_prim_u_8_strict(arr[3]),
+      contentType: dco_decode_String(arr[4]),
+      fileName: dco_decode_opt_String(arr[5]),
     );
   }
 
@@ -2585,12 +2586,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_secretKey = sse_decode_String(deserializer);
     var var_serverUrl = sse_decode_String(deserializer);
     var var_filePath = sse_decode_String(deserializer);
+    var var_fileBytes = sse_decode_opt_list_prim_u_8_strict(deserializer);
     var var_contentType = sse_decode_String(deserializer);
     var var_fileName = sse_decode_opt_String(deserializer);
     return BridgeBlossomUploadConfig(
       secretKey: var_secretKey,
       serverUrl: var_serverUrl,
       filePath: var_filePath,
+      fileBytes: var_fileBytes,
       contentType: var_contentType,
       fileName: var_fileName,
     );
@@ -3067,6 +3070,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.secretKey, serializer);
     sse_encode_String(self.serverUrl, serializer);
     sse_encode_String(self.filePath, serializer);
+    sse_encode_opt_list_prim_u_8_strict(self.fileBytes, serializer);
     sse_encode_String(self.contentType, serializer);
     sse_encode_opt_String(self.fileName, serializer);
   }

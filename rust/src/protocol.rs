@@ -1566,6 +1566,26 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
         {
             Ok(())
         }
+        "request_thread_topic"
+            if request
+                .parent_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && request
+                    .body
+                    .as_deref()
+                    .is_some_and(|body| !body.trim().is_empty())
+                && (request
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || request
+                        .recipient_pubkey
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty())) =>
+        {
+            Ok(())
+        }
         "toggle_reaction"
             if request
                 .parent_id

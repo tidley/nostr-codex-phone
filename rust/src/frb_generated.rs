@@ -2178,12 +2178,14 @@ impl SseDecode for crate::api::nostr::BridgeBlossomUploadConfig {
         let mut var_secretKey = <String>::sse_decode(deserializer);
         let mut var_serverUrl = <String>::sse_decode(deserializer);
         let mut var_filePath = <String>::sse_decode(deserializer);
+        let mut var_fileBytes = <Option<Vec<u8>>>::sse_decode(deserializer);
         let mut var_contentType = <String>::sse_decode(deserializer);
         let mut var_fileName = <Option<String>>::sse_decode(deserializer);
         return crate::api::nostr::BridgeBlossomUploadConfig {
             secret_key: var_secretKey,
             server_url: var_serverUrl,
             file_path: var_filePath,
+            file_bytes: var_fileBytes,
             content_type: var_contentType,
             file_name: var_fileName,
         };
@@ -2802,6 +2804,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::nostr::BridgeBlossomUploadCon
             self.secret_key.into_into_dart().into_dart(),
             self.server_url.into_into_dart().into_dart(),
             self.file_path.into_into_dart().into_dart(),
+            self.file_bytes.into_into_dart().into_dart(),
             self.content_type.into_into_dart().into_dart(),
             self.file_name.into_into_dart().into_dart(),
         ]
@@ -3097,6 +3100,7 @@ impl SseEncode for crate::api::nostr::BridgeBlossomUploadConfig {
         <String>::sse_encode(self.secret_key, serializer);
         <String>::sse_encode(self.server_url, serializer);
         <String>::sse_encode(self.file_path, serializer);
+        <Option<Vec<u8>>>::sse_encode(self.file_bytes, serializer);
         <String>::sse_encode(self.content_type, serializer);
         <Option<String>>::sse_encode(self.file_name, serializer);
     }
