@@ -1164,6 +1164,32 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                         warn!("failed to persist redeemed workspace member: {err:#}");
                         continue;
                     }
+                    let member_update = WorkspaceUpdate {
+                        action: "members_updated".to_string(),
+                        revision: config.workspace.revision()?,
+                        channels: vec![],
+                        members: config
+                            .workspace
+                            .members()?
+                            .into_iter()
+                            .map(member_payload)
+                            .collect(),
+                        messages: vec![],
+                        agents: vec![],
+                        conversation_agents: vec![],
+                        conversation_preprompts: vec![],
+                        typing: None,
+                    };
+                    if let Err(err) = broadcast_workspace_update(
+                        &config.workspace,
+                        config.messenger.as_ref(),
+                        &workspace_outbound,
+                        &member_update,
+                    )
+                    .await
+                    {
+                        warn!("failed to broadcast redeemed workspace member: {err:#}");
+                    }
                     let _ = config
                         .messenger
                         .send_wire_to_pubkey(
@@ -1813,6 +1839,58 @@ async fn process_workspace_request(
             agent_queues.enqueue_ephemeral_topic_request(workspace, sender, &request)?;
             return Ok(());
         }
+        "set_thread_topic" => {
+            let message = match request.channel_id.as_deref() {
+                Some(channel_id) => workspace.add_channel_message_with_main(
+                    sender,
+                    channel_id,
+                    request.body.as_deref().unwrap_or_default(),
+                    &[],
+                    &[],
+                    request.parent_id.as_deref(),
+                    false,
+                )?,
+                None => workspace.add_direct_message_with_main(
+                    sender,
+                    request.recipient_pubkey.as_deref().unwrap_or_default(),
+                    request.body.as_deref().unwrap_or_default(),
+                    &[],
+                    &[],
+                    request.parent_id.as_deref(),
+                    false,
+                )?,
+            };
+            let update = WorkspaceUpdate {
+                action: "message_created".to_string(),
+                revision: workspace.revision()?,
+                channels: vec![],
+                members: vec![],
+                messages: vec![message_payload(message)],
+                agents: vec![],
+                conversation_agents: vec![],
+                conversation_preprompts: vec![],
+                typing: None,
+            };
+            let recipients = if let Some(channel_id) = request.channel_id.as_deref() {
+                workspace
+                    .channel_members(channel_id)?
+                    .into_iter()
+                    .map(|member| member.pubkey)
+                    .collect()
+            } else {
+                vec![
+                    sender.to_string(),
+                    request
+                        .recipient_pubkey
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_string(),
+                ]
+            };
+            queue_workspace_update(workspace, recipients, &update).await?;
+            flush_workspace_notification_outbox(workspace, messenger, outbound).await;
+            return Ok(());
+        }
         "typing" => {
             let expires_in = request.expires_in_seconds.unwrap_or(4).clamp(1, 30);
             let expires_at = SystemTime::now()
@@ -2062,19 +2140,20 @@ async fn process_workspace_request(
             return Ok(());
         }
         "add_channel_member" => {
+            let channel_id = request.channel_id.as_deref().unwrap_or_default();
             workspace.add_channel_member(
-                request.channel_id.as_deref().unwrap_or_default(),
+                channel_id,
                 request.member_pubkey.as_deref().unwrap_or_default(),
             )?;
-            broadcast_workspace_snapshots(workspace, messenger, outbound).await?;
+            send_channel_members_update(workspace, messenger, outbound, channel_id).await?;
             return Ok(());
         }
         "remove_channel_member" => {
-            workspace.remove_channel_member(
-                request.channel_id.as_deref().unwrap_or_default(),
-                request.member_pubkey.as_deref().unwrap_or_default(),
-            )?;
-            broadcast_workspace_snapshots(workspace, messenger, outbound).await?;
+            let channel_id = request.channel_id.as_deref().unwrap_or_default();
+            let removed_member = request.member_pubkey.as_deref().unwrap_or_default();
+            workspace.remove_channel_member(channel_id, removed_member)?;
+            send_channel_members_update(workspace, messenger, outbound, channel_id).await?;
+            send_workspace_snapshot(workspace, messenger, outbound, removed_member).await?;
             return Ok(());
         }
         "delete_direct_conversation" => {
@@ -2136,6 +2215,7 @@ async fn process_workspace_request(
             send_channel_history(
                 workspace,
                 messenger,
+                outbound,
                 sender,
                 request.channel_id.as_deref().unwrap_or_default(),
             )
@@ -3202,6 +3282,7 @@ fn workspace_snapshot_frames(
 async fn send_channel_history(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
     sender: &str,
     channel_id: &str,
 ) -> Result<()> {
@@ -3241,12 +3322,13 @@ async fn send_channel_history(
             .collect(),
         typing: None,
     };
-    messenger
-        .send_wire_to_pubkey(sender, WireMessage::workspace_update(header))
+    outbound
+        .send(messenger, sender, WireMessage::workspace_update(header))
         .await?;
     for (index, chunk) in message_chunks.into_iter().enumerate() {
-        messenger
-            .send_wire_to_pubkey(
+        outbound
+            .send(
+                messenger,
                 sender,
                 WireMessage::workspace_update(WorkspaceUpdate {
                     action: history_transfer_action(
@@ -3521,28 +3603,34 @@ async fn broadcast_workspace_update(
     Ok(())
 }
 
-async fn send_ephemeral_workspace_update(
+async fn send_channel_members_update(
+    workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
     outbound: &WorkspaceOutbound,
-    recipients: impl IntoIterator<Item = String>,
-    update: WorkspaceUpdate,
+    channel_id: &str,
 ) -> Result<()> {
-    for recipient in recipients {
-        if outbound.has_fips_route(&recipient).await {
-            outbound
-                .send(
-                    messenger,
-                    &recipient,
-                    WireMessage::workspace_update(update.clone()),
-                )
-                .await?;
-            continue;
-        }
-        messenger
-            .send_ephemeral_wire_to(
-                PublicKey::parse(&recipient)?,
+    let channel = workspace
+        .channels()?
+        .into_iter()
+        .find(|channel| channel.id == channel_id)
+        .ok_or_else(|| anyhow!("channel does not exist"))?;
+    let update = WorkspaceUpdate {
+        action: "channel_members_updated".to_string(),
+        revision: workspace.revision()?,
+        channels: vec![channel_payload(workspace, channel)?],
+        members: vec![],
+        messages: vec![],
+        agents: vec![],
+        conversation_agents: vec![],
+        conversation_preprompts: vec![],
+        typing: None,
+    };
+    for member in workspace.channel_members(channel_id)? {
+        outbound
+            .send(
+                messenger,
+                &member.pubkey,
                 WireMessage::workspace_update(update.clone()),
-                Duration::from_secs(30),
             )
             .await?;
     }
@@ -3660,23 +3748,26 @@ async fn run_workspace_agent_with_typing(
     config: &CodexConfig,
     session_id: &str,
     active_turns: &Arc<Mutex<HashMap<String, CodexCancelToken>>>,
+    suppress_typing: bool,
 ) -> Result<CodexRunResult> {
     const TYPING_LEASE: Duration = Duration::from_secs(6);
-    if let Err(err) = send_agent_typing(
-        workspace,
-        messenger,
-        agent,
-        channel_id,
-        member,
-        peer,
-        parent_id,
-        None,
-        Some(TYPING_LEASE),
-        false,
-    )
-    .await
-    {
-        warn!(agent = %agent.id, "failed to send agent typing state: {err:#}");
+    if !suppress_typing {
+        if let Err(err) = send_agent_typing(
+            workspace,
+            messenger,
+            agent,
+            channel_id,
+            member,
+            peer,
+            parent_id,
+            None,
+            Some(TYPING_LEASE),
+            false,
+        )
+        .await
+        {
+            warn!(agent = %agent.id, "failed to send agent typing state: {err:#}");
+        }
     }
     let mut renew = interval(Duration::from_secs(3));
     renew.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -3729,23 +3820,29 @@ async fn run_workspace_agent_with_typing(
                 }
                 stage = Some(next_stage);
                 last_stage_sent = Instant::now();
-                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), false).await {
-                    warn!(agent = %agent.id, "failed to send agent progress state: {err:#}");
+                if !suppress_typing {
+                    if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), false).await {
+                        warn!(agent = %agent.id, "failed to send agent progress state: {err:#}");
+                    }
                 }
             }
             _ = renew.tick() => {
-                if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), false).await {
-                    warn!(agent = %agent.id, "failed to refresh agent typing state: {err:#}");
+                if !suppress_typing {
+                    if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), false).await {
+                        warn!(agent = %agent.id, "failed to refresh agent typing state: {err:#}");
+                    }
                 }
             }
         }
     };
-    if let Err(err) = send_agent_typing(
-        workspace, messenger, agent, channel_id, member, peer, parent_id, None, None, false,
-    )
-    .await
-    {
-        warn!(agent = %agent.id, "failed to clear agent typing state: {err:#}");
+    if !suppress_typing {
+        if let Err(err) = send_agent_typing(
+            workspace, messenger, agent, channel_id, member, peer, parent_id, None, None, false,
+        )
+        .await
+        {
+            warn!(agent = %agent.id, "failed to clear agent typing state: {err:#}");
+        }
     }
     active_turns.lock().await.remove(&agent.id);
     result.map(|mut result| {
@@ -4486,6 +4583,7 @@ async fn route_conversation_agents(
             .unwrap_or_default();
         let thread_context =
             workspace_thread_context(workspace, parent_id, channel_id, member, peer)?;
+        let suppress_typing = body.trim().starts_with("[[THREAD_TOPIC_REQUEST]]");
         let prompt = match conversation_scope_prompt(folder_scope, &agent_config) {
             Ok(scope) => format!(
                 "{}\n\n{}",
@@ -4521,6 +4619,7 @@ async fn route_conversation_agents(
             &agent_config,
             &active_session_id,
             active_turns,
+            suppress_typing,
         )
         .await
         {
@@ -4607,6 +4706,7 @@ async fn route_conversation_agents(
                     &agent_config,
                     &active_session_id,
                     active_turns,
+                    suppress_typing,
                 )
                 .await
                 {
@@ -4651,6 +4751,7 @@ async fn route_conversation_agents(
                 &agent_config,
                 &active_session_id,
                 active_turns,
+                suppress_typing,
             )
             .await
             {
@@ -4695,36 +4796,32 @@ async fn route_conversation_agents(
             .await?;
         }
         if is_thread_topic_response(&result.response) {
+            let message = match channel_id {
+                Some(channel_id) => workspace.add_channel_message_with_main(
+                    &format!("agent:{}", agent.id),
+                    channel_id,
+                    &result.response,
+                    &[],
+                    &[],
+                    parent_id,
+                    false,
+                )?,
+                None => workspace.add_direct_message_with_main(
+                    &format!("agent:{}", agent.id),
+                    peer.unwrap_or_default(),
+                    &result.response,
+                    &[],
+                    &[],
+                    parent_id,
+                    false,
+                )?,
+            };
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
                 revision: workspace.revision()?,
                 channels: vec![],
                 members: vec![],
-                messages: vec![WorkspaceMessagePayload {
-                    id: format!(
-                        "ephemeral-topic-{}-{}",
-                        parent_id.unwrap_or_default(),
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_nanos()
-                    ),
-                    channel_id: channel_id.map(str::to_string),
-                    recipient_pubkey: peer.map(str::to_string),
-                    sender_pubkey: format!("agent:{}", agent.id),
-                    body: result.response,
-                    attachments: vec![],
-                    mentions: vec![],
-                    parent_id: parent_id.map(str::to_string),
-                    also_send_to_main: false,
-                    pinned: false,
-                    reactions: vec![],
-                    work_history: vec![],
-                    created_at: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64,
-                }],
+                messages: vec![message_payload(message)],
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
@@ -4742,7 +4839,8 @@ async fn route_conversation_agents(
                     peer.unwrap_or_default().to_string(),
                 ]
             };
-            send_ephemeral_workspace_update(messenger, outbound, recipients, update).await?;
+            queue_workspace_update(workspace, recipients, &update).await?;
+            flush_workspace_notification_outbox(workspace, messenger, outbound).await;
             continue;
         }
         let also_send_to_main = parent_id.is_none();

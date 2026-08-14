@@ -114,7 +114,7 @@ void main() {
     expect(isWorkspaceEmptyAgentMessage(member), isFalse);
   });
 
-  test('uses an agent topic marker with no more than three words', () {
+  test('uses a saved thread topic marker with no more than three words', () {
     const followUp = WorkspaceMessage(
       id: 'follow-up',
       senderPubkey: 'owner',
@@ -123,9 +123,9 @@ void main() {
       channelId: 'channel-1',
       parentId: 'root',
     );
-    const agentReply = WorkspaceMessage(
+    const savedTopic = WorkspaceMessage(
       id: 'reply',
-      senderPubkey: 'agent:builder',
+      senderPubkey: 'owner',
       body:
           '[[THREAD_TOPIC: Deployment logs review details]]\nI found the issue.',
       createdAt: 3,
@@ -135,12 +135,12 @@ void main() {
 
     expect(workspaceThreadTopic([followUp]), isNull);
     expect(
-      workspaceThreadTopic([followUp, agentReply]),
+      workspaceThreadTopic([followUp, savedTopic]),
       'Deployment logs review',
     );
   });
 
-  test('does not include thread topic control messages in snapshots', () {
+  test('retains thread topic responses in snapshots', () {
     final state = WorkspaceState();
     state.apply({
       'workspace_update': {
@@ -176,6 +176,20 @@ void main() {
 
     final snapshot = state.toSnapshotJson();
     expect(snapshot['messages'], [
+      {
+        'id': 'response',
+        'channel_id': 'channel-1',
+        'sender_pubkey': 'agent:builder',
+        'body': '[[THREAD_TOPIC: Deployment]]',
+        'parent_id': 'root',
+        'also_send_to_main': false,
+        'pinned': false,
+        'attachments': <Object?>[],
+        'mentions': <Object?>[],
+        'reactions': <Object?>[],
+        'work_history': <Object?>[],
+        'created_at': 2,
+      },
       {
         'id': 'message',
         'channel_id': 'channel-1',
@@ -864,6 +878,55 @@ void main() {
       expect(state.messages['workspace']?.single.id, 'local-message');
     },
   );
+
+  test('workspace snapshots retain cached remote thread history', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'message_created',
+          'messages': [
+            {
+              'id': 'thread-root',
+              'channel_id': 'workspace',
+              'sender_pubkey': 'member',
+              'body': 'Older thread root',
+            },
+            {
+              'id': 'thread-reply',
+              'channel_id': 'workspace',
+              'parent_id': 'thread-root',
+              'sender_pubkey': 'member',
+              'body': 'Older thread reply',
+            },
+          ],
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'channels': [
+            {'id': 'workspace', 'name': 'workspace'},
+          ],
+          'messages': [
+            {
+              'id': 'latest-message',
+              'channel_id': 'workspace',
+              'sender_pubkey': 'member',
+              'body': 'Latest snapshot message',
+            },
+          ],
+          'agents': [
+            {'id': 'agent-1', 'name': 'Scout', 'role': 'Researcher'},
+          ],
+        },
+      });
+
+    expect(state.messages['workspace']?.map((message) => message.id), [
+      'thread-root',
+      'thread-reply',
+      'latest-message',
+    ]);
+  });
 
   test('workspace state merges broadcast agent renames', () {
     final state = WorkspaceState()

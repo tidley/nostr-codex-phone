@@ -1178,6 +1178,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     widget.workspaceRevision.addListener(_onWorkspaceRevision);
     _scheduleTypingExpiry(widget.workspace.typing.values);
     unawaited(widget.onRequest({'action': 'list'}));
+    _reloadActiveMessages();
   }
 
   @override
@@ -1712,9 +1713,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   void _requestThreadTopic(WorkspaceMessage thread, {bool automatic = false}) {
     final conversationKey = _conversationKey;
     if (conversationKey == null) return;
+    if ((_threadTopicFor(thread) ?? 'Thread') != 'Thread') return;
     final replies = _threadRepliesFor(thread);
     if (automatic && replies.length < 4) return;
-    if (workspaceThreadTopic(_threadMessagesFor(thread)) != null) return;
     final agentReply = replies.reversed
         .where((message) => isWorkspaceAgentSender(message.senderPubkey))
         .firstOrNull;
@@ -2580,6 +2581,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           'parent_id': message.id,
           'reaction': emoji,
         }),
+        onRequest: widget.onRequest,
         onOpenAttachment: widget.onOpenAttachment,
         onOpenMention: _showAgentDetails,
         ownPubkey: widget.ownPubkey,
@@ -5077,6 +5079,16 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
   String _searchQuery = '';
   String? _visibleHistoryDate;
   final _messageKeys = <String, GlobalKey>{};
+  String? _flashMessageId;
+
+  void _flashMessage(String messageId) {
+    setState(() => _flashMessageId = messageId);
+    Future<void>.delayed(const Duration(milliseconds: 700), () {
+      if (mounted && _flashMessageId == messageId) {
+        setState(() => _flashMessageId = null);
+      }
+    });
+  }
 
   Future<void> _cancelAgentTask(String agentId) async {
     _cancellingAgentIds.add(agentId);
@@ -5396,6 +5408,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
       widget.onOpenMessageReference(message);
       return;
     }
+    _flashMessage(message.id);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final target = _messageKeys[message.id]?.currentContext;
       if (target != null) {
@@ -6027,11 +6040,37 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                               ],
                             ),
                           ),
+                          if (savedMessages.isNotEmpty)
+                            TextButton.icon(
+                              onPressed: () => _showPinnedMessages(
+                                context,
+                                title: 'Saved',
+                                messages: savedMessages,
+                              ),
+                              icon: const Icon(
+                                Icons.bookmark_outline,
+                                size: 18,
+                              ),
+                              label: const Text('Saved'),
+                            ),
                           if (widget.onManageAgents != null)
                             IconButton(
                               onPressed: widget.onManageAgents,
                               icon: const Icon(Icons.person_add_alt_1_outlined),
                               tooltip: 'Manage agents',
+                            ),
+                          if (savedMessages.isNotEmpty)
+                            TextButton.icon(
+                              onPressed: () => _showPinnedMessages(
+                                context,
+                                title: 'Saved',
+                                messages: savedMessages,
+                              ),
+                              icon: const Icon(
+                                Icons.bookmark_outline,
+                                size: 18,
+                              ),
+                              label: const Text('Saved'),
                             ),
                           IconButton(
                             onPressed: _toggleSearch,
@@ -6177,16 +6216,6 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                           ),
                           icon: const Icon(Icons.push_pin_outlined, size: 18),
                           label: const Text('Pins'),
-                        ),
-                      if (savedMessages.isNotEmpty)
-                        OutlinedButton.icon(
-                          onPressed: () => _showPinnedMessages(
-                            context,
-                            title: 'Saved',
-                            messages: savedMessages,
-                          ),
-                          icon: const Icon(Icons.bookmark_outline, size: 18),
-                          label: const Text('Saved'),
                         ),
                     ],
                   ),
@@ -6344,6 +6373,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                                         threadTopic: widget.threadTopics[m.id],
                                         isThreadSource:
                                             widget.thread?.id == m.id,
+                                        flashOutline: _flashMessageId == m.id,
                                         onOpenMessageReference:
                                             _openMessageReference,
                                         onOpenMention: _showMentionDetails,
@@ -6976,6 +7006,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
     this.threadTopic,
     this.showThreadAction = true,
     this.isThreadSource = false,
+    this.flashOutline = false,
     this.searchQuery = '',
     this.showDate = false,
     this.dateFormat = WorkspaceDateFormat.uk,
@@ -7001,6 +7032,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
   final String? threadTopic;
   final bool showThreadAction;
   final bool isThreadSource;
+  final bool flashOutline;
   final String searchQuery;
   final bool showDate;
   final WorkspaceDateFormat dateFormat;
@@ -7061,6 +7093,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
       duration: const Duration(milliseconds: 1400),
     );
     _updateOutlineAnimation();
+    if (widget.flashOutline) _outlineController.forward(from: 0);
     _scheduleTimestampRefresh();
   }
 
@@ -7070,6 +7103,9 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
     if (oldWidget.threadUnreadCount != widget.threadUnreadCount ||
         oldWidget.threadActivityLabel != widget.threadActivityLabel) {
       _updateOutlineAnimation();
+    }
+    if (!oldWidget.flashOutline && widget.flashOutline) {
+      _outlineController.forward(from: 0);
     }
     if (oldWidget.showDate != widget.showDate ||
         oldWidget.message.createdAt != widget.message.createdAt) {
@@ -7340,25 +7376,6 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
             ),
           ),
         if (!widget.groupedWithPrevious) const SizedBox(height: 14),
-        if (widget.message.pinned || widget.isLocallyPinned)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 6),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (widget.message.pinned) const Icon(Icons.push_pin, size: 14),
-                if (widget.message.pinned && widget.isLocallyPinned)
-                  const SizedBox(width: 4),
-                if (widget.isLocallyPinned)
-                  const Icon(Icons.bookmark, size: 14),
-                const SizedBox(width: 5),
-                Text(
-                  widget.message.pinned ? 'Pinned' : 'Pinned for you',
-                  style: Theme.of(context).textTheme.labelSmall,
-                ),
-              ],
-            ),
-          ),
         if (_messageText.isNotEmpty)
           _WorkspaceMessageBody(
             text: _messageText,
@@ -7405,11 +7422,31 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
           ),
       ],
     );
-    final row = Stack(
+    Widget row(double timestampWidth) => Stack(
       children: [
         if (!widget.groupedWithPrevious)
           Positioned(top: 0, left: 0, child: avatar),
         messageContent,
+        if (widget.message.pinned || widget.isLocallyPinned)
+          Positioned(
+            top: 0,
+            right: timestampWidth + 8,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.message.pinned) const Icon(Icons.push_pin, size: 14),
+                if (widget.message.pinned && widget.isLocallyPinned)
+                  const SizedBox(width: 4),
+                if (widget.isLocallyPinned)
+                  const Icon(Icons.bookmark, size: 14),
+                const SizedBox(width: 5),
+                Text(
+                  widget.message.pinned ? 'Pinned' : 'Pinned for you',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+              ],
+            ),
+          ),
         Positioned(
           top: 0,
           right: 0,
@@ -7430,7 +7467,11 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                     minimumSize: const Size(48, 44),
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                   ),
-                  icon: const Icon(Icons.forum_outlined, size: 16),
+                  icon: Icon(
+                    Icons.forum_outlined,
+                    size: 16,
+                    color: widget.threadUnreadCount == 0 ? Colors.white : null,
+                  ),
                   label: Text(
                     '${widget.threadReplyCount} ${widget.threadReplyCount == 1 ? 'reply' : 'replies'}${widget.threadUnreadCount > 0 ? ' · ${widget.threadUnreadCount} new' : ''}',
                     style: widget.threadUnreadCount == 0
@@ -7550,7 +7591,9 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                     animation: _outlineController,
                     builder: (context, child) {
                       final threadIndicator =
-                          widget.isThreadSource || _hasNewThreadReply;
+                          widget.isThreadSource ||
+                          _hasNewThreadReply ||
+                          widget.flashOutline;
                       final primary = Theme.of(context).colorScheme.primary;
                       final bubble = Container(
                         padding: const EdgeInsets.symmetric(
@@ -7580,7 +7623,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                       }
                       return bubble;
                     },
-                    child: row,
+                    child: row(timestampWidth),
                   ),
                   if (_hovered)
                     Positioned(
@@ -8129,7 +8172,7 @@ class _WorkspaceMessageText extends StatelessWidget {
       r'\*\*[^*\r\n]+\*\*',
       r'`[^`\r\n]+`',
       r'\[\[message:([^\]\r\n]+)\]\]',
-      r'(?<!\w)(?:[~\w.-]+/)+[~\w.-]+',
+      r'(?<!\w)/(?:[~\w.-]+/)*[~\w.-]+',
       if (labels.isNotEmpty)
         '(?<!\\w)@(?:${labels.map(RegExp.escape).join('|')})(?![\\w-])',
     ];
@@ -8719,6 +8762,7 @@ class _WorkspaceContext extends StatelessWidget {
     required this.alsoSendToMain,
     required this.onAlsoSendToMainChanged,
     required this.onToggleReaction,
+    required this.onRequest,
     required this.onOpenAttachment,
     required this.onOpenMention,
     required this.ownPubkey,
@@ -8770,6 +8814,7 @@ class _WorkspaceContext extends StatelessWidget {
   final ValueChanged<bool> onAlsoSendToMainChanged;
   final Future<void> Function(WorkspaceMessage message, String emoji)
   onToggleReaction;
+  final Future<void> Function(Map<String, Object?> request) onRequest;
   final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
   final ValueChanged<WorkspaceMention> onOpenMention;
   final String ownPubkey;
@@ -8897,12 +8942,31 @@ class _WorkspaceContext extends StatelessWidget {
       ),
     );
     controller.dispose();
-    if (topic != null) topicOverride.value = topic.trim();
+    final cleaned = topic
+        ?.trim()
+        .replaceAll(RegExp(r'[\[\]\r\n]+'), ' ')
+        .split(RegExp(r'\s+'))
+        .where((word) => word.isNotEmpty)
+        .take(3)
+        .join(' ');
+    if (cleaned == null || cleaned.isEmpty || message == null) return;
+    topicOverride.value = cleaned;
+    unawaited(
+      onRequest({
+        'action': 'set_thread_topic',
+        if (message!.channelId != null) 'channel_id': message!.channelId,
+        if (message!.recipientPubkey != null)
+          'recipient_pubkey': message!.recipientPubkey,
+        'parent_id': message!.id,
+        'body': '[[THREAD_TOPIC: $cleaned]]',
+      }),
+    );
   }
 
   Widget _messageRow(
     WorkspaceMessage message, {
     required bool groupedWithPrevious,
+    bool flashOutline = false,
   }) => _WorkspaceMessageRow(
     message: message,
     authorName: _memberLabel(message.senderPubkey),
@@ -8920,6 +8984,7 @@ class _WorkspaceContext extends StatelessWidget {
     onMessageExpandedChanged: (expanded) =>
         onMessageExpandedChanged(message.id, expanded),
     showThreadAction: false,
+    flashOutline: flashOutline,
     showDate: true,
     dateFormat: dateFormat,
   );
@@ -9074,10 +9139,13 @@ class _WorkspaceContext extends StatelessWidget {
                 child: _ThreadMessageList(
                   message: message!,
                   replies: replies,
-                  messageBuilder: (message, groupedWithPrevious) => _messageRow(
-                    message,
-                    groupedWithPrevious: groupedWithPrevious,
-                  ),
+                  messageBuilder:
+                      (message, groupedWithPrevious, flashOutline) =>
+                          _messageRow(
+                            message,
+                            groupedWithPrevious: groupedWithPrevious,
+                            flashOutline: flashOutline,
+                          ),
                   threadSearch: threadSearch,
                   replyTargetId: replyTargetId,
                   onReplyTargetOpened: onReplyTargetOpened,
@@ -9304,7 +9372,11 @@ class _ThreadMessageList extends StatefulWidget {
 
   final WorkspaceMessage message;
   final List<WorkspaceMessage> replies;
-  final Widget Function(WorkspaceMessage message, bool groupedWithPrevious)
+  final Widget Function(
+    WorkspaceMessage message,
+    bool groupedWithPrevious,
+    bool flashOutline,
+  )
   messageBuilder;
   final _ThreadSearchController threadSearch;
   final String? replyTargetId;
@@ -9318,6 +9390,7 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
   final _scrollController = ScrollController();
   final _messageKeys = <String, GlobalKey>{};
   String? _lastReplyId;
+  String? _flashReplyId;
 
   @override
   void initState() {
@@ -9364,6 +9437,12 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
   }
 
   void _scrollToReply(String replyId) {
+    setState(() => _flashReplyId = replyId);
+    Future<void>.delayed(const Duration(milliseconds: 700), () {
+      if (mounted && _flashReplyId == replyId) {
+        setState(() => _flashReplyId = null);
+      }
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       final target = _messageKeys[replyId]?.currentContext;
@@ -9423,6 +9502,7 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
                       matchingReplies[index],
                       matchingReplies[index - 1],
                     ),
+                matchingReplies[index].id == _flashReplyId,
               ),
             ),
           ),
@@ -9438,7 +9518,7 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
             style: Theme.of(context).textTheme.labelLarge,
           ),
           const SizedBox(height: 16),
-          widget.messageBuilder(widget.message, false),
+          widget.messageBuilder(widget.message, false, false),
         ],
       ],
     );
@@ -11677,7 +11757,7 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
               ? const Color(0xffffb547)
               : theme.colorScheme.error;
           final stateLabel = switch (heartbeat.connectionState) {
-            'active' => 'Connected via FIPS',
+            'active' => 'FIPS connected',
             'connected' => 'FIPS connected',
             'connecting' => 'Connecting',
             'reconnecting' => 'Reconnecting',
@@ -11686,9 +11766,9 @@ class _ClientDiagnosticsPageState extends State<_ClientDiagnosticsPage> {
             _ => 'Disconnected',
           };
           final transportLabel = active
-              ? 'Connected via FIPS'
+              ? 'FIPS connected'
               : connectedToNostr
-              ? 'Connected to Nostr'
+              ? 'Nostr connected'
               : stateLabel;
           final transportDetail = active
               ? liveFor == null
