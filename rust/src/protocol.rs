@@ -1586,6 +1586,28 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
         {
             Ok(())
         }
+        "set_thread_topic"
+            if request
+                .parent_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && request.body.as_deref().is_some_and(|body| {
+                    let topic = body.trim();
+                    topic.starts_with("[[THREAD_TOPIC:")
+                        && topic.ends_with("]]")
+                        && topic.len() <= 96
+                })
+                && (request
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || request
+                        .recipient_pubkey
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty())) =>
+        {
+            Ok(())
+        }
         "toggle_reaction"
             if request
                 .parent_id
@@ -2042,6 +2064,14 @@ mod tests {
         assert!(parsed.to_json().unwrap().contains("parent_id"));
         assert!(parse_wire_message(
             r#"{"workspace_request":{"action":"send_direct_message","body":"missing recipient"}}"#
+        )
+        .is_err());
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"set_thread_topic","channel_id":"c1","parent_id":"p1","body":"[[THREAD_TOPIC: Release checklist]]"}}"#
+        )
+        .is_ok());
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"set_thread_topic","channel_id":"c1","parent_id":"p1","body":"Release checklist"}}"#
         )
         .is_err());
     }

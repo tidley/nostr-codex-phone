@@ -102,7 +102,6 @@ bool isWorkspaceAgentSender(String senderPubkey) =>
 
 String? workspaceThreadTopic(Iterable<WorkspaceMessage> replies) {
   for (final reply in replies.toList().reversed) {
-    if (!isWorkspaceAgentSender(reply.senderPubkey)) continue;
     final match = RegExp(
       r'^\s*\[\[THREAD_TOPIC:\s*([^\]\r\n]+)\]\]',
       caseSensitive: false,
@@ -132,7 +131,6 @@ bool isWorkspaceThreadTopicRequest(WorkspaceMessage message) =>
     message.body.trim().startsWith('[[THREAD_TOPIC_REQUEST]]');
 
 bool isWorkspaceThreadTopicResponse(WorkspaceMessage message) =>
-    isWorkspaceAgentSender(message.senderPubkey) &&
     workspaceDisplayMessageText(message.body).trim().isEmpty &&
     RegExp(
       r'^\s*\[\[THREAD_TOPIC:',
@@ -755,7 +753,7 @@ class WorkspaceState {
     'messages': [
       for (final conversation in messages.values)
         for (final message in conversation)
-          if (!isWorkspaceThreadTopicControlMessage(message)) message.toJson(),
+          if (!isWorkspaceThreadTopicRequest(message)) message.toJson(),
     ],
     'agents': agents.map((agent) => agent.toJson()).toList(growable: false),
     'conversation_agents': conversationAgents
@@ -854,11 +852,11 @@ class WorkspaceState {
                     (message.channelId == null ||
                         currentChannelIds.isEmpty ||
                         currentChannelIds.contains(message.channelId)) &&
-                    (preserveMessagesOnSnapshot ||
-                        isWorkspaceLocalSender(
-                          message.senderPubkey,
-                          localSenderIds,
-                        )),
+                    // Worker snapshots are intentionally bounded per
+                    // conversation, so replacing this cache would discard
+                    // older thread roots and replies that the client already
+                    // loaded on demand.
+                    true,
               )
               .toList(growable: false);
           if (local.isNotEmpty) localMessages[entry.key] = local;
