@@ -98,6 +98,25 @@ class NostrTransportImpl implements NostrTransport {
   }
 
   @override
+  Future<String> sendEphemeralQuery(String query, Duration expiresIn) async {
+    final keys = _keys;
+    if (keys == null) throw StateError('Nostr session is not started');
+    if (query.trim().isEmpty) {
+      throw ArgumentError.value(query, 'query', 'Cannot be empty');
+    }
+    final peer = _peerPubkey;
+    if (peer == null) throw StateError('Peer public key is not configured');
+    final event = await _createDirectMessage(
+      message: query,
+      authorSecretKey: keys.secret,
+      recipientPubkey: peer,
+      expiresAt: DateTime.now().add(expiresIn).millisecondsSinceEpoch ~/ 1000,
+    );
+    _broadcast(['EVENT', event.toMap()]);
+    return event.id;
+  }
+
+  @override
   Future<BridgeIncomingMessage?> nextMessage(Duration timeout) {
     if (_pendingMessages.isNotEmpty) {
       return Future.value(_pendingMessages.removeFirst());
@@ -228,6 +247,7 @@ class NostrTransportImpl implements NostrTransport {
     required String message,
     required String authorSecretKey,
     required String recipientPubkey,
+    int? expiresAt,
   }) async {
     final author = Keys(authorSecretKey);
     // nostr-sdk preserves a rumor's canonical ID while stripping its
@@ -235,9 +255,10 @@ class NostrTransportImpl implements NostrTransport {
     final signedRumor = Event.from(
       kind: DirectMessage.kindDirectMessage,
       content: message,
-      tags: [
-        ['p', recipientPubkey],
-      ],
+        tags: [
+          ['p', recipientPubkey],
+          if (expiresAt != null) ['expiration', '$expiresAt'],
+        ],
       secretKey: author.secret,
     );
     final rumor = signedRumor.toMap()..remove('sig');

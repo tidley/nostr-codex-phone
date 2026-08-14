@@ -91,6 +91,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BridgeFipsCallStatus dco_decode_bridge_fips_call_status(dynamic raw);
 
   @protected
+  BridgeFipsRelayOffer dco_decode_bridge_fips_relay_offer(dynamic raw);
+
+  @protected
   BridgeIncomingMessage dco_decode_bridge_incoming_message(dynamic raw);
 
   @protected
@@ -245,6 +248,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BridgeFipsCallStatus sse_decode_bridge_fips_call_status(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BridgeFipsRelayOffer sse_decode_bridge_fips_relay_offer(
     SseDeserializer deserializer,
   );
 
@@ -434,6 +442,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_bridge_fips_call_status(
     BridgeFipsCallStatus self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bridge_fips_relay_offer(
+    BridgeFipsRelayOffer self,
     SseSerializer serializer,
   );
 

@@ -6,9 +6,9 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `active_session`, `build_fips_call_session`, `build_workspace_fips_client`, `fips_call_receive_media`, `fips_call_status`, `fips_group_call_receive_media`, `group_call_key`, `key_pair_from_keys`, `new`, `queue`, `take`, `validate_control_frame`, `workspace_fips_app_envelope`, `workspace_snapshot_send_frame`, `workspace_transport_key`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RealtimeAudioPipeline`, `WorkspaceFipsClient`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+// These functions are ignored because they are not marked as `pub`: `active_session`, `build_ephemeral_fips_session`, `build_fips_call_session`, `build_workspace_fips_client`, `consume_relay_offer`, `fips_call_receive_media`, `fips_call_status`, `fips_group_call_receive_media`, `group_call_key`, `key_pair_from_keys`, `new`, `now_secs`, `prune_expired_relay_state`, `queue`, `take`, `validate_control_frame`, `validate_relay_tunnel`, `workspace_fips_app_envelope`, `workspace_snapshot_send_frame`, `workspace_transport_key`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RealtimeAudioPipeline`, `RelayTunnel`, `WorkspaceFipsClient`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 List<String> nostrDefaultRelays() =>
     RustLib.instance.api.crateApiNostrNostrDefaultRelays();
@@ -267,6 +267,86 @@ Future<String?> fipsGroupCallReceiveControl({
   timeoutMs: timeoutMs,
 );
 
+/// Creates a private, profile-signed offer for a newly generated ephemeral
+/// tunnel identity. Deliver `signed_offer` only through an authenticated Nostr
+/// DM to another client that has the same profile secret.
+Future<BridgeFipsRelayOffer> fipsRelayRequestOffer({
+  required BridgeFipsCallConfig config,
+  required String deviceName,
+  required List<String> lanEndpoints,
+}) => RustLib.instance.api.crateApiNostrFipsRelayRequestOffer(
+  config: config,
+  deviceName: deviceName,
+  lanEndpoints: lanEndpoints,
+);
+
+/// Verifies a same-profile requester offer, creates a distinct ephemeral relay
+/// identity, and starts its short-lived FIPS acceptor.
+Future<BridgeFipsRelayOffer> fipsRelayAcceptStart({
+  required BridgeFipsCallConfig config,
+  required String requesterOffer,
+  required String deviceName,
+  required List<String> lanEndpoints,
+}) => RustLib.instance.api.crateApiNostrFipsRelayAcceptStart(
+  config: config,
+  requesterOffer: requesterOffer,
+  deviceName: deviceName,
+  lanEndpoints: lanEndpoints,
+);
+
+/// Connects the requester's generated ephemeral key to the authenticated relay
+/// offer. Both offers must be signed by the same profile and share one session.
+Future<BridgeFipsCallStatus> fipsRelayConnect({
+  required BridgeFipsCallConfig config,
+  required String requesterOffer,
+  required String relayOffer,
+}) => RustLib.instance.api.crateApiNostrFipsRelayConnect(
+  config: config,
+  requesterOffer: requesterOffer,
+  relayOffer: relayOffer,
+);
+
+/// Waits for the requesting device to complete the relay tunnel traversal.
+Future<BridgeFipsCallStatus> fipsRelayAcceptComplete({
+  required String tunnelId,
+  required String requesterNpub,
+}) => RustLib.instance.api.crateApiNostrFipsRelayAcceptComplete(
+  tunnelId: tunnelId,
+  requesterNpub: requesterNpub,
+);
+
+/// Sends one bounded opaque relay frame. Relay payloads are deliberately not
+/// parsed here: authorization and session binding happen in the signed offer.
+Future<void> fipsRelaySend({
+  required String tunnelId,
+  required String peerNpub,
+  required String frame,
+}) => RustLib.instance.api.crateApiNostrFipsRelaySend(
+  tunnelId: tunnelId,
+  peerNpub: peerNpub,
+  frame: frame,
+);
+
+/// Receives one opaque relay frame from a peer device.
+Future<String?> fipsRelayReceive({
+  required String tunnelId,
+  required String peerNpub,
+  required BigInt timeoutMs,
+}) => RustLib.instance.api.crateApiNostrFipsRelayReceive(
+  tunnelId: tunnelId,
+  peerNpub: peerNpub,
+  timeoutMs: timeoutMs,
+);
+
+/// Closes a relay tunnel and any pending accept operation.
+Future<void> fipsRelayStop({
+  required String tunnelId,
+  required String peerNpub,
+}) => RustLib.instance.api.crateApiNostrFipsRelayStop(
+  tunnelId: tunnelId,
+  peerNpub: peerNpub,
+);
+
 Future<void> fipsGroupCallSendRealtimeVideo({
   required String callId,
   required String peerNpub,
@@ -468,6 +548,33 @@ class BridgeFipsCallStatus {
           runtimeType == other.runtimeType &&
           state == other.state &&
           maxDatagramBytes == other.maxDatagramBytes;
+}
+
+/// A profile-signed, NIP-17-deliverable relay offer. `signed_offer` must be
+/// delivered privately to another client using the same profile.
+class BridgeFipsRelayOffer {
+  final String sessionId;
+  final String tunnelNpub;
+  final String signedOffer;
+
+  const BridgeFipsRelayOffer({
+    required this.sessionId,
+    required this.tunnelNpub,
+    required this.signedOffer,
+  });
+
+  @override
+  int get hashCode =>
+      sessionId.hashCode ^ tunnelNpub.hashCode ^ signedOffer.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BridgeFipsRelayOffer &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          tunnelNpub == other.tunnelNpub &&
+          signedOffer == other.signedOffer;
 }
 
 class BridgeIncomingMessage {

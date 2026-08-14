@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -516949365;
+  int get rustContentHash => -2056164659;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -187,6 +187,47 @@ abstract class RustLibApi extends BaseApi {
   });
 
   Future<void> crateApiNostrFipsGroupCallStop({required String callId});
+
+  Future<BridgeFipsCallStatus> crateApiNostrFipsRelayAcceptComplete({
+    required String tunnelId,
+    required String requesterNpub,
+  });
+
+  Future<BridgeFipsRelayOffer> crateApiNostrFipsRelayAcceptStart({
+    required BridgeFipsCallConfig config,
+    required String requesterOffer,
+    required String deviceName,
+    required List<String> lanEndpoints,
+  });
+
+  Future<BridgeFipsCallStatus> crateApiNostrFipsRelayConnect({
+    required BridgeFipsCallConfig config,
+    required String requesterOffer,
+    required String relayOffer,
+  });
+
+  Future<String?> crateApiNostrFipsRelayReceive({
+    required String tunnelId,
+    required String peerNpub,
+    required BigInt timeoutMs,
+  });
+
+  Future<BridgeFipsRelayOffer> crateApiNostrFipsRelayRequestOffer({
+    required BridgeFipsCallConfig config,
+    required String deviceName,
+    required List<String> lanEndpoints,
+  });
+
+  Future<void> crateApiNostrFipsRelaySend({
+    required String tunnelId,
+    required String peerNpub,
+    required String frame,
+  });
+
+  Future<void> crateApiNostrFipsRelayStop({
+    required String tunnelId,
+    required String peerNpub,
+  });
 
   Future<void> crateApiNostrFipsWorkspaceSendWire({
     required String workspaceKey,
@@ -1149,6 +1190,261 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<BridgeFipsCallStatus> crateApiNostrFipsRelayAcceptComplete({
+    required String tunnelId,
+    required String requesterNpub,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(tunnelId, serializer);
+          sse_encode_String(requesterNpub, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 27,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_fips_call_status,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsRelayAcceptCompleteConstMeta,
+        argValues: [tunnelId, requesterNpub],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsRelayAcceptCompleteConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_relay_accept_complete",
+        argNames: ["tunnelId", "requesterNpub"],
+      );
+
+  @override
+  Future<BridgeFipsRelayOffer> crateApiNostrFipsRelayAcceptStart({
+    required BridgeFipsCallConfig config,
+    required String requesterOffer,
+    required String deviceName,
+    required List<String> lanEndpoints,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_fips_call_config(config, serializer);
+          sse_encode_String(requesterOffer, serializer);
+          sse_encode_String(deviceName, serializer);
+          sse_encode_list_String(lanEndpoints, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 28,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_fips_relay_offer,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsRelayAcceptStartConstMeta,
+        argValues: [config, requesterOffer, deviceName, lanEndpoints],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsRelayAcceptStartConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_relay_accept_start",
+        argNames: ["config", "requesterOffer", "deviceName", "lanEndpoints"],
+      );
+
+  @override
+  Future<BridgeFipsCallStatus> crateApiNostrFipsRelayConnect({
+    required BridgeFipsCallConfig config,
+    required String requesterOffer,
+    required String relayOffer,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_fips_call_config(config, serializer);
+          sse_encode_String(requesterOffer, serializer);
+          sse_encode_String(relayOffer, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 29,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_fips_call_status,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsRelayConnectConstMeta,
+        argValues: [config, requesterOffer, relayOffer],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsRelayConnectConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_relay_connect",
+        argNames: ["config", "requesterOffer", "relayOffer"],
+      );
+
+  @override
+  Future<String?> crateApiNostrFipsRelayReceive({
+    required String tunnelId,
+    required String peerNpub,
+    required BigInt timeoutMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(tunnelId, serializer);
+          sse_encode_String(peerNpub, serializer);
+          sse_encode_u_64(timeoutMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 30,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsRelayReceiveConstMeta,
+        argValues: [tunnelId, peerNpub, timeoutMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsRelayReceiveConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_relay_receive",
+        argNames: ["tunnelId", "peerNpub", "timeoutMs"],
+      );
+
+  @override
+  Future<BridgeFipsRelayOffer> crateApiNostrFipsRelayRequestOffer({
+    required BridgeFipsCallConfig config,
+    required String deviceName,
+    required List<String> lanEndpoints,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_bridge_fips_call_config(config, serializer);
+          sse_encode_String(deviceName, serializer);
+          sse_encode_list_String(lanEndpoints, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 31,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bridge_fips_relay_offer,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsRelayRequestOfferConstMeta,
+        argValues: [config, deviceName, lanEndpoints],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsRelayRequestOfferConstMeta =>
+      const TaskConstMeta(
+        debugName: "fips_relay_request_offer",
+        argNames: ["config", "deviceName", "lanEndpoints"],
+      );
+
+  @override
+  Future<void> crateApiNostrFipsRelaySend({
+    required String tunnelId,
+    required String peerNpub,
+    required String frame,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(tunnelId, serializer);
+          sse_encode_String(peerNpub, serializer);
+          sse_encode_String(frame, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 32,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsRelaySendConstMeta,
+        argValues: [tunnelId, peerNpub, frame],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsRelaySendConstMeta => const TaskConstMeta(
+    debugName: "fips_relay_send",
+    argNames: ["tunnelId", "peerNpub", "frame"],
+  );
+
+  @override
+  Future<void> crateApiNostrFipsRelayStop({
+    required String tunnelId,
+    required String peerNpub,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(tunnelId, serializer);
+          sse_encode_String(peerNpub, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 33,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNostrFipsRelayStopConstMeta,
+        argValues: [tunnelId, peerNpub],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrFipsRelayStopConstMeta => const TaskConstMeta(
+    debugName: "fips_relay_stop",
+    argNames: ["tunnelId", "peerNpub"],
+  );
+
+  @override
   Future<void> crateApiNostrFipsWorkspaceSendWire({
     required String workspaceKey,
     required String frame,
@@ -1164,7 +1460,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 27,
+            funcId: 34,
             port: port_,
           );
         },
@@ -1203,7 +1499,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 28,
+            funcId: 35,
             port: port_,
           );
         },
@@ -1238,7 +1534,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 29,
+            funcId: 36,
             port: port_,
           );
         },
@@ -1273,7 +1569,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 30,
+            funcId: 37,
             port: port_,
           );
         },
@@ -1306,7 +1602,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 31,
+            funcId: 38,
             port: port_,
           );
         },
@@ -1336,7 +1632,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 32,
+            funcId: 39,
             port: port_,
           );
         },
@@ -1360,7 +1656,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 33)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 40)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_String,
@@ -1388,7 +1684,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 34,
+            funcId: 41,
             port: port_,
           );
         },
@@ -1415,7 +1711,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 35)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 42)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bridge_key_pair,
@@ -1440,7 +1736,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 36,
+            funcId: 43,
             port: port_,
           );
         },
@@ -1470,7 +1766,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 44,
             port: port_,
           );
         },
@@ -1498,7 +1794,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
           sse_encode_String(secretKey, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 38)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 45)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bridge_key_pair,
@@ -1529,7 +1825,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 39,
+            funcId: 46,
             port: port_,
           );
         },
@@ -1561,7 +1857,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 40,
+            funcId: 47,
             port: port_,
           );
         },
@@ -1592,7 +1888,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 41,
+            funcId: 48,
             port: port_,
           );
         },
@@ -1620,7 +1916,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 42,
+            funcId: 49,
             port: port_,
           );
         },
@@ -1648,7 +1944,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 43,
+            funcId: 50,
             port: port_,
           );
         },
@@ -1681,7 +1977,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 44,
+            funcId: 51,
             port: port_,
           );
         },
@@ -1708,7 +2004,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 45,
+            funcId: 52,
             port: port_,
           );
         },
@@ -1736,7 +2032,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 46,
+            funcId: 53,
             port: port_,
           );
         },
@@ -1927,6 +2223,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return BridgeFipsCallStatus(
       state: dco_decode_String(arr[0]),
       maxDatagramBytes: dco_decode_opt_box_autoadd_u_32(arr[1]),
+    );
+  }
+
+  @protected
+  BridgeFipsRelayOffer dco_decode_bridge_fips_relay_offer(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return BridgeFipsRelayOffer(
+      sessionId: dco_decode_String(arr[0]),
+      tunnelNpub: dco_decode_String(arr[1]),
+      signedOffer: dco_decode_String(arr[2]),
     );
   }
 
@@ -2327,6 +2636,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return BridgeFipsCallStatus(
       state: var_state,
       maxDatagramBytes: var_maxDatagramBytes,
+    );
+  }
+
+  @protected
+  BridgeFipsRelayOffer sse_decode_bridge_fips_relay_offer(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_sessionId = sse_decode_String(deserializer);
+    var var_tunnelNpub = sse_decode_String(deserializer);
+    var var_signedOffer = sse_decode_String(deserializer);
+    return BridgeFipsRelayOffer(
+      sessionId: var_sessionId,
+      tunnelNpub: var_tunnelNpub,
+      signedOffer: var_signedOffer,
     );
   }
 
@@ -2777,6 +3101,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.state, serializer);
     sse_encode_opt_box_autoadd_u_32(self.maxDatagramBytes, serializer);
+  }
+
+  @protected
+  void sse_encode_bridge_fips_relay_offer(
+    BridgeFipsRelayOffer self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.sessionId, serializer);
+    sse_encode_String(self.tunnelNpub, serializer);
+    sse_encode_String(self.signedOffer, serializer);
   }
 
   @protected

@@ -22,12 +22,18 @@ class WorkspaceConversationPreference {
   const WorkspaceConversationPreference({
     this.pinned = false,
     this.archived = false,
+    this.muted = false,
   });
 
   final bool pinned;
   final bool archived;
+  final bool muted;
 
-  Map<String, bool> toJson() => {'pinned': pinned, 'archived': archived};
+  Map<String, bool> toJson() => {
+    'pinned': pinned,
+    'archived': archived,
+    'muted': muted,
+  };
 }
 
 Map<String, WorkspaceConversationPreference>
@@ -42,6 +48,7 @@ decodeWorkspaceConversationPreferences(String? raw) {
           entry.key.toString().trim(): WorkspaceConversationPreference(
             pinned: entry.value['pinned'] == true,
             archived: entry.value['archived'] == true,
+            muted: entry.value['muted'] == true,
           ),
     };
   } catch (_) {
@@ -100,7 +107,7 @@ String? workspaceThreadTopic(Iterable<WorkspaceMessage> replies) {
       r'^\s*\[\[THREAD_TOPIC:\s*([^\]\r\n]+)\]\]',
       caseSensitive: false,
     ).firstMatch(reply.body);
-    if (match == null) return null;
+    if (match == null) continue;
     final topic = match
         .group(1)!
         .trim()
@@ -687,6 +694,7 @@ class WorkspaceTyping {
 
 class WorkspaceState {
   static const _maxMessagesPerConversation = 500;
+  static const _typingStopGrace = Duration(seconds: 30);
 
   /// Last worker-authoritative workspace revision applied to this state.
   int revision = 0;
@@ -810,8 +818,10 @@ class WorkspaceState {
     final addedMessages = <WorkspaceMessage>[];
     final isSnapshot = data['action'] == 'snapshot';
     final isSnapshotHeader = data['action'] == 'snapshot_header';
-    final isSnapshotHeaderWithoutMessages =
-        isSnapshot && (data['messages'] as List?)?.isEmpty == true;
+    final isPartialSnapshot =
+        isSnapshot &&
+        ((data['messages'] as List?)?.isEmpty ?? true) &&
+        ((data['agents'] as List?)?.isEmpty ?? true);
     if (isSnapshot) {
       // Large snapshots arrive as an empty header followed by message chunks.
       // Keep visible rows until those chunks arrive, including local rows that
@@ -820,7 +830,7 @@ class WorkspaceState {
       final currentChannelIds = _channels(
         data['channels'],
       ).map((channel) => channel.id).toSet();
-      if (!isSnapshotHeaderWithoutMessages) {
+      if (!isPartialSnapshot) {
         for (final entry in messages.entries) {
           final local = entry.value
               .where(
@@ -843,14 +853,16 @@ class WorkspaceState {
       memberNames.clear();
       memberAdmins.clear();
       memberJoinedAt.clear();
-      if (!isSnapshotHeaderWithoutMessages) {
+      if (!isPartialSnapshot) {
         messages
           ..clear()
           ..addAll(localMessages);
       }
-      agents = [];
-      conversationAgents = [];
-      conversationPreprompts = [];
+      if (!isPartialSnapshot) {
+        agents = [];
+        conversationAgents = [];
+        conversationPreprompts = [];
+      }
       typing.clear();
     }
     final incomingTyping = data['typing'];
@@ -859,11 +871,12 @@ class WorkspaceState {
         Map<String, dynamic>.from(incomingTyping),
       );
       final key = _typingKey(status);
+      final previous = typing[key];
       if (status.senderPubkey.isNotEmpty && status.expiresAt > 0) {
-        final previous = typing[key];
         // FIPS progress and Nostr lease updates can arrive out of order. A
         // generic lease must not erase a newer, useful agent progress stage.
-        if (status.stage == null && previous?.stage != null) {
+        if ((status.stage == null || _isFinishedStep(status.stage)) &&
+            previous?.stage != null) {
           status = WorkspaceTyping(
             senderPubkey: status.senderPubkey,
             agentId: status.agentId,
@@ -878,6 +891,23 @@ class WorkspaceState {
           );
         }
         typing[key] = status;
+      } else if (previous != null) {
+        // A stopped lease can arrive before its final message on another relay
+        // update. Keep the preview until that message replaces it.
+        typing[key] = WorkspaceTyping(
+          senderPubkey: previous.senderPubkey,
+          agentId: previous.agentId,
+          agentName: previous.agentName,
+          stage: previous.stage,
+          channelId: previous.channelId,
+          recipientPubkey: previous.recipientPubkey,
+          memberPubkey: previous.memberPubkey,
+          peerPubkey: previous.peerPubkey,
+          parentId: previous.parentId,
+          expiresAt:
+              DateTime.now().millisecondsSinceEpoch ~/ 1000 +
+              _typingStopGrace.inSeconds,
+        );
       } else {
         typing.remove(key);
       }
@@ -885,7 +915,7 @@ class WorkspaceState {
     final incomingConversationAgents = _conversationAgents(
       data['conversation_agents'],
     );
-    if (isSnapshot ||
+    if ((isSnapshot && !isPartialSnapshot) ||
         isSnapshotHeader ||
         data['action'] == 'agent_created' ||
         data['action'] == 'conversation_agents_updated' ||
@@ -895,13 +925,15 @@ class WorkspaceState {
     final incomingPreprompts = _conversationPreprompts(
       data['conversation_preprompts'],
     );
-    if (isSnapshot ||
+    if ((isSnapshot && !isPartialSnapshot) ||
         isSnapshotHeader ||
         data['action'] == 'conversation_preprompt_updated') {
       conversationPreprompts = incomingPreprompts;
     }
     final incomingAgents = _agents(data['agents']);
-    if (isSnapshot || isSnapshotHeader || data['action'] == 'agent_deleted') {
+    if ((isSnapshot && !isPartialSnapshot) ||
+        (isSnapshotHeader && incomingAgents.isNotEmpty) ||
+        data['action'] == 'agent_deleted') {
       agents = incomingAgents;
     } else if (incomingAgents.isNotEmpty) {
       final byId = {for (final agent in agents) agent.id: agent};
@@ -972,6 +1004,11 @@ class WorkspaceState {
     }
     return addedMessages;
   }
+
+  static bool _isFinishedStep(String? stage) => RegExp(
+    r'\bfinished a step\.?$',
+    caseSensitive: false,
+  ).hasMatch(stage?.trim() ?? '');
 
   static String directKey(String one, String? two) => _directKey(one, two);
   String conversationKeyForMessage(WorkspaceMessage message) =>

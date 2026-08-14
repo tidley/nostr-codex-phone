@@ -23,6 +23,13 @@ class NostrTransportImpl implements NostrTransport {
   Future<String> sendQuery(String query) => nostrSendQuery(query: query);
 
   @override
+  Future<String> sendEphemeralQuery(String query, Duration expiresIn) =>
+      nostrSendEphemeralQuery(
+        query: query,
+        expiresInSeconds: BigInt.from(expiresIn.inSeconds),
+      );
+
+  @override
   Future<BridgeIncomingMessage?> nextMessage(Duration timeout) =>
       nostrNextMessage(timeoutMs: BigInt.from(timeout.inMilliseconds));
 

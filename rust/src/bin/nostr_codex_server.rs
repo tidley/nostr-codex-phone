@@ -1772,7 +1772,8 @@ async fn process_workspace_request(
                     sender_pubkey: sender.to_string(),
                     agent_id: None,
                     agent_name: None,
-                    stage: None,
+                    // Draft text stays in this expiring encrypted update only.
+                    stage: request.body.clone(),
                     channel_id: request.channel_id.clone(),
                     recipient_pubkey: request.recipient_pubkey.clone(),
                     member_pubkey: None,
@@ -1786,24 +1787,40 @@ async fn process_workspace_request(
                     workspace.channel_members(request.channel_id.as_deref().unwrap_or_default())?
                 {
                     if member.pubkey != sender {
-                        messenger
-                            .send_ephemeral_wire_to(
-                                PublicKey::parse(&member.pubkey)?,
-                                WireMessage::workspace_update(update.clone()),
-                                Duration::from_secs(expires_in),
-                            )
-                            .await?;
+                        if outbound.has_fips_route(&member.pubkey).await {
+                            outbound
+                                .send(
+                                    messenger,
+                                    &member.pubkey,
+                                    WireMessage::workspace_update(update.clone()),
+                                )
+                                .await?;
+                        } else {
+                            messenger
+                                .send_ephemeral_wire_to(
+                                    PublicKey::parse(&member.pubkey)?,
+                                    WireMessage::workspace_update(update.clone()),
+                                    Duration::from_secs(expires_in),
+                                )
+                                .await?;
+                        }
                     }
                 }
             } else {
                 let recipient = request.recipient_pubkey.as_deref().unwrap_or_default();
-                messenger
-                    .send_ephemeral_wire_to(
-                        PublicKey::parse(recipient)?,
-                        WireMessage::workspace_update(update),
-                        Duration::from_secs(expires_in),
-                    )
-                    .await?;
+                if outbound.has_fips_route(recipient).await {
+                    outbound
+                        .send(messenger, recipient, WireMessage::workspace_update(update))
+                        .await?;
+                } else {
+                    messenger
+                        .send_ephemeral_wire_to(
+                            PublicKey::parse(recipient)?,
+                            WireMessage::workspace_update(update),
+                            Duration::from_secs(expires_in),
+                        )
+                        .await?;
+                }
             }
             return Ok(());
         }
@@ -4646,6 +4663,10 @@ fn conversation_agent_session_prompt(preprompt: &str, scope: &str) -> String {
     }
     if !scope.is_empty() {
         sections.push(scope.to_string());
+    } else {
+        sections.push(
+            "Use your configured working directory for this conversation. This is execution context only: do not reply with a workspace path, fallback workspace status, or setup confirmation. Answer the user's message.".to_string(),
+        );
     }
     sections.join("\n\n")
 }
