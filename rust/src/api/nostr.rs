@@ -2,16 +2,17 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use fips_client::{call_status, clean_endpoints, FipsClientConfig};
 use fips_mobile::{
     fips_application_service_frames, FipsApplicationEnvelope, FipsApplicationFrameAssembler,
-    FipsMobileClient, FipsMobileQuicSession,
+    FipsMobileClient, FipsMobileQuicSession, FipsMobileQuicSessionConfig,
 };
 use nostr_sdk::prelude::*;
 use once_cell::sync::Lazy;
 use tokio::sync::{oneshot, Mutex};
 
+use crate::api::fips_relay::{create_offer, new_session_id, verify_offer};
 use crate::blossom::{download_attachment, upload_audio, BlossomUploadConfig};
 use crate::nostr_client::{default_relays, IncomingMessage, NostrConfig, NostrMessenger};
 use crate::protocol::{parse_wire_message, AudioEncryption, AudioReference, MediaReference};
@@ -36,8 +37,28 @@ static GROUP_CALL_AUDIO: Lazy<Mutex<HashMap<String, RealtimeAudioPipeline>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static GROUP_CALL_ACCEPT_CANCEL: Lazy<Mutex<HashMap<String, oneshot::Sender<()>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+static RELAY_TUNNELS: Lazy<Mutex<HashMap<String, RelayTunnel>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static RELAY_ACCEPT_CANCEL: Lazy<Mutex<HashMap<String, oneshot::Sender<()>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static RELAY_PENDING: Lazy<Mutex<HashMap<String, PendingRelaySession>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static RELAY_USED_OFFERS: Lazy<Mutex<HashMap<String, u64>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 const WORKSPACE_FIPS_SERVICE_PORT: u16 = 49_160;
+const MAX_RELAY_SESSIONS: usize = 128;
+
+struct RelayTunnel {
+    session: FipsMobileQuicSession,
+    peer_npub: String,
+    expires_at: u64,
+}
+
+struct PendingRelaySession {
+    session: FipsMobileQuicSession,
+    expires_at: u64,
+}
 
 // This client carries both the legacy snapshot envelopes and future app envelopes.
 // The public snapshot bridge names remain stable for the current Flutter client.
@@ -119,6 +140,15 @@ pub struct BridgeFipsCallConfig {
 pub struct BridgeFipsCallStatus {
     pub state: String,
     pub max_datagram_bytes: Option<u32>,
+}
+
+/// A profile-signed, NIP-17-deliverable relay offer. `signed_offer` must be
+/// delivered privately to another client using the same profile.
+#[derive(Debug, Clone)]
+pub struct BridgeFipsRelayOffer {
+    pub session_id: String,
+    pub tunnel_npub: String,
+    pub signed_offer: String,
 }
 
 #[derive(Debug, Clone)]
@@ -889,6 +919,231 @@ pub async fn fips_group_call_receive_control(
     }
 }
 
+/// Creates a private, profile-signed offer for a newly generated ephemeral
+/// tunnel identity. Deliver `signed_offer` only through an authenticated Nostr
+/// DM to another client that has the same profile secret.
+pub async fn fips_relay_request_offer(
+    config: BridgeFipsCallConfig,
+    device_name: String,
+    lan_endpoints: Vec<String>,
+) -> Result<BridgeFipsRelayOffer> {
+    prune_expired_relay_state().await;
+    let session_id = new_session_id();
+    let session = build_ephemeral_fips_session(&config)?;
+    let tunnel_npub = session.npub();
+    let offer = create_offer(
+        &config.secret_key,
+        &session_id,
+        "requester",
+        &tunnel_npub,
+        None,
+        None,
+        &device_name,
+        &lan_endpoints,
+    )?;
+    let mut pending = RELAY_PENDING.lock().await;
+    if pending.len() >= MAX_RELAY_SESSIONS {
+        bail!("too many pending FIPS relay sessions");
+    }
+    pending.insert(
+        session_id.clone(),
+        PendingRelaySession {
+            session,
+            expires_at: offer.expires_at,
+        },
+    );
+    Ok(BridgeFipsRelayOffer {
+        session_id,
+        tunnel_npub,
+        signed_offer: offer.signed_offer,
+    })
+}
+
+/// Verifies a same-profile requester offer, creates a distinct ephemeral relay
+/// identity, and starts its short-lived FIPS acceptor.
+pub async fn fips_relay_accept_start(
+    config: BridgeFipsCallConfig,
+    requester_offer: String,
+    device_name: String,
+    lan_endpoints: Vec<String>,
+) -> Result<BridgeFipsRelayOffer> {
+    prune_expired_relay_state().await;
+    let requester = verify_offer(&requester_offer, &config.secret_key, "requester")?;
+    consume_relay_offer(&requester_offer, requester.expires_at).await?;
+    let mut session = build_ephemeral_fips_session(&config)?;
+    let tunnel_npub = session.npub();
+    let offer = create_offer(
+        &config.secret_key,
+        &requester.session_id,
+        "relay",
+        &tunnel_npub,
+        Some(&requester.tunnel_npub),
+        Some(requester.expires_at),
+        &device_name,
+        &lan_endpoints,
+    )?;
+    session.start_accept().await?;
+    let key = group_call_key(&requester.session_id, &requester.tunnel_npub)?;
+    let mut tunnels = RELAY_TUNNELS.lock().await;
+    if tunnels.len() >= MAX_RELAY_SESSIONS {
+        let _ = session.stop().await;
+        bail!("too many active FIPS relay sessions");
+    }
+    tunnels.insert(
+        key,
+        RelayTunnel {
+            session,
+            peer_npub: requester.tunnel_npub,
+            expires_at: requester.expires_at,
+        },
+    );
+    Ok(BridgeFipsRelayOffer {
+        session_id: requester.session_id,
+        tunnel_npub,
+        signed_offer: offer.signed_offer,
+    })
+}
+
+/// Connects the requester's generated ephemeral key to the authenticated relay
+/// offer. Both offers must be signed by the same profile and share one session.
+pub async fn fips_relay_connect(
+    config: BridgeFipsCallConfig,
+    requester_offer: String,
+    relay_offer: String,
+) -> Result<BridgeFipsCallStatus> {
+    prune_expired_relay_state().await;
+    let requester = verify_offer(&requester_offer, &config.secret_key, "requester")?;
+    let relay = verify_offer(&relay_offer, &config.secret_key, "relay")?;
+    if requester.session_id != relay.session_id {
+        bail!("relay offers do not bind the same session");
+    }
+    if relay.peer_tunnel_npub.as_deref() != Some(requester.tunnel_npub.as_str()) {
+        bail!("relay offer does not bind the requester ephemeral identity");
+    }
+    if relay.expires_at != requester.expires_at {
+        bail!("relay offers do not have the same expiration");
+    }
+    consume_relay_offer(&relay_offer, relay.expires_at).await?;
+    let pending = RELAY_PENDING
+        .lock()
+        .await
+        .remove(&requester.session_id)
+        .ok_or_else(|| anyhow!("relay requester offer is unknown or already used"))?;
+    let mut session = pending.session;
+    if session.npub() != requester.tunnel_npub {
+        let _ = session.stop().await;
+        bail!("relay requester offer does not match its ephemeral identity");
+    }
+    if pending.expires_at != requester.expires_at || now_secs() >= requester.expires_at {
+        let _ = session.stop().await;
+        bail!("relay offer is expired");
+    }
+    if let Err(error) = session.connect(&relay.tunnel_npub).await {
+        let _ = session.stop().await;
+        return Err(error.into());
+    }
+    let status = fips_call_status(&session);
+    let key = group_call_key(&requester.session_id, &relay.tunnel_npub)?;
+    let mut tunnels = RELAY_TUNNELS.lock().await;
+    if tunnels.len() >= MAX_RELAY_SESSIONS {
+        let _ = session.stop().await;
+        bail!("too many active FIPS relay sessions");
+    }
+    tunnels.insert(
+        key,
+        RelayTunnel {
+            session,
+            peer_npub: relay.tunnel_npub,
+            expires_at: requester.expires_at,
+        },
+    );
+    Ok(status)
+}
+
+/// Waits for the requesting device to complete the relay tunnel traversal.
+pub async fn fips_relay_accept_complete(
+    tunnel_id: String,
+    requester_npub: String,
+) -> Result<BridgeFipsCallStatus> {
+    prune_expired_relay_state().await;
+    let key = group_call_key(&tunnel_id, &requester_npub)?;
+    let (cancel, cancelled) = oneshot::channel();
+    RELAY_ACCEPT_CANCEL.lock().await.insert(key.clone(), cancel);
+    let mut tunnel = RELAY_TUNNELS
+        .lock()
+        .await
+        .remove(&key)
+        .ok_or_else(|| anyhow!("FIPS relay acceptance is not started"))?;
+    validate_relay_tunnel(&tunnel, &requester_npub)?;
+    let result = tokio::select! {
+        result = tunnel.session.accept() => result.map_err(anyhow::Error::from),
+        _ = cancelled => Err(anyhow!("FIPS relay acceptance cancelled")),
+    };
+    RELAY_ACCEPT_CANCEL.lock().await.remove(&key);
+    match result {
+        Ok(()) => {
+            let status = fips_call_status(&tunnel.session);
+            RELAY_TUNNELS.lock().await.insert(key, tunnel);
+            Ok(status)
+        }
+        Err(error) => {
+            let _ = tunnel.session.stop().await;
+            Err(error)
+        }
+    }
+}
+
+/// Sends one bounded opaque relay frame. Relay payloads are deliberately not
+/// parsed here: authorization and session binding happen in the signed offer.
+pub async fn fips_relay_send(tunnel_id: String, peer_npub: String, frame: String) -> Result<()> {
+    prune_expired_relay_state().await;
+    validate_control_frame(&frame)?;
+    let key = group_call_key(&tunnel_id, &peer_npub)?;
+    let mut tunnels = RELAY_TUNNELS.lock().await;
+    let tunnel = tunnels
+        .get_mut(&key)
+        .ok_or_else(|| anyhow!("FIPS relay tunnel is not active"))?;
+    validate_relay_tunnel(tunnel, &peer_npub)?;
+    tunnel.session.send(frame.as_bytes()).await?;
+    Ok(())
+}
+
+/// Receives one opaque relay frame from a peer device.
+pub async fn fips_relay_receive(
+    tunnel_id: String,
+    peer_npub: String,
+    timeout_ms: u64,
+) -> Result<Option<String>> {
+    prune_expired_relay_state().await;
+    let key = group_call_key(&tunnel_id, &peer_npub)?;
+    let mut tunnels = RELAY_TUNNELS.lock().await;
+    let tunnel = tunnels
+        .get_mut(&key)
+        .ok_or_else(|| anyhow!("FIPS relay tunnel is not active"))?;
+    validate_relay_tunnel(tunnel, &peer_npub)?;
+    let frame = tokio::time::timeout(
+        Duration::from_millis(timeout_ms.clamp(1, 5_000)),
+        tunnel.session.receive(),
+    )
+    .await;
+    match frame {
+        Ok(frame) => String::from_utf8(frame?).map(Some).map_err(Into::into),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Closes a relay tunnel and any pending accept operation.
+pub async fn fips_relay_stop(tunnel_id: String, peer_npub: String) -> Result<()> {
+    let key = group_call_key(&tunnel_id, &peer_npub)?;
+    if let Some(cancel) = RELAY_ACCEPT_CANCEL.lock().await.remove(&key) {
+        let _ = cancel.send(());
+    }
+    if let Some(mut tunnel) = RELAY_TUNNELS.lock().await.remove(&key) {
+        tunnel.session.stop().await?;
+    }
+    Ok(())
+}
+
 pub async fn fips_group_call_send_realtime_video(
     call_id: String,
     peer_npub: String,
@@ -993,6 +1248,86 @@ fn build_fips_call_session(config: BridgeFipsCallConfig) -> Result<FipsMobileQui
     FipsClientConfig::from(config).quic_session()
 }
 
+fn build_ephemeral_fips_session(config: &BridgeFipsCallConfig) -> Result<FipsMobileQuicSession> {
+    // The profile key signs authorization offers only. A tunnel always uses a
+    // new identity so it cannot replace or collide with the profile's FIPS node.
+    let identity = fips_mobile::Identity::generate();
+    let mut session_config = FipsMobileQuicSessionConfig::default();
+    let relays = clean_endpoints(&config.relays);
+    if !relays.is_empty() {
+        session_config.discovery.advert_relays = relays.clone();
+        session_config.discovery.dm_relays = relays;
+    }
+    let stun_servers = clean_endpoints(&config.stun_servers);
+    if !stun_servers.is_empty() {
+        session_config.discovery.stun_servers = stun_servers;
+    }
+    Ok(FipsMobileQuicSession::new(identity, session_config))
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn validate_relay_tunnel(tunnel: &RelayTunnel, peer_npub: &str) -> Result<()> {
+    if now_secs() >= tunnel.expires_at {
+        bail!("relay tunnel has expired");
+    }
+    if PublicKey::parse(peer_npub.trim())?.to_bech32()? != tunnel.peer_npub {
+        bail!("relay peer does not match the authorized ephemeral identity");
+    }
+    Ok(())
+}
+
+async fn consume_relay_offer(signed_offer: &str, expires_at: u64) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let fingerprint = format!("{:x}", Sha256::digest(signed_offer.as_bytes()));
+    let now = now_secs();
+    let mut used = RELAY_USED_OFFERS.lock().await;
+    used.retain(|_, expiry| *expiry > now);
+    if used.len() >= 128 {
+        bail!("relay offer replay registry is full");
+    }
+    if used.insert(fingerprint, expires_at).is_some() {
+        bail!("relay offer was already used");
+    }
+    Ok(())
+}
+
+async fn prune_expired_relay_state() {
+    let now = now_secs();
+    let expired_pending = {
+        let mut pending = RELAY_PENDING.lock().await;
+        let keys = pending
+            .iter()
+            .filter_map(|(key, pending)| (pending.expires_at <= now).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .filter_map(|key| pending.remove(&key))
+            .collect::<Vec<_>>()
+    };
+    for mut pending in expired_pending {
+        let _ = pending.session.stop().await;
+    }
+    let expired = {
+        let mut tunnels = RELAY_TUNNELS.lock().await;
+        let keys = tunnels
+            .iter()
+            .filter_map(|(key, tunnel)| (tunnel.expires_at <= now).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .filter_map(|key| tunnels.remove(&key))
+            .collect::<Vec<_>>()
+    };
+    for mut tunnel in expired {
+        let _ = tunnel.session.stop().await;
+    }
+}
+
 async fn build_workspace_fips_client(config: BridgeFipsCallConfig) -> Result<FipsMobileClient> {
     FipsClientConfig::from(config)
         .application_client(WORKSPACE_FIPS_SERVICE_PORT, 128)
@@ -1039,6 +1374,7 @@ mod tests {
     use fips_mobile::{FipsMobileQuicSessionConfig, Identity};
 
     static CALL_SLOT_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+    static RELAY_STATE_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[tokio::test]
     async fn stopping_a_call_cancels_pending_acceptance() {
@@ -1102,6 +1438,88 @@ mod tests {
         assert!(validate_control_frame("{\"type\":\"hangup\"}").is_ok());
         assert!(validate_control_frame("").is_err());
         assert!(validate_control_frame(&"x".repeat(16 * 1024 + 1)).is_err());
+    }
+
+    #[tokio::test]
+    async fn relay_offers_are_single_use() {
+        let _guard = RELAY_STATE_TEST_LOCK.lock().await;
+        let offer = "signed-offer";
+        let expiry = now_secs() + 60;
+        consume_relay_offer(offer, expiry).await.unwrap();
+        assert!(consume_relay_offer(offer, expiry).await.is_err());
+        RELAY_USED_OFFERS.lock().await.clear();
+    }
+
+    #[tokio::test]
+    async fn expired_relay_sessions_are_stopped_and_removed() {
+        let _guard = RELAY_STATE_TEST_LOCK.lock().await;
+        let expired_at = now_secs().saturating_sub(1);
+        let pending_id = new_session_id();
+        let peer = Identity::generate();
+        let peer_npub = peer.npub();
+        let tunnel_key = group_call_key(&new_session_id(), &peer_npub).unwrap();
+
+        RELAY_PENDING.lock().await.insert(
+            pending_id.clone(),
+            PendingRelaySession {
+                session: FipsMobileQuicSession::new(
+                    Identity::generate(),
+                    FipsMobileQuicSessionConfig::default(),
+                ),
+                expires_at: expired_at,
+            },
+        );
+        RELAY_TUNNELS.lock().await.insert(
+            tunnel_key.clone(),
+            RelayTunnel {
+                session: FipsMobileQuicSession::new(
+                    Identity::generate(),
+                    FipsMobileQuicSessionConfig::default(),
+                ),
+                peer_npub,
+                expires_at: expired_at,
+            },
+        );
+
+        prune_expired_relay_state().await;
+
+        assert!(!RELAY_PENDING.lock().await.contains_key(&pending_id));
+        assert!(!RELAY_TUNNELS.lock().await.contains_key(&tunnel_key));
+    }
+
+    #[tokio::test]
+    async fn relay_request_refuses_a_full_pending_registry() {
+        let _guard = RELAY_STATE_TEST_LOCK.lock().await;
+        let expires_at = now_secs() + 60;
+        let mut pending = RELAY_PENDING.lock().await;
+        pending.clear();
+        for _ in 0..MAX_RELAY_SESSIONS {
+            pending.insert(
+                new_session_id(),
+                PendingRelaySession {
+                    session: FipsMobileQuicSession::new(
+                        Identity::generate(),
+                        FipsMobileQuicSessionConfig::default(),
+                    ),
+                    expires_at,
+                },
+            );
+        }
+        drop(pending);
+
+        let result = fips_relay_request_offer(
+            BridgeFipsCallConfig {
+                secret_key: Keys::generate().secret_key().to_bech32().unwrap(),
+                relays: vec![],
+                stun_servers: vec![],
+            },
+            "Phone".to_string(),
+            vec![],
+        )
+        .await;
+
+        assert!(result.unwrap_err().to_string().contains("too many pending"));
+        RELAY_PENDING.lock().await.clear();
     }
 }
 

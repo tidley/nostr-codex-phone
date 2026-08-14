@@ -195,8 +195,18 @@ void main() {
 
       expect(state.memberAdmins, {'member'});
       expect(state.toSnapshotJson()['members'], [
-        {'pubkey': 'owner', 'display_name': '', 'is_admin': false},
-        {'pubkey': 'member', 'display_name': 'Member', 'is_admin': true},
+        {
+          'pubkey': 'owner',
+          'display_name': '',
+          'is_admin': false,
+          'joined_at': 0,
+        },
+        {
+          'pubkey': 'member',
+          'display_name': 'Member',
+          'is_admin': true,
+          'joined_at': 0,
+        },
       ]);
 
       state.apply({
@@ -1013,7 +1023,7 @@ void main() {
   });
 
   test(
-    'agent activity has an identity, stage, matches both DM participants, and clears',
+    'agent activity has an identity, stage, matches both DM participants, and fades',
     () {
       final state = WorkspaceState()
         ..apply({
@@ -1056,12 +1066,22 @@ void main() {
           },
         },
       });
+      final nowSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       expect(
         state.activeTyping(
           channelId: null,
           ownPubkey: 'alice',
           peerPubkey: 'bob',
-          nowSeconds: 199,
+          nowSeconds: nowSeconds,
+        ),
+        hasLength(1),
+      );
+      expect(
+        state.activeTyping(
+          channelId: null,
+          ownPubkey: 'alice',
+          peerPubkey: 'bob',
+          nowSeconds: nowSeconds + 31,
         ),
         isEmpty,
       );

@@ -11,6 +11,7 @@ abstract class NostrTransport {
   Future<BridgeSessionStatus> start(BridgeNostrConfig config);
   Future<void> stop();
   Future<String> sendQuery(String query);
+  Future<String> sendEphemeralQuery(String query, Duration expiresIn);
   Future<BridgeIncomingMessage?> nextMessage(Duration timeout);
   Future<List<BridgeIncomingMessage>> fetchRecentMessages(Duration lookback);
 }

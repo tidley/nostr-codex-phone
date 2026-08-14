@@ -235,6 +235,16 @@ enum _RelayProbeStrength { strong, fair, weak, offline }
 
 enum AppTheme { mint, ember }
 
+enum WorkspaceDateFormat {
+  uk('uk', 'British (31/7/2026)'),
+  us('us', 'US (7/31/2026)');
+
+  const WorkspaceDateFormat(this.storageValue, this.label);
+
+  final String storageValue;
+  final String label;
+}
+
 extension on AppTheme {
   String get storageValue => name;
 
@@ -578,6 +588,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _inactiveReplyPopupStorageKey = 'inactive_reply_popup_enabled';
   static const _inactiveReplyAudioStorageKey = 'inactive_reply_audio_enabled';
   static const _backgroundDeliveryStorageKey = 'background_delivery_enabled';
+  static const _dateFormatStorageKey = 'date_format';
   static const _conversationHistoryStorageKey = 'conversation_history_v1';
   static const _seenIncomingEventIdsStorageKey = 'seen_incoming_event_ids_v1';
   static const _unreadCountsStorageKey = 'unread_counts_v1';
@@ -622,6 +633,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _inactiveReplyPopupStorageKey,
     _inactiveReplyAudioStorageKey,
     _backgroundDeliveryStorageKey,
+    _dateFormatStorageKey,
     _conversationHistoryStorageKey,
     _seenIncomingEventIdsStorageKey,
     _unreadCountsStorageKey,
@@ -697,7 +709,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _workspaceFilePreview = ValueNotifier<FileContentResult?>(null);
   Completer<List<_OpenCodeModelChoice>>? _pendingOpenCodeModelListCompleter;
   final _completedVoiceEventIds = <String>{};
-  Completer<List<RepoChoice>>? _pendingRepoListCompleter;
+  final _pendingRepoListCompleters = <String, Completer<List<RepoChoice>>>{};
   _PendingSessionStart? _pendingSessionStart;
   List<RepoChoice> _cachedRepoChoices = const [];
   bool _autoSpeak = true;
@@ -743,6 +755,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   MediaSelection? _pendingMediaAttachment;
   String? _pendingMediaFileName;
   bool _showTeamWorkspace = true;
+  var _dateFormat = WorkspaceDateFormat.uk;
   String? _workspaceInviteCode;
   Timer? _workspaceInviteTimer;
   String _workspaceMemberStatus = 'Not yet confirmed';
@@ -776,6 +789,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   _workspaceConversationPreferences = {};
   Set<String> _workspaceLocalMessagePins = {};
   final Map<String, Map<String, bool>> _workspaceSidebarSections = {};
+  final _workspaceConversationDrafts = <String, Map<String, _WorkspaceDraft>>{};
+  final _workspaceThreadDrafts = <String, Map<String, _WorkspaceDraft>>{};
 
   bool get _hasPendingMediaAttachment => _pendingMediaAttachment != null;
 
@@ -1125,6 +1140,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final backgroundDelivery = await _storage.read(
       key: _backgroundDeliveryStorageKey,
     );
+    final dateFormat = await _storage.read(key: _dateFormatStorageKey);
     final seenEventIds = await _storage.read(
       key: _seenIncomingEventIdsStorageKey,
     );
@@ -1280,6 +1296,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       // the already authenticated Nostr route until a web transport exists.
       _workspaceFipsEnabled.value =
           !kIsWeb && _storedBool(workspaceFipsEnabled, true);
+      _dateFormat = dateFormat == 'us'
+          ? WorkspaceDateFormat.us
+          : WorkspaceDateFormat.uk;
       _loadingSettings = false;
     });
     await _loadConversationHistoryForActiveSession();
@@ -1370,6 +1389,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _storage.write(
       key: _autoSpeakStorageKey,
       value: _autoSpeak.toString(),
+    );
+    await _storage.write(
+      key: _dateFormatStorageKey,
+      value: _dateFormat.storageValue,
     );
     await _saveWorkingAnimationStyle();
     await _saveRecordingWaveformSettings();
@@ -1491,6 +1514,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     String conversationKey, {
     bool? pinned,
     bool? archived,
+    bool? muted,
   }) {
     final key = _workspacePreferenceKey(conversationKey);
     final current =
@@ -1499,9 +1523,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final next = WorkspaceConversationPreference(
       pinned: pinned ?? current.pinned,
       archived: archived ?? current.archived,
+      muted: muted ?? current.muted,
     );
     setState(() {
-      if (!next.pinned && !next.archived) {
+      if (!next.pinned && !next.archived && !next.muted) {
         _workspaceConversationPreferences.remove(key);
       } else {
         _workspaceConversationPreferences[key] = next;
@@ -3431,6 +3456,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             autoSpeak: _autoSpeak,
             workingAnimationStyle: _workingAnimationStyle,
             workingAnimationSpeed: _workingAnimationSpeed,
+            dateFormat: _dateFormat,
             recordingWaveformSensitivity: _recordingWaveformSensitivity,
             recordingWaveformBars: _recordingWaveformBars,
             recordingWaveformDecay: _recordingWaveformDecay,
@@ -3457,6 +3483,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onThemeChanged: (theme) {
               refreshSettings(() => settingsTheme = theme);
               widget.onThemeChanged(theme);
+            },
+            onDateFormatChanged: (value) {
+              setState(() => _dateFormat = value);
+              refreshSettings(() {});
             },
             onProfileNameChanged: _setWorkspaceDisplayName,
             onSaveTarget: () => unawaited(_saveCurrentRepoTarget()),
@@ -5209,16 +5239,21 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
 
     if (message.kind == 'repo_list') {
-      if (!_incomingFromActivePeer(message)) return false;
+      final fromActiveWorkspaceFips =
+          _workspaceFipsConnectionState == 'active' &&
+          _workspaceWorkerKeyForIncoming(message) == _workspaceWorkerKey;
+      if (!_incomingFromActivePeer(message) && !fromActiveWorkspaceFips) {
+        return false;
+      }
       final choices = _repoChoicesFromRepoListPayload(message.rawJson);
       if (choices == null) {
         _showError('Received malformed repo list');
         return true;
       }
-      final pending = _pendingRepoListCompleter;
-      if (pending != null && !pending.isCompleted) {
-        pending.complete(choices);
+      for (final pending in _pendingRepoListCompleters.values) {
+        if (!pending.isCompleted) pending.complete(choices);
       }
+      _pendingRepoListCompleters.clear();
       _cacheRepoChoices(choices);
       setState(() => _status = 'Loaded ${choices.length} repo folders');
       return true;
@@ -5231,6 +5266,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         return true;
       }
       final pending = _pendingToolViews.remove(result.requestId);
+      final requestedModelList = result.tool == 'model_list' && pending != null;
       final pendingModelList = _pendingOpenCodeModelListCompleter;
       if (result.tool == 'model_list' && pendingModelList != null) {
         _pendingOpenCodeModelListCompleter = null;
@@ -5270,8 +5306,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       // A duplicate or late status result must refresh the cache only. Without
       // its original request callback it would repeatedly push the Host page.
       if (result.tool == 'system_status') return true;
+      // A stale file-browser response must not open the full-screen picker at
+      // startup. Workspace browsing is handled only by its pending request.
+      if (result.tool == 'file_browser' && pending == null) return true;
       if (!fromCatchUp) {
-        if (result.tool == 'model_list' && result.error == null) {
+        if (requestedModelList && result.error == null) {
           unawaited(_openModelPicker(result));
         } else if (result.tool == 'file_browser' &&
             pending?.workspaceConversationKey != null) {
@@ -6368,17 +6407,16 @@ Return a concise catch-up summary of what happened after that point: completed w
     if (!await _ensureConnectedToParentService()) {
       throw StateError('Connect to the computer service first');
     }
-    final existing = _pendingRepoListCompleter;
+    final requestPath = path?.trim() ?? '';
+    final existing = _pendingRepoListCompleters[requestPath];
     if (existing != null && !existing.isCompleted) {
       return existing.future;
     }
     final completer = Completer<List<RepoChoice>>();
-    _pendingRepoListCompleter = completer;
+    _pendingRepoListCompleters[requestPath] = completer;
 
     final payload = jsonEncode({
-      'repo_list_request': {
-        if (path != null && path.trim().isNotEmpty) 'path': path.trim(),
-      },
+      'repo_list_request': {if (requestPath.isNotEmpty) 'path': requestPath},
     });
 
     try {
@@ -6397,8 +6435,8 @@ Return a concise catch-up summary of what happened after that point: completed w
         onTimeout: () => throw TimeoutException('Repo list request timed out'),
       );
     } finally {
-      if (identical(_pendingRepoListCompleter, completer)) {
-        _pendingRepoListCompleter = null;
+      if (identical(_pendingRepoListCompleters[requestPath], completer)) {
+        _pendingRepoListCompleters.remove(requestPath);
       }
       if (mounted) {
         setState(() {
@@ -7708,6 +7746,12 @@ Return a concise catch-up summary of what happened after that point: completed w
             ),
           ),
           fipsConnected: heartbeat.connectionState == 'active',
+          fipsConnectedSpaceIds: {
+            for (final target in _computerServiceTargets)
+              if (_workspaceWorkerForKey(target.pubkey).fips.connectionState ==
+                  'active')
+                target.id,
+          },
           fipsConnectedPeers: _workspaceFips.directPeers,
           onOpenWorkerConsole: () => unawaited(_openWorkerConsole()),
           onOpenFiles: (conversationKey) => _sendToolRequest(
@@ -7741,6 +7785,14 @@ Return a concise catch-up summary of what happened after that point: completed w
               ? 'Admin'
               : _workspaceMemberStatus,
           workspace: _workspace,
+          conversationDrafts: _workspaceConversationDrafts.putIfAbsent(
+            _computerServiceTarget?.pubkey ?? '',
+            () => {},
+          ),
+          threadDrafts: _workspaceThreadDrafts.putIfAbsent(
+            _computerServiceTarget?.pubkey ?? '',
+            () => {},
+          ),
           focusedConversationKey: _workspaceFocusedConversationKey,
           openThreadKey: _activeWorkspaceWorker.openThreadKey,
           panelStates: _activeWorkspaceWorker.panelStates,
@@ -7828,6 +7880,7 @@ Return a concise catch-up summary of what happened after that point: completed w
           onHangupGroupCall: _hangupGroupCall,
           mediaSource: _callMediaSource,
           onMediaSourceChanged: _setCallMediaSource,
+          dateFormat: _dateFormat,
         ),
       );
     }
@@ -9699,9 +9752,9 @@ Return a concise catch-up summary of what happened after that point: completed w
 
   Future<void> _sendWorkspaceTyping(Map<String, Object?> request) async {
     if (!await _ensureConnectedToParentService()) return;
-    await nostrSendEphemeralQuery(
-      query: jsonEncode({'workspace_request': request}),
-      expiresInSeconds: BigInt.from(6),
+    await _nostr.sendEphemeralQuery(
+      jsonEncode({'workspace_request': request}),
+      const Duration(seconds: 6),
     );
   }
 
