@@ -72,8 +72,8 @@ class _WorkspaceEntryPageState extends State<_WorkspaceEntryPage> {
                   Center(
                     child: Image.asset(
                       'assets/branding/ribbet-mark.png',
-                      width: 56,
-                      height: 56,
+                      width: 112,
+                      height: 112,
                       color: palette.brand,
                     ),
                   ),
@@ -3832,11 +3832,9 @@ class _WorkspaceSidebar extends StatelessWidget {
       color: palette.sidebar,
       child: Column(
         children: [
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(12, 18, 12, 8),
-              children: [
-                Row(
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 18, 12, 8),
+            child: Row(
                   children: [
                     Expanded(
                       child: PopupMenuButton<String>(
@@ -3943,7 +3941,12 @@ class _WorkspaceSidebar extends StatelessWidget {
                     ),
                   ],
                 ),
-                const SizedBox(height: 16),
+          ),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+              children: [
+                const SizedBox(height: 8),
                 ListTile(
                   dense: true,
                   selected: threadsSelected,
@@ -7028,9 +7031,16 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                     ),
                   ),
                 ),
+                if (isAgent && widget.message.workHistory.isNotEmpty) ...[
+                  const SizedBox(width: 4),
+                  _showWorkButton(context),
+                ],
                 const SizedBox(width: 8),
                 if (widget.threadTopic case final topic?) ...[
-                  Expanded(child: _threadTopicTag(context, topic)),
+                  Flexible(
+                    fit: FlexFit.loose,
+                    child: _threadTopicTag(context, topic),
+                  ),
                 ],
               ],
             ),
@@ -7115,8 +7125,6 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
           right: 0,
           child: _timestamp(context, grouped: widget.groupedWithPrevious),
         ),
-        if (isAgent && widget.message.workHistory.isNotEmpty)
-          Positioned(right: 0, bottom: 0, child: _showWorkButton(context)),
       ],
     );
     final replyControls =
@@ -7227,7 +7235,10 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
             : 0.0;
         final headerWidth = widget.groupedWithPrevious
             ? threadTopicWidth
-            : bodyIndent + authorWidth + threadTopicWidth;
+            : bodyIndent +
+                  authorWidth +
+                  (isAgent && widget.message.workHistory.isNotEmpty ? 92 : 0) +
+                  threadTopicWidth;
         final contentWidth = math
             .max(
               math.max(bodyWidth + bodyIndent, headerWidth) +
@@ -8746,9 +8757,11 @@ class _ThreadMessageList extends StatefulWidget {
 class _ThreadMessageListState extends State<_ThreadMessageList> {
   final _scrollController = ScrollController();
   final _searchController = TextEditingController();
+  final _searchFocus = FocusNode();
   final _messageKeys = <String, GlobalKey>{};
   String? _lastReplyId;
   String _searchQuery = '';
+  bool _searchOpen = false;
 
   @override
   void initState() {
@@ -8773,7 +8786,23 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
   void dispose() {
     _scrollController.dispose();
     _searchController.dispose();
+    _searchFocus.dispose();
     super.dispose();
+  }
+
+  void _openSearch() {
+    setState(() => _searchOpen = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _searchFocus.requestFocus();
+    });
+  }
+
+  void _closeSearch() {
+    _searchController.clear();
+    setState(() {
+      _searchOpen = false;
+      _searchQuery = '';
+    });
   }
 
   String? get _latestReplyId =>
@@ -8830,25 +8859,32 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
         ).toLowerCase().contains(query);
     return Column(
       children: [
-        TextField(
-          controller: _searchController,
-          onChanged: (value) => setState(() => _searchQuery = value),
-          decoration: InputDecoration(
-            hintText: 'Search this thread',
-            prefixIcon: const Icon(Icons.search),
-            suffixIcon: _searchQuery.isEmpty
-                ? null
-                : IconButton(
-                    tooltip: 'Clear search',
-                    icon: const Icon(Icons.clear),
-                    onPressed: () {
-                      _searchController.clear();
-                      setState(() => _searchQuery = '');
-                    },
-                  ),
+        if (!_searchOpen)
+          Align(
+            alignment: Alignment.centerRight,
+            child: IconButton(
+              tooltip: 'Search this thread',
+              onPressed: _openSearch,
+              icon: const Icon(Icons.search),
+            ),
+          )
+        else ...[
+          TextField(
+            controller: _searchController,
+            focusNode: _searchFocus,
+            onChanged: (value) => setState(() => _searchQuery = value),
+            decoration: InputDecoration(
+              hintText: 'Search this thread',
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: IconButton(
+                tooltip: 'Close search',
+                icon: const Icon(Icons.close),
+                onPressed: _closeSearch,
+              ),
+            ),
           ),
-        ),
-        const SizedBox(height: 12),
+          const SizedBox(height: 12),
+        ],
         Expanded(
           child: ListView(
             controller: _scrollController,
@@ -15737,6 +15773,12 @@ class _ConnectionPanel extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('Settings', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: connecting ? null : onEnterInviteCode,
+              icon: const Icon(Icons.content_paste_go_outlined),
+              label: const Text('Paste workspace invite'),
+            ),
             const SizedBox(height: 12),
             if (showRepoTarget) ...[
               Text('Repo target', style: theme.textTheme.titleSmall),
