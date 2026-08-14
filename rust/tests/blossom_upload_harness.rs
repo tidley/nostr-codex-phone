@@ -174,6 +174,7 @@ async fn uploads_random_300kb_blobs_for_text_and_audio_notes() {
             secret_key: secret_key.clone(),
             server_url: server_url.clone(),
             file_path: path,
+            file_bytes: None,
             content_type: content_type.to_string(),
             file_name: Some(file_name.to_string()),
         })

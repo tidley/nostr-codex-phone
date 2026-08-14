@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 class MediaUploadCancelledException implements Exception {
   const MediaUploadCancelledException({
     required this.server,
@@ -17,12 +19,14 @@ enum MediaSource { camera, photoPicker, filePicker }
 class MediaSelection {
   const MediaSelection({
     required this.path,
+    this.bytes,
     required this.fileName,
     required this.extension,
     required this.contentType,
   });
 
   final String path;
+  final Uint8List? bytes;
   final String fileName;
   final String? extension;
   final String contentType;

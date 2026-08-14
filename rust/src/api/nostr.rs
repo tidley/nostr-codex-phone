@@ -209,6 +209,7 @@ pub struct BridgeBlossomUploadConfig {
     pub secret_key: String,
     pub server_url: String,
     pub file_path: String,
+    pub file_bytes: Option<Vec<u8>>,
     pub content_type: String,
     pub file_name: Option<String>,
 }
@@ -306,6 +307,7 @@ pub async fn blossom_upload_audio(
         secret_key: config.secret_key,
         server_url: config.server_url,
         file_path: config.file_path,
+        file_bytes: config.file_bytes,
         content_type: config.content_type,
         file_name: config.file_name,
     })

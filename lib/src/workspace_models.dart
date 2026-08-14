@@ -131,6 +131,18 @@ bool isWorkspaceEmptyAgentMessage(WorkspaceMessage message) =>
 bool isWorkspaceThreadTopicRequest(WorkspaceMessage message) =>
     message.body.trim().startsWith('[[THREAD_TOPIC_REQUEST]]');
 
+bool isWorkspaceThreadTopicResponse(WorkspaceMessage message) =>
+    isWorkspaceAgentSender(message.senderPubkey) &&
+    workspaceDisplayMessageText(message.body).trim().isEmpty &&
+    RegExp(
+      r'^\s*\[\[THREAD_TOPIC:',
+      caseSensitive: false,
+    ).hasMatch(message.body);
+
+bool isWorkspaceThreadTopicControlMessage(WorkspaceMessage message) =>
+    isWorkspaceThreadTopicRequest(message) ||
+    isWorkspaceThreadTopicResponse(message);
+
 bool isWorkspaceLocalSender(
   String senderPubkey,
   Iterable<String> localSenderIds,
@@ -742,7 +754,8 @@ class WorkspaceState {
     ],
     'messages': [
       for (final conversation in messages.values)
-        for (final message in conversation) message.toJson(),
+        for (final message in conversation)
+          if (!isWorkspaceThreadTopicControlMessage(message)) message.toJson(),
     ],
     'agents': agents.map((agent) => agent.toJson()).toList(growable: false),
     'conversation_agents': conversationAgents
@@ -822,6 +835,9 @@ class WorkspaceState {
         isSnapshot &&
         ((data['messages'] as List?)?.isEmpty ?? true) &&
         ((data['agents'] as List?)?.isEmpty ?? true);
+    final hasAgentSnapshot = data['agents'] is List;
+    final hasConversationAgentSnapshot = data['conversation_agents'] is List;
+    final hasPrepromptSnapshot = data['conversation_preprompts'] is List;
     if (isSnapshot) {
       // Large snapshots arrive as an empty header followed by message chunks.
       // Keep visible rows until those chunks arrive, including local rows that
@@ -858,9 +874,13 @@ class WorkspaceState {
           ..clear()
           ..addAll(localMessages);
       }
-      if (!isPartialSnapshot) {
+      if (!isPartialSnapshot && hasAgentSnapshot) {
         agents = [];
+      }
+      if (!isPartialSnapshot && hasConversationAgentSnapshot) {
         conversationAgents = [];
+      }
+      if (!isPartialSnapshot && hasPrepromptSnapshot) {
         conversationPreprompts = [];
       }
       typing.clear();
@@ -915,8 +935,8 @@ class WorkspaceState {
     final incomingConversationAgents = _conversationAgents(
       data['conversation_agents'],
     );
-    if ((isSnapshot && !isPartialSnapshot) ||
-        isSnapshotHeader ||
+    if ((isSnapshot && !isPartialSnapshot && hasConversationAgentSnapshot) ||
+        (isSnapshotHeader && hasConversationAgentSnapshot) ||
         data['action'] == 'agent_created' ||
         data['action'] == 'conversation_agents_updated' ||
         data['action'] == 'agent_deleted') {
@@ -925,13 +945,13 @@ class WorkspaceState {
     final incomingPreprompts = _conversationPreprompts(
       data['conversation_preprompts'],
     );
-    if ((isSnapshot && !isPartialSnapshot) ||
-        isSnapshotHeader ||
+    if ((isSnapshot && !isPartialSnapshot && hasPrepromptSnapshot) ||
+        (isSnapshotHeader && hasPrepromptSnapshot) ||
         data['action'] == 'conversation_preprompt_updated') {
       conversationPreprompts = incomingPreprompts;
     }
     final incomingAgents = _agents(data['agents']);
-    if ((isSnapshot && !isPartialSnapshot) ||
+    if ((isSnapshot && !isPartialSnapshot && hasAgentSnapshot) ||
         (isSnapshotHeader && incomingAgents.isNotEmpty) ||
         data['action'] == 'agent_deleted') {
       agents = incomingAgents;
