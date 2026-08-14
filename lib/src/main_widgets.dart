@@ -4,18 +4,14 @@ class _WorkspaceEntryPage extends StatefulWidget {
   const _WorkspaceEntryPage({
     required this.initialName,
     required this.canScan,
-    required this.onCreate,
-    required this.onPasteInvite,
-    required this.onScanInvite,
-    required this.onOpenSettings,
+    required this.onJoinWorkspace,
+    required this.onScanCode,
   });
 
   final String initialName;
   final bool canScan;
-  final Future<void> Function(String name) onCreate;
-  final Future<void> Function() onPasteInvite;
-  final Future<void> Function() onScanInvite;
-  final VoidCallback onOpenSettings;
+  final Future<void> Function(String name, String code) onJoinWorkspace;
+  final Future<void> Function(String name) onScanCode;
 
   @override
   State<_WorkspaceEntryPage> createState() => _WorkspaceEntryPageState();
@@ -25,33 +21,33 @@ class _WorkspaceEntryPageState extends State<_WorkspaceEntryPage> {
   late final TextEditingController _name = TextEditingController(
     text: widget.initialName,
   );
+  final _invite = TextEditingController();
   bool _creating = false;
 
   @override
   void dispose() {
     _name.dispose();
+    _invite.dispose();
     super.dispose();
   }
 
-  Future<void> _create() async {
+  Future<void> _joinWorkspace() async {
     setState(() => _creating = true);
-    await widget.onCreate(_name.text);
+    await widget.onJoinWorkspace(_name.text, _invite.text);
     if (mounted) setState(() => _creating = false);
   }
 
   Future<void> _pasteInvite() async {
-    await _saveName();
-    if (mounted) await widget.onPasteInvite();
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (mounted && data?.text?.trim().isNotEmpty == true) {
+      setState(() => _invite.text = data!.text!);
+    }
   }
 
-  Future<void> _scanInvite() async {
-    await _saveName();
-    if (mounted) await widget.onScanInvite();
-  }
-
-  Future<void> _saveName() async {
-    if (_name.text.trim().isEmpty) return;
-    await _create();
+  Future<void> _scanCode() async {
+    setState(() => _creating = true);
+    await widget.onScanCode(_name.text);
+    if (mounted) setState(() => _creating = false);
   }
 
   @override
@@ -85,79 +81,90 @@ class _WorkspaceEntryPageState extends State<_WorkspaceEntryPage> {
                       fontWeight: FontWeight.w700,
                     ),
                   ),
-                  const SizedBox(height: 32),
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          const Text(
-                            'Choose a name your colleagues will see',
-                            style: TextStyle(fontWeight: FontWeight.w600),
+                  const SizedBox(height: 36),
+                  Text('Your name', style: theme.textTheme.titleMedium),
+                  const SizedBox(height: 4),
+                  Text(
+                    'This is the name your colleagues will see.',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: palette.label,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: _name,
+                    autofocus: true,
+                    textCapitalization: TextCapitalization.words,
+                    textInputAction: TextInputAction.next,
+                    decoration: const InputDecoration(
+                      hintText: 'Enter your name',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 30),
+                  Text(
+                    'Invite or worker code',
+                    style: theme.textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Paste a workspace invite or worker target details.',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: palette.label,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: _invite,
+                    minLines: 1,
+                    maxLines: 3,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) => _creating ? null : _joinWorkspace(),
+                    decoration: InputDecoration(
+                      hintText: 'Paste invite code or target.txt contents',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: Tooltip(
+                        message: 'Paste invite code',
+                        child: TextButton.icon(
+                          onPressed: _creating ? null : _pasteInvite,
+                          icon: const Icon(
+                            Icons.content_paste_outlined,
+                            size: 18,
                           ),
-                          const SizedBox(height: 18),
-                          TextField(
-                            controller: _name,
-                            autofocus: true,
-                            textInputAction: TextInputAction.done,
-                            onChanged: (_) => setState(() {}),
-                            onSubmitted: (_) =>
-                                _creating ? null : _pasteInvite(),
-                            decoration: const InputDecoration(
-                              hintText: 'Enter your name',
-                              border: OutlineInputBorder(),
-                            ),
-                          ),
-                          if (_name.text.trim().isNotEmpty) ...[
-                            const SizedBox(height: 12),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: FilledButton.icon(
-                                    onPressed: _creating ? null : _pasteInvite,
-                                    icon: const Icon(
-                                      Icons.content_paste_go_outlined,
-                                    ),
-                                    label: Text(
-                                      _creating
-                                          ? 'Saving name...'
-                                          : 'Paste workspace invite',
-                                    ),
-                                  ),
-                                ),
-                                if (widget.canScan) ...[
-                                  const SizedBox(width: 10),
-                                  FilledButton.icon(
-                                    onPressed: _creating ? null : _scanInvite,
-                                    icon: const Icon(Icons.qr_code_scanner),
-                                    label: const Text('Scan QR'),
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ],
-                        ],
+                          label: const Text('Paste'),
+                        ),
                       ),
                     ),
                   ),
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 18),
-                    child: Row(
-                      children: [
-                        Expanded(child: Divider()),
-                        Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 12),
-                          child: Text('OR'),
-                        ),
-                        Expanded(child: Divider()),
-                      ],
+                  const SizedBox(height: 26),
+                  FilledButton(
+                    onPressed: _creating ? null : _joinWorkspace,
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(56),
+                    ),
+                    child: Text(
+                      _creating ? 'Joining workspace...' : 'Join workspace',
                     ),
                   ),
-                  TextButton(
-                    onPressed: widget.onOpenSettings,
-                    child: const Text('Set up service instead'),
-                  ),
+                  if (widget.canScan) ...[
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: _creating ? null : _scanCode,
+                      style: OutlinedButton.styleFrom(
+                        minimumSize: const Size.fromHeight(52),
+                      ),
+                      icon: const Icon(Icons.qr_code_scanner),
+                      label: const Text('Scan invite or worker QR'),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Works with a workspace invite, worker QR, or target.txt QR.',
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: palette.label,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -1011,9 +1018,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   Map<String, _WorkspaceDraft> get _threadDrafts => widget.threadDrafts;
   final _threadTopicOverrides = <String, ValueNotifier<String?>>{};
   final _requestedThreadTopicKeys = <String>{};
-  final _knownThreadIds = <String>{};
-  final _autoTopicThreadIds = <String>{};
-  var _threadTopicBaselineReady = false;
   final _emptyThreadTopicOverride = ValueNotifier<String?>(null);
   Map<String, _WorkspacePanelState> get _panelStates => widget.panelStates;
   final _conversationWidgetKey = GlobalKey<_WorkspaceConversationState>();
@@ -1960,6 +1964,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     } else {
       widget.onCloseThread();
     }
+    _requestTopicsForActiveThreads();
     _syncTypingLease();
     _reloadActiveMessages();
   }
@@ -2869,7 +2874,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     for (final status in statuses) {
       final parentId = status.parentId;
       if (parentId != null) {
-        labels.putIfAbsent(parentId, () => []).add(_typingActivityLabel(status));
+        labels
+            .putIfAbsent(parentId, () => [])
+            .add(_typingActivityLabel(status));
       }
     }
     return {
@@ -2879,7 +2886,16 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   String _typingLabel(WorkspaceTyping status) {
     final name = status.agentName ?? _memberLabel(status.senderPubkey);
-    if (status.agentId != null) return '$name is working...';
+    if (status.agentId != null) {
+      final parentId = status.parentId;
+      final topic = parentId == null
+          ? null
+          : workspaceThreadTopic(
+              _activeMessages.where((message) => message.parentId == parentId),
+            );
+      if (topic != null) return '$name is working on $topic...';
+      return '$name is working...';
+    }
     return '$name is typing...';
   }
 
@@ -2895,26 +2911,15 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   void _onWorkspaceRevision() {
     _cachedMessageRevision = null;
     _cachedConversationActivityLabels = null;
-    _cacheActiveMessageProjection();
-    if (!_threadTopicBaselineReady) {
-      _knownThreadIds.addAll(
-        widget.workspace.messages.values
-            .expand((messages) => messages)
-            .where((message) => message.parentId == null)
-            .map(_threadKey),
-      );
-      _threadTopicBaselineReady = true;
-      _scheduleTypingExpiry(widget.workspace.typing.values);
-      return;
-    }
-    for (final thread in _cachedRootMessages) {
-      final key = _threadKey(thread);
-      if (_knownThreadIds.add(key)) _autoTopicThreadIds.add(key);
-      if (_autoTopicThreadIds.contains(key)) {
-        _requestThreadTopic(thread, automatic: true);
-      }
-    }
+    _requestTopicsForActiveThreads();
     _scheduleTypingExpiry(widget.workspace.typing.values);
+  }
+
+  void _requestTopicsForActiveThreads() {
+    _cacheActiveMessageProjection();
+    for (final thread in _cachedRootMessages) {
+      _requestThreadTopic(thread, automatic: true);
+    }
   }
 
   void _scheduleTypingExpiry(Iterable<WorkspaceTyping> typing) {
@@ -3510,11 +3515,12 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                 final allReplies =
                     (widget.workspace.messages[conversationKey] ??
                             const <WorkspaceMessage>[])
-                        .where(
-                          (message) => message.parentId == source.id,
-                        )
+                        .where((message) => message.parentId == source.id)
                         .toList()
-                      ..sort((left, right) => left.createdAt.compareTo(right.createdAt));
+                      ..sort(
+                        (left, right) =>
+                            left.createdAt.compareTo(right.createdAt),
+                      );
                 final replies = allReplies
                     .where(
                       (message) =>
@@ -3524,7 +3530,9 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                     .toList(growable: false);
                 final threadTopic = workspaceThreadTopic(allReplies);
                 final previewMessages = [source, ...replies]
-                  ..sort((left, right) => left.createdAt.compareTo(right.createdAt));
+                  ..sort(
+                    (left, right) => left.createdAt.compareTo(right.createdAt),
+                  );
                 final latestMessages = previewMessages.skip(
                   math.max(0, previewMessages.length - 5),
                 );
@@ -3622,7 +3630,9 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                                 identity: message.$2.senderPubkey,
                                 author: _memberLabel(message.$2.senderPubkey),
                                 timestamp: _timeLabel(message.$2.createdAt),
-                                text: workspaceDisplayMessageText(message.$2.body),
+                                text: workspaceDisplayMessageText(
+                                  message.$2.body,
+                                ),
                               ),
                             ],
                             if (previewMessages.length > latestMessages.length)
@@ -3982,6 +3992,7 @@ class _WorkspaceSidebar extends StatelessWidget {
       // track only their unopened threads, so use the larger total.
       return math.max(conversationUnread, threadUnread);
     }
+
     bool hasUnreadActivity(String conversationKey) =>
         !muted(conversationKey) &&
         unreadCountForConversation(conversationKey) > 0;
