@@ -1306,6 +1306,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _refreshOwnPubkey();
     await _restoreWorkspaceCache();
     await _applyTtsSettings();
+    unawaited(_bootstrapRestoredWorkspaceFips());
     unawaited(_syncBackgroundDelivery());
     unawaited(_loadTtsOptions());
   }
@@ -2167,6 +2168,16 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     );
     if (!mounted || payload == null || payload.trim().isEmpty) return;
     await _importRepoTargetPayload(payload, source: 'Scanned');
+  }
+
+  Future<void> _scanWorkspaceEntryQr(String name) async {
+    if (name.trim().isEmpty) {
+      _showError('Enter a name before scanning a QR code');
+      return;
+    }
+    await _startWorkspace(name);
+    if (!mounted) return;
+    await _scanRepoTargetQr();
   }
 
   Future<void> _pasteRepoTarget() async {
@@ -4145,9 +4156,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Timer? get _workspaceFipsRetryTimer => _workspaceFips.retryTimer;
   set _workspaceFipsRetryTimer(Timer? value) =>
       _workspaceFips.retryTimer = value;
-  Timer? get _workspaceFipsOfferTimer => _workspaceFips.offerTimer;
-  set _workspaceFipsOfferTimer(Timer? value) =>
-      _workspaceFips.offerTimer = value;
   int get _workspaceFipsNextMessageId => _workspaceFips.nextMessageId;
   set _workspaceFipsNextMessageId(int value) =>
       _workspaceFips.nextMessageId = value;
@@ -4436,6 +4444,51 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _connected &&
         _connectedPeerPubkey == peer &&
         await _sendPairingSecretIfNeeded(target);
+  }
+
+  Future<void> _bootstrapRestoredWorkspaceFips() async {
+    if (kIsWeb ||
+        !_workspaceFipsEnabled.value ||
+        _secretKeyController.text.trim().isEmpty) {
+      return;
+    }
+
+    final targets = <String, RepoTarget>{
+      for (final target in _computerServiceTargets)
+        if (target.pubkey.trim().isNotEmpty) target.pubkey.trim(): target,
+    }.values;
+    for (final target in targets) {
+      if (!mounted || !_workspaceFipsEnabled.value) return;
+      final worker = _workspaceWorkerForKey(target.pubkey);
+      if (worker.fips.connectionState == 'active') continue;
+      if (!await _ensureConnectedToWorkspaceService(
+        target,
+        requireNostr: true,
+      )) {
+        continue;
+      }
+      try {
+        await _sendWithAutoRecovery(
+          label: 'FIPS workspace bootstrap',
+          sender: () => _nostr.sendQuery(
+            jsonEncode({
+              'workspace_request': {'action': 'list', 'fips_snapshot': true},
+            }),
+          ),
+        );
+        _awaitWorkspaceFipsOfferFor(target.pubkey);
+      } catch (error) {
+        _recordDiagnostic(
+          'FIPS workspace bootstrap failed for ${target.displayName}: $error',
+        );
+      }
+    }
+
+    // Keep the Nostr fallback route aligned with the workspace shown in the UI.
+    final selected = _computerServiceTarget;
+    if (mounted && selected != null && _workspaceFipsEnabled.value) {
+      await _ensureConnectedToWorkspaceService(selected, requireNostr: true);
+    }
   }
 
   Future<RepoTarget?> _parentServiceTargetForSpawn() async {
@@ -5009,7 +5062,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (message.kind == 'workspace_update') {
       final workerKey = _workspaceWorkerKeyForIncoming(message);
       if (workerKey == null) return false;
-      if (workerKey != _workspaceWorkerKey) return true;
       final worker = _workspaceWorkerForKey(workerKey);
       try {
         final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
@@ -5066,7 +5118,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                     _ownPubkey ?? '',
                     _ownPubkeyHex ?? '',
                   }) ||
-                  isWorkspaceEmptyAgentMessage(workspaceMessage)) {
+                  isWorkspaceEmptyAgentMessage(workspaceMessage) ||
+                  isWorkspaceThreadTopicControlMessage(workspaceMessage)) {
                 continue;
               }
               final conversationKey = worker.workspace
@@ -7676,10 +7729,8 @@ Return a concise catch-up summary of what happened after that point: completed w
       return _WorkspaceEntryPage(
         initialName: _workspaceDisplayName,
         canScan: _supportsCameraQrScan,
-        onCreate: _startWorkspace,
-        onPasteInvite: _enterWorkspaceInviteCode,
-        onScanInvite: _scanRepoTargetQr,
-        onOpenSettings: () => unawaited(_openSettings()),
+        onJoinWorkspace: _joinWorkspaceEntry,
+        onScanCode: _scanWorkspaceEntryQr,
       );
     }
 
@@ -8709,7 +8760,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     } else {
       session.heartbeat.value = _WorkspaceFipsHeartbeat(connectionState: state);
     }
-    if (state == 'active') {
+    if (state == 'active' && identical(session, _workspaceFips)) {
       unawaited(_sendWorkspaceRequest({'action': 'fips_mesh'}));
       session.heartbeatTicker ??= Timer.periodic(const Duration(seconds: 1), (
         _,
@@ -8798,22 +8849,29 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   void _awaitWorkspaceFipsOffer() {
-    if (_workspaceFipsSnapshotInFlight ||
-        _workspaceFipsConnectionState == 'active' ||
-        (_workspaceFipsOfferTimer?.isActive ?? false)) {
+    _awaitWorkspaceFipsOfferFor(_workspaceWorkerKey);
+  }
+
+  void _awaitWorkspaceFipsOfferFor(String workerKey) {
+    final session = _workspaceWorkerForKey(workerKey).fips;
+    if (session.snapshotInFlight ||
+        session.connectionState == 'active' ||
+        (session.offerTimer?.isActive ?? false)) {
       return;
     }
-    _workspaceFipsOfferTimer?.cancel();
+    session.offerTimer?.cancel();
     _recordDiagnostic('FIPS workspace snapshot requested');
-    _workspaceFipsOfferTimer = Timer(const Duration(seconds: 20), () {
+    session.offerTimer = Timer(const Duration(seconds: 20), () {
       if (!_workspaceFipsEnabled.value ||
-          _workspaceFipsSnapshotInFlight ||
-          _workspaceFipsConnectionState == 'active') {
+          session.snapshotInFlight ||
+          session.connectionState == 'active') {
         return;
       }
       _recordDiagnostic('FIPS workspace offer timed out; using Nostr');
-      unawaited(_stopWorkspaceFipsAndFallback());
-      _scheduleWorkspaceFipsRetry();
+      if (workerKey == _workspaceWorkerKey) {
+        unawaited(_stopWorkspaceFipsAndFallback());
+        _scheduleWorkspaceFipsRetry();
+      }
     });
   }
 
@@ -9910,6 +9968,20 @@ Return a concise catch-up summary of what happened after that point: completed w
       }),
     );
     if (mounted) setState(() => _workspaceMemberStatus = 'Joining...');
+  }
+
+  Future<void> _joinWorkspaceEntry(String name, String code) async {
+    if (name.trim().isEmpty) {
+      _showError('Enter a name');
+      return;
+    }
+    if (code.trim().isEmpty) {
+      _showError('Paste a workspace invite code or scan a QR code');
+      return;
+    }
+    await _startWorkspace(name);
+    if (!mounted) return;
+    await _importRepoTargetPayload(code, source: 'Pasted');
   }
 
   Future<void> _enterWorkspaceInviteCode() async {
