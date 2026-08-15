@@ -118,11 +118,13 @@ class _WorkspaceFipsSession {
   Timer? heartbeatTicker;
   Timer? retryTimer;
   Timer? offerTimer;
+  Timer? gapSyncTimer;
 
   void dispose() {
     heartbeatTicker?.cancel();
     retryTimer?.cancel();
     offerTimer?.cancel();
+    gapSyncTimer?.cancel();
     heartbeat.dispose();
     peers.dispose();
   }
@@ -444,12 +446,15 @@ class NostrCodexApp extends StatefulWidget {
 class _NostrCodexAppState extends State<NostrCodexApp> {
   static final _storage = SettingsStorage();
   static const _themeStorageKey = 'app_theme';
+  static const _textScaleStorageKey = 'app_text_scale';
   AppTheme _selectedTheme = AppTheme.mint;
+  double _textScale = 1;
 
   @override
   void initState() {
     super.initState();
     _loadTheme();
+    _loadTextScale();
   }
 
   Future<void> _loadTheme() async {
@@ -465,6 +470,22 @@ class _NostrCodexAppState extends State<NostrCodexApp> {
     unawaited(_storage.write(key: _themeStorageKey, value: theme.storageValue));
   }
 
+  Future<void> _loadTextScale() async {
+    final stored = double.tryParse(
+      await _storage.read(key: _textScaleStorageKey) ?? '',
+    );
+    if (stored != null && mounted) {
+      setState(() => _textScale = stored.clamp(0.8, 1.5));
+    }
+  }
+
+  void _selectTextScale(double value) {
+    final scale = value.clamp(0.8, 1.5);
+    if (_textScale == scale) return;
+    setState(() => _textScale = scale);
+    unawaited(_storage.write(key: _textScaleStorageKey, value: '$scale'));
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -472,7 +493,18 @@ class _NostrCodexAppState extends State<NostrCodexApp> {
       debugShowCheckedModeBanner: false,
       theme: _appTheme(_selectedTheme),
       themeMode: ThemeMode.dark,
-      home: NostrCodexHome(theme: _selectedTheme, onThemeChanged: _selectTheme),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(
+          context,
+        ).copyWith(textScaler: TextScaler.linear(_textScale)),
+        child: child!,
+      ),
+      home: NostrCodexHome(
+        theme: _selectedTheme,
+        textScale: _textScale,
+        onThemeChanged: _selectTheme,
+        onTextScaleChanged: _selectTextScale,
+      ),
     );
   }
 }
@@ -509,7 +541,7 @@ ThemeData _appTheme(AppTheme theme) {
       : const _WorkspacePalette(
           background: Color(0xff101a19),
           sidebar: Color(0xff142321),
-          content: Color(0xff101a19),
+          content: Color(0xff081216),
           composer: Color(0xff1e2d29),
           selected: Color(0xff1d6c5a),
           label: Color(0xffb6e2d4),
@@ -540,12 +572,16 @@ ThemeData _appTheme(AppTheme theme) {
 class NostrCodexHome extends StatefulWidget {
   const NostrCodexHome({
     required this.theme,
+    required this.textScale,
     required this.onThemeChanged,
+    required this.onTextScaleChanged,
     super.key,
   });
 
   final AppTheme theme;
+  final double textScale;
   final ValueChanged<AppTheme> onThemeChanged;
+  final ValueChanged<double> onTextScaleChanged;
 
   @override
   State<NostrCodexHome> createState() => _NostrCodexHomeState();
@@ -3428,6 +3464,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   Future<void> _openSettings() async {
     var settingsTheme = widget.theme;
+    var settingsTextScale = widget.textScale;
     var settingsConnected = _connected;
     var settingsConnecting = _connecting;
     var settingsOwnPubkey = _ownPubkey;
@@ -3442,6 +3479,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         builder: (_) => StatefulBuilder(
           builder: (settingsContext, refreshSettings) => _SettingsPage(
             theme: settingsTheme,
+            textScale: settingsTextScale,
             repoTargets: _repoTargets,
             computerServiceTarget: _computerServiceTarget,
             showRepoTarget: _activeWorkspaceHasLocalWorkerTarget,
@@ -3489,6 +3527,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onThemeChanged: (theme) {
               refreshSettings(() => settingsTheme = theme);
               widget.onThemeChanged(theme);
+            },
+            onTextScaleChanged: (value) {
+              widget.onTextScaleChanged(value);
+              refreshSettings(() => settingsTextScale = value);
             },
             onDateFormatChanged: (value) {
               setState(() => _dateFormat = value);
@@ -5127,22 +5169,25 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               final threadKey = workspaceMessage.parentId == null
                   ? null
                   : '$conversationKey:${workspaceMessage.parentId}';
-              if (threadKey != null) {
-                if (worker.openThreadKey != threadKey) {
-                  worker.threadUnreadCounts[threadKey] =
-                      (worker.threadUnreadCounts[threadKey] ?? 0) + 1;
-                }
-              }
               final focused =
                   _showTeamWorkspace &&
                   workerKey == _workspaceWorkerKey &&
                   conversationKey == worker.focusedConversationKey;
-              // An unread reply in a different thread should still mark the
-              // focused conversation as having activity in the sidebar.
-              if (!focused ||
-                  (threadKey != null && worker.openThreadKey != threadKey)) {
+              final unreadThreadReply =
+                  threadKey != null &&
+                  (!focused || worker.openThreadKey != threadKey);
+              if (unreadThreadReply) {
+                worker.threadUnreadCounts[threadKey] =
+                    (worker.threadUnreadCounts[threadKey] ?? 0) + 1;
+              }
+              // Conversation and thread counts are disjoint. A thread reply is
+              // tracked by its thread key; counting it here too makes the
+              // sidebar diverge when threads are opened or cleared.
+              if (threadKey == null && !focused) {
                 worker.unreadCounts[conversationKey] =
                     (worker.unreadCounts[conversationKey] ?? 0) + 1;
+              }
+              if (!focused || unreadThreadReply) {
                 if (workerKey != _workspaceWorkerKey) {
                   worker.attentionVersion++;
                 }
@@ -7880,6 +7925,9 @@ Return a concise catch-up summary of what happened after that point: completed w
           setState(() {
             _workspaceFocusedConversationKey = conversationKey;
             _workspaceUnreadCounts.remove(conversationKey);
+            _workspaceThreadUnreadCounts.removeWhere(
+              (threadKey, _) => threadKey.startsWith('$conversationKey:'),
+            );
           });
           unawaited(_saveLastWorkspaceLocation());
         },
@@ -8611,12 +8659,7 @@ Return a concise catch-up summary of what happened after that point: completed w
             _receiveMessage(message);
             _setWorkspaceFipsConnectionState('active', session: session);
             if (missedUpdate) {
-              _recordDiagnostic(
-                'FIPS workspace update gap detected; synchronizing workspace',
-              );
-              if (workerKey == _workspaceWorkerKey) {
-                unawaited(_sendWorkspaceRequest({'action': 'list'}));
-              }
+              _scheduleWorkspaceFipsGapSync(workerKey);
             }
             continue;
           default:
@@ -8850,6 +8893,20 @@ Return a concise catch-up summary of what happened after that point: completed w
 
   void _awaitWorkspaceFipsOffer() {
     _awaitWorkspaceFipsOfferFor(_workspaceWorkerKey);
+  }
+
+  void _scheduleWorkspaceFipsGapSync(String workerKey) {
+    final session = _workspaceWorkerForKey(workerKey).fips;
+    if (session.gapSyncTimer?.isActive ?? false) return;
+    _recordDiagnostic(
+      'FIPS workspace update gap detected; synchronizing workspace',
+    );
+    session.gapSyncTimer = Timer(const Duration(milliseconds: 500), () {
+      session.gapSyncTimer = null;
+      if (workerKey == _workspaceWorkerKey) {
+        unawaited(_sendWorkspaceRequest({'action': 'list'}));
+      }
+    });
   }
 
   void _awaitWorkspaceFipsOfferFor(String workerKey) {

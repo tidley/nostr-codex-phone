@@ -977,6 +977,37 @@ void main() {
     expect(state.agents.single.name, 'Scout');
   });
 
+  test(
+    'workspace resync does not clear known agents with an empty directory',
+    () {
+      final state = WorkspaceState()
+        ..apply({
+          'workspace_update': {
+            'action': 'snapshot',
+            'agents': [
+              {'id': 'agent-1', 'name': 'Scout', 'role': 'Researcher'},
+            ],
+          },
+        })
+        ..apply({
+          'workspace_update': {
+            'action': 'snapshot',
+            'messages': [
+              {
+                'id': 'message-1',
+                'channel_id': 'workspace',
+                'sender_pubkey': 'member',
+                'body': 'FIPS resync',
+              },
+            ],
+            'agents': [],
+          },
+        });
+
+      expect(state.agents.single.name, 'Scout');
+    },
+  );
+
   test('workspace state applies agent provisioning failures', () {
     final state = WorkspaceState()
       ..apply({
@@ -1000,6 +1031,24 @@ void main() {
     expect(state.agents.single.sessionStatus, 'failed');
     expect(state.agents.single.sessionError, 'OpenCode is unavailable');
     expect(state.conversationAgents.single.agentId, 'agent-1');
+  });
+
+  test('agent directory responses refresh conversation memberships', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'agents',
+          'agents': [
+            {'id': 'agent-1', 'name': 'Scout', 'role': 'Researcher'},
+          ],
+          'conversation_agents': [
+            {'agent_id': 'agent-1', 'channel_id': 'channel-1'},
+          ],
+        },
+      });
+
+    expect(state.agents.single.name, 'Scout');
+    expect(state.conversationAgents.single.channelId, 'channel-1');
   });
 
   test('workspace state removes deleted agents and their memberships', () {

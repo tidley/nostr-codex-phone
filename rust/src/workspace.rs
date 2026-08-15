@@ -588,16 +588,39 @@ impl WorkspaceStore {
         Ok(())
     }
 
-    pub fn remove_channel_member(&self, channel_id: &str, pubkey: &str) -> Result<()> {
+    pub fn remove_channel_member(
+        &self,
+        channel_id: &str,
+        pubkey: &str,
+        replacement_admin: &str,
+    ) -> Result<()> {
         let channel_id = required("channel id", channel_id)?;
         let pubkey = required("member pubkey", pubkey)?;
+        let replacement_admin = required("replacement admin", replacement_admin)?;
         let created_by: String = self.conn.query_row(
             "SELECT created_by FROM workspace_channels WHERE id = ?1",
             [&channel_id],
             |row| row.get(0),
         )?;
         if pubkey == created_by {
-            bail!("the conversation creator cannot be removed");
+            if pubkey == replacement_admin {
+                bail!("the conversation creator cannot remove themselves");
+            }
+            let transaction = self.conn.unchecked_transaction()?;
+            transaction.execute(
+                "UPDATE workspace_channels SET created_by = ?2 WHERE id = ?1",
+                params![channel_id, replacement_admin],
+            )?;
+            transaction.execute(
+                "INSERT INTO workspace_channel_members (channel_id, pubkey, is_admin, joined_at) VALUES (?1, ?2, 1, ?3) ON CONFLICT(channel_id, pubkey) DO UPDATE SET is_admin = 1",
+                params![channel_id, replacement_admin, now()],
+            )?;
+            transaction.execute(
+                "DELETE FROM workspace_channel_members WHERE channel_id = ?1 AND pubkey = ?2",
+                params![channel_id, pubkey],
+            )?;
+            transaction.commit()?;
+            return Ok(());
         }
         if self.conn.execute(
             "DELETE FROM workspace_channel_members WHERE channel_id = ?1 AND pubkey = ?2",
@@ -635,6 +658,7 @@ impl WorkspaceStore {
 
     pub fn delete_channel(&self, channel_id: &str) -> Result<()> {
         self.require_channel(channel_id)?;
+        let agent_ids = self.conversation_agent_ids("channel_id = ?1", [channel_id])?;
         self.conn.execute(
             "DELETE FROM workspace_message_reactions WHERE message_id IN (SELECT id FROM workspace_messages WHERE channel_id = ?1)",
             [channel_id],
@@ -657,11 +681,16 @@ impl WorkspaceStore {
         )?;
         self.conn
             .execute("DELETE FROM workspace_channels WHERE id = ?1", [channel_id])?;
+        self.delete_unassigned_agents(&agent_ids)?;
         Ok(())
     }
 
     pub fn delete_direct_conversation(&self, member: &str, peer: &str) -> Result<()> {
         let (member, peer) = direct_participants(member, peer)?;
+        let agent_ids = self.conversation_agent_ids(
+            "member_pubkey = ?1 AND peer_pubkey = ?2",
+            params![&member, &peer],
+        )?;
         self.conn.execute(
             "DELETE FROM workspace_message_reactions WHERE message_id IN (SELECT id FROM workspace_messages WHERE channel_id IS NULL AND ((sender_pubkey = ?1 AND recipient_pubkey = ?2) OR (sender_pubkey = ?2 AND recipient_pubkey = ?1)))",
             params![member, peer],
@@ -672,6 +701,39 @@ impl WorkspaceStore {
         )?;
         self.conn.execute("DELETE FROM workspace_conversation_agents WHERE member_pubkey = ?1 AND peer_pubkey = ?2", params![member, peer])?;
         self.conn.execute("DELETE FROM workspace_conversation_preprompts WHERE member_pubkey = ?1 AND peer_pubkey = ?2", params![member, peer])?;
+        self.delete_unassigned_agents(&agent_ids)?;
+        Ok(())
+    }
+
+    fn conversation_agent_ids<P>(&self, predicate: &str, params: P) -> Result<Vec<String>>
+    where
+        P: rusqlite::Params,
+    {
+        let sql = format!("SELECT agent_id FROM workspace_conversation_agents WHERE {predicate}");
+        Ok(self
+            .conn
+            .prepare(&sql)?
+            .query_map(params, |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn delete_unassigned_agents(&self, agent_ids: &[String]) -> Result<()> {
+        for agent_id in agent_ids {
+            let assigned = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspace_conversation_agents WHERE agent_id = ?1)",
+                [agent_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if assigned {
+                continue;
+            }
+            self.conn.execute(
+                "DELETE FROM workspace_agent_instances WHERE agent_id = ?1",
+                [agent_id],
+            )?;
+            self.conn
+                .execute("DELETE FROM workspace_agents WHERE id = ?1", [agent_id])?;
+        }
         Ok(())
     }
 
@@ -1779,9 +1841,35 @@ mod tests {
         );
         assert!(store.channels_for_member("other").unwrap().is_empty());
         assert_eq!(store.channel_members(&channel.id).unwrap().len(), 2);
-        assert!(store.remove_channel_member(&channel.id, "owner").is_err());
-        store.remove_channel_member(&channel.id, "member").unwrap();
+        assert!(store
+            .remove_channel_member(&channel.id, "owner", "owner")
+            .is_err());
+        store
+            .remove_channel_member(&channel.id, "member", "owner")
+            .unwrap();
         assert!(!store.is_channel_member(&channel.id, "member").unwrap());
+    }
+
+    #[test]
+    fn transfers_conversation_creator_when_an_admin_removes_them() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("creator").unwrap();
+        store.add_member("admin").unwrap();
+        let channel = store.create_channel("private", "creator").unwrap();
+
+        store
+            .remove_channel_member(&channel.id, "creator", "admin")
+            .unwrap();
+
+        let transferred = store
+            .channels()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == channel.id)
+            .unwrap();
+        assert_eq!(transferred.created_by, "admin");
+        assert!(!store.is_channel_member(&channel.id, "creator").unwrap());
+        assert!(store.is_channel_admin(&channel.id, "admin").unwrap());
     }
 
     #[test]

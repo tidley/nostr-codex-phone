@@ -776,6 +776,17 @@ class WorkspaceState {
     if (incomingRevision < revision) return const [];
     final transfer = _historyTransferAction(data['action']?.toString());
     if (transfer != null) {
+      // Channel and direct-message history can span many relay frames. Show
+      // each received frame instead of losing the entire history if one frame
+      // is delayed or missing. Snapshots still need atomic replacement.
+      if (transfer.action != 'snapshot') {
+        data['action'] = transfer.action;
+        return apply(
+          {'workspace_update': data},
+          localSenderIds: localSenderIds,
+          preserveMessagesOnSnapshot: preserveMessagesOnSnapshot,
+        );
+      }
       final pending = _historyTransfers.putIfAbsent(
         transfer.id,
         () => _WorkspaceHistoryTransfer(transfer.total),
@@ -872,7 +883,9 @@ class WorkspaceState {
           ..clear()
           ..addAll(localMessages);
       }
-      if (!isPartialSnapshot && hasAgentSnapshot) {
+      if (!isPartialSnapshot &&
+          hasAgentSnapshot &&
+          _agents(data['agents']).isNotEmpty) {
         agents = [];
       }
       if (!isPartialSnapshot && hasConversationAgentSnapshot) {
@@ -936,6 +949,7 @@ class WorkspaceState {
     if ((isSnapshot && !isPartialSnapshot && hasConversationAgentSnapshot) ||
         (isSnapshotHeader && hasConversationAgentSnapshot) ||
         data['action'] == 'agent_created' ||
+        data['action'] == 'agents' ||
         data['action'] == 'conversation_agents_updated' ||
         data['action'] == 'agent_deleted') {
       conversationAgents = incomingConversationAgents;
@@ -949,7 +963,12 @@ class WorkspaceState {
       conversationPreprompts = incomingPreprompts;
     }
     final incomingAgents = _agents(data['agents']);
-    if ((isSnapshot && !isPartialSnapshot && hasAgentSnapshot) ||
+    final replacesAgentDirectory =
+        isSnapshot &&
+        !isPartialSnapshot &&
+        hasAgentSnapshot &&
+        (incomingAgents.isNotEmpty || agents.isEmpty);
+    if (replacesAgentDirectory ||
         (isSnapshotHeader && incomingAgents.isNotEmpty) ||
         data['action'] == 'agent_deleted') {
       agents = incomingAgents;
