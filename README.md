@@ -173,9 +173,11 @@ cargo build --release --manifest-path rust/Cargo.toml --bin nostr-codex-server
 ```
 
 The deploy script confirms that the systemd user service executes the target
-path, installs the release binary there, verifies matching SHA-256 checksums,
-and restarts the service. Set `CODEX_WORKDIR` or `NOSTR_CODEX_WORKER` when the
-worker state is outside the repository's parent directory.
+path, stages the release binary in a versioned directory, atomically switches
+the service path, verifies matching SHA-256 checksums, and restarts the
+service. It restores the previous binary if the restart fails. Set
+`CODEX_WORKDIR` or `NOSTR_CODEX_WORKER` when the worker state is outside the
+repository's parent directory.
 
 The deploy script needs access to the worker user's DBus session. It sets these
 values automatically when `/run/user/$(id -u)/bus` is available:
@@ -187,9 +189,45 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 
 If that socket is unavailable, the script stops before copying the binary and
 reports that manual deployment from the worker user's desktop session is
-required. Every worker source change must build the release binary, run the
-deploy script, and restart `nostr-codex-server.service`; automatic systemd
-restarts do not require manual action.
+required.
+
+### Verified Worker OTA Updates
+
+`install-worker-service.sh` installs a daily systemd user timer. The timer
+downloads `worker-update.json` and its Minisign signature, verifies the
+pinned public key and worker SHA-256, stages the binary in
+`.nostr-codex/releases/`, atomically switches the stable worker path, and
+observes the service for 30 seconds. If the updated service fails, it switches
+back to the previous binary and restarts it.
+
+OTA updates are disabled until the worker environment contains the distributor
+public key. Add this to `.nostr-codex/.env.server` before installing the
+service, using a public key obtained through a trusted channel:
+
+```bash
+NOSTR_CODEX_UPDATE_PUBLIC_KEY='RWQ...minisign-public-key...'
+# Optional: use a private release mirror instead of GitHub Releases.
+# NOSTR_CODEX_UPDATE_URL='https://updates.example.com/code-call'
+```
+
+Build release metadata with a Minisign secret key:
+
+```bash
+NOSTR_CODEX_UPDATE_SIGNING_KEY=/secure/path/worker-update.key \
+  scripts/package-release-assets.sh
+```
+
+Upload `nostr-codex-worker-linux-x64`, `worker-update.json`, and
+`worker-update.json.minisig` to the same release. Check or apply an update
+manually with:
+
+```bash
+<workspace>/.nostr-codex/bin/update-worker.sh --check
+<workspace>/.nostr-codex/bin/update-worker.sh --apply
+```
+
+Use `systemctl --user disable --now nostr-codex-update.timer` to turn off
+automatic checks. The updater never activates unsigned metadata.
 
 Verify:
 

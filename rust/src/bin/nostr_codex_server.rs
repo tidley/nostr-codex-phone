@@ -1107,6 +1107,8 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     ));
     start_system_status_collector(
         worker_state_path(&config.codex_config.working_dir, "system-status.jsonl"),
+        config.codex_config.working_dir.clone(),
+        config.codex_config.bin.clone(),
         config.control.clone(),
     );
     if env::var("OPENCODE_SYSTEMD_SCOPE")
@@ -1423,7 +1425,12 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     }
 }
 
-fn start_system_status_collector(history_path: PathBuf, control: RuntimeControl) {
+fn start_system_status_collector(
+    history_path: PathBuf,
+    workdir: PathBuf,
+    codex_bin: String,
+    control: RuntimeControl,
+) {
     tokio::spawn(async move {
         let mut samples = interval(SYSTEM_STATUS_SAMPLE_INTERVAL);
         samples.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1435,7 +1442,11 @@ fn start_system_status_collector(history_path: PathBuf, control: RuntimeControl)
                     }
                 }
                 _ = samples.tick() => {
-                    match tokio::task::spawn_blocking(collect_system_status_sample).await {
+                    let sample_workdir = workdir.clone();
+                    let sample_codex_bin = codex_bin.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        collect_system_status_sample(&sample_workdir, &sample_codex_bin)
+                    }).await {
                         Ok(sample) => append_system_status_sample(&history_path, &sample),
                         Err(err) => warn!("system status collector stopped: {err}"),
                     }
@@ -1819,8 +1830,8 @@ async fn process_workspace_request(
                 bail!("Only channel or workspace admins can manage channel members.");
             }
         } else if matches!(request.action.as_str(), "rename_channel" | "delete_channel") {
-            if !workspace.is_channel_admin(channel_id, sender)? {
-                bail!("Only channel admins can manage this conversation.");
+            if !workspace.is_channel_admin(channel_id, sender)? && !workspace.is_admin(sender)? {
+                bail!("Only channel or workspace admins can manage this conversation.");
             }
         } else if request.action != "create_channel"
             && !workspace.is_channel_member(channel_id, sender)?
@@ -2151,7 +2162,14 @@ async fn process_workspace_request(
         "remove_channel_member" => {
             let channel_id = request.channel_id.as_deref().unwrap_or_default();
             let removed_member = request.member_pubkey.as_deref().unwrap_or_default();
-            workspace.remove_channel_member(channel_id, removed_member)?;
+            let removes_creator = workspace
+                .channels()?
+                .iter()
+                .any(|channel| channel.id == channel_id && channel.created_by == removed_member);
+            if removes_creator && !workspace.is_admin(sender)? {
+                bail!("Only workspace admins can replace a conversation creator.");
+            }
+            workspace.remove_channel_member(channel_id, removed_member, sender)?;
             send_channel_members_update(workspace, messenger, outbound, channel_id).await?;
             send_workspace_snapshot(workspace, messenger, outbound, removed_member).await?;
             return Ok(());
@@ -2560,26 +2578,11 @@ async fn process_workspace_request(
             let mut profile = workspace_agent_profile_from_request(&request, codex_config)?;
             let folder_scope = conversation_scoped
                 .then(|| {
-                    if request.folder_scope.is_empty() {
-                        // The custom-agent dialog's "Worker default" option
-                        // intentionally omits a scope, just like presets.
-                        let default_scope = workspace.conversation_folder_scope(
-                            request.channel_id.as_deref(),
-                            request.channel_id.is_none().then_some(sender),
-                            request.recipient_pubkey.as_deref(),
-                        )?;
-                        let default_folder;
-                        let scope = if default_scope.is_empty() {
-                            default_folder =
-                                canonical_worker_root_dir()?.to_string_lossy().into_owned();
-                            std::slice::from_ref(&default_folder)
-                        } else {
-                            &default_scope
-                        };
-                        canonical_conversation_folder_scope(scope, codex_config)
-                    } else {
-                        canonical_conversation_folder_scope(&request.folder_scope, codex_config)
-                    }
+                    workspace.conversation_folder_scope(
+                        request.channel_id.as_deref(),
+                        request.channel_id.is_none().then_some(sender),
+                        request.recipient_pubkey.as_deref(),
+                    )
                 })
                 .transpose()?;
             // Conversation-created agents never retain a global workdir. Their
@@ -2605,14 +2608,14 @@ async fn process_workspace_request(
                 session_error.as_deref(),
                 sender,
             )?;
-            if let Some(folder_scope) = folder_scope {
+            if conversation_scoped {
                 let channel_id = request.channel_id.as_deref();
                 workspace.add_conversation_agent(
                     &agent.id,
                     channel_id,
                     channel_id.is_none().then_some(sender),
                     request.recipient_pubkey.as_deref(),
-                    &folder_scope,
+                    &[],
                 )?;
             }
             let update = WorkspaceUpdate {
@@ -2812,7 +2815,7 @@ async fn process_workspace_request(
                     channel_id,
                     channel_id.is_none().then_some(sender),
                     recipient,
-                    &canonical_conversation_folder_scope(&request.folder_scope, codex_config)?,
+                    &[],
                 )?;
             } else {
                 workspace.remove_conversation_agent(
@@ -4491,7 +4494,6 @@ async fn route_conversation_agents(
     mentions: &[WorkspaceMentionPayload],
     active_turns: &Arc<Mutex<HashMap<String, CodexCancelToken>>>,
 ) -> Result<()> {
-    let memberships = workspace.conversation_agents()?;
     let preprompts = workspace.conversation_preprompts()?;
     for mut agent in workspace.agents_for_conversation(channel_id, member, peer)? {
         if only_agent_id.is_some_and(|agent_id| agent.id != agent_id) {
@@ -4541,21 +4543,12 @@ async fn route_conversation_agents(
             warn!(agent = %agent.id, status = %agent.session_status, "workspace agent is not ready to respond");
             continue;
         };
-        let folder_scope = memberships
-            .iter()
-            .find(|membership| {
-                membership.agent_id == agent.id
-                    && match channel_id {
-                        Some(channel_id) => membership.channel_id.as_deref() == Some(channel_id),
-                        None => direct_membership_matches(
-                            membership,
-                            member.unwrap_or_default(),
-                            peer.unwrap_or_default(),
-                        ),
-                    }
-            })
-            .map(|membership| membership.folder_scope.as_slice())
-            .unwrap_or_default();
+        // Conversation scope is shared by every agent in the conversation.
+        // Its first directory is the working directory; any additional
+        // directories are included as read-only reference context.
+        let conversation_folder_scope =
+            workspace.conversation_folder_scope(channel_id, member, peer)?;
+        let folder_scope = conversation_folder_scope.as_slice();
         let mut agent_config = match codex_config_for_workspace_agent_record(codex_config, &agent) {
             Ok(config) => config,
             Err(err) => {
@@ -5497,6 +5490,7 @@ async fn process_message(
                 &message.sender_pubkey_hex,
                 &message.text,
                 &codex_config.working_dir,
+                &codex_config.bin,
             ) {
                 let delivery_error = ToolResult {
                     data: serde_json::json!({
@@ -7518,6 +7512,7 @@ fn structured_tool_result(
     peer_pubkey: &str,
     request: &str,
     workdir: &Path,
+    codex_bin: &str,
 ) -> Option<ToolResult> {
     let value = serde_json::from_str::<serde_json::Value>(request.trim()).ok()?;
     let object = value.as_object()?;
@@ -7539,13 +7534,17 @@ fn structured_tool_result(
             workdir,
             object.get("path").and_then(serde_json::Value::as_str),
         ),
-        "system_status" => worker_system_status_data(
-            workdir,
-            object
-                .get("history_range")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("24h"),
-        ),
+        "system_status" => {
+            let mut status = worker_system_status_data(
+                workdir,
+                object
+                    .get("history_range")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("24h"),
+            );
+            status["codex_status"] = codex_status_data(workdir, codex_bin);
+            status
+        }
         _ => serde_json::json!({
             "text": handle_tool_request(memory, peer_pubkey, request, workdir)
                 .unwrap_or_else(|| format!("Unknown tool request `{tool}`.")),
@@ -7560,7 +7559,61 @@ fn structured_tool_result(
     })
 }
 
-fn collect_system_status_sample() -> serde_json::Value {
+fn codex_status_data(workdir: &Path, codex_bin: &str) -> serde_json::Value {
+    match StdCommand::new(codex_bin)
+        .arg("status")
+        .current_dir(workdir)
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            serde_json::json!({
+                "text": text,
+                "usage": codex_usage_data(&text),
+            })
+        }
+        Ok(output) => serde_json::json!({
+            "error": String::from_utf8_lossy(&output.stderr).trim(),
+        }),
+        Err(error) => serde_json::json!({"error": error.to_string()}),
+    }
+}
+
+fn codex_usage_data(text: &str) -> serde_json::Value {
+    let limits = text
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let percent_at = line.find('%')?;
+            let suffix = line[percent_at + 1..].to_ascii_lowercase();
+            if !["left", "remain", "available"]
+                .iter()
+                .any(|word| suffix.contains(word))
+            {
+                return None;
+            }
+            let number_start = line[..percent_at]
+                .char_indices()
+                .rev()
+                .take_while(|(_, character)| character.is_ascii_digit() || *character == '.')
+                .last()
+                .map(|(index, _)| index)?;
+            let remaining_percent = line[number_start..percent_at].parse::<f64>().ok()?;
+            (0.0..=100.0).contains(&remaining_percent).then(|| {
+                serde_json::json!({
+                    "label": line[..number_start]
+                        .trim_matches(|character: char| character.is_ascii_whitespace() || matches!(character, '-' | ':' | '•'))
+                        .trim_end_matches(|character: char| character == ':' || character.is_ascii_whitespace()),
+                    "remaining_percent": remaining_percent,
+                })
+            })
+        })
+        .take(2)
+        .collect::<Vec<_>>();
+    serde_json::json!({"limits": limits})
+}
+
+fn collect_system_status_sample(workdir: &Path, codex_bin: &str) -> serde_json::Value {
     let sampled_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -7593,6 +7646,7 @@ fn collect_system_status_sample() -> serde_json::Value {
         "networks": read_networks(),
         "temperatures": read_temperatures(),
         "battery": read_battery_status(),
+        "codex_usage": codex_status_data(workdir, codex_bin).get("usage"),
         "system": system_information(),
     });
     sample
@@ -7711,6 +7765,7 @@ fn compact_system_status_history_entry(sample: &serde_json::Value) -> serde_json
             "used_bytes": sample.pointer("/filesystem/used_bytes"),
             "total_bytes": sample.pointer("/filesystem/total_bytes"),
         },
+        "codex_usage": sample.get("codex_usage"),
     })
 }
 
@@ -10023,7 +10078,8 @@ mod tests {
         .to_string();
 
         let result =
-            structured_tool_result(&mut None, "peer-1", &request, temp_dir.path()).unwrap();
+            structured_tool_result(&mut None, "peer-1", &request, temp_dir.path(), "codex")
+                .unwrap();
 
         assert_eq!(result.tool, "read_file");
         assert_eq!(result.request_id, "request-1");
@@ -10052,8 +10108,29 @@ mod tests {
                 "memory": {"used_bytes": 10, "total_bytes": 20},
                 "swap": {"used_bytes": 2, "total_bytes": 4},
                 "filesystem": {"used_bytes": 30, "total_bytes": 40},
+                "codex_usage": null,
             })
         );
+    }
+
+    #[test]
+    fn reports_a_codex_status_launch_error() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let status = codex_status_data(temp_dir.path(), "missing-codex-command");
+
+        assert!(status["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()));
+    }
+
+    #[test]
+    fn extracts_remaining_codex_limits() {
+        let usage = codex_usage_data("5-hour limit: 82% left\nWeekly limit: 41% remaining");
+
+        assert_eq!(usage["limits"][0]["label"], "5-hour limit");
+        assert_eq!(usage["limits"][0]["remaining_percent"], 82.0);
+        assert_eq!(usage["limits"][1]["label"], "Weekly limit");
+        assert_eq!(usage["limits"][1]["remaining_percent"], 41.0);
     }
 
     #[test]
@@ -10081,7 +10158,8 @@ mod tests {
         .to_string();
 
         let result =
-            structured_tool_result(&mut None, "peer-1", &request, temp_dir.path()).unwrap();
+            structured_tool_result(&mut None, "peer-1", &request, temp_dir.path(), "codex")
+                .unwrap();
         let paths = result.data["entries"]
             .as_array()
             .unwrap()

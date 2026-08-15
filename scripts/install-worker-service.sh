@@ -32,7 +32,12 @@ fi
 
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 unit="$unit_dir/nostr-codex-server.service"
+update_script="$state_dir/bin/update-worker.sh"
+update_unit="$unit_dir/nostr-codex-update.service"
+update_timer="$unit_dir/nostr-codex-update.timer"
 mkdir -p "$unit_dir"
+mkdir -p "$(dirname "$update_script")"
+install -m 755 "$(dirname "${BASH_SOURCE[0]}")/update-worker.sh" "$update_script"
 
 cat >"$unit_dir/agent-workloads.slice" <<'UNIT'
 [Slice]
@@ -73,6 +78,35 @@ MemoryMax=1G
 WantedBy=default.target
 UNIT
 
+cat >"$update_unit" <<UNIT
+[Unit]
+Description=Check for a verified Nostr Codex worker update
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=$root
+EnvironmentFile=-$env_file
+Environment=CODEX_WORKDIR=$root
+Environment=NOSTR_CODEX_WORKER=$worker
+ExecStart=$update_script --apply
+UNIT
+
+cat >"$update_timer" <<'UNIT'
+[Unit]
+Description=Daily Nostr Codex worker update check
+
+[Timer]
+OnBootSec=10m
+OnUnitActiveSec=24h
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target
+UNIT
+
 if [[ -z "${XDG_RUNTIME_DIR:-}" && -d "/run/user/$(id -u)" ]]; then
   export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 fi
@@ -80,4 +114,5 @@ fi
 systemctl --user daemon-reload
 systemctl --user enable --now nostr-codex-server.service
 systemctl --user restart nostr-codex-server.service
+systemctl --user enable --now nostr-codex-update.timer
 systemctl --user status nostr-codex-server.service --no-pager

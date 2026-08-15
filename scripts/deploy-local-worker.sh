@@ -57,12 +57,38 @@ checksum="$(sha256sum "$source_worker" | cut -d' ' -f1)"
 for worker in "${workers[@]}"; do
   unit="${worker%%:*}"
   binary="${worker#*:}"
-  install -m 755 "$source_worker" "$binary"
-  if [[ "$checksum" != "$(sha256sum "$binary" | cut -d' ' -f1)" ]]; then
-    echo "Worker checksum verification failed for $binary" >&2
+  state_dir="$(dirname "$binary")"
+  releases_dir="$state_dir/releases"
+  release_worker="$releases_dir/local-$checksum/nostr-codex-worker-linux-x64"
+  previous_worker="$(readlink -f "$binary" 2>/dev/null || true)"
+  mkdir -p "$(dirname "$release_worker")"
+  install -m 755 "$source_worker" "$release_worker"
+  if [[ "$checksum" != "$(sha256sum "$release_worker" | cut -d' ' -f1)" ]]; then
+    echo "Worker checksum verification failed for $release_worker" >&2
     exit 1
   fi
-  systemctl --user restart "$unit"
-  systemctl --user is-active --quiet "$unit"
-  echo "Deployed and restarted $unit with $checksum"
+  if [[ -f "$binary" && ! -L "$binary" ]]; then
+    legacy_worker="$releases_dir/legacy-$(sha256sum "$binary" | cut -d' ' -f1)/nostr-codex-worker-linux-x64"
+    mkdir -p "$(dirname "$legacy_worker")"
+    [[ -e "$legacy_worker" ]] || install -m 755 "$binary" "$legacy_worker"
+    previous_worker="$legacy_worker"
+  fi
+  candidate="$state_dir/.nostr-codex-worker.next"
+  ln -s "$release_worker" "$candidate"
+  mv -Tf "$candidate" "$binary"
+  if systemctl --user restart "$unit" && systemctl --user is-active --quiet "$unit"; then
+    if [[ -n "$previous_worker" && -e "$previous_worker" ]]; then
+      ln -s "$previous_worker" "$state_dir/.previous-worker.next"
+      mv -Tf "$state_dir/.previous-worker.next" "$state_dir/previous-worker"
+    fi
+    echo "Deployed and restarted $unit with $checksum"
+    continue
+  fi
+  echo "Deployment failed for $unit; restoring the previous worker." >&2
+  if [[ -n "$previous_worker" && -e "$previous_worker" ]]; then
+    ln -s "$previous_worker" "$candidate"
+    mv -Tf "$candidate" "$binary"
+    systemctl --user restart "$unit"
+  fi
+  exit 1
 done
