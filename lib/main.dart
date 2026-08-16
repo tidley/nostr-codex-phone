@@ -6089,10 +6089,22 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
   }
 
-  Future<void> _openWorkerConsole() => _sendToolRequest(
-    'system_status',
-    extra: {'history_range': '24h'},
-    onResult: (result) => unawaited(_openToolResult(result)),
+  Future<void> _openWorkerConsole() => Navigator.of(context).push<void>(
+    MaterialPageRoute(
+      builder: (_) => _WorkerConsolePage(
+        data: _workerConsoleHistoryCache['24h'] ?? {'history_range': '24h'},
+        cache: _workerConsoleHistoryCache,
+        workspace: _activeWorkspaceWorker.workspace,
+        workspaceRevision: _activeWorkspaceWorker.revision,
+        onWorkspaceRequest: _sendWorkspaceRequest,
+        onRequestRange: (range, onResult) => _sendToolRequest(
+          'system_status',
+          extra: {'history_range': range},
+          onResult: (result) =>
+              onResult(result.error == null ? result.data : null, result.error),
+        ),
+      ),
+    ),
   );
 
   Future<void> _openToolResult(ToolResultPayload payload) async {
@@ -6162,6 +6174,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         page = _WorkerConsolePage(
           data: payload.data,
           cache: _workerConsoleHistoryCache,
+          workspace: _activeWorkspaceWorker.workspace,
+          workspaceRevision: _activeWorkspaceWorker.revision,
+          onWorkspaceRequest: _sendWorkspaceRequest,
           onRequestRange: (range, onResult) => _sendToolRequest(
             'system_status',
             extra: {'history_range': range},
@@ -7613,10 +7628,26 @@ Return a concise catch-up summary of what happened after that point: completed w
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  void _recordDiagnostic(String message) {
+  void _recordDiagnostic(String message, {bool coalesce = false}) {
     final timestamp = DateTime.now().toIso8601String().substring(11, 19);
     final diagnostics = _activeWorkspaceWorker.diagnostics;
     final next = [...diagnostics.value, '$timestamp  $message'];
+    if (coalesce && diagnostics.value.isNotEmpty) {
+      final previous = diagnostics.value.last;
+      final previousMessage = previous.length > 10
+          ? previous.substring(10)
+          : previous;
+      final match = RegExp(
+        r'^(.*?)(?: \((\d+) times\))?$',
+      ).firstMatch(previousMessage);
+      if (match?.group(1) == message) {
+        final count = int.tryParse(match?.group(2) ?? '') ?? 1;
+        next
+          ..removeLast()
+          ..removeLast()
+          ..add('$timestamp  $message (${count + 1} times)');
+      }
+    }
     diagnostics.value = List.unmodifiable(
       next.length > 200 ? next.sublist(next.length - 200) : next,
     );
@@ -7925,6 +7956,11 @@ Return a concise catch-up summary of what happened after that point: completed w
           setState(() {
             _workspaceFocusedConversationKey = conversationKey;
             _workspaceUnreadCounts.remove(conversationKey);
+          });
+          unawaited(_saveLastWorkspaceLocation());
+        },
+        onMarkAllThreadsRead: (conversationKey) {
+          setState(() {
             _workspaceThreadUnreadCounts.removeWhere(
               (threadKey, _) => threadKey.startsWith('$conversationKey:'),
             );
@@ -8900,6 +8936,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     if (session.gapSyncTimer?.isActive ?? false) return;
     _recordDiagnostic(
       'FIPS workspace update gap detected; synchronizing workspace',
+      coalesce: true,
     );
     session.gapSyncTimer = Timer(const Duration(milliseconds: 500), () {
       session.gapSyncTimer = null;

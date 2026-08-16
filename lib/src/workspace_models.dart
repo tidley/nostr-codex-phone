@@ -668,6 +668,7 @@ class WorkspaceTyping {
     this.agentId,
     this.agentName,
     this.stage,
+    this.workHistory = const [],
     this.channelId,
     this.recipientPubkey,
     this.memberPubkey,
@@ -680,6 +681,7 @@ class WorkspaceTyping {
   final String? agentId;
   final String? agentName;
   final String? stage;
+  final List<String> workHistory;
   final String? channelId;
   final String? recipientPubkey;
   final String? memberPubkey;
@@ -693,6 +695,10 @@ class WorkspaceTyping {
         agentId: json['agent_id']?.toString(),
         agentName: json['agent_name']?.toString(),
         stage: json['stage']?.toString(),
+        workHistory: (json['work_history'] as List? ?? const [])
+            .map((item) => item.toString())
+            .where((item) => item.isNotEmpty)
+            .toList(growable: false),
         channelId: json['channel_id']?.toString(),
         recipientPubkey: json['recipient_pubkey']?.toString(),
         memberPubkey: json['member_pubkey']?.toString(),
@@ -704,7 +710,7 @@ class WorkspaceTyping {
 
 class WorkspaceState {
   static const _maxMessagesPerConversation = 500;
-  static const _typingStopGrace = Duration(seconds: 30);
+  static const _typingStopGrace = Duration(seconds: 60);
 
   /// Last worker-authoritative workspace revision applied to this state.
   int revision = 0;
@@ -913,6 +919,7 @@ class WorkspaceState {
             agentId: status.agentId,
             agentName: status.agentName,
             stage: previous!.stage,
+            workHistory: previous.workHistory,
             channelId: status.channelId,
             recipientPubkey: status.recipientPubkey,
             memberPubkey: status.memberPubkey,
@@ -922,6 +929,8 @@ class WorkspaceState {
           );
         }
         typing[key] = status;
+      } else if (status.stage == '') {
+        typing.remove(key);
       } else if (previous != null) {
         // A stopped lease can arrive before its final message on another relay
         // update. Keep the preview until that message replaces it.
@@ -930,6 +939,7 @@ class WorkspaceState {
           agentId: previous.agentId,
           agentName: previous.agentName,
           stage: previous.stage,
+          workHistory: previous.workHistory,
           channelId: previous.channelId,
           recipientPubkey: previous.recipientPubkey,
           memberPubkey: previous.memberPubkey,
@@ -947,9 +957,11 @@ class WorkspaceState {
       data['conversation_agents'],
     );
     if ((isSnapshot && !isPartialSnapshot && hasConversationAgentSnapshot) ||
-        (isSnapshotHeader && hasConversationAgentSnapshot) ||
-        data['action'] == 'agent_created' ||
+        (isSnapshotHeader && incomingConversationAgents.isNotEmpty) ||
+        (data['action'] == 'agent_created' &&
+            incomingConversationAgents.isNotEmpty) ||
         data['action'] == 'agents' ||
+        data['action'] == 'opencode_debug_channel' ||
         data['action'] == 'conversation_agents_updated' ||
         data['action'] == 'agent_deleted') {
       conversationAgents = incomingConversationAgents;
@@ -958,7 +970,7 @@ class WorkspaceState {
       data['conversation_preprompts'],
     );
     if ((isSnapshot && !isPartialSnapshot && hasPrepromptSnapshot) ||
-        (isSnapshotHeader && hasPrepromptSnapshot) ||
+        (isSnapshotHeader && incomingPreprompts.isNotEmpty) ||
         data['action'] == 'conversation_preprompt_updated') {
       conversationPreprompts = incomingPreprompts;
     }
@@ -1019,9 +1031,29 @@ class WorkspaceState {
     final incomingMessages = _messages(data['messages']);
     if (data['action'] == 'message_created') {
       for (final message in incomingMessages) {
-        typing.removeWhere(
-          (_, status) => _typingMatchesMessage(status, message),
-        );
+        for (final entry in typing.entries.toList()) {
+          final status = entry.value;
+          if (!_typingMatchesMessage(status, message)) continue;
+          if (status.agentId == null) {
+            typing.remove(entry.key);
+            continue;
+          }
+          typing[entry.key] = WorkspaceTyping(
+            senderPubkey: status.senderPubkey,
+            agentId: status.agentId,
+            agentName: status.agentName,
+            stage: status.stage,
+            workHistory: status.workHistory,
+            channelId: status.channelId,
+            recipientPubkey: status.recipientPubkey,
+            memberPubkey: status.memberPubkey,
+            peerPubkey: status.peerPubkey,
+            parentId: status.parentId,
+            expiresAt:
+                DateTime.now().millisecondsSinceEpoch ~/ 1000 +
+                _typingStopGrace.inSeconds,
+          );
+        }
       }
     }
     for (final message in incomingMessages) {

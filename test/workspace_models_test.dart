@@ -1033,6 +1033,32 @@ void main() {
     expect(state.conversationAgents.single.agentId, 'agent-1');
   });
 
+  test('global agent updates retain conversation agent memberships', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'agents',
+          'agents': [
+            {'id': 'agent-1', 'name': 'Scout', 'role': 'Researcher'},
+          ],
+          'conversation_agents': [
+            {'agent_id': 'agent-1', 'channel_id': 'channel-1'},
+          ],
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'agent_created',
+          'agents': [
+            {'id': 'agent-2', 'name': 'Writer', 'role': 'Builder'},
+          ],
+          'conversation_agents': [],
+        },
+      });
+
+    expect(state.conversationAgents.single.agentId, 'agent-1');
+  });
+
   test('agent directory responses refresh conversation memberships', () {
     final state = WorkspaceState()
       ..apply({
@@ -1049,6 +1075,30 @@ void main() {
 
     expect(state.agents.single.name, 'Scout');
     expect(state.conversationAgents.single.channelId, 'channel-1');
+  });
+
+  test('empty snapshot header retains conversation agent memberships', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'agents': [
+            {'id': 'agent-1', 'name': 'Scout', 'role': 'Researcher'},
+          ],
+          'conversation_agents': [
+            {'agent_id': 'agent-1', 'channel_id': 'channel-1'},
+          ],
+        },
+      })
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot_header',
+          'conversation_agents': [],
+          'conversation_preprompts': [],
+        },
+      });
+
+    expect(state.conversationAgents.single.agentId, 'agent-1');
   });
 
   test('workspace state removes deleted agents and their memberships', () {
