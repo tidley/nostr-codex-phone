@@ -1043,7 +1043,6 @@ async fn main() -> Result<()> {
     let workspace_path = worker_state_path(&codex_config.working_dir, "workspace.sqlite3");
     let workspace = WorkspaceStore::open(&workspace_path)?;
     initialize_workspace_members(&workspace, owner_peer_hex.as_deref(), &allowed_owner_hexes)?;
-    ensure_phone_debug_channel(&workspace, &codex_config).await?;
     let config = WorkerRuntimeConfig {
         messenger,
         worker_env,
@@ -2417,6 +2416,11 @@ async fn process_workspace_request(
             return Ok(());
         }
         "send_channel_message" => {
+            if request.message_id.as_deref().is_some_and(|message_id| {
+                workspace.message_by_id(message_id).ok().flatten().is_some()
+            }) {
+                return Ok(());
+            }
             let channel_id = request.channel_id.as_deref().unwrap_or_default();
             let parent_id = request.parent_id.as_deref().filter(|parent_id| {
                 workspace
@@ -2474,6 +2478,11 @@ async fn process_workspace_request(
             return Ok(());
         }
         "send_direct_message" => {
+            if request.message_id.as_deref().is_some_and(|message_id| {
+                workspace.message_by_id(message_id).ok().flatten().is_some()
+            }) {
+                return Ok(());
+            }
             let message = workspace.add_direct_message_with_main_and_id(
                 sender,
                 request.recipient_pubkey.as_deref().unwrap_or_default(),
@@ -4933,8 +4942,14 @@ async fn route_conversation_agents(
             let Some(message_count) = workspace_history_request_count(&result.response) else {
                 break;
             };
-            let history =
-                workspace_agent_history(workspace, channel_id, member, peer, message_count)?;
+            let history = workspace_agent_history(
+                workspace,
+                channel_id,
+                member,
+                peer,
+                parent_id,
+                message_count,
+            )?;
             let prompt = format!(
                 "Here is the requested conversation history. Use it to answer the user's message. Do not mention this retrieval.\n\n{history}"
             );
@@ -4995,6 +5010,10 @@ async fn route_conversation_agents(
             .await?;
         }
         if is_thread_topic_response(&result.response) {
+            let direct_recipient = peer
+                .filter(|peer| !peer.starts_with("agent:"))
+                .or(member)
+                .unwrap_or_default();
             let message = match channel_id {
                 Some(channel_id) => workspace.add_channel_message_with_main(
                     &format!("agent:{}", agent.id),
@@ -5007,7 +5026,7 @@ async fn route_conversation_agents(
                 )?,
                 None => workspace.add_direct_message_with_main(
                     &format!("agent:{}", agent.id),
-                    peer.unwrap_or_default(),
+                    direct_recipient,
                     &result.response,
                     &[],
                     &[],
@@ -5043,6 +5062,10 @@ async fn route_conversation_agents(
             continue;
         }
         let also_send_to_main = parent_id.is_none();
+        let direct_recipient = peer
+            .filter(|peer| !peer.starts_with("agent:"))
+            .or(member)
+            .unwrap_or_default();
         let mut message = match channel_id {
             Some(channel_id) => workspace.add_channel_message_with_main(
                 &format!("agent:{}", agent.id),
@@ -5055,7 +5078,7 @@ async fn route_conversation_agents(
             )?,
             None => workspace.add_direct_message_with_main(
                 &format!("agent:{}", agent.id),
-                peer.unwrap_or_default(),
+                direct_recipient,
                 &result.response,
                 &[],
                 &[],
@@ -5226,19 +5249,25 @@ fn workspace_agent_history(
     channel_id: Option<&str>,
     member: Option<&str>,
     peer: Option<&str>,
+    parent_id: Option<&str>,
     message_count: usize,
 ) -> Result<String> {
     let messages = match channel_id {
         Some(channel_id) => workspace.channel_messages(channel_id)?,
         None => workspace.direct_messages(member.unwrap_or_default(), peer.unwrap_or_default())?,
     };
-    let recent = messages
+    let mut recent = messages
         .iter()
         .rev()
+        .filter(|message| {
+            parent_id.is_none_or(|parent_id| {
+                message.id == parent_id || message.parent_id.as_deref() == Some(parent_id)
+            })
+        })
         .take(message_count)
-        .rev()
         .map(|message| format!("{}: {}", message.sender_pubkey, message.body))
         .collect::<Vec<_>>();
+    recent.reverse();
     Ok(format!(
         "Recent conversation messages (up to {message_count}):\n{}",
         if recent.is_empty() {

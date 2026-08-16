@@ -101,7 +101,8 @@ bool isWorkspaceAgentSender(String senderPubkey) =>
     senderPubkey.trim().toLowerCase().startsWith('agent:');
 
 String? workspaceThreadTopic(Iterable<WorkspaceMessage> replies) {
-  for (final reply in replies.toList().reversed) {
+  final messages = replies.toList();
+  for (final reply in messages.reversed) {
     final match = RegExp(
       r'^\s*\[\[THREAD_TOPIC:\s*([^\]\r\n]+)\]\]',
       caseSensitive: false,
@@ -115,8 +116,17 @@ String? workspaceThreadTopic(Iterable<WorkspaceMessage> replies) {
         .join(' ');
     if (topic.isNotEmpty) return topic;
   }
+  for (final reply in messages.reversed) {
+    final hashtags = workspaceMessageHashtags(reply.body);
+    if (hashtags.isNotEmpty) return hashtags.take(3).join(' ');
+  }
   return null;
 }
+
+/// Extracts message hashtags that can be used as thread topics.
+List<String> workspaceMessageHashtags(String value) => RegExp(
+  r'(?<![\w#])#[A-Za-z][A-Za-z0-9_-]*',
+).allMatches(value).map((match) => match.group(0)!).toSet().toList();
 
 String workspaceDisplayMessageText(String value) => value.replaceFirst(
   RegExp(r'^\s*\[\[THREAD_TOPIC:\s*[^\]\r\n]+\]\]\s*', caseSensitive: false),
@@ -710,7 +720,7 @@ class WorkspaceTyping {
 
 class WorkspaceState {
   static const _maxMessagesPerConversation = 500;
-  static const _typingStopGrace = Duration(seconds: 60);
+  static const _typingStopGrace = Duration(seconds: 30);
 
   /// Last worker-authoritative workspace revision applied to this state.
   int revision = 0;
@@ -1038,21 +1048,7 @@ class WorkspaceState {
             typing.remove(entry.key);
             continue;
           }
-          typing[entry.key] = WorkspaceTyping(
-            senderPubkey: status.senderPubkey,
-            agentId: status.agentId,
-            agentName: status.agentName,
-            stage: status.stage,
-            workHistory: status.workHistory,
-            channelId: status.channelId,
-            recipientPubkey: status.recipientPubkey,
-            memberPubkey: status.memberPubkey,
-            peerPubkey: status.peerPubkey,
-            parentId: status.parentId,
-            expiresAt:
-                DateTime.now().millisecondsSinceEpoch ~/ 1000 +
-                _typingStopGrace.inSeconds,
-          );
+          typing.remove(entry.key);
         }
       }
     }
@@ -1179,6 +1175,13 @@ class WorkspaceState {
 
   List<String> directPeers(String ownPubkey) {
     final peers = <String>{};
+    for (final membership in conversationAgents) {
+      if (membership.channelId == null &&
+          membership.memberPubkey == ownPubkey &&
+          membership.peerPubkey?.startsWith('agent:') == true) {
+        peers.add(membership.peerPubkey!);
+      }
+    }
     for (final conversation in messages.values) {
       for (final message in conversation) {
         if (message.channelId != null) continue;
@@ -1187,6 +1190,9 @@ class WorkspaceState {
           peers.add(message.recipientPubkey!);
         } else if (message.recipientPubkey == ownPubkey &&
             !isWorkspaceAgentSender(message.senderPubkey)) {
+          peers.add(message.senderPubkey);
+        } else if (message.recipientPubkey == ownPubkey &&
+            isWorkspaceAgentSender(message.senderPubkey)) {
           peers.add(message.senderPubkey);
         }
       }

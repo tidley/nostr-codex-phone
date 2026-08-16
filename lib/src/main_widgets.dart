@@ -1006,7 +1006,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   static const _sidebarMinWidth = 220.0;
   static const _sidebarMaxWidth = 360.0;
   static const _threadPaneMinWidth = 360.0;
-  static const _threadPaneMaxWidth = 1100.0;
+  static const _threadPaneMaxFraction = 0.9;
   static const _conversationMinWidth = 360.0;
   late final _WorkspaceMentionTextEditingController _composer;
   final _composerFocus = FocusNode();
@@ -1042,6 +1042,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   WorkspaceMessage? _thread;
   final _openThreadIds = <String>[];
   String? _threadReplyTargetId;
+  String? _threadsTopicFilter;
   bool _alsoSendToMain = false;
   bool _filesSelected = false;
   bool _filesFullWindow = false;
@@ -1728,9 +1729,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final conversationKey = _conversationKey;
     if (conversationKey == null) return;
     final replies = _threadRepliesFor(thread);
-    if (automatic && replies.length < 3) return;
-    final topicGeneration = automatic ? replies.length ~/ 20 : 0;
-    if (automatic && topicGeneration > 1) return;
+    final topicGeneration = replies.length == 20 ? 1 : 0;
+    if (automatic && replies.length != 3 && replies.length != 20) return;
     final hasManualTopic =
         _threadTopicOverrides['$conversationKey:${thread.id}']?.value
             ?.trim()
@@ -2025,7 +2025,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     _select(next.$1, next.$2);
   }
 
-  void _showThreads() {
+  void _showThreads({String? topic}) {
     _closeDrawer();
     final previousKey = _conversationKey;
     if (previousKey != null) {
@@ -2035,6 +2035,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     }
     setState(() {
       _section = _WorkspaceSection.threads;
+      _threadsTopicFilter = topic;
       _active = '';
       _thread = null;
       _filesSelected = false;
@@ -2226,6 +2227,10 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   }
 
   void _openMessageSearch() {
+    if (_thread != null) {
+      _threadSearch.open();
+      return;
+    }
     _conversationWidgetKey.currentState?._openSearch();
   }
 
@@ -2385,6 +2390,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
               }
             },
             onOpenThread: _openSidebarThread,
+            selectedTopic: _threadsTopicFilter,
             dateFormat: widget.dateFormat,
           )
         : ValueListenableBuilder<int>(
@@ -2435,6 +2441,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                 },
                 onCloseThread: _closeThread,
                 onOpenMessageReference: _openReferencedMessage,
+                onOpenTopic: (topic) => _showThreads(topic: topic),
                 onToggleReaction: (message, emoji) => widget.onRequest({
                   'action': 'toggle_reaction',
                   'parent_id': message.id,
@@ -2655,6 +2662,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         onRequest: widget.onRequest,
         onOpenAttachment: widget.onOpenAttachment,
         onOpenMention: _showAgentDetails,
+        onOpenTopic: (topic) => _showThreads(topic: topic),
         ownPubkey: widget.ownPubkey,
         localSenderIds: widget.localSenderIds,
         displayName: widget.displayName,
@@ -2748,10 +2756,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                 _conversationMinWidth +
                 _threadPaneMinWidth +
                 10;
-    final maxSidePaneWidth =
-        (windowWidth - persistentChromeWidth - _conversationMinWidth - 10)
-            .clamp(_threadPaneMinWidth, _threadPaneMaxWidth);
     final availableMessageWidth = windowWidth - persistentChromeWidth - 10;
+    final maxSidePaneWidth = (availableMessageWidth * _threadPaneMaxFraction)
+        .clamp(_threadPaneMinWidth, availableMessageWidth);
     final sidePaneWidth = (availableMessageWidth * _threadPaneWidthFraction)
         .clamp(_threadPaneMinWidth, maxSidePaneWidth);
     // Keep the active conversation readable. On a narrow window the detail
@@ -2813,7 +2820,14 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                       icon: const Icon(Icons.close),
                       tooltip: 'Close thread',
                     ),
-                    title: const Text('Thread'),
+                    title: Text(
+                      _thread == null
+                          ? 'Thread'
+                          : _threadTopicFor(_thread!) ?? 'Thread',
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   )
                 : AppBar(
                     title: Text(
@@ -2872,16 +2886,21 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                             duration: const Duration(milliseconds: 240),
                             switchInCurve: Curves.easeOutCubic,
                             switchOutCurve: Curves.easeInCubic,
-                            transitionBuilder: (child, animation) =>
-                                SlideTransition(
-                                  position: animation.drive(
-                                    Tween(
-                                      begin: const Offset(1, 0),
-                                      end: Offset.zero,
-                                    ),
+                            transitionBuilder: (child, animation) {
+                              if (child.key !=
+                                  const ValueKey('mobile-side-pane')) {
+                                return child;
+                              }
+                              return SlideTransition(
+                                position: animation.drive(
+                                  Tween(
+                                    begin: const Offset(1, 0),
+                                    end: Offset.zero,
                                   ),
-                                  child: child,
                                 ),
+                                child: child,
+                              );
+                            },
                             child: showSingleSidePane
                                 ? KeyedSubtree(
                                     key: const ValueKey('mobile-side-pane'),
@@ -2903,7 +2922,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                       onResize: (delta) => setState(() {
                         _threadPaneWidthFraction =
                             ((sidePaneWidth + delta) / availableMessageWidth)
-                                .clamp(0.0, 1.0);
+                                .clamp(0.0, _threadPaneMaxFraction);
                         _savePanelState();
                       }),
                     ),
@@ -3011,9 +3030,16 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   String _compactTypingLabel(WorkspaceTyping status) {
     final name = status.agentName ?? _memberLabel(status.senderPubkey);
-    return status.agentId != null
+    if (status.agentId == null) return '$name is typing...';
+    final parentId = status.parentId;
+    final topic = parentId == null
+        ? null
+        : workspaceThreadTopic(
+            _activeMessages.where((message) => message.parentId == parentId),
+          );
+    return topic == null
         ? '$name is working...'
-        : '$name is typing...';
+        : '$name is working on $topic...';
   }
 
   String _typingActivityLabel(WorkspaceTyping status) {
@@ -3631,6 +3657,7 @@ class _WorkspaceThreadsView extends StatefulWidget {
     required this.threadUnreadCounts,
     required this.onMarkAllRead,
     required this.onOpenThread,
+    this.selectedTopic,
     required this.dateFormat,
   });
 
@@ -3643,6 +3670,7 @@ class _WorkspaceThreadsView extends StatefulWidget {
   final Map<String, int> threadUnreadCounts;
   final VoidCallback onMarkAllRead;
   final void Function(String conversationKey, String threadId) onOpenThread;
+  final String? selectedTopic;
   final WorkspaceDateFormat dateFormat;
 
   @override
@@ -3655,6 +3683,29 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
   bool _showUnreadOnly = false;
   bool _sortMostRecent = true;
   final _selectedTopicWords = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _applySelectedTopic();
+  }
+
+  @override
+  void didUpdateWidget(covariant _WorkspaceThreadsView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.selectedTopic != widget.selectedTopic) _applySelectedTopic();
+  }
+
+  void _applySelectedTopic() {
+    final topic = widget.selectedTopic;
+    _selectedTopicWords
+      ..clear()
+      ..addAll(
+        topic == null
+            ? const []
+            : _topicWords(topic).map((word) => word.toLowerCase()),
+      );
+  }
 
   String _memberLabel(String pubkey) {
     if (isWorkspaceAgentSender(pubkey)) {
@@ -3709,15 +3760,51 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
     );
   }
 
+  List<String> _topicsFor(WorkspaceMessage source) {
+    final conversationKey = widget.workspace.conversationKeyForMessage(source);
+    final messages = [
+      source,
+      ...(widget.workspace.messages[conversationKey] ??
+              const <WorkspaceMessage>[])
+          .where((message) => message.parentId == source.id),
+    ];
+    final topics = <String>[];
+    final seen = <String>{};
+    void add(String topic) {
+      if (seen.add(topic.toLowerCase())) topics.add(topic);
+    }
+
+    if (_topicFor(source) case final topic?) add(topic);
+    for (final message in messages) {
+      for (final hashtag in workspaceMessageHashtags(message.body)) {
+        add(hashtag);
+      }
+    }
+    return topics;
+  }
+
   Iterable<String> _topicWords(String topic) =>
       RegExp(r'[A-Za-z0-9]+').allMatches(topic).map((match) => match.group(0)!);
 
   bool _matchesSelectedTopicWords(WorkspaceMessage source) {
     if (_selectedTopicWords.isEmpty) return true;
-    final topic = _topicFor(source);
-    if (topic == null) return false;
-    final words = _topicWords(topic).map((word) => word.toLowerCase()).toSet();
+    final words = _topicsFor(
+      source,
+    ).expand(_topicWords).map((word) => word.toLowerCase()).toSet();
     return _selectedTopicWords.every(words.contains);
+  }
+
+  bool _isTopicPhraseSelected(String topic) => _topicWords(
+    topic,
+  ).map((word) => word.toLowerCase()).every(_selectedTopicWords.contains);
+
+  void _setTopicPhraseSelected(String topic, bool selected) {
+    final words = _topicWords(topic).map((word) => word.toLowerCase());
+    setState(
+      () => selected
+          ? _selectedTopicWords.addAll(words)
+          : _selectedTopicWords.removeAll(words),
+    );
   }
 
   @override
@@ -3746,20 +3833,18 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
         }
       }
     }
-    final topicWords = <String, ({String label, int count})>{};
+    final topicsByPhrase = <String, ({String label, int count})>{};
     for (final source in threads.values) {
-      final topic = _topicFor(source);
-      if (topic != null)
-        for (final word in _topicWords(topic).toSet()) {
-          final key = word.toLowerCase();
-          final existing = topicWords[key];
-          topicWords[key] = (
-            label: existing?.label ?? word,
-            count: (existing?.count ?? 0) + 1,
-          );
-        }
+      for (final topic in _topicsFor(source)) {
+        final key = topic.toLowerCase();
+        final existing = topicsByPhrase[key];
+        topicsByPhrase[key] = (
+          label: existing?.label ?? topic,
+          count: (existing?.count ?? 0) + 1,
+        );
+      }
     }
-    final topics = topicWords.entries.toList()
+    final topics = topicsByPhrase.entries.toList()
       ..sort((left, right) => left.value.label.compareTo(right.value.label));
     final ordered =
         threads.values
@@ -3882,11 +3967,10 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                         label: Text(
                           '${topic.value.label} (${topic.value.count})',
                         ),
-                        selected: _selectedTopicWords.contains(topic.key),
-                        onSelected: (selected) => setState(
-                          () => selected
-                              ? _selectedTopicWords.add(topic.key)
-                              : _selectedTopicWords.remove(topic.key),
+                        selected: _isTopicPhraseSelected(topic.value.label),
+                        onSelected: (selected) => _setTopicPhraseSelected(
+                          topic.value.label,
+                          selected,
                         ),
                       ),
                   ],
@@ -3916,12 +4000,9 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                 for (final topic in topics)
                   FilterChip(
                     label: Text('${topic.value.label} (${topic.value.count})'),
-                    selected: _selectedTopicWords.contains(topic.key),
-                    onSelected: (selected) => setState(
-                      () => selected
-                          ? _selectedTopicWords.add(topic.key)
-                          : _selectedTopicWords.remove(topic.key),
-                    ),
+                    selected: _isTopicPhraseSelected(topic.value.label),
+                    onSelected: (selected) =>
+                        _setTopicPhraseSelected(topic.value.label, selected),
                   ),
               ],
             ),
@@ -4226,15 +4307,18 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
     final replies =
         widget.workspace.messages[conversationKey] ??
         const <WorkspaceMessage>[];
-    final topic = _topicFor(source) ?? '';
+    final topics = _topicsFor(source);
     final exactTopic = RegExp(r'^"(.+)"$').firstMatch(query)?.group(1);
-    if (exactTopic != null) return topic.toLowerCase() == exactTopic;
+    if (exactTopic != null) {
+      return topics.any((topic) => topic.toLowerCase() == exactTopic);
+    }
     final queryWords = _topicWords(
       query,
     ).map((word) => word.toLowerCase()).toSet();
-    final topicWords = _topicWords(
-      topic,
-    ).map((word) => word.toLowerCase()).toSet();
+    final topicWords = topics
+        .expand(_topicWords)
+        .map((word) => word.toLowerCase())
+        .toSet();
     if (queryWords.isNotEmpty && queryWords.every(topicWords.contains)) {
       return true;
     }
@@ -4245,7 +4329,7 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
       channel,
       _memberLabel(source.senderPubkey),
       workspaceDisplayMessageText(source.body),
-      topic,
+      ...topics,
       ...replies
           .where((message) => message.parentId == source.id)
           .expand(
@@ -5621,6 +5705,7 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.onOpenThread,
     required this.onCloseThread,
     required this.onOpenMessageReference,
+    required this.onOpenTopic,
     required this.onToggleReaction,
     required this.localMessagePinIds,
     required this.onToggleLocalMessagePin,
@@ -5714,6 +5799,7 @@ class _WorkspaceConversation extends StatefulWidget {
   final ValueChanged<WorkspaceMessage> onOpenThread;
   final VoidCallback onCloseThread;
   final ValueChanged<WorkspaceMessage> onOpenMessageReference;
+  final ValueChanged<String> onOpenTopic;
   final Future<void> Function(WorkspaceMessage message, String emoji)
   onToggleReaction;
   final Set<String> localMessagePinIds;
@@ -5787,7 +5873,7 @@ class _WorkspaceConversation extends StatefulWidget {
 
 class _WorkspaceConversationState extends State<_WorkspaceConversation> {
   String _compactTypingLabel(WorkspaceTyping status) {
-    final name = status.agentName ?? status.senderPubkey;
+    final name = status.agentName ?? _memberLabel(status.senderPubkey);
     return status.agentId != null
         ? '$name is working...'
         : '$name is typing...';
@@ -6877,19 +6963,22 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                       Row(
                         children: [
                           Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                            child: Row(
                               children: [
-                                Text(
-                                  widget.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(context).textTheme.titleLarge
-                                      ?.copyWith(fontWeight: FontWeight.bold),
+                                Flexible(
+                                  child: Text(
+                                    widget.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleLarge
+                                        ?.copyWith(fontWeight: FontWeight.bold),
+                                  ),
                                 ),
                                 if (widget.section ==
                                     _WorkspaceSection.channel) ...[
-                                  const SizedBox(height: 2),
+                                  const SizedBox(width: 10),
                                   TextButton(
                                     onPressed: _showConversationMembers,
                                     style: TextButton.styleFrom(
@@ -6899,11 +6988,58 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                                           MaterialTapTargetSize.shrinkWrap,
                                       alignment: Alignment.centerLeft,
                                     ),
-                                    child: Text(
-                                      '$_humanCount humans - ${widget.agentCount} agents',
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.bodySmall,
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Semantics(
+                                          label: '$_humanCount humans',
+                                          child: ExcludeSemantics(
+                                            child: _WorkspaceFrogAvatar(
+                                              identity: 'humans',
+                                              label: 'Humans',
+                                              radius: 10,
+                                              backgroundColor: const Color(
+                                                0xffffffff,
+                                              ),
+                                              foregroundColor: const Color(
+                                                0xff238636,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 3),
+                                        Text(
+                                          '$_humanCount',
+                                          style: Theme.of(
+                                            context,
+                                          ).textTheme.bodySmall,
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Semantics(
+                                          label: '${widget.agentCount} agents',
+                                          child: ExcludeSemantics(
+                                            child: _WorkspaceFrogAvatar(
+                                              identity: 'agents',
+                                              label: 'Agents',
+                                              radius: 10,
+                                              bot: true,
+                                              backgroundColor: const Color(
+                                                0xff5f8790,
+                                              ),
+                                              foregroundColor: const Color(
+                                                0xff102b30,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 3),
+                                        Text(
+                                          '${widget.agentCount}',
+                                          style: Theme.of(
+                                            context,
+                                          ).textTheme.bodySmall,
+                                        ),
+                                      ],
                                     ),
                                   ),
                                 ],
@@ -7115,6 +7251,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                                               m.senderPubkey,
                                             ),
                                             groupedWithPrevious: grouped,
+                                            showAuthorWhenGrouped: true,
                                             isLocalSender:
                                                 isWorkspaceLocalSender(
                                                   m.senderPubkey,
@@ -7192,93 +7329,104 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                 ),
               ),
               SizedBox(
-                height: 28,
+                height: 52,
                 child:
                     _unreadThreadReplyCount > 0 ||
                         widget.typingStatuses.any(
                           (status) => !_showsMainLiveMessage(status),
                         ) ||
                         _cancelledAgentIds.isNotEmpty
-                    ? ColoredBox(
-                        color: palette.content.withValues(alpha: 0.75),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 20),
-                          child: LayoutBuilder(
-                            builder: (context, constraints) => SingleChildScrollView(
-                              scrollDirection: Axis.horizontal,
-                              child: ConstrainedBox(
-                                constraints: BoxConstraints(
-                                  minWidth: constraints.maxWidth,
-                                ),
-                                child: Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      if (_unreadThreadReplyCount > 0)
-                                        _UnreadRepliesButton(
-                                          count: _unreadThreadReplyCount,
-                                          onPressed:
-                                              _unreadThreadSources.isEmpty
-                                              ? null
-                                              : () => widget.onOpenThread(
-                                                  _unreadThreadSources.first,
-                                                ),
-                                        ),
-                                      for (
-                                        var index = 0;
-                                        index < widget.typingStatuses.length;
-                                        index++
-                                      )
-                                        if (!_showsMainLiveMessage(
-                                          widget.typingStatuses[index],
-                                        ))
-                                          if (widget
-                                                  .typingStatuses[index]
-                                                  .agentId
-                                              case final agentId?)
-                                            _HoldToCancelAgentTask(
-                                              key: ValueKey(
-                                                'cancel-agent-$agentId-${widget.typingStatuses[index].parentId ?? ''}',
-                                              ),
-                                              label: widget.typingLabels[index],
-                                              onTap: _typingThreadOpener(
-                                                widget.typingStatuses[index],
-                                              ),
-                                              onCancel: () =>
-                                                  _cancelAgentTask(agentId),
-                                            )
-                                          else
-                                            TextButton(
-                                              onPressed: _typingThreadOpener(
-                                                widget.typingStatuses[index],
-                                              ),
-                                              style: TextButton.styleFrom(
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                      horizontal: 8,
-                                                      vertical: 2,
-                                                    ),
-                                                minimumSize: const Size(0, 28),
-                                                tapTargetSize:
-                                                    MaterialTapTargetSize
-                                                        .shrinkWrap,
-                                              ),
-                                              child: Text(
-                                                widget.typingLabels[index],
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                            ),
-                                      if (_cancelledAgentIds.isNotEmpty)
-                                        const Padding(
-                                          padding: EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                            vertical: 2,
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        child: ColoredBox(
+                          color: palette.content.withValues(alpha: 0.75),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 20),
+                            child: LayoutBuilder(
+                              builder: (context, constraints) => SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: ConstrainedBox(
+                                  constraints: BoxConstraints(
+                                    minWidth: constraints.maxWidth,
+                                  ),
+                                  child: Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (_unreadThreadReplyCount > 0)
+                                          _UnreadRepliesButton(
+                                            count: _unreadThreadReplyCount,
+                                            onPressed:
+                                                _unreadThreadSources.isEmpty
+                                                ? null
+                                                : () => widget.onOpenThread(
+                                                    _unreadThreadSources.first,
+                                                  ),
                                           ),
-                                          child: Text('Cancelled', maxLines: 1),
-                                        ),
-                                    ],
+                                        for (
+                                          var index = 0;
+                                          index < widget.typingStatuses.length;
+                                          index++
+                                        )
+                                          if (!_showsMainLiveMessage(
+                                            widget.typingStatuses[index],
+                                          ))
+                                            if (widget
+                                                    .typingStatuses[index]
+                                                    .agentId
+                                                case final agentId?)
+                                              _HoldToCancelAgentTask(
+                                                key: ValueKey(
+                                                  'cancel-agent-$agentId-${widget.typingStatuses[index].parentId ?? ''}',
+                                                ),
+                                                label:
+                                                    widget.typingLabels[index],
+                                                onTap: _typingThreadOpener(
+                                                  widget.typingStatuses[index],
+                                                ),
+                                                onCancel: () =>
+                                                    _cancelAgentTask(agentId),
+                                              )
+                                            else
+                                              TextButton(
+                                                onPressed: _typingThreadOpener(
+                                                  widget.typingStatuses[index],
+                                                ),
+                                                style: TextButton.styleFrom(
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 8,
+                                                        vertical: 2,
+                                                      ),
+                                                  minimumSize: const Size(
+                                                    0,
+                                                    28,
+                                                  ),
+                                                  tapTargetSize:
+                                                      MaterialTapTargetSize
+                                                          .shrinkWrap,
+                                                ),
+                                                child: Text(
+                                                  widget.typingLabels[index],
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                ),
+                                              ),
+                                        if (_cancelledAgentIds.isNotEmpty)
+                                          const Padding(
+                                            padding: EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 2,
+                                            ),
+                                            child: Text(
+                                              'Cancelled',
+                                              maxLines: 1,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
                                   ),
                                 ),
                               ),
@@ -7584,6 +7732,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
     required this.onReact,
     required this.onOpenMessageReference,
     this.onOpenMention,
+    this.onOpenTopic,
     this.isLocallyPinned = false,
     this.onToggleLocalPin,
     this.onToggleSharedPin,
@@ -7603,6 +7752,8 @@ class _WorkspaceMessageRow extends StatefulWidget {
     this.dateFormat = WorkspaceDateFormat.uk,
     this.showActions = true,
     this.isInProgress = false,
+    this.fitBubbleToContent = false,
+    this.showAuthorWhenGrouped = false,
   });
   final WorkspaceMessage message;
   final String authorName;
@@ -7613,6 +7764,7 @@ class _WorkspaceMessageRow extends StatefulWidget {
   final ValueChanged<String> onReact;
   final ValueChanged<String> onOpenMessageReference;
   final ValueChanged<WorkspaceMention>? onOpenMention;
+  final ValueChanged<String>? onOpenTopic;
   final bool isLocallyPinned;
   final VoidCallback? onToggleLocalPin;
   final VoidCallback? onToggleSharedPin;
@@ -7632,6 +7784,8 @@ class _WorkspaceMessageRow extends StatefulWidget {
   final WorkspaceDateFormat dateFormat;
   final bool showActions;
   final bool isInProgress;
+  final bool fitBubbleToContent;
+  final bool showAuthorWhenGrouped;
   @override
   State<_WorkspaceMessageRow> createState() => _WorkspaceMessageRowState();
 }
@@ -7643,18 +7797,6 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
   late final AnimationController _outlineController;
   late final ValueNotifier<List<String>> _workHistory;
   Timer? _timestampTimer;
-
-  bool get _hasNewThreadReply => widget.threadUnreadCount > 0;
-
-  void _updateOutlineAnimation() {
-    if (_hasNewThreadReply) {
-      _outlineController.repeat(reverse: true);
-    } else {
-      _outlineController
-        ..stop()
-        ..value = 0;
-    }
-  }
 
   void _scheduleTimestampRefresh() {
     _timestampTimer?.cancel();
@@ -7690,7 +7832,6 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
       duration: const Duration(milliseconds: 1400),
     );
     _workHistory = ValueNotifier(widget.message.workHistory);
-    _updateOutlineAnimation();
     if (widget.flashOutline) _outlineController.forward(from: 0);
     _scheduleTimestampRefresh();
   }
@@ -7698,10 +7839,6 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
   @override
   void didUpdateWidget(covariant _WorkspaceMessageRow oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.threadUnreadCount != widget.threadUnreadCount ||
-        oldWidget.threadActivityLabel != widget.threadActivityLabel) {
-      _updateOutlineAnimation();
-    }
     if (!oldWidget.flashOutline && widget.flashOutline) {
       _outlineController.forward(from: 0);
     }
@@ -7942,7 +8079,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (widget.groupedWithPrevious)
+        if (widget.groupedWithPrevious && !widget.showAuthorWhenGrouped)
           Align(
             alignment: Alignment.centerLeft,
             child: Padding(
@@ -7959,10 +8096,11 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
               ),
             ),
           ),
-        if (!widget.groupedWithPrevious)
+        if (!widget.groupedWithPrevious || widget.showAuthorWhenGrouped)
           Padding(
             padding: const EdgeInsets.only(left: 44, top: 4),
             child: Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
                 ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 120),
@@ -7995,6 +8133,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
             mentions: widget.message.mentions,
             onOpenMessageReference: widget.onOpenMessageReference,
             onOpenMention: widget.onOpenMention,
+            onOpenTopic: widget.onOpenTopic,
             searchQuery: widget.searchQuery,
             expanded: widget.isMessageExpanded,
             onExpandedChanged: widget.onMessageExpandedChanged,
@@ -8069,6 +8208,9 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
     );
     final lastReplyLabel = _lastReplyLabel();
     final mutedColor = Theme.of(context).colorScheme.onSurfaceVariant;
+    final replyCountStyle = Theme.of(
+      context,
+    ).textTheme.labelMedium?.copyWith(fontWeight: FontWeight.w700);
     final replyControls =
         widget.threadReplyCount > 0 || widget.threadActivityLabel != null
         ? Padding(
@@ -8083,17 +8225,12 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.start,
                     crossAxisAlignment: CrossAxisAlignment.center,
-                    textDirection: TextDirection.rtl,
                     children: [
                       if (widget.threadReplyCount > 0) ...[
-                        if (lastReplyLabel != null)
-                          Text(
-                            lastReplyLabel,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.labelMedium
-                                ?.copyWith(color: mutedColor),
-                          ),
+                        Text(
+                          '${widget.threadReplyCount} ${widget.threadReplyCount == 1 ? 'reply' : 'replies'}',
+                          style: replyCountStyle,
+                        ),
                         if (lastReplyLabel != null) const SizedBox(width: 6),
                         if (lastReplyLabel != null)
                           Text(
@@ -8102,30 +8239,30 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                                 ?.copyWith(color: mutedColor),
                           ),
                         if (lastReplyLabel != null) const SizedBox(width: 6),
-                        Text(
-                          '${widget.threadReplyCount} ${widget.threadReplyCount == 1 ? 'reply' : 'replies'}',
-                          style: Theme.of(context).textTheme.labelMedium
-                              ?.copyWith(fontWeight: FontWeight.w700),
-                        ),
-                        const SizedBox(width: 5),
-                        Transform.translate(
-                          offset: const Offset(0, 1),
-                          child: Icon(
-                            Icons.forum_outlined,
-                            size: 14,
-                            color: mutedColor,
+                        if (lastReplyLabel != null)
+                          Text(
+                            lastReplyLabel,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.labelMedium
+                                ?.copyWith(color: mutedColor),
                           ),
-                        ),
                         if (widget.threadUnreadCount > 0)
                           const SizedBox(width: 8),
                         if (widget.threadUnreadCount > 0)
+                          const Icon(
+                            Icons.circle,
+                            size: 7,
+                            color: Color(0xff35d6a0),
+                          ),
+                        if (widget.threadUnreadCount > 0)
+                          const SizedBox(width: 4),
+                        if (widget.threadUnreadCount > 0)
                           Text(
                             '${widget.threadUnreadCount} new',
-                            style: Theme.of(context).textTheme.labelMedium
-                                ?.copyWith(
-                                  color: Theme.of(context).colorScheme.primary,
-                                  fontWeight: FontWeight.w700,
-                                ),
+                            style: replyCountStyle?.copyWith(
+                              color: const Color(0xff35d6a0),
+                            ),
                           ),
                       ],
                       if (widget.threadActivityLabel != null)
@@ -8155,9 +8292,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
         final minimumBubbleWidth = MediaQuery.sizeOf(context).width < 720
             ? 144.0
             : 300.0;
-        final availableBubbleWidth = math
-            .min(constraints.maxWidth, 820)
-            .toDouble();
+        final availableBubbleWidth = constraints.maxWidth;
         final maxBubbleWidth = math
             .max(minimumBubbleWidth, availableBubbleWidth)
             .toDouble();
@@ -8171,161 +8306,184 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
           textDirection: Directionality.of(context),
           textScaler: MediaQuery.textScalerOf(context),
         )..layout()).width;
-        final bubbleWidth = maxBubbleWidth;
-        final bubble = SizedBox(
-          width: bubbleWidth,
-          child: MouseRegion(
-            onEnter: (_) => setState(() => _hovered = true),
-            onExit: (_) => setState(() => _hovered = false),
-            child: GestureDetector(
-              onTap: widget.onThread,
-              onLongPress: widget.showActions
-                  ? () => unawaited(_showMessageActions(context))
-                  : null,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  AnimatedBuilder(
-                    animation: _outlineController,
-                    builder: (context, child) {
-                      final newReply = _hasNewThreadReply;
-                      final flash = widget.flashOutline;
-                      final selected = widget.isThreadSource;
-                      final primary = Theme.of(context).colorScheme.primary;
-                      final glow = Curves.easeInOut.transform(
-                        _outlineController.value,
-                      );
-                      final highlighted = selected || newReply || flash;
-                      final bubble = Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: widget.isLocalSender
-                              ? const Color(0xff182326)
-                              : const Color(0xff111b1e),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: newReply || flash
-                                ? primary.withValues(
-                                    alpha:
-                                        (flash ? 0.48 : 0.34) + (0.48 * glow),
-                                  )
-                                : selected
-                                ? primary.withValues(alpha: 0.72)
-                                : Theme.of(context).colorScheme.outlineVariant
-                                      .withValues(alpha: 0.28),
-                            width: 1,
+        final bubble = ConstrainedBox(
+          constraints: BoxConstraints(
+            minWidth: widget.fitBubbleToContent ? 180 : 0,
+            maxWidth: maxBubbleWidth,
+          ),
+          child: SizedBox(
+            width: widget.fitBubbleToContent ? null : maxBubbleWidth,
+            child: MouseRegion(
+              onEnter: (_) => setState(() => _hovered = true),
+              onExit: (_) => setState(() => _hovered = false),
+              child: GestureDetector(
+                onTap: widget.onThread,
+                onLongPress: widget.showActions
+                    ? () => unawaited(_showMessageActions(context))
+                    : null,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    AnimatedBuilder(
+                      animation: _outlineController,
+                      builder: (context, child) {
+                        final flash = widget.flashOutline;
+                        final selected = widget.isThreadSource;
+                        final primary = Theme.of(context).colorScheme.primary;
+                        final glow = Curves.easeInOut.transform(
+                          _outlineController.value,
+                        );
+                        final bubble = Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
                           ),
-                          boxShadow: newReply || flash
-                              ? [
-                                  BoxShadow(
-                                    color: primary.withValues(
-                                      alpha: (flash ? 0.36 : 0.22) * glow,
+                          decoration: BoxDecoration(
+                            color: widget.isLocalSender
+                                ? const Color(0xff182326)
+                                : const Color(0xff111b1e),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: flash
+                                  ? primary.withValues(
+                                      alpha:
+                                          (flash ? 0.48 : 0.34) + (0.48 * glow),
+                                    )
+                                  : selected
+                                  ? primary.withValues(alpha: 0.72)
+                                  : Theme.of(context).colorScheme.outlineVariant
+                                        .withValues(alpha: 0.28),
+                              width: 1,
+                            ),
+                            boxShadow: flash
+                                ? [
+                                    BoxShadow(
+                                      color: primary.withValues(
+                                        alpha: (flash ? 0.36 : 0.22) * glow,
+                                      ),
+                                      blurRadius: flash ? 28 : 20,
+                                      spreadRadius: flash ? 5 : 3,
                                     ),
-                                    blurRadius: flash ? 28 : 20,
-                                    spreadRadius: flash ? 5 : 3,
-                                  ),
-                                ]
-                              : null,
-                        ),
-                        child: child,
-                      );
-                      return bubble;
-                    },
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        row(timestampWidth),
-                        if (replyControls != null) ...[replyControls],
-                      ],
-                    ),
-                  ),
-                  if (_hovered && widget.showActions)
-                    Positioned(
-                      top: -4,
-                      right: 0,
-                      child: Material(
-                        elevation: 3,
-                        borderRadius: BorderRadius.circular(10),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              tooltip: 'Copy text',
-                              icon: const Icon(Icons.copy_outlined, size: 18),
-                              onPressed: () => Clipboard.setData(
-                                ClipboardData(text: _messageText),
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: 'Copy message reference',
-                              icon: const Icon(Icons.link_outlined, size: 18),
-                              onPressed: () => Clipboard.setData(
-                                ClipboardData(
-                                  text: '[[message:${widget.message.id}]]',
-                                ),
-                              ),
-                            ),
-                            if (widget.showThreadAction)
-                              IconButton(
-                                tooltip: 'Reply in thread',
-                                icon: const Icon(
-                                  Icons.reply_outlined,
-                                  size: 18,
-                                ),
-                                onPressed: widget.onThread,
-                              ),
-                            if (widget.onToggleSharedPin != null)
-                              IconButton(
-                                tooltip: widget.message.pinned
-                                    ? 'Unpin for everyone'
-                                    : 'Pin for everyone',
-                                icon: Icon(
-                                  widget.message.pinned
-                                      ? Icons.push_pin
-                                      : Icons.push_pin_outlined,
-                                  size: 18,
-                                ),
-                                onPressed: widget.onToggleSharedPin,
-                              ),
-                            if (widget.onToggleLocalPin != null)
-                              IconButton(
-                                tooltip: widget.isLocallyPinned
-                                    ? 'Unpin for me'
-                                    : 'Pin for me',
-                                icon: Icon(
-                                  widget.isLocallyPinned
-                                      ? Icons.bookmark
-                                      : Icons.bookmark_border,
-                                  size: 18,
-                                ),
-                                onPressed: widget.onToggleLocalPin,
-                              ),
-                            PopupMenuButton<String>(
-                              tooltip: 'React',
-                              padding: EdgeInsets.zero,
-                              splashRadius: 18,
-                              icon: const Icon(
-                                Icons.add_reaction_outlined,
-                                size: 18,
-                              ),
-                              onSelected: widget.onReact,
-                              itemBuilder: _reactionMenuItems,
-                            ),
-                          ],
-                        ),
+                                  ]
+                                : null,
+                          ),
+                          child: child,
+                        );
+                        return bubble;
+                      },
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          row(timestampWidth),
+                          if (replyControls != null) ...[replyControls],
+                        ],
                       ),
                     ),
-                ],
+                    if (widget.threadUnreadCount > 0)
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: Align(
+                            alignment: Alignment.centerRight,
+                            child: Transform.translate(
+                              offset: const Offset(-6, 0),
+                              child: const DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: Color(0xff22e0c0),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: SizedBox.square(dimension: 7),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (_hovered && widget.showActions)
+                      Positioned(
+                        top: -4,
+                        right: 0,
+                        child: Material(
+                          elevation: 3,
+                          borderRadius: BorderRadius.circular(10),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                tooltip: 'Copy text',
+                                icon: const Icon(Icons.copy_outlined, size: 18),
+                                onPressed: () => Clipboard.setData(
+                                  ClipboardData(text: _messageText),
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Copy message reference',
+                                icon: const Icon(Icons.link_outlined, size: 18),
+                                onPressed: () => Clipboard.setData(
+                                  ClipboardData(
+                                    text: '[[message:${widget.message.id}]]',
+                                  ),
+                                ),
+                              ),
+                              if (widget.showThreadAction)
+                                IconButton(
+                                  tooltip: 'Reply in thread',
+                                  icon: const Icon(
+                                    Icons.reply_outlined,
+                                    size: 18,
+                                  ),
+                                  onPressed: widget.onThread,
+                                ),
+                              if (widget.onToggleSharedPin != null)
+                                IconButton(
+                                  tooltip: widget.message.pinned
+                                      ? 'Unpin for everyone'
+                                      : 'Pin for everyone',
+                                  icon: Icon(
+                                    widget.message.pinned
+                                        ? Icons.push_pin
+                                        : Icons.push_pin_outlined,
+                                    size: 18,
+                                  ),
+                                  onPressed: widget.onToggleSharedPin,
+                                ),
+                              if (widget.onToggleLocalPin != null)
+                                IconButton(
+                                  tooltip: widget.isLocallyPinned
+                                      ? 'Unpin for me'
+                                      : 'Pin for me',
+                                  icon: Icon(
+                                    widget.isLocallyPinned
+                                        ? Icons.bookmark
+                                        : Icons.bookmark_border,
+                                    size: 18,
+                                  ),
+                                  onPressed: widget.onToggleLocalPin,
+                                ),
+                              PopupMenuButton<String>(
+                                tooltip: 'React',
+                                padding: EdgeInsets.zero,
+                                splashRadius: 18,
+                                icon: const Icon(
+                                  Icons.add_reaction_outlined,
+                                  size: 18,
+                                ),
+                                onSelected: widget.onReact,
+                                itemBuilder: _reactionMenuItems,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
               ),
             ),
           ),
         );
         return Align(
-          alignment: Alignment.center,
+          alignment: widget.fitBubbleToContent
+              ? Alignment.centerLeft
+              : Alignment.center,
           heightFactor: 1,
           child: bubble,
         );
@@ -8402,24 +8560,36 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
     ),
   );
 
-  Widget _threadTopicTag(BuildContext context, String topic) => DecoratedBox(
-    decoration: BoxDecoration(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
-      borderRadius: BorderRadius.circular(999),
-    ),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-      child: Text(
-        topic,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          color: Theme.of(context).colorScheme.onSurface,
-          fontWeight: FontWeight.w500,
+  Widget _threadTopicTag(BuildContext context, String topic) {
+    final onTap = widget.onOpenTopic == null
+        ? null
+        : () => widget.onOpenTopic!(topic);
+    return Semantics(
+      button: onTap != null,
+      label: 'Filter threads by $topic',
+      child: GestureDetector(
+        onTap: onTap,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+            child: Text(
+              topic,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurface,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _ThreadWorkingDots extends StatefulWidget {
@@ -8486,12 +8656,16 @@ class _WorkspaceFrogAvatar extends StatelessWidget {
     required this.label,
     this.radius = 18,
     this.bot = false,
+    this.backgroundColor,
+    this.foregroundColor,
   });
 
   final String identity;
   final String label;
   final double radius;
   final bool bot;
+  final Color? backgroundColor;
+  final Color? foregroundColor;
 
   static const _colors = [
     (Color(0xff7dd3fc), Color(0xff0c4a6e)), // Sky
@@ -8511,9 +8685,13 @@ class _WorkspaceFrogAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final circleRadius = radius - 2;
-    final colors = bot
+    final defaultColors = bot
         ? (const Color(0xff5f8790), const Color(0xff102b30))
         : _colors[workspaceAvatarColorIndex(identity, label, _colors.length)];
+    final colors = (
+      backgroundColor ?? defaultColors.$1,
+      foregroundColor ?? defaultColors.$2,
+    );
     return CircleAvatar(
       radius: circleRadius,
       backgroundColor: colors.$1,
@@ -8665,6 +8843,7 @@ class _WorkspaceMessageBody extends StatefulWidget {
     required this.expanded,
     required this.onExpandedChanged,
     this.onOpenMention,
+    this.onOpenTopic,
     this.searchQuery = '',
   });
   final String text;
@@ -8673,6 +8852,7 @@ class _WorkspaceMessageBody extends StatefulWidget {
   final bool expanded;
   final ValueChanged<bool> onExpandedChanged;
   final ValueChanged<WorkspaceMention>? onOpenMention;
+  final ValueChanged<String>? onOpenTopic;
   final String searchQuery;
 
   @override
@@ -8687,7 +8867,9 @@ class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
     builder: (context, constraints) {
       // Code blocks render outside the plain-text layout measured below, so the
       // raw Markdown line count can claim a fully visible message is truncated.
-      final hasCodeBlock = RegExp(r'```[\s\S]*?```').hasMatch(widget.text);
+      final hasStructuredBlock =
+          RegExp(r'```[\s\S]*?```').hasMatch(widget.text) ||
+          _WorkspaceMarkdownTable.parseAll(widget.text).isNotEmpty;
       final style = DefaultTextStyle.of(context).style;
       final painter = TextPainter(
         text: TextSpan(text: widget.text, style: style),
@@ -8695,7 +8877,7 @@ class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
         textScaler: MediaQuery.textScalerOf(context),
         maxLines: _expandThresholdLines,
       )..layout(maxWidth: constraints.maxWidth);
-      final truncated = !hasCodeBlock && painter.didExceedMaxLines;
+      final truncated = !hasStructuredBlock && painter.didExceedMaxLines;
       return Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -8705,6 +8887,7 @@ class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
             mentions: widget.mentions,
             onOpenMessageReference: widget.onOpenMessageReference,
             onOpenMention: widget.onOpenMention,
+            onOpenTopic: widget.onOpenTopic,
             searchQuery: widget.searchQuery,
             maxLines: truncated && !widget.expanded ? _previewLines : null,
             overflow: TextOverflow.clip,
@@ -8739,6 +8922,7 @@ class _WorkspaceMessageText extends StatelessWidget {
     required this.mentions,
     required this.onOpenMessageReference,
     this.onOpenMention,
+    this.onOpenTopic,
     this.maxLines,
     this.overflow = TextOverflow.ellipsis,
     this.searchQuery = '',
@@ -8747,6 +8931,7 @@ class _WorkspaceMessageText extends StatelessWidget {
   final List<WorkspaceMention> mentions;
   final ValueChanged<String> onOpenMessageReference;
   final ValueChanged<WorkspaceMention>? onOpenMention;
+  final ValueChanged<String>? onOpenTopic;
   final int? maxLines;
   final TextOverflow overflow;
   final String searchQuery;
@@ -8754,20 +8939,60 @@ class _WorkspaceMessageText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final blocks = RegExp(r'```[^\r\n]*\r?\n([\s\S]*?)```').allMatches(text);
-    if (blocks.isEmpty) return _buildPlainText(context, text, maxLines);
+    if (blocks.isEmpty) return _buildTextWithTables(context, text, maxLines);
 
     final children = <Widget>[];
     var offset = 0;
     for (final block in blocks) {
       final before = text.substring(offset, block.start).trim();
       if (before.isNotEmpty) {
-        children.add(_buildPlainText(context, before, null));
+        children.add(_buildTextWithTables(context, before, null));
         children.add(const SizedBox(height: 8));
       }
       children.add(_WorkspaceCodeBlock(code: block.group(1)!.trimRight()));
       offset = block.end;
     }
     final after = text.substring(offset).trim();
+    if (after.isNotEmpty) {
+      children.add(const SizedBox(height: 8));
+      children.add(_buildTextWithTables(context, after, null));
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
+    );
+  }
+
+  Widget _buildTextWithTables(
+    BuildContext context,
+    String value,
+    int? maxLines,
+  ) {
+    final tables = _WorkspaceMarkdownTable.parseAll(value);
+    if (tables.isEmpty) return _buildPlainText(context, value, maxLines);
+
+    final children = <Widget>[];
+    var offset = 0;
+    for (final table in tables) {
+      final before = value.substring(offset, table.start).trim();
+      if (before.isNotEmpty) {
+        children.add(_buildPlainText(context, before, null));
+        children.add(const SizedBox(height: 8));
+      }
+      children.add(
+        _WorkspaceMarkdownTableView(
+          table: table,
+          mentions: mentions,
+          onOpenMessageReference: onOpenMessageReference,
+          onOpenMention: onOpenMention,
+          onOpenTopic: onOpenTopic,
+          searchQuery: searchQuery,
+        ),
+      );
+      offset = table.end;
+    }
+    final after = value.substring(offset).trim();
     if (after.isNotEmpty) {
       children.add(const SizedBox(height: 8));
       children.add(_buildPlainText(context, after, null));
@@ -8791,6 +9016,7 @@ class _WorkspaceMessageText extends StatelessWidget {
       r'\*\*[^*\r\n]+\*\*',
       r'`[^`\r\n]+`',
       r'\[\[message:([^\]\r\n]+)\]\]',
+      r'(?<![\w#])#[A-Za-z][A-Za-z0-9_-]*',
       r'(?<!\w)/(?:[~\w.-]+/)*[~\w.-]+',
       if (labels.isNotEmpty)
         '(?<!\\w)@(?:${labels.map(RegExp.escape).join('|')})(?![\\w-])',
@@ -8886,6 +9112,26 @@ class _WorkspaceMessageText extends StatelessWidget {
           offset = match.end;
           continue;
         }
+        if (token.startsWith('#')) {
+          spans.add(
+            TextSpan(
+              text: token,
+              semanticsLabel: 'Topic $token',
+              style: style.copyWith(
+                color: Theme.of(context).colorScheme.primary,
+                fontWeight: FontWeight.w600,
+                decoration: onOpenTopic == null
+                    ? null
+                    : TextDecoration.underline,
+              ),
+              recognizer: onOpenTopic == null
+                  ? null
+                  : (TapGestureRecognizer()..onTap = () => onOpenTopic!(token)),
+            ),
+          );
+          offset = match.end;
+          continue;
+        }
         spans.add(
           TextSpan(
             text: token.startsWith('`')
@@ -8952,6 +9198,160 @@ class _WorkspaceMessageText extends StatelessWidget {
     if (offset < value.length)
       spans.add(TextSpan(text: value.substring(offset)));
     return spans;
+  }
+}
+
+class _WorkspaceMarkdownTable {
+  const _WorkspaceMarkdownTable({
+    required this.start,
+    required this.end,
+    required this.headers,
+    required this.alignments,
+    required this.rows,
+  });
+
+  final int start;
+  final int end;
+  final List<String> headers;
+  final List<bool> alignments;
+  final List<List<String>> rows;
+
+  static List<_WorkspaceMarkdownTable> parseAll(String text) {
+    final lines = text.split('\n');
+    final tables = <_WorkspaceMarkdownTable>[];
+    var characterOffset = 0;
+    for (var index = 0; index < lines.length - 1; index++) {
+      final headers = _cells(lines[index]);
+      final separators = _cells(lines[index + 1]);
+      if (headers == null ||
+          separators == null ||
+          headers.length != separators.length ||
+          !separators.every(_isSeparator)) {
+        characterOffset += lines[index].length + 1;
+        continue;
+      }
+
+      final start = characterOffset;
+      final rows = <List<String>>[];
+      var rowIndex = index + 2;
+      while (rowIndex < lines.length) {
+        final cells = _cells(lines[rowIndex]);
+        if (cells == null) break;
+        rows.add(
+          List.generate(headers.length, (column) {
+            return column < cells.length ? cells[column] : '';
+          }),
+        );
+        rowIndex++;
+      }
+      final end = start + lines.sublist(index, rowIndex).join('\n').length;
+      tables.add(
+        _WorkspaceMarkdownTable(
+          start: start,
+          end: end,
+          headers: headers,
+          alignments: separators.map((cell) => cell.endsWith(':')).toList(),
+          rows: rows,
+        ),
+      );
+      while (index < rowIndex) {
+        characterOffset += lines[index].length + 1;
+        index++;
+      }
+      index--;
+    }
+    return tables;
+  }
+
+  static List<String>? _cells(String line) {
+    final trimmed = line.trim();
+    if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return null;
+    return trimmed
+        .substring(1, trimmed.length - 1)
+        .split('|')
+        .map((cell) => cell.trim())
+        .toList();
+  }
+
+  static bool _isSeparator(String cell) =>
+      RegExp(r'^:?-{3,}:?$').hasMatch(cell);
+}
+
+class _WorkspaceMarkdownTableView extends StatelessWidget {
+  const _WorkspaceMarkdownTableView({
+    required this.table,
+    required this.mentions,
+    required this.onOpenMessageReference,
+    required this.onOpenMention,
+    required this.onOpenTopic,
+    required this.searchQuery,
+  });
+
+  final _WorkspaceMarkdownTable table;
+  final List<WorkspaceMention> mentions;
+  final ValueChanged<String> onOpenMessageReference;
+  final ValueChanged<WorkspaceMention>? onOpenMention;
+  final ValueChanged<String>? onOpenTopic;
+  final String searchQuery;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 2),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest.withValues(alpha: 0.28),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.5)),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: DataTable(
+            headingRowHeight: 36,
+            dataRowMinHeight: 36,
+            dataRowMaxHeight: 64,
+            horizontalMargin: 12,
+            columnSpacing: 20,
+            dividerThickness: 0.5,
+            columns: List.generate(
+              table.headers.length,
+              (index) => DataColumn(
+                numeric: table.alignments[index],
+                label: Text(
+                  table.headers[index],
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+            rows: [
+              for (final row in table.rows)
+                DataRow(
+                  cells: List.generate(
+                    table.headers.length,
+                    (index) => DataCell(
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 280),
+                        child: _WorkspaceMessageText(
+                          text: row[index],
+                          mentions: mentions,
+                          onOpenMessageReference: onOpenMessageReference,
+                          onOpenMention: onOpenMention,
+                          onOpenTopic: onOpenTopic,
+                          searchQuery: searchQuery,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -9386,6 +9786,7 @@ class _WorkspaceContext extends StatelessWidget {
     required this.onRequest,
     required this.onOpenAttachment,
     required this.onOpenMention,
+    required this.onOpenTopic,
     required this.ownPubkey,
     required this.localSenderIds,
     required this.displayName,
@@ -9438,6 +9839,7 @@ class _WorkspaceContext extends StatelessWidget {
   final Future<void> Function(Map<String, Object?> request) onRequest;
   final Future<void> Function(BridgeAudioReference attachment) onOpenAttachment;
   final ValueChanged<WorkspaceMention> onOpenMention;
+  final ValueChanged<String> onOpenTopic;
   final String ownPubkey;
   final Set<String> localSenderIds;
   final String displayName;
@@ -9519,7 +9921,7 @@ class _WorkspaceContext extends StatelessWidget {
         overflow: TextOverflow.ellipsis,
         style: Theme.of(
           context,
-        ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+        ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
       );
     }
     return _ThreadTitleDropdown(
@@ -9589,6 +9991,7 @@ class _WorkspaceContext extends StatelessWidget {
     WorkspaceMessage message, {
     required bool groupedWithPrevious,
     bool flashOutline = false,
+    String searchQuery = '',
   }) => _WorkspaceMessageRow(
     message: message,
     authorName: _memberLabel(message.senderPubkey),
@@ -9601,6 +10004,7 @@ class _WorkspaceContext extends StatelessWidget {
         unawaited(onRequest({'action': 'toggle_pin', 'parent_id': message.id})),
     onOpenMessageReference: (_) {},
     onOpenMention: onOpenMention,
+    onOpenTopic: onOpenTopic,
     threadReplyCount: 0,
     threadUnreadCount: 0,
     onOpenAttachment: onOpenAttachment,
@@ -9608,7 +10012,9 @@ class _WorkspaceContext extends StatelessWidget {
     onMessageExpandedChanged: (expanded) =>
         onMessageExpandedChanged(message.id, expanded),
     showThreadAction: false,
+    fitBubbleToContent: true,
     flashOutline: flashOutline,
+    searchQuery: searchQuery,
     showDate: true,
     dateFormat: dateFormat,
   );
@@ -9624,9 +10030,9 @@ class _WorkspaceContext extends StatelessWidget {
               children: [
                 Text(
                   'Conversation details',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 18),
                 const _ContextLine(
@@ -9652,118 +10058,78 @@ class _WorkspaceContext extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (!compactHeader) ...[
-                  AnimatedBuilder(
-                    animation: threadSearch,
-                    builder: (context, _) => threadSearch.isOpen
-                        ? TextField(
-                            controller: threadSearch.controller,
-                            focusNode: threadSearch.focus,
-                            decoration: InputDecoration(
-                              hintText: 'Search this thread',
-                              prefixIcon: const Icon(Icons.search),
-                              suffixIcon: IconButton(
-                                tooltip: 'Close search',
-                                icon: const Icon(Icons.close),
-                                onPressed: threadSearch.close,
-                              ),
-                            ),
-                          )
-                        : Row(
-                            children: [
-                              Expanded(
-                                child: _ThreadTopicActions(
-                                  onRequestTopic: onRequestTopic,
-                                  onEditTopic: () =>
-                                      unawaited(_editThreadTopic(context)),
-                                  child: ValueListenableBuilder<String?>(
-                                    valueListenable: topicOverride,
-                                    builder: (context, _, _) =>
-                                        _threadTitleSelector(context),
-                                  ),
-                                ),
-                              ),
-                              IconButton(
-                                tooltip: 'Close this thread',
-                                onPressed: onCloseCurrentThread,
-                                icon: const Icon(Icons.close, size: 18),
-                                constraints: const BoxConstraints.tightFor(
-                                  width: 28,
-                                  height: 32,
-                                ),
-                                padding: EdgeInsets.zero,
-                              ),
-                              if (filesOpen)
-                                TextButton.icon(
-                                  onPressed: onShowFiles,
-                                  icon: const Icon(
-                                    Icons.folder_open_outlined,
-                                    size: 18,
-                                  ),
-                                  label: const Text('Files'),
-                                ),
-                              IconButton(
-                                tooltip: 'Search this thread',
-                                onPressed: threadSearch.open,
-                                icon: const Icon(Icons.search),
-                              ),
-                              IconButton(
-                                tooltip: fullWindow
-                                    ? 'Return to conversation'
-                                    : 'Open thread full-window',
-                                onPressed: onToggleFullWindow,
-                                icon: Icon(
-                                  fullWindow
-                                      ? Icons.close_fullscreen
-                                      : Icons.open_in_full,
-                                ),
-                              ),
-                              IconButton(
-                                tooltip: 'Close thread panel',
-                                onPressed: () =>
-                                    unawaited(_closeAllThreads(context)),
-                                icon: const Icon(Icons.close),
-                              ),
-                            ],
-                          ),
-                  ),
-                  const Divider(),
-                ],
-                if (compactHeader) ...[
                   Row(
                     children: [
-                      if (threadSearch.isOpen)
-                        Expanded(
-                          child: TextField(
-                            controller: threadSearch.controller,
-                            focusNode: threadSearch.focus,
-                            autofocus: true,
-                            decoration: const InputDecoration(
-                              isDense: true,
-                              hintText: 'Search this thread',
-                              prefixIcon: Icon(Icons.search),
-                            ),
-                          ),
-                        )
-                      else
-                        Expanded(
+                      Expanded(
+                        child: _ThreadTopicActions(
+                          onRequestTopic: onRequestTopic,
+                          onEditTopic: () =>
+                              unawaited(_editThreadTopic(context)),
                           child: ValueListenableBuilder<String?>(
                             valueListenable: topicOverride,
                             builder: (context, _, _) =>
                                 _threadTitleSelector(context),
                           ),
                         ),
+                      ),
                       IconButton(
-                        tooltip: threadSearch.isOpen
-                            ? 'Close search'
-                            : 'Search this thread',
-                        onPressed: threadSearch.isOpen
-                            ? threadSearch.close
-                            : threadSearch.open,
-                        icon: Icon(
-                          threadSearch.isOpen
-                              ? Icons.search_off_outlined
-                              : Icons.search,
+                        tooltip: 'Close this thread',
+                        onPressed: onCloseCurrentThread,
+                        icon: const Icon(Icons.close, size: 18),
+                        constraints: const BoxConstraints.tightFor(
+                          width: 28,
+                          height: 32,
                         ),
+                        padding: EdgeInsets.zero,
+                      ),
+                      if (filesOpen)
+                        TextButton.icon(
+                          onPressed: onShowFiles,
+                          icon: const Icon(
+                            Icons.folder_open_outlined,
+                            size: 18,
+                          ),
+                          label: const Text('Files'),
+                        ),
+                      IconButton(
+                        tooltip: 'Search this thread',
+                        onPressed: threadSearch.open,
+                        icon: const Icon(Icons.search),
+                      ),
+                      IconButton(
+                        tooltip: fullWindow
+                            ? 'Return to conversation'
+                            : 'Open thread full-window',
+                        onPressed: onToggleFullWindow,
+                        icon: Icon(
+                          fullWindow
+                              ? Icons.close_fullscreen
+                              : Icons.open_in_full,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Close thread panel',
+                        onPressed: () => unawaited(_closeAllThreads(context)),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                  const Divider(),
+                ],
+                if (compactHeader) ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ValueListenableBuilder<String?>(
+                          valueListenable: topicOverride,
+                          builder: (context, _, _) =>
+                              _threadTitleSelector(context),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Search this thread',
+                        onPressed: threadSearch.open,
+                        icon: const Icon(Icons.search),
                       ),
                       IconButton(
                         tooltip: 'Close this thread',
@@ -9794,12 +10160,17 @@ class _WorkspaceContext extends StatelessWidget {
                     message: message!,
                     replies: replies,
                     messageBuilder:
-                        (message, groupedWithPrevious, flashOutline) =>
-                            _messageRow(
-                              message,
-                              groupedWithPrevious: groupedWithPrevious,
-                              flashOutline: flashOutline,
-                            ),
+                        (
+                          message,
+                          groupedWithPrevious,
+                          flashOutline,
+                          searchQuery,
+                        ) => _messageRow(
+                          message,
+                          groupedWithPrevious: groupedWithPrevious,
+                          flashOutline: flashOutline,
+                          searchQuery: searchQuery,
+                        ),
                     threadSearch: threadSearch,
                     replyTargetId: replyTargetId,
                     onReplyTargetOpened: onReplyTargetOpened,
@@ -9816,6 +10187,7 @@ class _WorkspaceContext extends StatelessWidget {
                     ],
                   ),
                 ),
+                _ThreadFindBar(search: threadSearch),
                 WorkspaceComposer(
                   composer: composer,
                   composerFocus: composerFocus,
@@ -9844,9 +10216,15 @@ class _ThreadSearchController extends ChangeNotifier {
   final controller = TextEditingController();
   final focus = FocusNode();
   var isOpen = false;
+  var highlightAll = false;
+  var resultCount = 0;
+  var selectedIndex = 0;
 
   _ThreadSearchController() {
-    controller.addListener(notifyListeners);
+    controller.addListener(() {
+      selectedIndex = 0;
+      notifyListeners();
+    });
   }
 
   String get query => controller.text;
@@ -9860,17 +10238,127 @@ class _ThreadSearchController extends ChangeNotifier {
   void close() {
     controller.clear();
     isOpen = false;
+    resultCount = 0;
+    selectedIndex = 0;
     notifyListeners();
+  }
+
+  void toggleHighlightAll() {
+    highlightAll = !highlightAll;
+    notifyListeners();
+  }
+
+  void previous() {
+    if (resultCount == 0) return;
+    selectedIndex = (selectedIndex - 1 + resultCount) % resultCount;
+    notifyListeners();
+  }
+
+  void next() {
+    if (resultCount == 0) return;
+    selectedIndex = (selectedIndex + 1) % resultCount;
+    notifyListeners();
+  }
+
+  void setResultCount(int count) {
+    final nextIndex = count == 0
+        ? 0
+        : selectedIndex.clamp(0, count - 1).toInt();
+    if (resultCount == count && selectedIndex == nextIndex) return;
+    resultCount = count;
+    selectedIndex = nextIndex;
+    WidgetsBinding.instance.addPostFrameCallback((_) => notifyListeners());
   }
 
   @override
   void dispose() {
-    controller
-      ..removeListener(notifyListeners)
-      ..dispose();
+    controller.dispose();
     focus.dispose();
     super.dispose();
   }
+}
+
+class _ThreadFindBar extends StatelessWidget {
+  const _ThreadFindBar({required this.search});
+
+  final _ThreadSearchController search;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: search,
+    builder: (context, _) => AnimatedSize(
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOutCubic,
+      child: search.isOpen
+          ? Container(
+              width: double.infinity,
+              margin: const EdgeInsets.fromLTRB(0, 8, 0, 4),
+              padding: const EdgeInsets.fromLTRB(10, 8, 6, 6),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.search, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextField(
+                          controller: search.controller,
+                          focusNode: search.focus,
+                          autofocus: true,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            hintText: 'Find in thread',
+                            border: InputBorder.none,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Close find',
+                        onPressed: search.close,
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      Text(
+                        search.resultCount == 0
+                            ? 'No matches'
+                            : '${search.selectedIndex + 1} of ${search.resultCount}',
+                        style: Theme.of(context).textTheme.labelMedium,
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        tooltip: 'Previous match',
+                        onPressed: search.resultCount == 0
+                            ? null
+                            : search.previous,
+                        icon: const Icon(Icons.keyboard_arrow_up),
+                      ),
+                      IconButton(
+                        tooltip: 'Next match',
+                        onPressed: search.resultCount == 0 ? null : search.next,
+                        icon: const Icon(Icons.keyboard_arrow_down),
+                      ),
+                      FilterChip(
+                        label: const Text('Highlight all'),
+                        selected: search.highlightAll,
+                        onSelected: (_) => search.toggleHighlightAll(),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            )
+          : const SizedBox.shrink(),
+    ),
+  );
 }
 
 class _ThreadTitleDropdown extends StatefulWidget {
@@ -9994,7 +10482,7 @@ class _ThreadTitleDropdownState extends State<_ThreadTitleDropdown>
                   widget.title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
                     color: Color.lerp(foreground, primary, _controller.value),
                     fontWeight: FontWeight.bold,
                   ),
@@ -10030,6 +10518,7 @@ class _ThreadMessageList extends StatefulWidget {
     WorkspaceMessage message,
     bool groupedWithPrevious,
     bool flashOutline,
+    String searchQuery,
   )
   messageBuilder;
   final _ThreadSearchController threadSearch;
@@ -10047,6 +10536,7 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
   final _messageKeys = <String, GlobalKey>{};
   String? _lastReplyId;
   String? _flashReplyId;
+  String? _lastSearchResultId;
   String? _stickyHistoryDate;
 
   @override
@@ -10054,7 +10544,11 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
     super.initState();
     _lastReplyId = _latestReplyId;
     _scrollController.addListener(_updateStickyHistoryDate);
-    if (widget.replyTargetId case final replyId?) _scrollToReply(replyId);
+    if (widget.replyTargetId case final replyId?) {
+      _scrollToReply(replyId);
+    } else {
+      _jumpToLatestReply();
+    }
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => _updateStickyHistoryDate(),
     );
@@ -10063,6 +10557,16 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
   @override
   void didUpdateWidget(covariant _ThreadMessageList oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.message.id != widget.message.id) {
+      _lastReplyId = _latestReplyId;
+      _stickyHistoryDate = null;
+      if (widget.replyTargetId case final replyId?) {
+        _scrollToReply(replyId);
+      } else {
+        _jumpToLatestReply();
+      }
+      return;
+    }
     if (oldWidget.replyTargetId != widget.replyTargetId &&
         widget.replyTargetId != null) {
       _scrollToReply(widget.replyTargetId!);
@@ -10167,6 +10671,19 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
     });
   }
 
+  void _jumpToLatestReply() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      // Images and Markdown can increase the list height after its first layout.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _scrollController.hasClients) {
+          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        }
+      });
+    });
+  }
+
   void _scrollToReply(String replyId) {
     setState(() => _flashReplyId = replyId);
     Future<void>.delayed(const Duration(milliseconds: 1800), () {
@@ -10189,6 +10706,24 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
     });
   }
 
+  void _revealSearchResult(String messageId) {
+    setState(() => _flashReplyId = messageId);
+    Future<void>.delayed(const Duration(milliseconds: 1800), () {
+      if (mounted && _flashReplyId == messageId) {
+        setState(() => _flashReplyId = null);
+      }
+    });
+    final target = _messageKeys[messageId]?.currentContext;
+    if (target != null) {
+      Scrollable.ensureVisible(
+        target,
+        alignment: 0.35,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
@@ -10199,24 +10734,42 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
 
   Widget _buildMessages(BuildContext context) {
     final query = widget.threadSearch.query.trim().toLowerCase();
-    final matchingReplies = query.isEmpty
-        ? widget.replies
-        : widget.replies
+    final messages = [widget.message, ...widget.replies];
+    final matchingMessages = query.isEmpty
+        ? const <WorkspaceMessage>[]
+        : messages
               .where(
                 (message) => workspaceDisplayMessageText(
                   message.body,
                 ).toLowerCase().contains(query),
               )
               .toList(growable: false);
-    final sourceMatches =
-        query.isEmpty ||
-        workspaceDisplayMessageText(
-          widget.message.body,
-        ).toLowerCase().contains(query);
+    widget.threadSearch.setResultCount(matchingMessages.length);
+    final selectedSearchMessage = matchingMessages.isEmpty
+        ? null
+        : matchingMessages[widget.threadSearch.selectedIndex];
+    if (selectedSearchMessage?.id != _lastSearchResultId) {
+      _lastSearchResultId = selectedSearchMessage?.id;
+      if (selectedSearchMessage != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _lastSearchResultId == selectedSearchMessage.id) {
+            _revealSearchResult(selectedSearchMessage.id);
+          }
+        });
+      }
+    }
     final latestDate =
-        matchingReplies.lastOrNull?.createdAt ?? widget.message.createdAt;
+        widget.replies.lastOrNull?.createdAt ?? widget.message.createdAt;
     final visibleHistoryDate =
         _stickyHistoryDate ?? _historyDateLabel(latestDate);
+    String searchQueryFor(WorkspaceMessage message) {
+      if (query.isEmpty) return '';
+      return widget.threadSearch.highlightAll ||
+              message.id == selectedSearchMessage?.id
+          ? query
+          : '';
+    }
+
     return Column(
       children: [
         _WorkspaceDateDivider(label: visibleHistoryDate),
@@ -10227,20 +10780,20 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
             padding: EdgeInsets.zero,
             children: [
               const SizedBox(height: 12),
-              if (sourceMatches) ...[
-                KeyedSubtree(
-                  key: _messageKeys.putIfAbsent(
-                    widget.message.id,
-                    GlobalKey.new,
-                  ),
-                  child: widget.messageBuilder(widget.message, false, false),
+              KeyedSubtree(
+                key: _messageKeys.putIfAbsent(widget.message.id, GlobalKey.new),
+                child: widget.messageBuilder(
+                  widget.message,
+                  false,
+                  widget.message.id == _flashReplyId,
+                  searchQueryFor(widget.message),
                 ),
-                const SizedBox(height: 10),
-              ],
+              ),
+              const SizedBox(height: 10),
               Row(
                 children: [
                   Text(
-                    '${matchingReplies.length} ${matchingReplies.length == 1 ? 'reply' : 'replies'}',
+                    '${widget.replies.length} ${widget.replies.length == 1 ? 'reply' : 'replies'}',
                     style: Theme.of(context).textTheme.labelSmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                       fontWeight: FontWeight.w600,
@@ -10258,33 +10811,40 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
                 ],
               ),
               const SizedBox(height: 10),
-              for (var index = 0; index < matchingReplies.length; index++)
+              for (var index = 0; index < widget.replies.length; index++) ...[
+                if (_historyDateLabel(widget.replies[index].createdAt) !=
+                    _historyDateLabel(
+                      index == 0
+                          ? widget.message.createdAt
+                          : widget.replies[index - 1].createdAt,
+                    ))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _WorkspaceDateDivider(
+                      label: _historyDateLabel(widget.replies[index].createdAt),
+                    ),
+                  ),
                 KeyedSubtree(
                   key: _messageKeys.putIfAbsent(
-                    matchingReplies[index].id,
+                    widget.replies[index].id,
                     GlobalKey.new,
                   ),
                   child: Padding(
                     padding: const EdgeInsets.only(bottom: 10),
                     child: widget.messageBuilder(
-                      matchingReplies[index],
+                      widget.replies[index],
                       index > 0 &&
                           isWorkspaceMessageGroupedWithPrevious(
-                            matchingReplies[index],
-                            matchingReplies[index - 1],
+                            widget.replies[index],
+                            widget.replies[index - 1],
                           ),
-                      matchingReplies[index].id == _flashReplyId,
+                      widget.replies[index].id == _flashReplyId,
+                      searchQueryFor(widget.replies[index]),
                     ),
                   ),
                 ),
-              if (query.isEmpty) ...widget.liveMessages,
-              if (query.isNotEmpty && matchingReplies.isEmpty && !sourceMatches)
-                const Padding(
-                  padding: EdgeInsets.only(top: 32),
-                  child: Center(
-                    child: Text('No matching messages in this thread.'),
-                  ),
-                ),
+              ],
+              ...widget.liveMessages,
             ],
           ),
         ),
@@ -10639,6 +11199,35 @@ class WorkspaceComposer extends StatelessWidget {
         false;
   }
 
+  bool _compactToggleCrowdsText(BuildContext context, String text) {
+    const horizontalComposerPadding = 40.0;
+    const prefixIconWidth = 48.0;
+    const suffixIconWidth = 96.0;
+    const inputPadding = 24.0;
+    const clearance = 16.0;
+    final availableWidth =
+        MediaQuery.sizeOf(context).width -
+        horizontalComposerPadding -
+        prefixIconWidth -
+        suffixIconWidth -
+        inputPadding -
+        clearance;
+    final painter = TextPainter(
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+    );
+
+    for (final line in text.split('\n')) {
+      painter.text = TextSpan(
+        text: line,
+        style: DefaultTextStyle.of(context).style,
+      );
+      painter.layout();
+      if (painter.width >= availableWidth) return true;
+    }
+    return false;
+  }
+
   @override
   Widget build(
     BuildContext context,
@@ -10647,6 +11236,7 @@ class WorkspaceComposer extends StatelessWidget {
     builder: (context, value, _) {
       final canSend = value.text.trim().isNotEmpty;
       final desktop = _isDesktop(Theme.of(context).platform);
+      final compact = MediaQuery.sizeOf(context).width < 720;
       return Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -10736,7 +11326,7 @@ class WorkspaceComposer extends StatelessWidget {
                             : null,
                       ),
                     ),
-                    suffixIcon: Column(
+                    suffixIcon: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         if (voiceTranscribing)
@@ -10749,7 +11339,7 @@ class WorkspaceComposer extends StatelessWidget {
                             ),
                           ),
                         if (alsoSendToMain case final enabled?
-                            when !_hasAgentMention(value.text))
+                            when !compact && !_hasAgentMention(value.text))
                           Semantics(
                             button: true,
                             toggled: enabled,
@@ -10796,6 +11386,28 @@ class WorkspaceComposer extends StatelessWidget {
                                   ),
                                 ],
                               ),
+                            ),
+                          ),
+                        if (alsoSendToMain case final enabled?
+                            when compact &&
+                                !_compactToggleCrowdsText(
+                                  context,
+                                  value.text,
+                                ) &&
+                                !_hasAgentMention(value.text))
+                          IconButton(
+                            tooltip: enabled
+                                ? 'Also sending to $sendToConversationLabel'
+                                : 'Also send to $sendToConversationLabel',
+                            onPressed: () =>
+                                onAlsoSendToMainChanged?.call(!enabled),
+                            icon: Icon(
+                              Icons.call_split,
+                              color: enabled
+                                  ? Theme.of(context).colorScheme.primary
+                                  : Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
                             ),
                           ),
                         if (voiceRecording || canSend)
@@ -13760,8 +14372,6 @@ class _WorkerConsolePageState extends State<_WorkerConsolePage> {
                     padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
                     child: Column(
                       children: [
-                        _hostDebugPanel(),
-                        const SizedBox(height: 16),
                         Align(
                           alignment: Alignment.centerRight,
                           child: Wrap(

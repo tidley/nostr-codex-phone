@@ -628,6 +628,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   static const _conversationHistoryStorageKey = 'conversation_history_v1';
   static const _seenIncomingEventIdsStorageKey = 'seen_incoming_event_ids_v1';
   static const _unreadCountsStorageKey = 'unread_counts_v1';
+  static const _workspaceUnreadCountsStorageKey = 'workspace_unread_counts_v1';
   static const _repoChoicesStorageKey = 'repo_choices_v1';
   static const _recentSessionIdsStorageKey = 'recent_session_ids_v1';
   static const _workspaceDisplayNameStorageKey = 'workspace_display_name';
@@ -673,6 +674,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _conversationHistoryStorageKey,
     _seenIncomingEventIdsStorageKey,
     _unreadCountsStorageKey,
+    _workspaceUnreadCountsStorageKey,
     _repoChoicesStorageKey,
     _recentSessionIdsStorageKey,
     _workspaceDisplayNameStorageKey,
@@ -1181,6 +1183,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       key: _seenIncomingEventIdsStorageKey,
     );
     final unreadCounts = await _storage.read(key: _unreadCountsStorageKey);
+    final workspaceUnreadCounts = await _storage.read(
+      key: _workspaceUnreadCountsStorageKey,
+    );
     final repoChoices = await _storage.read(key: _repoChoicesStorageKey);
     final recentSessionIds = await _storage.read(
       key: _recentSessionIdsStorageKey,
@@ -1237,6 +1242,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _showTeamWorkspace = location['page'] != 'sessions';
       if (serviceTarget != null && location['worker_id'] == serviceTarget.id) {
         final worker = _workspaceWorkerForKey(serviceTarget.pubkey);
+        final restoredUnread = _decodeWorkspaceUnreadCounts(
+          workspaceUnreadCounts,
+          serviceTarget.pubkey,
+        );
+        worker.unreadCounts.addAll(restoredUnread.$1);
+        worker.threadUnreadCounts.addAll(restoredUnread.$2);
         worker.focusedConversationKey = location['conversation_key'] ?? '';
         worker.openThreadKey = location['thread_key'];
       }
@@ -2022,6 +2033,24 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
   }
 
+  (Map<String, int>, Map<String, int>) _decodeWorkspaceUnreadCounts(
+    String? raw,
+    String workerKey,
+  ) {
+    if (raw == null || raw.trim().isEmpty) return ({}, {});
+    try {
+      final workers = jsonDecode(raw);
+      if (workers is! Map || workers[workerKey] is! Map) return ({}, {});
+      final counts = Map<Object?, Object?>.from(workers[workerKey] as Map);
+      return (
+        _decodeUnreadCounts(jsonEncode(counts['conversations'] ?? {})),
+        _decodeUnreadCounts(jsonEncode(counts['threads'] ?? {})),
+      );
+    } catch (_) {
+      return ({}, {});
+    }
+  }
+
   List<RepoChoice> _decodeRepoChoicesCache(String? raw) {
     if (raw == null || raw.trim().isEmpty) return const [];
     try {
@@ -2063,6 +2092,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       value: jsonEncode(_unreadCountsByTarget),
     );
   }
+
+  Future<void> _saveWorkspaceUnreadCounts() => _storage.write(
+    key: _workspaceUnreadCountsStorageKey,
+    value: jsonEncode({
+      for (final entry in _workspaceWorkers.entries)
+        entry.key: {
+          'conversations': entry.value.unreadCounts,
+          'threads': entry.value.threadUnreadCounts,
+        },
+    }),
+  );
 
   Future<void> _saveRepoChoicesCache() async {
     await _storage.write(
@@ -2588,6 +2628,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       final choices = <RepoChoice>[];
       for (final root in roots) {
         if (root is! Map) continue;
+        final rootPath = root['root']?.toString().trim() ?? '';
+        if (rootPath.isNotEmpty) {
+          choices.add(
+            RepoChoice(
+              name: 'Worker root',
+              path: rootPath,
+              relativePath: '.',
+              isGitRepo: false,
+            ),
+          );
+        }
         final repos = root['repos'];
         if (repos is! Iterable) continue;
         for (final repo in repos) {
@@ -5186,6 +5237,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               if (threadKey == null && !focused) {
                 worker.unreadCounts[conversationKey] =
                     (worker.unreadCounts[conversationKey] ?? 0) + 1;
+              }
+              if (!focused || unreadThreadReply) {
+                unawaited(_saveWorkspaceUnreadCounts());
               }
               if (!focused || unreadThreadReply) {
                 if (workerKey != _workspaceWorkerKey) {
@@ -7957,6 +8011,7 @@ Return a concise catch-up summary of what happened after that point: completed w
             _workspaceFocusedConversationKey = conversationKey;
             _workspaceUnreadCounts.remove(conversationKey);
           });
+          unawaited(_saveWorkspaceUnreadCounts());
           unawaited(_saveLastWorkspaceLocation());
         },
         onMarkAllThreadsRead: (conversationKey) {
@@ -7965,6 +8020,7 @@ Return a concise catch-up summary of what happened after that point: completed w
               (threadKey, _) => threadKey.startsWith('$conversationKey:'),
             );
           });
+          unawaited(_saveWorkspaceUnreadCounts());
           unawaited(_saveLastWorkspaceLocation());
         },
         onOpenThread: (conversationKey, parentId) {
@@ -7974,6 +8030,7 @@ Return a concise catch-up summary of what happened after that point: completed w
             _activeWorkspaceWorker.openThreadKey = threadKey;
             _workspaceThreadUnreadCounts.remove(threadKey);
           });
+          unawaited(_saveWorkspaceUnreadCounts());
           unawaited(_saveLastWorkspaceLocation());
         },
         onCloseThread: () {
@@ -8273,23 +8330,7 @@ Return a concise catch-up summary of what happened after that point: completed w
 
   Future<void> _sendWorkspaceRequest(Map<String, Object?> request) async {
     if (request['action'] == 'refresh') {
-      // Keep an authenticated FIPS route alive. It can refresh workspace state
-      // directly, while stale Nostr sessions still need reconnecting.
-      if ((_connected || _connecting) &&
-          _workspaceFipsConnectionState != 'active') {
-        await _disconnect(expand: false);
-      }
       request = {'action': 'list'};
-    }
-    if (request['action'] == 'list') {
-      // A live FIPS session receives its refresh directly. Only Nostr bootstrap
-      // requests need a capability offer that creates or replaces the session.
-      request = {
-        ...request,
-        'fips_snapshot':
-            _workspaceFipsEnabled.value &&
-            _workspaceFipsConnectionState != 'active',
-      };
     }
     _addOptimisticWorkspaceMessage(request);
     final bootstrap = request['action'] == 'list_fallback';
@@ -8321,9 +8362,6 @@ Return a concise catch-up summary of what happened after that point: completed w
       sender: () =>
           _nostr.sendQuery(jsonEncode({'workspace_request': request})),
     );
-    if (request['action'] == 'list' && request['fips_snapshot'] == true) {
-      _awaitWorkspaceFipsOffer();
-    }
   }
 
   void _addOptimisticWorkspaceMessage(Map<String, Object?> request) {
@@ -8707,12 +8745,13 @@ Return a concise catch-up summary of what happened after that point: completed w
     } catch (error) {
       if (sessionGeneration != session.generation) return;
       final fipsEnabled = _workspaceFipsEnabled.value;
-      final traversalUnavailable = error.toString().contains(
-        'NAT traversal failed',
-      );
+      final directRouteUnavailable =
+          error.toString().contains('NAT traversal failed') ||
+          error.toString().contains('no route to destination') ||
+          error is TimeoutException;
       _setWorkspaceFipsConnectionState(
         fipsEnabled
-            ? traversalUnavailable
+            ? directRouteUnavailable
                   ? 'fallback'
                   : 'reconnecting'
             : 'disabled',
@@ -8720,7 +8759,7 @@ Return a concise catch-up summary of what happened after that point: completed w
       );
       if (fipsEnabled) {
         _recordDiagnostic(
-          traversalUnavailable
+          directRouteUnavailable
               ? 'FIPS direct route is unavailable; using Nostr until FIPS is toggled: $error'
               : 'FIPS workspace ${snapshotComplete ? 'session' : 'bootstrap'} failed, using Nostr: $error',
         );
@@ -8732,9 +8771,7 @@ Return a concise catch-up summary of what happened after that point: completed w
           _recordDiagnostic('Nostr workspace fallback failed: $fallbackError');
         }
       }
-      if (fipsEnabled &&
-          !traversalUnavailable &&
-          workerKey == _workspaceWorkerKey) {
+      if (fipsEnabled && workerKey == _workspaceWorkerKey) {
         _scheduleWorkspaceFipsRetry();
       }
     } finally {
@@ -8972,12 +9009,14 @@ Return a concise catch-up summary of what happened after that point: completed w
   void _scheduleWorkspaceFipsRetry() {
     if (!_workspaceFipsEnabled.value) return;
     _workspaceFipsRetryTimer?.cancel();
-    const delay = Duration(seconds: 20);
-    _recordDiagnostic('FIPS workspace snapshot: retrying in 20s');
+    const delay = Duration(minutes: 1);
+    _recordDiagnostic('FIPS workspace snapshot: retrying in 1m');
     _workspaceFipsRetryTimer = Timer(delay, () {
       if (_workspaceFipsSnapshotInFlight) return;
       _recordDiagnostic('FIPS workspace snapshot: retrying');
-      unawaited(_sendWorkspaceRequest({'action': 'list'}));
+      unawaited(
+        _sendWorkspaceRequest({'action': 'list', 'fips_snapshot': true}),
+      );
     });
   }
 
