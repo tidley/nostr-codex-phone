@@ -28,6 +28,42 @@ void main() {
     },
   );
 
+  test('uses message hashtags as a fallback thread topic', () {
+    final replies = [
+      const WorkspaceMessage(
+        id: 'one',
+        senderPubkey: 'agent:test',
+        body: 'Working on #thread-routing and #mobile.',
+        createdAt: 1,
+      ),
+    ];
+
+    expect(workspaceMessageHashtags(replies.single.body), [
+      '#thread-routing',
+      '#mobile',
+    ]);
+    expect(workspaceThreadTopic(replies), '#thread-routing #mobile');
+  });
+
+  test('explicit thread topics take precedence over hashtags', () {
+    final replies = [
+      const WorkspaceMessage(
+        id: 'one',
+        senderPubkey: 'agent:test',
+        body: '#temporary',
+        createdAt: 1,
+      ),
+      const WorkspaceMessage(
+        id: 'two',
+        senderPubkey: 'agent:test',
+        body: '[[THREAD_TOPIC: Reply routing]]',
+        createdAt: 2,
+      ),
+    ];
+
+    expect(workspaceThreadTopic(replies), 'Reply routing');
+  });
+
   testWidgets('incoming group call prompt shows context and actions', (
     tester,
   ) async {
