@@ -325,6 +325,8 @@ pub struct WorkspaceTypingPayload {
     pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work_history: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

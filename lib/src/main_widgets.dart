@@ -469,7 +469,7 @@ class _SessionDrawer extends StatelessWidget {
                                               Icon(
                                                 connected
                                                     ? Icons.cloud_done_outlined
-                                                    : Icons.chat_bubble_outline,
+                                                    : Icons.forum_outlined,
                                                 color: statusColor,
                                               ),
                                           ],
@@ -870,6 +870,7 @@ class _TeamWorkspace extends StatefulWidget {
     required this.onToggleLocalMessagePin,
     required this.onRemoveMember,
     required this.onFocusConversation,
+    required this.onMarkAllThreadsRead,
     required this.onOpenThread,
     required this.onCloseThread,
     required this.onRequest,
@@ -967,6 +968,7 @@ class _TeamWorkspace extends StatefulWidget {
   final ValueChanged<String> onToggleLocalMessagePin;
   final Future<void> Function(String pubkey) onRemoveMember;
   final ValueChanged<String> onFocusConversation;
+  final ValueChanged<String> onMarkAllThreadsRead;
   final void Function(String conversationKey, String parentId) onOpenThread;
   final VoidCallback onCloseThread;
   final Future<void> Function(Map<String, Object?> request) onRequest;
@@ -1046,7 +1048,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   bool _threadFullWindow = false;
   bool _sidebarCollapsed = false;
   double _sidebarWidth = 280;
-  double _threadPaneWidthFraction = 0.42;
+  double _threadPaneWidthFraction = 0.5;
   final _expandedMessageIds = <String>{};
   int? _cachedMessageRevision;
   String? _cachedMessageConversationKey;
@@ -1561,14 +1563,12 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     }
     _lastTypingLease = now;
     final threadTyping = _threadComposerFocus.hasFocus && _thread != null;
-    final draft = threadTyping ? _threadComposer.text : _composer.text;
     unawaited(
       widget.onTyping({
         'action': 'typing',
         if (_section == _WorkspaceSection.channel) 'channel_id': _active,
         if (_section == _WorkspaceSection.direct) 'recipient_pubkey': _active,
         if (threadTyping) 'parent_id': _thread!.id,
-        'body': draft,
         'expires_in_seconds': 6,
       }),
     );
@@ -1730,6 +1730,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final replies = _threadRepliesFor(thread);
     if (automatic && replies.length < 3) return;
     final topicGeneration = automatic ? replies.length ~/ 20 : 0;
+    if (automatic && topicGeneration > 1) return;
     final hasManualTopic =
         _threadTopicOverrides['$conversationKey:${thread.id}']?.value
             ?.trim()
@@ -1967,7 +1968,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _expandedMessageIds
         ..clear()
         ..addAll(nextPanelState?.expandedMessageIds ?? const []);
-      _threadPaneWidthFraction = nextPanelState?.widthFraction ?? 0.42;
+      _threadPaneWidthFraction = nextPanelState?.widthFraction ?? 0.5;
       _sidebarCollapsed = nextPanelState?.sidebarCollapsed ?? false;
       _alsoSendToMain = nextPanelState?.alsoSendToMain ?? false;
       _filesSelected = nextPanelState?.filesSelected ?? false;
@@ -1994,6 +1995,34 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     _requestTopicsForActiveThreads();
     _syncTypingLease();
     _reloadActiveMessages();
+  }
+
+  void _cycleConversation(int direction) {
+    final conversations = <(_WorkspaceSection, String)>[
+      for (final channel in widget.workspace.channels)
+        if (widget.conversationPreferences[channel.id]?.archived != true)
+          (_WorkspaceSection.channel, channel.id),
+      for (final peer in widget.workspace.directPeers(widget.ownPubkey))
+        if (widget
+                .conversationPreferences[WorkspaceState.directKey(
+                  widget.ownPubkey,
+                  peer,
+                )]
+                ?.archived !=
+            true)
+          (_WorkspaceSection.direct, peer),
+    ];
+    if (conversations.isEmpty) return;
+    final currentIndex = conversations.indexWhere(
+      (conversation) =>
+          conversation.$1 == _section && conversation.$2 == _active,
+    );
+    final nextIndex = currentIndex < 0
+        ? 0
+        : (currentIndex + direction + conversations.length) %
+              conversations.length;
+    final next = conversations[nextIndex];
+    _select(next.$1, next.$2);
   }
 
   void _showThreads() {
@@ -2142,7 +2171,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _saveThreadDraft();
       if (!_openThreadIds.contains(thread.id)) _openThreadIds.add(thread.id);
       _thread = thread;
-      _threadPaneWidthFraction = 0.42;
+      _threadPaneWidthFraction = 0.5;
       _alsoSendToMain = false;
       _threadReplyTargetId = replyTargetId;
       _restoreThreadDraft();
@@ -2344,8 +2373,17 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             ownPubkey: widget.ownPubkey,
             memberNames: widget.memberNames,
             memberAliases: widget.memberAliases,
-            drafts: _threadDrafts,
+            conversationDrafts: _conversationDrafts,
+            threadDrafts: _threadDrafts,
             threadUnreadCounts: widget.threadUnreadCounts,
+            onMarkAllRead: () {
+              final conversationKeys = widget.threadUnreadCounts.keys
+                  .map((key) => key.substring(0, key.lastIndexOf(':')))
+                  .toSet();
+              for (final conversationKey in conversationKeys) {
+                widget.onMarkAllThreadsRead(conversationKey);
+              }
+            },
             onOpenThread: _openSidebarThread,
             dateFormat: widget.dateFormat,
           )
@@ -2504,15 +2542,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                 onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
                 initialFolderChoices: widget.initialFolderChoices,
                 onLoadFolders: widget.onLoadFolders,
-                conversationPreprompt: widget.workspace.conversationPreprompt(
-                  channelId: _section == _WorkspaceSection.channel
-                      ? _active
-                      : null,
-                  ownPubkey: widget.ownPubkey,
-                  peerPubkey: _section == _WorkspaceSection.direct
-                      ? _active
-                      : null,
-                ),
                 conversationFolderScope: widget.workspace
                     .conversationFolderScope(
                       channelId: _section == _WorkspaceSection.channel
@@ -2531,14 +2560,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                         _section == _WorkspaceSection.channel
                     ? () => _manageAgents(context)
                     : null,
-                onEditConversationPreprompt: (value) => widget.onRequest({
-                  'action': 'set_conversation_preprompt',
-                  'body': value,
-                  if (_section == _WorkspaceSection.channel)
-                    'channel_id': _active,
-                  if (_section == _WorkspaceSection.direct)
-                    'recipient_pubkey': _active,
-                }),
                 onEditConversationFolder: (folders) => widget.onRequest({
                   'action': 'set_conversation_preprompt',
                   'body': widget.workspace.conversationPreprompt(
@@ -2563,7 +2584,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                   mention,
                 ),
                 typingStatuses: toastTyping,
-                typingLabels: _typingLabels(toastTyping),
+                typingLabels: toastTyping
+                    .map(_compactTypingLabel)
+                    .toList(growable: false),
                 callPhase: widget.callPhase,
                 callPeerPubkey: widget.callPeerPubkey,
                 groupCallPhase: widget.groupCallPhase,
@@ -2762,6 +2785,14 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
               _openMessageSearch,
           const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
               _openMessageSearch,
+          const SingleActivator(LogicalKeyboardKey.tab, alt: true): () =>
+              _cycleConversation(1),
+          const SingleActivator(
+            LogicalKeyboardKey.tab,
+            alt: true,
+            shift: true,
+          ): () =>
+              _cycleConversation(-1),
         },
         child: PopScope<void>(
           canPop: !canDismissNarrowThread,
@@ -2836,6 +2867,33 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                   Expanded(
                     child: fullSidePane
                         ? sidePane
+                        : !medium
+                        ? AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 240),
+                            switchInCurve: Curves.easeOutCubic,
+                            switchOutCurve: Curves.easeInCubic,
+                            transitionBuilder: (child, animation) =>
+                                SlideTransition(
+                                  position: animation.drive(
+                                    Tween(
+                                      begin: const Offset(1, 0),
+                                      end: Offset.zero,
+                                    ),
+                                  ),
+                                  child: child,
+                                ),
+                            child: showSingleSidePane
+                                ? KeyedSubtree(
+                                    key: const ValueKey('mobile-side-pane'),
+                                    child: sidePane,
+                                  )
+                                : KeyedSubtree(
+                                    key: const ValueKey(
+                                      'mobile-conversation-pane',
+                                    ),
+                                    child: conversation,
+                                  ),
+                          )
                         : showSingleSidePane
                         ? narrowSidePane
                         : conversation,
@@ -2937,6 +2995,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   String _typingLabel(WorkspaceTyping status) {
     final name = status.agentName ?? _memberLabel(status.senderPubkey);
     if (status.agentId != null) {
+      final stage = status.stage?.trim();
+      if (stage != null && stage.isNotEmpty) return '$name: $stage';
       final parentId = status.parentId;
       final topic = parentId == null
           ? null
@@ -2947,6 +3007,13 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       return '$name is working...';
     }
     return '$name is typing...';
+  }
+
+  String _compactTypingLabel(WorkspaceTyping status) {
+    final name = status.agentName ?? _memberLabel(status.senderPubkey);
+    return status.agentId != null
+        ? '$name is working...'
+        : '$name is typing...';
   }
 
   String _typingActivityLabel(WorkspaceTyping status) {
@@ -2963,6 +3030,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     _cachedConversationActivityLabels = null;
     _requestTopicsForActiveThreads();
     _scheduleTypingExpiry(widget.workspace.typing.values);
+    if (mounted) setState(() {});
   }
 
   void _requestTopicsForActiveThreads() {
@@ -3066,7 +3134,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             for (final member in widget.workspace.members)
               if (member != widget.ownPubkey)
                 ListTile(
-                  leading: const Icon(Icons.chat_bubble_outline),
+                  leading: const Icon(Icons.forum_outlined),
                   title: Text(_memberLabel(member)),
                   onTap: () => Navigator.pop(context, member),
                 ),
@@ -3169,6 +3237,46 @@ class _ConversationAgentsPage extends StatelessWidget {
     });
   }
 
+  Future<void> _editConversationBrief(BuildContext context) async {
+    final controller = TextEditingController(
+      text: workspace.conversationPreprompt(
+        channelId: channelId,
+        ownPubkey: ownPubkey,
+        peerPubkey: peerPubkey,
+      ),
+    );
+    final brief = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Agent brief'),
+        content: TextField(
+          controller: controller,
+          maxLength: 4000,
+          minLines: 4,
+          maxLines: 10,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (brief == null) return;
+    await onRequest({
+      'action': 'set_conversation_preprompt',
+      'body': brief.trim(),
+      if (channelId != null) 'channel_id': channelId,
+      if (channelId == null) 'recipient_pubkey': peerPubkey,
+    });
+  }
+
   Future<void> _createCustom(BuildContext context) async {
     final profile = await showDialog<Map<String, Object?>>(
       context: context,
@@ -3246,6 +3354,13 @@ class _ConversationAgentsPage extends StatelessWidget {
             for (final agent in workspace.agents)
               if (agent.id == membership.agentId) agent,
         ];
+        final brief = workspace
+            .conversationPreprompt(
+              channelId: channelId,
+              ownPubkey: ownPubkey,
+              peerPubkey: peerPubkey,
+            )
+            .trim();
         return ListView(
           padding: const EdgeInsets.all(24),
           children: [
@@ -3271,6 +3386,20 @@ class _ConversationAgentsPage extends StatelessWidget {
               ),
               trailing: const Icon(Icons.edit_outlined),
               onTap: () => _editConversationFolders(context),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.edit_note_outlined),
+              title: const Text('Agent brief'),
+              subtitle: Text(
+                brief.isEmpty
+                    ? 'Set instructions for this conversation'
+                    : brief,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: const Icon(Icons.edit_outlined),
+              onTap: () => _editConversationBrief(context),
             ),
             const SizedBox(height: 24),
             if (agents.isEmpty)
@@ -3497,8 +3626,10 @@ class _WorkspaceThreadsView extends StatefulWidget {
     required this.ownPubkey,
     required this.memberNames,
     required this.memberAliases,
-    required this.drafts,
+    required this.conversationDrafts,
+    required this.threadDrafts,
     required this.threadUnreadCounts,
+    required this.onMarkAllRead,
     required this.onOpenThread,
     required this.dateFormat,
   });
@@ -3507,8 +3638,10 @@ class _WorkspaceThreadsView extends StatefulWidget {
   final String ownPubkey;
   final Map<String, String> memberNames;
   final Map<String, String> memberAliases;
-  final Map<String, _WorkspaceDraft> drafts;
+  final Map<String, _WorkspaceDraft> conversationDrafts;
+  final Map<String, _WorkspaceDraft> threadDrafts;
   final Map<String, int> threadUnreadCounts;
+  final VoidCallback onMarkAllRead;
   final void Function(String conversationKey, String threadId) onOpenThread;
   final WorkspaceDateFormat dateFormat;
 
@@ -3521,6 +3654,7 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
   String _searchQuery = '';
   bool _showUnreadOnly = false;
   bool _sortMostRecent = true;
+  final _selectedTopicWords = <String>{};
 
   String _memberLabel(String pubkey) {
     if (isWorkspaceAgentSender(pubkey)) {
@@ -3567,6 +3701,25 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
     return lastActivity;
   }
 
+  String? _topicFor(WorkspaceMessage source) {
+    final conversationKey = widget.workspace.conversationKeyForMessage(source);
+    return workspaceThreadTopic(
+      (widget.workspace.messages[conversationKey] ?? const <WorkspaceMessage>[])
+          .where((message) => message.parentId == source.id),
+    );
+  }
+
+  Iterable<String> _topicWords(String topic) =>
+      RegExp(r'[A-Za-z0-9]+').allMatches(topic).map((match) => match.group(0)!);
+
+  bool _matchesSelectedTopicWords(WorkspaceMessage source) {
+    if (_selectedTopicWords.isEmpty) return true;
+    final topic = _topicFor(source);
+    if (topic == null) return false;
+    final words = _topicWords(topic).map((word) => word.toLowerCase()).toSet();
+    return _selectedTopicWords.every(words.contains);
+  }
+
   @override
   Widget build(BuildContext context) {
     final threads = <String, WorkspaceMessage>{};
@@ -3593,9 +3746,25 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
         }
       }
     }
+    final topicWords = <String, ({String label, int count})>{};
+    for (final source in threads.values) {
+      final topic = _topicFor(source);
+      if (topic != null)
+        for (final word in _topicWords(topic).toSet()) {
+          final key = word.toLowerCase();
+          final existing = topicWords[key];
+          topicWords[key] = (
+            label: existing?.label ?? word,
+            count: (existing?.count ?? 0) + 1,
+          );
+        }
+    }
+    final topics = topicWords.entries.toList()
+      ..sort((left, right) => left.value.label.compareTo(right.value.label));
     final ordered =
         threads.values
             .where(_matchesSearch)
+            .where(_matchesSelectedTopicWords)
             .where(
               (source) =>
                   !_showUnreadOnly ||
@@ -3610,6 +3779,18 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
             ).compareTo(_lastActivityAt(right));
             return _sortMostRecent ? -comparison : comparison;
           });
+    final conversationDraftThreadKeys = <String>{};
+    final conversationsWithDraftShown = <String>{};
+    for (final source in ordered) {
+      final conversationKey = widget.workspace.conversationKeyForMessage(
+        source,
+      );
+      final draft = widget.conversationDrafts[conversationKey];
+      if (draft?.value.text.trim().isNotEmpty == true &&
+          conversationsWithDraftShown.add(conversationKey)) {
+        conversationDraftThreadKeys.add('$conversationKey:${source.id}');
+      }
+    }
     return ColoredBox(
       color: Theme.of(context).extension<_WorkspacePalette>()!.content,
       child: ListView(
@@ -3631,7 +3812,7 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                   onChanged: (value) => setState(() => _searchQuery = value),
                   decoration: InputDecoration(
                     isDense: true,
-                    hintText: 'Search threads',
+                    hintText: 'Search topic words or "exact topic"',
                     prefixIcon: const Icon(Icons.search, size: 18),
                     suffixIcon: _searchQuery.isEmpty
                         ? null
@@ -3647,15 +3828,11 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                 ),
               );
               final controls = [
-                _ThreadToolbarMenu(
-                  label: _showUnreadOnly ? 'Unread only' : 'All threads',
-                  tooltip: 'Filter threads',
-                  onSelected: (value) =>
-                      setState(() => _showUnreadOnly = value == 'unread'),
-                  items: const [
-                    PopupMenuItem(value: 'all', child: Text('All threads')),
-                    PopupMenuItem(value: 'unread', child: Text('Unread only')),
-                  ],
+                FilterChip(
+                  label: const Text('Unread threads'),
+                  selected: _showUnreadOnly,
+                  onSelected: (selected) =>
+                      setState(() => _showUnreadOnly = selected),
                 ),
                 _ThreadToolbarMenu(
                   label: _sortMostRecent ? 'Most recent' : 'Oldest first',
@@ -3667,15 +3844,22 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                     PopupMenuItem(value: 'oldest', child: Text('Oldest first')),
                   ],
                 ),
+                if (widget.threadUnreadCounts.values.any((count) => count > 0))
+                  TextButton.icon(
+                    onPressed: widget.onMarkAllRead,
+                    icon: const Icon(Icons.done_all_outlined, size: 18),
+                    label: const Text('Mark all read'),
+                  ),
               ];
               if (constraints.maxWidth >= 620) {
                 return Row(
                   children: [
                     search,
                     const Spacer(),
-                    controls[0],
-                    const SizedBox(width: 10),
-                    controls[1],
+                    for (final control in controls) ...[
+                      const SizedBox(width: 10),
+                      control,
+                    ],
                   ],
                 );
               }
@@ -3683,11 +3867,66 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                 spacing: 10,
                 runSpacing: 8,
                 crossAxisAlignment: WrapCrossAlignment.center,
-                children: [search, ...controls],
+                children: [
+                  search,
+                  ...controls,
+                  if (topics.isNotEmpty) ...[
+                    ChoiceChip(
+                      label: const Text('All topics'),
+                      selected: _selectedTopicWords.isEmpty,
+                      onSelected: (_) =>
+                          setState(() => _selectedTopicWords.clear()),
+                    ),
+                    for (final topic in topics)
+                      FilterChip(
+                        label: Text(
+                          '${topic.value.label} (${topic.value.count})',
+                        ),
+                        selected: _selectedTopicWords.contains(topic.key),
+                        onSelected: (selected) => setState(
+                          () => selected
+                              ? _selectedTopicWords.add(topic.key)
+                              : _selectedTopicWords.remove(topic.key),
+                        ),
+                      ),
+                  ],
+                ],
               );
             },
           ),
           const SizedBox(height: 10),
+          if (topics.isNotEmpty && MediaQuery.sizeOf(context).width >= 620) ...[
+            Text(
+              'Topics',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ChoiceChip(
+                  label: const Text('All topics'),
+                  selected: _selectedTopicWords.isEmpty,
+                  onSelected: (_) =>
+                      setState(() => _selectedTopicWords.clear()),
+                ),
+                for (final topic in topics)
+                  FilterChip(
+                    label: Text('${topic.value.label} (${topic.value.count})'),
+                    selected: _selectedTopicWords.contains(topic.key),
+                    onSelected: (selected) => setState(
+                      () => selected
+                          ? _selectedTopicWords.add(topic.key)
+                          : _selectedTopicWords.remove(topic.key),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 18),
+          ],
           if (ordered.isEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 32),
@@ -3723,10 +3962,20 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                     )
                     .toList(growable: false);
                 final threadTopic = workspaceThreadTopic(allReplies);
-                final latestReplies = replies.skip(
-                  math.max(0, replies.length - 2),
-                );
-                final draft = widget.drafts['$conversationKey:${source.id}'];
+                final firstPreviewReplies = replies.length >= 4
+                    ? replies.take(2)
+                    : replies;
+                final lastPreviewReplies = replies.length >= 4
+                    ? replies.skip(replies.length - 2)
+                    : const Iterable<WorkspaceMessage>.empty();
+                final messageDraft =
+                    conversationDraftThreadKeys.contains(
+                      '$conversationKey:${source.id}',
+                    )
+                    ? widget.conversationDrafts[conversationKey]
+                    : null;
+                final replyDraft =
+                    widget.threadDrafts['$conversationKey:${source.id}'];
                 final unreadCount =
                     widget
                         .threadUnreadCounts['$conversationKey:${source.id}'] ??
@@ -3734,7 +3983,10 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                 final channelName =
                     widget.workspace.channelName(source.channelId ?? '') ??
                     'Direct message';
-                final earlierMessages = replies.length - latestReplies.length;
+                final hiddenMessages =
+                    replies.length -
+                    firstPreviewReplies.length -
+                    lastPreviewReplies.length;
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Material(
@@ -3799,10 +4051,7 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                                 const SizedBox(width: 10),
                                 Expanded(
                                   child: Text(
-                                    threadTopic ??
-                                        workspaceDisplayMessageText(
-                                          source.body,
-                                        ),
+                                    threadTopic ?? '',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: Theme.of(context)
@@ -3858,7 +4107,8 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                               mentions: source.mentions,
                               source: true,
                             ),
-                            for (final message in latestReplies.indexed) ...[
+                            for (final message
+                                in firstPreviewReplies.indexed) ...[
                               const SizedBox(height: 8),
                               _ThreadPreviewMessage(
                                 identity: message.$2.senderPubkey,
@@ -3870,38 +4120,42 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                                 mentions: message.$2.mentions,
                               ),
                             ],
-                            if (draft?.value.text.trim().isNotEmpty ==
+                            if (hiddenMessages > 0) ...[
+                              const SizedBox(height: 8),
+                              _WorkspaceDateDivider(
+                                label:
+                                    '$hiddenMessages more ${hiddenMessages == 1 ? 'message' : 'messages'}',
+                              ),
+                            ],
+                            for (final message
+                                in lastPreviewReplies.indexed) ...[
+                              const SizedBox(height: 8),
+                              _ThreadPreviewMessage(
+                                identity: message.$2.senderPubkey,
+                                author: _memberLabel(message.$2.senderPubkey),
+                                timestamp: _timeLabel(message.$2.createdAt),
+                                text: workspaceDisplayMessageText(
+                                  message.$2.body,
+                                ),
+                                mentions: message.$2.mentions,
+                              ),
+                            ],
+                            if (messageDraft?.value.text.trim().isNotEmpty ==
                                 true) ...[
                               const SizedBox(height: 10),
-                              Container(
-                                width: double.infinity,
-                                padding: const EdgeInsets.all(12),
-                                decoration: BoxDecoration(
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .primaryContainer
-                                      .withValues(alpha: 0.32),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'Draft reply',
-                                      style: Theme.of(context)
-                                          .textTheme
-                                          .labelMedium
-                                          ?.copyWith(
-                                            color: Theme.of(
-                                              context,
-                                            ).colorScheme.primary,
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(draft!.value.text.trim()),
-                                  ],
-                                ),
+                              _draftPreview(
+                                context,
+                                label: 'Draft message',
+                                draft: messageDraft!,
+                              ),
+                            ],
+                            if (replyDraft?.value.text.trim().isNotEmpty ==
+                                true) ...[
+                              const SizedBox(height: 10),
+                              _draftPreview(
+                                context,
+                                label: 'Draft reply',
+                                draft: replyDraft!,
                               ),
                             ],
                             const SizedBox(height: 10),
@@ -3913,9 +4167,7 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
                             ),
                             const SizedBox(height: 8),
                             Text(
-                              earlierMessages > 0
-                                  ? 'Open thread to view $earlierMessages earlier ${earlierMessages == 1 ? 'message' : 'messages'}'
-                                  : 'Open thread',
+                              'Open thread',
                               style: Theme.of(context).textTheme.labelSmall
                                   ?.copyWith(
                                     color: Theme.of(
@@ -3938,6 +4190,35 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
     );
   }
 
+  Widget _draftPreview(
+    BuildContext context, {
+    required String label,
+    required _WorkspaceDraft draft,
+  }) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: Theme.of(
+        context,
+      ).colorScheme.primaryContainer.withValues(alpha: 0.32),
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: Theme.of(context).textTheme.labelMedium?.copyWith(
+            color: Theme.of(context).colorScheme.primary,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(draft.value.text.trim()),
+      ],
+    ),
+  );
+
   bool _matchesSearch(WorkspaceMessage source) {
     final query = _searchQuery.trim().toLowerCase();
     if (query.isEmpty) return true;
@@ -3945,6 +4226,18 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
     final replies =
         widget.workspace.messages[conversationKey] ??
         const <WorkspaceMessage>[];
+    final topic = _topicFor(source) ?? '';
+    final exactTopic = RegExp(r'^"(.+)"$').firstMatch(query)?.group(1);
+    if (exactTopic != null) return topic.toLowerCase() == exactTopic;
+    final queryWords = _topicWords(
+      query,
+    ).map((word) => word.toLowerCase()).toSet();
+    final topicWords = _topicWords(
+      topic,
+    ).map((word) => word.toLowerCase()).toSet();
+    if (queryWords.isNotEmpty && queryWords.every(topicWords.contains)) {
+      return true;
+    }
     final channel =
         widget.workspace.channelName(source.channelId ?? '') ??
         'Direct message';
@@ -3952,6 +4245,7 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
       channel,
       _memberLabel(source.senderPubkey),
       workspaceDisplayMessageText(source.body),
+      topic,
       ...replies
           .where((message) => message.parentId == source.id)
           .expand(
@@ -4077,11 +4371,39 @@ class _ThreadPreviewMessage extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 1),
-              _WorkspaceMessageText(
-                text: text,
-                mentions: mentions,
-                onOpenMessageReference: (_) {},
-                maxLines: 3,
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final painter = TextPainter(
+                    text: TextSpan(
+                      text: text,
+                      style: DefaultTextStyle.of(context).style,
+                    ),
+                    maxLines: 3,
+                    textDirection: Directionality.of(context),
+                  )..layout(maxWidth: constraints.maxWidth);
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _WorkspaceMessageText(
+                        text: text,
+                        mentions: mentions,
+                        onOpenMessageReference: (_) {},
+                        maxLines: 3,
+                        overflow: TextOverflow.clip,
+                      ),
+                      if (painter.didExceedMaxLines)
+                        Text(
+                          '...',
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                        ),
+                    ],
+                  );
+                },
               ),
             ],
           ),
@@ -4182,6 +4504,71 @@ class _WorkspaceSidebar extends StatelessWidget {
   final void Function(_WorkspaceSection, String) onToggleArchiveConversation;
   final bool activeConversationMuted;
   final VoidCallback onToggleActiveConversationMuted;
+
+  void _showConversationActions(
+    BuildContext context,
+    _WorkspaceSection section,
+    String id,
+  ) {
+    final key = section == _WorkspaceSection.direct
+        ? WorkspaceState.directKey(ownPubkey, id)
+        : id;
+    final preference =
+        conversationPreferences[key] ?? const WorkspaceConversationPreference();
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Icon(
+                preference.pinned ? Icons.push_pin : Icons.push_pin_outlined,
+              ),
+              title: Text(
+                preference.pinned ? 'Unpin conversation' : 'Pin conversation',
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                onTogglePinConversation(section, id);
+              },
+            ),
+            ListTile(
+              leading: Icon(
+                preference.muted
+                    ? Icons.notifications_none
+                    : Icons.notifications_off_outlined,
+              ),
+              title: Text(
+                preference.muted ? 'Unmute conversation' : 'Mute conversation',
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                onToggleMuteConversation(section, id);
+              },
+            ),
+            ListTile(
+              leading: Icon(
+                preference.archived
+                    ? Icons.unarchive_outlined
+                    : Icons.archive_outlined,
+              ),
+              title: Text(
+                preference.archived
+                    ? 'Unarchive conversation'
+                    : 'Archive conversation',
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                onToggleArchiveConversation(section, id);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -4314,6 +4701,7 @@ class _WorkspaceSidebar extends StatelessWidget {
       Widget? action,
       Widget? leading,
       bool reserveActivity = true,
+      VoidCallback? onLongPress,
     }) {
       Widget listItem({bool showAction = false}) => SizedBox(
         height: 42,
@@ -4379,6 +4767,7 @@ class _WorkspaceSidebar extends StatelessWidget {
                 ? null
                 : Text(count, style: Theme.of(context).textTheme.labelSmall),
             onTap: onTap,
+            onLongPress: onLongPress,
           ),
         ),
       );
@@ -4623,6 +5012,11 @@ class _WorkspaceSidebar extends StatelessWidget {
                         ),
                         onTap: () =>
                             onSelect(_WorkspaceSection.channel, entry.$2.id),
+                        onLongPress: () => _showConversationActions(
+                          context,
+                          _WorkspaceSection.channel,
+                          entry.$2.id,
+                        ),
                       ),
                     ],
                     if (pinnedChannels.isNotEmpty && otherChannels.isNotEmpty)
@@ -4642,6 +5036,11 @@ class _WorkspaceSidebar extends StatelessWidget {
                         ),
                         onTap: () =>
                             onSelect(_WorkspaceSection.channel, channel.id),
+                        onLongPress: () => _showConversationActions(
+                          context,
+                          _WorkspaceSection.channel,
+                          channel.id,
+                        ),
                       ),
                   ],
                 ),
@@ -4652,7 +5051,7 @@ class _WorkspaceSidebar extends StatelessWidget {
                   onExpandedChanged: (expanded) =>
                       onSidebarSectionChanged('direct-messages', expanded),
                   title: 'Direct messages',
-                  icon: Icons.chat_bubble_outline,
+                  icon: Icons.forum_outlined,
                   hasUnread: visibleMembers.any(
                     (member) => hasUnreadActivity(
                       WorkspaceState.directKey(ownPubkey, member),
@@ -4702,13 +5101,18 @@ class _WorkspaceSidebar extends StatelessWidget {
                         ),
                         onTap: () =>
                             onSelect(_WorkspaceSection.direct, entry.$2),
+                        onLongPress: () => _showConversationActions(
+                          context,
+                          _WorkspaceSection.direct,
+                          entry.$2,
+                        ),
                       ),
                     ],
                     if (pinnedMembers.isNotEmpty && otherMembers.isNotEmpty)
                       const Divider(height: 16, indent: 12, endIndent: 12),
                     for (final member in otherMembers)
                       item(
-                        Icons.chat_bubble_outline,
+                        Icons.forum_outlined,
                         memberLabel(member),
                         leading: _WorkspaceFrogAvatar(
                           identity: member,
@@ -4732,6 +5136,11 @@ class _WorkspaceSidebar extends StatelessWidget {
                           muted(WorkspaceState.directKey(ownPubkey, member)),
                         ),
                         onTap: () => onSelect(_WorkspaceSection.direct, member),
+                        onLongPress: () => _showConversationActions(
+                          context,
+                          _WorkspaceSection.direct,
+                          member,
+                        ),
                       ),
                   ],
                 ),
@@ -4770,6 +5179,11 @@ class _WorkspaceSidebar extends StatelessWidget {
                           ),
                           onTap: () =>
                               onSelect(_WorkspaceSection.channel, channel.id),
+                          onLongPress: () => _showConversationActions(
+                            context,
+                            _WorkspaceSection.channel,
+                            channel.id,
+                          ),
                         ),
                       for (final member in archivedMembers)
                         item(
@@ -4802,6 +5216,11 @@ class _WorkspaceSidebar extends StatelessWidget {
                           ),
                           onTap: () =>
                               onSelect(_WorkspaceSection.direct, member),
+                          onLongPress: () => _showConversationActions(
+                            context,
+                            _WorkspaceSection.direct,
+                            member,
+                          ),
                         ),
                     ],
                   ),
@@ -4886,18 +5305,7 @@ class _WorkspaceSidebar extends StatelessWidget {
               onTap: onSettings,
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(20, 10, 18, 12),
-                child: Row(
-                  children: [
-                    const Icon(Icons.settings_outlined),
-                    const SizedBox(width: 12),
-                    Text(
-                      'Ribbit',
-                      style: Theme.of(
-                        context,
-                      ).textTheme.labelSmall?.copyWith(color: palette.label),
-                    ),
-                  ],
-                ),
+                child: Row(children: [const Icon(Icons.settings_outlined)]),
               ),
             ),
           ),
@@ -5253,13 +5661,11 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.onLoadOpenCodeModels,
     required this.initialFolderChoices,
     required this.onLoadFolders,
-    required this.conversationPreprompt,
     required this.conversationFolderScope,
     required this.agents,
     required this.agentDirectory,
     required this.agentCount,
     required this.onManageAgents,
-    required this.onEditConversationPreprompt,
     required this.onEditConversationFolder,
     required this.mentionOptions,
     required this.onMentionSelected,
@@ -5350,13 +5756,11 @@ class _WorkspaceConversation extends StatefulWidget {
   final Future<List<_OpenCodeModelChoice>> Function() onLoadOpenCodeModels;
   final List<RepoChoice> initialFolderChoices;
   final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
-  final String conversationPreprompt;
   final List<String> conversationFolderScope;
   final List<WorkspaceAgent> agents;
   final List<WorkspaceAgent> agentDirectory;
   final int agentCount;
   final VoidCallback? onManageAgents;
-  final Future<void> Function(String value) onEditConversationPreprompt;
   final Future<void> Function(List<String> folders) onEditConversationFolder;
   final List<WorkspaceMention> mentionOptions;
   final ValueChanged<WorkspaceMention> onMentionSelected;
@@ -5382,22 +5786,29 @@ class _WorkspaceConversation extends StatefulWidget {
 }
 
 class _WorkspaceConversationState extends State<_WorkspaceConversation> {
+  String _compactTypingLabel(WorkspaceTyping status) {
+    final name = status.agentName ?? status.senderPubkey;
+    return status.agentId != null
+        ? '$name is working...'
+        : '$name is typing...';
+  }
+
   final _scrollController = ScrollController();
+  final _historyViewportKey = GlobalKey();
   final _searchController = TextEditingController();
   final _searchFocus = FocusNode();
   String? _lastMessageId;
   double? _lastViewportHeight;
   bool _scrollQueued = false;
-  bool _historyDateQueued = false;
   bool _searchOpen = false;
   String _searchQuery = '';
-  String? _visibleHistoryDate;
   final _messageKeys = <String, GlobalKey>{};
   String? _flashMessageId;
+  String? _stickyHistoryDate;
 
   void _flashMessage(String messageId) {
     setState(() => _flashMessageId = messageId);
-    Future<void>.delayed(const Duration(milliseconds: 700), () {
+    Future<void>.delayed(const Duration(milliseconds: 1800), () {
       if (mounted && _flashMessageId == messageId) {
         setState(() => _flashMessageId = null);
       }
@@ -5494,36 +5905,6 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
   final _cancelledAgentIds = <String>{};
   final _cancelledAgentTimers = <String, Timer>{};
 
-  Future<void> _editConversationPreprompt() async {
-    final controller = TextEditingController(
-      text: widget.conversationPreprompt,
-    );
-    final value = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Agent brief'),
-        content: TextField(
-          controller: controller,
-          maxLength: 4000,
-          minLines: 4,
-          maxLines: 10,
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-    if (value != null) await widget.onEditConversationPreprompt(value.trim());
-  }
-
   Future<void> _editConversationFolder() async {
     final folders = await showDialog<List<String>>(
       context: context,
@@ -5539,9 +5920,12 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_updateStickyHistoryDate);
     _lastMessageId = _latestMessageId;
     _queueScrollToLatest();
-    _queueVisibleHistoryDateUpdate();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _updateStickyHistoryDate(),
+    );
   }
 
   @override
@@ -5570,6 +5954,9 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
       _lastMessageId = _latestMessageId;
       _queueScrollToLatest();
     }
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _updateStickyHistoryDate(),
+    );
   }
 
   @override
@@ -5579,7 +5966,9 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     }
     _searchController.dispose();
     _searchFocus.dispose();
-    _scrollController.dispose();
+    _scrollController
+      ..removeListener(_updateStickyHistoryDate)
+      ..dispose();
     super.dispose();
   }
 
@@ -5623,34 +6012,36 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     return '${weekdays[date.weekday - 1]}, ${date.day} ${months[date.month - 1]} ${date.year}';
   }
 
-  void _queueVisibleHistoryDateUpdate() {
-    if (_historyDateQueued) return;
-    _historyDateQueued = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _historyDateQueued = false;
-      if (!mounted) return;
-      final viewport = context.findRenderObject() as RenderBox?;
-      if (viewport == null || !viewport.hasSize) return;
-      final viewportTop = viewport.localToGlobal(Offset.zero).dy;
-      WorkspaceMessage? firstVisible;
-      var firstVisibleTop = double.infinity;
-      for (final message in _visibleMessages) {
-        final box =
-            _messageKeys[message.id]?.currentContext?.findRenderObject()
-                as RenderBox?;
-        if (box == null || !box.hasSize) continue;
-        final top = box.localToGlobal(Offset.zero).dy;
-        if (top + box.size.height > viewportTop && top < firstVisibleTop) {
-          firstVisible = message;
-          firstVisibleTop = top;
-        }
+  void _updateStickyHistoryDate() {
+    final viewport =
+        _historyViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    if (!mounted || viewport == null) return;
+
+    final viewportTop = viewport.localToGlobal(Offset.zero).dy;
+    WorkspaceMessage? visibleMessage;
+    var nextMessageTop = double.infinity;
+    for (final message in _visibleMessages) {
+      final box =
+          _messageKeys[message.id]?.currentContext?.findRenderObject()
+              as RenderBox?;
+      if (box == null) continue;
+      final top = box.localToGlobal(Offset.zero).dy;
+      final bottom = top + box.size.height;
+      if (top <= viewportTop && bottom >= viewportTop) {
+        visibleMessage = message;
+        break;
       }
-      if (firstVisible == null) return;
-      final label = _historyDateLabel(firstVisible.createdAt);
-      if (_visibleHistoryDate != label) {
-        setState(() => _visibleHistoryDate = label);
+      if (top > viewportTop && top < nextMessageTop) {
+        visibleMessage = message;
+        nextMessageTop = top;
       }
-    });
+    }
+    final label = visibleMessage == null
+        ? null
+        : _historyDateLabel(visibleMessage.createdAt);
+    if (label != null && label != _stickyHistoryDate) {
+      setState(() => _stickyHistoryDate = label);
+    }
   }
 
   int get _unreadThreadReplyCount =>
@@ -5660,8 +6051,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
       .where((message) => (widget.threadUnreadCounts[message.id] ?? 0) > 0)
       .toList(growable: false);
 
-  bool _showsMainLiveMessage(WorkspaceTyping status) =>
-      status.agentId == null && status.parentId == null;
+  bool _showsMainLiveMessage(WorkspaceTyping status) => status.parentId == null;
 
   List<WorkspaceMessage> get _visibleMessages {
     final query = _searchQuery.trim().toLowerCase();
@@ -5855,6 +6245,19 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
   }
 
   Future<void> _showConversationActions([BuildContext? anchorContext]) async {
+    final pinnedMessages = _sharedPinnedMessages;
+    final savedMessages = _savedMessages;
+    final directCall = widget.section == _WorkspaceSection.direct;
+    final channelCall = widget.section == _WorkspaceSection.channel;
+    final callPhase = directCall
+        ? widget.callPeerPubkey == null ||
+                  widget.callPeerPubkey == widget.directPeer
+              ? widget.callPhase
+              : _CallPhase.idle
+        : widget.groupCallChannelId == null ||
+              widget.groupCallChannelId == widget.channelId
+        ? widget.groupCallPhase
+        : _CallPhase.idle;
     final overlay =
         Overlay.of(context).context.findRenderObject()! as RenderBox;
     final anchor = anchorContext?.findRenderObject() as RenderBox?;
@@ -5868,14 +6271,117 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
       context: context,
       position: position,
       items: [
-        if (widget.onManageAgents != null)
+        if (pinnedMessages.isNotEmpty)
           const PopupMenuItem(
-            value: 'agents',
+            value: 'pins',
             child: ListTile(
               dense: true,
               contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.person_add_alt_1_outlined),
-              title: Text('Manage agents'),
+              leading: Icon(Icons.push_pin_outlined),
+              title: Text('Pins'),
+            ),
+          ),
+        if (savedMessages.isNotEmpty)
+          const PopupMenuItem(
+            value: 'saved',
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.bookmark_outline),
+              title: Text('Saved messages'),
+            ),
+          ),
+        const PopupMenuItem(
+          value: 'reload',
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.arrow_upward_outlined),
+            title: Text('Reload last messages'),
+          ),
+        ),
+        if (_supportsLiveCalls && (directCall || channelCall)) ...[
+          if (callPhase == _CallPhase.idle)
+            const PopupMenuItem(
+              value: 'call',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.call_outlined),
+                title: Text('Start call'),
+              ),
+            ),
+          if (callPhase == _CallPhase.incoming) ...[
+            const PopupMenuItem(
+              value: 'answer',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.call_outlined),
+                title: Text('Answer call'),
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'reject',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.call_end_outlined),
+                title: Text('Reject call'),
+              ),
+            ),
+          ],
+          if (callPhase == _CallPhase.outgoing ||
+              callPhase == _CallPhase.connecting ||
+              callPhase == _CallPhase.active)
+            const PopupMenuItem(
+              value: 'hangup',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.call_end_outlined),
+                title: Text('Hang up'),
+              ),
+            ),
+          if (callPhase == _CallPhase.active) ...[
+            const PopupMenuItem(
+              value: 'audio',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.volume_up_outlined),
+                title: Text('Audio only'),
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'camera',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.videocam_outlined),
+                title: Text('Use camera'),
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'screen',
+              child: ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.screen_share_outlined),
+                title: Text('Share screen'),
+              ),
+            ),
+          ],
+        ],
+        if (widget.section == _WorkspaceSection.channel ||
+            widget.section == _WorkspaceSection.direct)
+          const PopupMenuItem(
+            value: 'files',
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.folder_open_outlined),
+              title: Text('Browse repository files'),
             ),
           ),
         if (widget.section == _WorkspaceSection.channel)
@@ -5971,8 +6477,32 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
       ],
     );
     if (!mounted || action == null) return;
-    if (action == 'agents') {
-      widget.onManageAgents?.call();
+    if (action == 'pins') {
+      _showPinnedMessages(context, title: 'Pins', messages: pinnedMessages);
+    } else if (action == 'saved') {
+      _showPinnedMessages(context, title: 'Saved', messages: savedMessages);
+    } else if (action == 'reload') {
+      widget.onReload();
+    } else if (action == 'call') {
+      if (directCall) {
+        widget.onStartCall(widget.directPeer!);
+      } else {
+        await widget.onStartChannelCall(widget.channelId!);
+      }
+    } else if (action == 'answer') {
+      directCall ? widget.onAcceptCall() : widget.onAcceptGroupCall();
+    } else if (action == 'reject') {
+      directCall ? widget.onRejectCall() : widget.onRejectGroupCall();
+    } else if (action == 'hangup') {
+      directCall ? widget.onHangupCall() : widget.onHangupGroupCall();
+    } else if (action == 'audio') {
+      widget.onMediaSourceChanged(_CallMediaSource.audioOnly);
+    } else if (action == 'camera') {
+      widget.onMediaSourceChanged(_CallMediaSource.camera);
+    } else if (action == 'screen') {
+      widget.onMediaSourceChanged(_CallMediaSource.screen);
+    } else if (action == 'files') {
+      await widget.onOpenFiles();
     } else if (action == 'folder') {
       await _editConversationFolder();
     } else if (action == 'rename') {
@@ -6013,12 +6543,6 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (widget.onManageAgents != null)
-              ListTile(
-                leading: const Icon(Icons.person_add_alt_1_outlined),
-                title: const Text('Manage agents'),
-                onTap: () => Navigator.pop(context, 'agents'),
-              ),
             ListTile(
               leading: Icon(
                 _searchOpen ? Icons.search_off_outlined : Icons.search,
@@ -6031,17 +6555,28 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
               title: const Text('Reload last messages'),
               onTap: () => Navigator.pop(context, 'reload'),
             ),
+            ListTile(
+              leading: const Icon(Icons.people_outline),
+              title: const Text('Members & agents'),
+              onTap: () => Navigator.pop(context, 'members'),
+            ),
+            if (_sharedPinnedMessages.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.push_pin_outlined),
+                title: const Text('Pinned messages'),
+                onTap: () => Navigator.pop(context, 'pins'),
+              ),
+            if (_savedMessages.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.bookmark_outline),
+                title: const Text('Saved messages'),
+                onTap: () => Navigator.pop(context, 'saved'),
+              ),
             if (channelCall || directCall)
               ListTile(
                 leading: const Icon(Icons.folder_open_outlined),
                 title: const Text('Browse repository files'),
                 onTap: () => Navigator.pop(context, 'files'),
-              ),
-            if (channelCall)
-              ListTile(
-                leading: const Icon(Icons.edit_note_outlined),
-                title: const Text('Edit agent brief'),
-                onTap: () => Navigator.pop(context, 'brief'),
               ),
             if (channelCall)
               ListTile(
@@ -6107,20 +6642,27 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     );
     if (!mounted || action == null) return;
     switch (action) {
-      case 'agents':
-        widget.onManageAgents?.call();
-        break;
       case 'search':
         _toggleSearch();
         break;
       case 'reload':
         widget.onReload();
         break;
+      case 'members':
+        _showConversationMembers();
+        break;
+      case 'pins':
+        _showPinnedMessages(
+          context,
+          title: 'Pins',
+          messages: _sharedPinnedMessages,
+        );
+        break;
+      case 'saved':
+        _showPinnedMessages(context, title: 'Saved', messages: _savedMessages);
+        break;
       case 'files':
         await widget.onOpenFiles();
-        break;
-      case 'brief':
-        await _editConversationPreprompt();
         break;
       case 'folder':
         await _editConversationFolder();
@@ -6172,7 +6714,6 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         if (mounted && _scrollController.hasClients) {
           _scrollController.jumpTo(0);
         }
-        _queueVisibleHistoryDateUpdate();
       });
     });
   }
@@ -6229,6 +6770,9 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         members: members,
         agents: widget.agents,
         workspaceMembers: widget.members,
+        onManageAgents: widget.section == _WorkspaceSection.channel
+            ? widget.onManageAgents
+            : null,
         canManage:
             widget.canManageMembers ||
             creatorIsAdmin ||
@@ -6286,6 +6830,14 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     }
     final palette = Theme.of(context).extension<_WorkspacePalette>()!;
     final visibleMessages = _visibleMessages;
+    final mainLiveMessages = widget.typingStatuses
+        .where(_showsMainLiveMessage)
+        .toList(growable: false);
+    final visibleHistoryDate =
+        _stickyHistoryDate ??
+        (visibleMessages.isEmpty
+            ? null
+            : _historyDateLabel(visibleMessages.last.createdAt));
     final sharedPinnedMessages = _sharedPinnedMessages;
     final savedMessages = _savedMessages;
     final searching = _searchQuery.trim().isNotEmpty;
@@ -6335,58 +6887,29 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                                   style: Theme.of(context).textTheme.titleLarge
                                       ?.copyWith(fontWeight: FontWeight.bold),
                                 ),
-                                const SizedBox(height: 2),
-                                TextButton(
-                                  onPressed: _showConversationMembers,
-                                  style: TextButton.styleFrom(
-                                    padding: EdgeInsets.zero,
-                                    minimumSize: Size.zero,
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                    alignment: Alignment.centerLeft,
+                                if (widget.section ==
+                                    _WorkspaceSection.channel) ...[
+                                  const SizedBox(height: 2),
+                                  TextButton(
+                                    onPressed: _showConversationMembers,
+                                    style: TextButton.styleFrom(
+                                      padding: EdgeInsets.zero,
+                                      minimumSize: Size.zero,
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                      alignment: Alignment.centerLeft,
+                                    ),
+                                    child: Text(
+                                      '$_humanCount humans - ${widget.agentCount} agents',
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.bodySmall,
+                                    ),
                                   ),
-                                  child: Text(
-                                    '$_humanCount humans - ${widget.agentCount} agents',
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.bodySmall,
-                                  ),
-                                ),
+                                ],
                               ],
                             ),
                           ),
-                          if (savedMessages.isNotEmpty)
-                            TextButton.icon(
-                              onPressed: () => _showPinnedMessages(
-                                context,
-                                title: 'Saved',
-                                messages: savedMessages,
-                              ),
-                              icon: const Icon(
-                                Icons.bookmark_outline,
-                                size: 18,
-                              ),
-                              label: const Text('Saved'),
-                            ),
-                          if (widget.onManageAgents != null)
-                            IconButton(
-                              onPressed: widget.onManageAgents,
-                              icon: const Icon(Icons.person_add_alt_1_outlined),
-                              tooltip: 'Manage agents',
-                            ),
-                          if (savedMessages.isNotEmpty)
-                            TextButton.icon(
-                              onPressed: () => _showPinnedMessages(
-                                context,
-                                title: 'Saved',
-                                messages: savedMessages,
-                              ),
-                              icon: const Icon(
-                                Icons.bookmark_outline,
-                                size: 18,
-                              ),
-                              label: const Text('Saved'),
-                            ),
                           IconButton(
                             onPressed: _toggleSearch,
                             icon: Icon(
@@ -6398,68 +6921,35 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                                 ? 'Close search'
                                 : 'Search messages',
                           ),
-                          IconButton(
-                            onPressed: widget.onReload,
-                            icon: const Icon(Icons.arrow_upward_outlined),
-                            tooltip: 'Reload last messages',
+                          if (sharedPinnedMessages.isNotEmpty)
+                            IconButton(
+                              onPressed: () => _showPinnedMessages(
+                                context,
+                                title: 'Pins',
+                                messages: sharedPinnedMessages,
+                              ),
+                              icon: const Icon(Icons.push_pin_outlined),
+                              tooltip: 'Pinned messages',
+                            ),
+                          if (savedMessages.isNotEmpty)
+                            IconButton(
+                              onPressed: () => _showPinnedMessages(
+                                context,
+                                title: 'Saved',
+                                messages: savedMessages,
+                              ),
+                              icon: const Icon(Icons.bookmark_outline),
+                              tooltip: 'Saved messages',
+                            ),
+                          Builder(
+                            builder: (anchorContext) => IconButton(
+                              onPressed: () => unawaited(
+                                _showConversationActions(anchorContext),
+                              ),
+                              icon: const Icon(Icons.more_horiz),
+                              tooltip: 'Conversation options',
+                            ),
                           ),
-                          if (widget.section == _WorkspaceSection.channel ||
-                              widget.section == _WorkspaceSection.direct)
-                            IconButton(
-                              onPressed: () => unawaited(widget.onOpenFiles()),
-                              icon: const Icon(Icons.folder_open_outlined),
-                              tooltip: 'Browse repository files',
-                            ),
-                          if (widget.section == _WorkspaceSection.channel)
-                            IconButton(
-                              onPressed: _editConversationPreprompt,
-                              icon: const Icon(Icons.edit_note_outlined),
-                              tooltip: 'Edit agent brief',
-                            ),
-                          if (widget.section == _WorkspaceSection.channel)
-                            Builder(
-                              builder: (anchorContext) => IconButton(
-                                onPressed: () => unawaited(
-                                  _showConversationActions(anchorContext),
-                                ),
-                                icon: const Icon(Icons.more_horiz),
-                                tooltip: 'Conversation options',
-                              ),
-                            ),
-                          if (_supportsLiveCalls &&
-                              widget.section == _WorkspaceSection.direct)
-                            _CallControl(
-                              phase:
-                                  widget.callPeerPubkey == null ||
-                                      widget.callPeerPubkey == widget.directPeer
-                                  ? widget.callPhase
-                                  : _CallPhase.idle,
-                              onStart: () =>
-                                  widget.onStartCall(widget.directPeer!),
-                              onAccept: widget.onAcceptCall,
-                              onReject: widget.onRejectCall,
-                              onHangup: widget.onHangupCall,
-                              mediaSource: widget.mediaSource,
-                              onMediaSourceChanged: widget.onMediaSourceChanged,
-                            ),
-                          if (_supportsLiveCalls &&
-                              widget.section == _WorkspaceSection.channel)
-                            _CallControl(
-                              phase:
-                                  widget.groupCallChannelId == null ||
-                                      widget.groupCallChannelId ==
-                                          widget.channelId
-                                  ? widget.groupCallPhase
-                                  : _CallPhase.idle,
-                              onStart: () => unawaited(
-                                widget.onStartChannelCall(widget.channelId!),
-                              ),
-                              onAccept: widget.onAcceptGroupCall,
-                              onReject: widget.onRejectGroupCall,
-                              onHangup: widget.onHangupGroupCall,
-                              mediaSource: widget.mediaSource,
-                              onMediaSourceChanged: widget.onMediaSourceChanged,
-                            ),
                         ],
                       ),
                       if (_searchOpen) ...[
@@ -6511,41 +7001,12 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                     ),
                   ),
                 ),
-              if (sharedPinnedMessages.isNotEmpty || savedMessages.isNotEmpty)
-                Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    compactHeader ? 16 : 24,
-                    8,
-                    compactHeader ? 16 : 24,
-                    0,
-                  ),
-                  child: Wrap(
-                    spacing: 8,
-                    children: [
-                      if (sharedPinnedMessages.isNotEmpty)
-                        OutlinedButton.icon(
-                          onPressed: () => _showPinnedMessages(
-                            context,
-                            title: 'Pins',
-                            messages: sharedPinnedMessages,
-                          ),
-                          icon: const Icon(Icons.push_pin_outlined, size: 18),
-                          label: const Text('Pins'),
-                        ),
-                    ],
-                  ),
-                ),
               Expanded(
-                child: Stack(
+                child: Column(
                   children: [
-                    NotificationListener<ScrollNotification>(
-                      onNotification: (notification) {
-                        if (notification is ScrollUpdateNotification ||
-                            notification is ScrollEndNotification) {
-                          _queueVisibleHistoryDateUpdate();
-                        }
-                        return false;
-                      },
+                    if (visibleHistoryDate != null)
+                      _WorkspaceDateDivider(label: visibleHistoryDate),
+                    Expanded(
                       child: LayoutBuilder(
                         builder: (context, constraints) {
                           if (_lastViewportHeight != constraints.maxHeight) {
@@ -6560,6 +7021,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                             );
                           }
                           return ListView.builder(
+                            key: _historyViewportKey,
                             controller: _scrollController,
                             reverse: true,
                             padding: EdgeInsets.fromLTRB(
@@ -6568,70 +7030,36 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                               compactHeader ? 16 : 24,
                               2,
                             ),
-                            itemCount: visibleMessages.length + 1,
+                            itemCount:
+                                visibleMessages.length +
+                                mainLiveMessages.length,
                             itemBuilder: (context, index) {
-                              if (index == visibleMessages.length) {
-                                return Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.stretch,
-                                  children: [
-                                    if (widget.conversationPreprompt.isEmpty &&
-                                        widget.section ==
-                                            _WorkspaceSection.channel)
-                                      Padding(
-                                        padding: const EdgeInsets.only(
-                                          bottom: 16,
-                                        ),
-                                        child: TextButton.icon(
-                                          onPressed: _editConversationPreprompt,
-                                          icon: const Icon(
-                                            Icons.edit_note_outlined,
-                                          ),
-                                          label: const Text(
-                                            'Add an agent brief',
-                                          ),
-                                        ),
-                                      )
-                                    else if (widget
-                                        .conversationPreprompt
-                                        .isNotEmpty)
-                                      Container(
-                                        margin: const EdgeInsets.only(
-                                          bottom: 20,
-                                        ),
-                                        padding: const EdgeInsets.all(14),
-                                        decoration: BoxDecoration(
-                                          color: palette.sidebar.withValues(
-                                            alpha: 0.55,
-                                          ),
-                                          borderRadius: BorderRadius.circular(
-                                            10,
-                                          ),
-                                        ),
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              'Agent brief',
-                                              style: Theme.of(
-                                                context,
-                                              ).textTheme.labelLarge,
-                                            ),
-                                            const SizedBox(height: 5),
-                                            Text(widget.conversationPreprompt),
-                                          ],
-                                        ),
-                                      ),
-                                  ],
+                              if (index < mainLiveMessages.length) {
+                                final status = mainLiveMessages[index];
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 10),
+                                  child: _WorkspaceLiveMessageRow(
+                                    status: status,
+                                    authorName: _memberLabel(
+                                      status.senderPubkey,
+                                    ),
+                                    displayText: _compactTypingLabel(status),
+                                    onOpenMention: _showMentionDetails,
+                                  ),
                                 );
                               }
                               final messageIndex =
-                                  visibleMessages.length - index - 1;
+                                  visibleMessages.length -
+                                  (index - mainLiveMessages.length) -
+                                  1;
                               final m = visibleMessages[messageIndex];
                               final previous = messageIndex == 0
                                   ? null
                                   : visibleMessages[messageIndex - 1];
+                              final isNewDate =
+                                  previous == null ||
+                                  _historyDateLabel(m.createdAt) !=
+                                      _historyDateLabel(previous.createdAt);
                               // A reply thread makes its source a distinct
                               // conversation turn, even if its author repeats.
                               final grouped =
@@ -6643,150 +7071,126 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                                       (widget.threadReplyCounts[previous.id] ??
                                               0) ==
                                           0);
-                              return Padding(
-                                padding: const EdgeInsets.only(bottom: 4),
-                                child: KeyedSubtree(
-                                  key: _messageKeys.putIfAbsent(
-                                    m.id,
-                                    GlobalKey.new,
-                                  ),
-                                  child: Column(
-                                    crossAxisAlignment: m.parentId == null
-                                        ? CrossAxisAlignment.stretch
-                                        : CrossAxisAlignment.start,
-                                    children: [
-                                      _WorkspaceMessageRow(
-                                        message: m,
-                                        authorName: _memberLabel(
-                                          m.senderPubkey,
-                                        ),
-                                        groupedWithPrevious: grouped,
-                                        isLocalSender: isWorkspaceLocalSender(
-                                          m.senderPubkey,
-                                          widget.localSenderIds,
-                                        ),
-                                        fipsConnected: widget.fipsConnectedPeers
-                                            .contains(m.senderPubkey),
-                                        onThread: () => widget.onOpenThread(
-                                          _threadSourceFor(m),
-                                        ),
-                                        threadReplyCount:
-                                            widget.threadReplyCounts[m.id] ?? 0,
-                                        threadLastReplyAt:
-                                            widget.threadLastReplyAt[m.id],
-                                        threadUnreadCount:
-                                            widget.threadUnreadCounts[m.id] ??
-                                            0,
-                                        threadActivityLabel:
-                                            widget.threadActivityLabels[m.id],
-                                        isMessageExpanded: widget
-                                            .expandedMessageIds
-                                            .contains(m.id),
-                                        onMessageExpandedChanged: (expanded) =>
-                                            widget.onMessageExpandedChanged(
-                                              m.id,
-                                              expanded,
-                                            ),
-                                        threadTopic: widget.threadTopics[m.id],
-                                        isThreadSource:
-                                            widget.thread?.id == m.id,
-                                        flashOutline: _flashMessageId == m.id,
-                                        onOpenMessageReference:
-                                            _openMessageReference,
-                                        onOpenMention: _showMentionDetails,
-                                        onReact: (emoji) => unawaited(
-                                          widget.onToggleReaction(m, emoji),
-                                        ),
-                                        isLocallyPinned: widget
-                                            .localMessagePinIds
-                                            .contains(m.id),
-                                        onToggleLocalPin: () => widget
-                                            .onToggleLocalMessagePin(m.id),
-                                        onToggleSharedPin: () => unawaited(
-                                          widget.onRequest({
-                                            'action': 'toggle_pin',
-                                            'parent_id': m.id,
-                                          }),
-                                        ),
-                                        onOpenAttachment:
-                                            widget.onOpenAttachment,
-                                        searchQuery: _searchQuery,
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  if (isNewDate)
+                                    Padding(
+                                      padding: const EdgeInsets.only(
+                                        bottom: 10,
                                       ),
-                                      if (searching)
-                                        Align(
-                                          alignment: Alignment.centerRight,
-                                          child: TextButton.icon(
-                                            onPressed: () =>
-                                                _openSearchResult(m),
-                                            icon: const Icon(
-                                              Icons.my_location_outlined,
-                                              size: 16,
+                                      child: Row(
+                                        children: [
+                                          const Expanded(child: Divider()),
+                                          Padding(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 12,
                                             ),
-                                            label: const Text('Open here'),
+                                            child: Text(
+                                              _historyDateLabel(m.createdAt),
+                                              style: Theme.of(
+                                                context,
+                                              ).textTheme.labelSmall,
+                                            ),
                                           ),
-                                        ),
-                                    ],
+                                          const Expanded(child: Divider()),
+                                        ],
+                                      ),
+                                    ),
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 10),
+                                    child: KeyedSubtree(
+                                      key: _messageKeys.putIfAbsent(
+                                        m.id,
+                                        GlobalKey.new,
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment: m.parentId == null
+                                            ? CrossAxisAlignment.stretch
+                                            : CrossAxisAlignment.start,
+                                        children: [
+                                          _WorkspaceMessageRow(
+                                            message: m,
+                                            authorName: _memberLabel(
+                                              m.senderPubkey,
+                                            ),
+                                            groupedWithPrevious: grouped,
+                                            isLocalSender:
+                                                isWorkspaceLocalSender(
+                                                  m.senderPubkey,
+                                                  widget.localSenderIds,
+                                                ),
+                                            fipsConnected: widget
+                                                .fipsConnectedPeers
+                                                .contains(m.senderPubkey),
+                                            onThread: searching
+                                                ? () => _openSearchResult(m)
+                                                : () => widget.onOpenThread(
+                                                    _threadSourceFor(m),
+                                                  ),
+                                            threadReplyCount:
+                                                widget.threadReplyCounts[m
+                                                    .id] ??
+                                                0,
+                                            threadLastReplyAt:
+                                                widget.threadLastReplyAt[m.id],
+                                            threadUnreadCount:
+                                                widget.threadUnreadCounts[m
+                                                    .id] ??
+                                                0,
+                                            threadActivityLabel: widget
+                                                .threadActivityLabels[m.id],
+                                            isMessageExpanded: widget
+                                                .expandedMessageIds
+                                                .contains(m.id),
+                                            onMessageExpandedChanged:
+                                                (expanded) => widget
+                                                    .onMessageExpandedChanged(
+                                                      m.id,
+                                                      expanded,
+                                                    ),
+                                            threadTopic:
+                                                widget.threadTopics[m.id],
+                                            isThreadSource:
+                                                widget.thread?.id == m.id,
+                                            flashOutline:
+                                                _flashMessageId == m.id,
+                                            onOpenMessageReference:
+                                                _openMessageReference,
+                                            onOpenMention: _showMentionDetails,
+                                            onReact: (emoji) => unawaited(
+                                              widget.onToggleReaction(m, emoji),
+                                            ),
+                                            isLocallyPinned: widget
+                                                .localMessagePinIds
+                                                .contains(m.id),
+                                            onToggleLocalPin: () => widget
+                                                .onToggleLocalMessagePin(m.id),
+                                            onToggleSharedPin: () => unawaited(
+                                              widget.onRequest({
+                                                'action': 'toggle_pin',
+                                                'parent_id': m.id,
+                                              }),
+                                            ),
+                                            onOpenAttachment:
+                                                widget.onOpenAttachment,
+                                            searchQuery: _searchQuery,
+                                            showDate: true,
+                                          ),
+                                        ],
+                                      ),
+                                    ),
                                   ),
-                                ),
+                                ],
                               );
                             },
                           );
                         },
                       ),
                     ),
-                    if (_visibleHistoryDate != null)
-                      Positioned(
-                        top: 12,
-                        left: 0,
-                        right: 0,
-                        child: IgnorePointer(
-                          child: Center(
-                            child: AnimatedSwitcher(
-                              duration: const Duration(milliseconds: 180),
-                              child: Container(
-                                key: ValueKey(_visibleHistoryDate),
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 5,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: palette.sidebar.withValues(
-                                    alpha: 0.92,
-                                  ),
-                                  borderRadius: BorderRadius.circular(999),
-                                  border: Border.all(
-                                    color: palette.label.withValues(
-                                      alpha: 0.22,
-                                    ),
-                                  ),
-                                ),
-                                child: Text(
-                                  _visibleHistoryDate!,
-                                  style: Theme.of(context).textTheme.labelSmall,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
                   ],
                 ),
               ),
-              for (final status in widget.typingStatuses)
-                if (_showsMainLiveMessage(status))
-                  Padding(
-                    padding: EdgeInsets.fromLTRB(
-                      compactHeader ? 16 : 24,
-                      0,
-                      compactHeader ? 16 : 24,
-                      8,
-                    ),
-                    child: _WorkspaceLiveMessageRow(
-                      status: status,
-                      authorName: _memberLabel(status.senderPubkey),
-                      onOpenMention: _showMentionDetails,
-                    ),
-                  ),
               SizedBox(
                 height: 28,
                 child:
@@ -6796,7 +7200,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                         ) ||
                         _cancelledAgentIds.isNotEmpty
                     ? ColoredBox(
-                        color: palette.sidebar.withValues(alpha: 0.5),
+                        color: palette.content.withValues(alpha: 0.75),
                         child: Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 20),
                           child: LayoutBuilder(
@@ -6932,20 +7336,23 @@ class _UnreadRepliesButtonState extends State<_UnreadRepliesButton> {
   Widget build(BuildContext context) => MouseRegion(
     onEnter: (_) => setState(() => _hovered = true),
     onExit: (_) => setState(() => _hovered = false),
-    child: TextButton.icon(
-      style: TextButton.styleFrom(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        minimumSize: const Size(0, 20),
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      ),
-      onPressed: widget.onPressed,
-      icon: const Icon(Icons.forum_outlined, size: 16),
-      label: Text(
-        _hovered
-            ? widget.count == 1
-                  ? 'Read reply'
-                  : 'Read first'
-            : '${widget.count} new ${widget.count == 1 ? 'reply' : 'replies'}',
+    child: Transform.translate(
+      offset: const Offset(0, -1),
+      child: TextButton.icon(
+        style: TextButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          minimumSize: const Size(0, 20),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        onPressed: widget.onPressed,
+        icon: const Icon(Icons.forum_outlined, size: 16),
+        label: Text(
+          _hovered
+              ? widget.count == 1
+                    ? 'Read reply'
+                    : 'Read first'
+              : '${widget.count} new ${widget.count == 1 ? 'reply' : 'replies'}',
+        ),
       ),
     ),
   );
@@ -7037,126 +7444,6 @@ class _HoldToCancelAgentTaskState extends State<_HoldToCancelAgentTask> {
   );
 }
 
-class _CallControl extends StatelessWidget {
-  const _CallControl({
-    required this.phase,
-    required this.onStart,
-    required this.onAccept,
-    required this.onReject,
-    required this.onHangup,
-    required this.mediaSource,
-    required this.onMediaSourceChanged,
-  });
-
-  final _CallPhase phase;
-  final VoidCallback onStart;
-  final VoidCallback onAccept;
-  final VoidCallback onReject;
-  final VoidCallback onHangup;
-  final _CallMediaSource mediaSource;
-  final ValueChanged<_CallMediaSource> onMediaSourceChanged;
-
-  @override
-  Widget build(BuildContext context) => switch (phase) {
-    _CallPhase.idle => IconButton(
-      tooltip: 'Start call',
-      onPressed: onStart,
-      icon: const Icon(Icons.call_outlined),
-    ),
-    _CallPhase.incoming => Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        const Text('Preparing FIPS direct connection...'),
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextButton(onPressed: onReject, child: const Text('Reject')),
-            FilledButton(
-              // FIPS traversal runs after its responder advert is published.
-              // Do not make the Nostr answer signal wait for that operation.
-              onPressed: onAccept,
-              child: const Text('Answer'),
-            ),
-          ],
-        ),
-      ],
-    ),
-    _CallPhase.outgoing => TextButton.icon(
-      onPressed: onHangup,
-      icon: const Icon(Icons.call_end_outlined),
-      label: const Text('Waiting for answer...'),
-    ),
-    _CallPhase.connecting => TextButton.icon(
-      onPressed: onHangup,
-      icon: const Icon(Icons.call_end_outlined),
-      label: const Text('Establishing FIPS connection...'),
-    ),
-    _CallPhase.active => Wrap(
-      crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: 4,
-      children: [
-        _MediaSourceButton(
-          source: _CallMediaSource.audioOnly,
-          active: mediaSource == _CallMediaSource.audioOnly,
-          onPressed: onMediaSourceChanged,
-          icon: Icons.volume_up_outlined,
-          label: 'Audio only',
-        ),
-        _MediaSourceButton(
-          source: _CallMediaSource.camera,
-          active: mediaSource == _CallMediaSource.camera,
-          onPressed: onMediaSourceChanged,
-          icon: Icons.videocam_outlined,
-          label: 'Camera',
-        ),
-        _MediaSourceButton(
-          source: _CallMediaSource.screen,
-          active: mediaSource == _CallMediaSource.screen,
-          onPressed: onMediaSourceChanged,
-          icon: Icons.screen_share_outlined,
-          label: 'Share screen',
-        ),
-        IconButton(
-          tooltip: 'Hang up',
-          onPressed: onHangup,
-          icon: const Icon(Icons.call_end),
-        ),
-      ],
-    ),
-  };
-}
-
-class _MediaSourceButton extends StatelessWidget {
-  const _MediaSourceButton({
-    required this.source,
-    required this.active,
-    required this.onPressed,
-    required this.icon,
-    required this.label,
-  });
-  final _CallMediaSource source;
-  final bool active;
-  final ValueChanged<_CallMediaSource> onPressed;
-  final IconData icon;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) => Tooltip(
-    message: label,
-    child: IconButton(
-      onPressed: () => onPressed(source),
-      style: IconButton.styleFrom(
-        foregroundColor: active
-            ? Theme.of(context).colorScheme.onPrimary
-            : null,
-        backgroundColor: active ? Theme.of(context).colorScheme.primary : null,
-      ),
-      icon: Icon(icon),
-    ),
-  );
-}
-
 class _TypingDots extends StatefulWidget {
   const _TypingDots({required this.label});
 
@@ -7210,102 +7497,80 @@ class _WorkspaceLiveMessageRow extends StatelessWidget {
   const _WorkspaceLiveMessageRow({
     required this.status,
     required this.authorName,
+    this.displayText,
     this.onOpenMention,
   });
 
   final WorkspaceTyping status;
   final String authorName;
+  final String? displayText;
   final ValueChanged<WorkspaceMention>? onOpenMention;
 
   @override
   Widget build(BuildContext context) {
     final isAgent = status.agentId != null;
     final text = status.stage?.trim();
-    final body = text == null || text.isEmpty
-        ? (isAgent ? 'Working' : 'Typing')
-        : text;
-    final authorLabel = Text(
-      authorName,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: const TextStyle(fontWeight: FontWeight.bold),
-    );
-    final interactiveAuthorLabel = isAgent && onOpenMention != null
-        ? GestureDetector(
-            onTap: () {
-              if (!HardwareKeyboard.instance.isControlPressed &&
-                  !HardwareKeyboard.instance.isMetaPressed) {
-                return;
-              }
-              onOpenMention!(
-                WorkspaceMention(
-                  kind: 'agent',
-                  id: status.agentId!,
-                  label: authorName,
-                ),
-              );
-            },
-            child: authorLabel,
-          )
-        : authorLabel;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final minimumBubbleWidth = MediaQuery.sizeOf(context).width < 720
-            ? 144.0
-            : 300.0;
-        final maximumBubbleWidth = math
-            .max(minimumBubbleWidth, math.min(constraints.maxWidth, 820))
-            .toDouble();
-        return Align(
-          alignment: Alignment.centerLeft,
-          child: SizedBox(
-            width: maximumBubbleWidth,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              decoration: BoxDecoration(
-                color: isAgent
-                    ? const Color(0xff12332d).withValues(alpha: 0.5)
-                    : Theme.of(context).colorScheme.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Stack(
-                children: [
-                  Positioned(
-                    top: 0,
-                    left: 0,
-                    child: _WorkspaceFrogAvatar(
-                      identity: status.senderPubkey,
-                      label: authorName,
-                      radius: 16,
-                      bot: isAgent,
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.only(left: 44, top: 4),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Flexible(child: interactiveAuthorLabel),
-                            const SizedBox(width: 5),
-                            _TypingDots(label: '$authorName is active'),
-                          ],
-                        ),
-                        const SizedBox(height: 3),
-                        Text(body),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
+    final body =
+        displayText ??
+        (!isAgent
+            ? '$authorName is typing...'
+            : text == null || text.isEmpty
+            ? 'Working'
+            : text);
+    return _WorkspaceMessageRow(
+      message: WorkspaceMessage(
+        id: 'typing:${status.senderPubkey}:${status.parentId ?? ''}',
+        senderPubkey: status.senderPubkey,
+        body: body,
+        parentId: status.parentId,
+        workHistory: status.workHistory,
+        createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      ),
+      authorName: authorName,
+      groupedWithPrevious: false,
+      isLocalSender: false,
+      fipsConnected: false,
+      onThread: () {},
+      onReact: (_) {},
+      onOpenMessageReference: (_) {},
+      onOpenMention: onOpenMention,
+      threadReplyCount: 0,
+      threadUnreadCount: 0,
+      onOpenAttachment: (_) async {},
+      isMessageExpanded: false,
+      onMessageExpandedChanged: (_) {},
+      showThreadAction: false,
+      showActions: false,
+      isInProgress: true,
     );
   }
+}
+
+class _WorkspaceDateDivider extends StatelessWidget {
+  const _WorkspaceDateDivider({required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => ColoredBox(
+    color: Theme.of(context).extension<_WorkspacePalette>()!.content,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: FractionallySizedBox(
+        widthFactor: 0.8,
+        child: Row(
+          children: [
+            const Expanded(child: Divider()),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Text(label, style: Theme.of(context).textTheme.labelSmall),
+            ),
+            const Expanded(child: Divider()),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class _WorkspaceMessageRow extends StatefulWidget {
@@ -7336,6 +7601,8 @@ class _WorkspaceMessageRow extends StatefulWidget {
     this.searchQuery = '',
     this.showDate = false,
     this.dateFormat = WorkspaceDateFormat.uk,
+    this.showActions = true,
+    this.isInProgress = false,
   });
   final WorkspaceMessage message;
   final String authorName;
@@ -7363,6 +7630,8 @@ class _WorkspaceMessageRow extends StatefulWidget {
   final String searchQuery;
   final bool showDate;
   final WorkspaceDateFormat dateFormat;
+  final bool showActions;
+  final bool isInProgress;
   @override
   State<_WorkspaceMessageRow> createState() => _WorkspaceMessageRowState();
 }
@@ -7372,13 +7641,14 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
   static const _reactions = ['👍', '❤️', '👀'];
   bool _hovered = false;
   late final AnimationController _outlineController;
+  late final ValueNotifier<List<String>> _workHistory;
   Timer? _timestampTimer;
 
   bool get _hasNewThreadReply => widget.threadUnreadCount > 0;
 
   void _updateOutlineAnimation() {
     if (_hasNewThreadReply) {
-      _outlineController.repeat();
+      _outlineController.repeat(reverse: true);
     } else {
       _outlineController
         ..stop()
@@ -7419,6 +7689,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
       vsync: this,
       duration: const Duration(milliseconds: 1400),
     );
+    _workHistory = ValueNotifier(widget.message.workHistory);
     _updateOutlineAnimation();
     if (widget.flashOutline) _outlineController.forward(from: 0);
     _scheduleTimestampRefresh();
@@ -7438,12 +7709,16 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
         oldWidget.message.createdAt != widget.message.createdAt) {
       _scheduleTimestampRefresh();
     }
+    if (oldWidget.message.workHistory != widget.message.workHistory) {
+      _workHistory.value = widget.message.workHistory;
+    }
   }
 
   @override
   void dispose() {
     _timestampTimer?.cancel();
     _outlineController.dispose();
+    _workHistory.dispose();
     super.dispose();
   }
 
@@ -7588,33 +7863,38 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
     context: context,
     showDragHandle: true,
     builder: (context) {
-      var cumulativeSeconds = 0;
-      final items = <_WorkHistoryItem>[];
-      for (var index = 0; index < widget.message.workHistory.length; index++) {
-        final value = widget.message.workHistory[index];
-        cumulativeSeconds += _WorkHistoryItem.durationSeconds(value);
-        items.add(
-          _WorkHistoryItem(
-            index: index + 1,
-            value: value,
-            cumulativeSeconds: cumulativeSeconds,
-          ),
-        );
-      }
-      return SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          children: [
-            ListTile(
-              title: const Text('Work history'),
-              trailing: Text(
-                'Total ${_WorkHistoryItem.formatDuration(cumulativeSeconds)}',
-                style: Theme.of(context).textTheme.labelLarge,
+      return ValueListenableBuilder<List<String>>(
+        valueListenable: _workHistory,
+        builder: (context, history, _) {
+          var cumulativeSeconds = 0;
+          final items = <_WorkHistoryItem>[];
+          for (var index = 0; index < history.length; index++) {
+            final value = history[index];
+            cumulativeSeconds += _WorkHistoryItem.durationSeconds(value);
+            items.add(
+              _WorkHistoryItem(
+                index: index + 1,
+                value: value,
+                cumulativeSeconds: cumulativeSeconds,
               ),
+            );
+          }
+          return SafeArea(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                ListTile(
+                  title: const Text('Work history'),
+                  trailing: Text(
+                    'Total ${_WorkHistoryItem.formatDuration(cumulativeSeconds)}',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
+                ),
+                ...items,
+              ],
             ),
-            ...items,
-          ],
-        ),
+          );
+        },
       );
     },
   );
@@ -7688,7 +7968,13 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                   constraints: const BoxConstraints(maxWidth: 120),
                   child: interactiveAuthorLabel,
                 ),
-                if (isAgent && widget.message.workHistory.isNotEmpty) ...[
+                if (widget.isInProgress) ...[
+                  const SizedBox(width: 5),
+                  _TypingDots(label: '${widget.authorName} is working'),
+                ],
+                if (isAgent &&
+                    (widget.isInProgress ||
+                        widget.message.workHistory.isNotEmpty)) ...[
                   const SizedBox(width: 8),
                   _showWorkButton(context),
                 ],
@@ -7782,10 +8068,11 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
       ],
     );
     final lastReplyLabel = _lastReplyLabel();
+    final mutedColor = Theme.of(context).colorScheme.onSurfaceVariant;
     final replyControls =
         widget.threadReplyCount > 0 || widget.threadActivityLabel != null
         ? Padding(
-            padding: const EdgeInsets.only(top: 2),
+            padding: const EdgeInsets.only(top: 5),
             child: InkWell(
               onTap: widget.onThread,
               borderRadius: BorderRadius.circular(6),
@@ -7793,46 +8080,67 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                 constraints: const BoxConstraints(minHeight: 28),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 3),
-                  child: Wrap(
-                    spacing: 7,
-                    runSpacing: 2,
-                    crossAxisAlignment: WrapCrossAlignment.center,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    textDirection: TextDirection.rtl,
                     children: [
                       if (widget.threadReplyCount > 0) ...[
+                        if (lastReplyLabel != null)
+                          Text(
+                            lastReplyLabel,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.labelMedium
+                                ?.copyWith(color: mutedColor),
+                          ),
+                        if (lastReplyLabel != null) const SizedBox(width: 6),
+                        if (lastReplyLabel != null)
+                          Text(
+                            '•',
+                            style: Theme.of(context).textTheme.labelMedium
+                                ?.copyWith(color: mutedColor),
+                          ),
+                        if (lastReplyLabel != null) const SizedBox(width: 6),
                         Text(
                           '${widget.threadReplyCount} ${widget.threadReplyCount == 1 ? 'reply' : 'replies'}',
                           style: Theme.of(context).textTheme.labelMedium
                               ?.copyWith(fontWeight: FontWeight.w700),
                         ),
-                        if (lastReplyLabel != null)
-                          Text(
-                            lastReplyLabel,
-                            style: Theme.of(context).textTheme.labelSmall
-                                ?.copyWith(
-                                  color: Theme.of(
-                                    context,
-                                  ).colorScheme.onSurfaceVariant,
-                                ),
+                        const SizedBox(width: 5),
+                        Transform.translate(
+                          offset: const Offset(0, 1),
+                          child: Icon(
+                            Icons.forum_outlined,
+                            size: 14,
+                            color: mutedColor,
                           ),
+                        ),
+                        if (widget.threadUnreadCount > 0)
+                          const SizedBox(width: 8),
                         if (widget.threadUnreadCount > 0)
                           Text(
                             '${widget.threadUnreadCount} new',
-                            style: Theme.of(context).textTheme.labelSmall
+                            style: Theme.of(context).textTheme.labelMedium
                                 ?.copyWith(
                                   color: Theme.of(context).colorScheme.primary,
                                   fontWeight: FontWeight.w700,
                                 ),
                           ),
                       ],
+                      if (widget.threadActivityLabel != null)
+                        const SizedBox(width: 10),
                       if (widget.threadActivityLabel case final label?) ...[
-                        _ThreadWorkingDots(
-                          color: Theme.of(context).colorScheme.primary,
-                        ),
-                        Text(
-                          label,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.labelSmall,
+                        _ThreadWorkingDots(color: const Color(0xff35d6a0)),
+                        const SizedBox(width: 5),
+                        Flexible(
+                          child: Text(
+                            label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.labelMedium
+                                ?.copyWith(color: mutedColor),
+                          ),
                         ),
                       ],
                     ],
@@ -7870,38 +8178,60 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
             onEnter: (_) => setState(() => _hovered = true),
             onExit: (_) => setState(() => _hovered = false),
             child: GestureDetector(
-              onLongPress: () => unawaited(_showMessageActions(context)),
+              onTap: widget.onThread,
+              onLongPress: widget.showActions
+                  ? () => unawaited(_showMessageActions(context))
+                  : null,
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
                   AnimatedBuilder(
                     animation: _outlineController,
                     builder: (context, child) {
-                      final threadIndicator =
-                          widget.isThreadSource ||
-                          _hasNewThreadReply ||
-                          widget.flashOutline;
+                      final newReply = _hasNewThreadReply;
+                      final flash = widget.flashOutline;
+                      final selected = widget.isThreadSource;
                       final primary = Theme.of(context).colorScheme.primary;
+                      final glow = Curves.easeInOut.transform(
+                        _outlineController.value,
+                      );
+                      final highlighted = selected || newReply || flash;
                       final bubble = Container(
                         padding: const EdgeInsets.symmetric(
                           horizontal: 10,
                           vertical: 6,
                         ),
                         decoration: BoxDecoration(
-                          color: const Color(0xff111b1e),
+                          color: widget.isLocalSender
+                              ? const Color(0xff182326)
+                              : const Color(0xff111b1e),
                           borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: newReply || flash
+                                ? primary.withValues(
+                                    alpha:
+                                        (flash ? 0.48 : 0.34) + (0.48 * glow),
+                                  )
+                                : selected
+                                ? primary.withValues(alpha: 0.72)
+                                : Theme.of(context).colorScheme.outlineVariant
+                                      .withValues(alpha: 0.28),
+                            width: 1,
+                          ),
+                          boxShadow: newReply || flash
+                              ? [
+                                  BoxShadow(
+                                    color: primary.withValues(
+                                      alpha: (flash ? 0.36 : 0.22) * glow,
+                                    ),
+                                    blurRadius: flash ? 28 : 20,
+                                    spreadRadius: flash ? 5 : 3,
+                                  ),
+                                ]
+                              : null,
                         ),
                         child: child,
                       );
-                      if (threadIndicator) {
-                        return CustomPaint(
-                          foregroundPainter: _ThreadOutlinePainter(
-                            color: primary,
-                            phase: _outlineController.value,
-                          ),
-                          child: bubble,
-                        );
-                      }
                       return bubble;
                     },
                     child: Column(
@@ -7913,7 +8243,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                       ],
                     ),
                   ),
-                  if (_hovered)
+                  if (_hovered && widget.showActions)
                     Positioned(
                       top: -4,
                       right: 0,
@@ -7995,7 +8325,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
           ),
         );
         return Align(
-          alignment: Alignment.centerLeft,
+          alignment: Alignment.center,
           heightFactor: 1,
           child: bubble,
         );
@@ -8090,30 +8420,6 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
       ),
     ),
   );
-}
-
-class _ThreadOutlinePainter extends CustomPainter {
-  const _ThreadOutlinePainter({required this.color, required this.phase});
-
-  final Color color;
-  final double phase;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rect = Offset.zero & size;
-    final opacity = 0.42 + (math.sin(phase * math.pi * 2) + 1) * 0.10;
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(rect.deflate(1), const Radius.circular(11)),
-      Paint()
-        ..color = color.withValues(alpha: opacity)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1,
-    );
-  }
-
-  @override
-  bool shouldRepaint(_ThreadOutlinePainter oldDelegate) =>
-      oldDelegate.color != color || oldDelegate.phase != phase;
 }
 
 class _ThreadWorkingDots extends StatefulWidget {
@@ -8401,15 +8707,25 @@ class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
             onOpenMention: widget.onOpenMention,
             searchQuery: widget.searchQuery,
             maxLines: truncated && !widget.expanded ? _previewLines : null,
+            overflow: TextOverflow.clip,
           ),
+          if (truncated && !widget.expanded)
+            Text(
+              '...',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
           if (truncated)
             TextButton(
               onPressed: () => widget.onExpandedChanged(!widget.expanded),
               style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
+                alignment: Alignment.centerLeft,
+                padding: EdgeInsets.zero,
                 minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
-              child: Text(widget.expanded ? 'Hide' : 'Show all'),
+              child: Text(widget.expanded ? 'Hide' : 'Show more'),
             ),
         ],
       );
@@ -8424,6 +8740,7 @@ class _WorkspaceMessageText extends StatelessWidget {
     required this.onOpenMessageReference,
     this.onOpenMention,
     this.maxLines,
+    this.overflow = TextOverflow.ellipsis,
     this.searchQuery = '',
   });
   final String text;
@@ -8431,6 +8748,7 @@ class _WorkspaceMessageText extends StatelessWidget {
   final ValueChanged<String> onOpenMessageReference;
   final ValueChanged<WorkspaceMention>? onOpenMention;
   final int? maxLines;
+  final TextOverflow overflow;
   final String searchQuery;
 
   @override
@@ -8485,11 +8803,7 @@ class _WorkspaceMessageText extends StatelessWidget {
       );
       return maxLines == null
           ? SelectableText.rich(span)
-          : RichText(
-              text: span,
-              maxLines: maxLines,
-              overflow: TextOverflow.ellipsis,
-            );
+          : RichText(text: span, maxLines: maxLines, overflow: overflow);
     }
     final style = DefaultTextStyle.of(context).style;
     final spans = <InlineSpan>[];
@@ -8595,11 +8909,7 @@ class _WorkspaceMessageText extends StatelessWidget {
     final span = TextSpan(style: style, children: spans);
     return maxLines == null
         ? SelectableText.rich(span)
-        : RichText(
-            text: span,
-            maxLines: maxLines,
-            overflow: TextOverflow.ellipsis,
-          );
+        : RichText(text: span, maxLines: maxLines, overflow: overflow);
   }
 
   WorkspaceMention? _linkedMention(String value) {
@@ -9217,6 +9527,7 @@ class _WorkspaceContext extends StatelessWidget {
       threads: openThreads,
       selectedThreadId: message!.id,
       hasUnreadOtherThread: hasUnreadOtherThread,
+      threadUnreadCounts: threadUnreadCounts,
       threadTitle: (thread) => _threadTitleFor(thread),
       onSelected: onSelectThread,
     );
@@ -9286,6 +9597,8 @@ class _WorkspaceContext extends StatelessWidget {
     fipsConnected: false,
     onThread: () {},
     onReact: (emoji) => unawaited(onToggleReaction(message, emoji)),
+    onToggleSharedPin: () =>
+        unawaited(onRequest({'action': 'toggle_pin', 'parent_id': message.id})),
     onOpenMessageReference: (_) {},
     onOpenMention: onOpenMention,
     threadReplyCount: 0,
@@ -9301,215 +9614,229 @@ class _WorkspaceContext extends StatelessWidget {
   );
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
-    child: message == null
-        ? Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Conversation details',
-                style: Theme.of(
-                  context,
-                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 18),
-              const _ContextLine(
-                Icons.people_outline,
-                'Workspace members appear in Members',
-              ),
-              const _ContextLine(Icons.push_pin_outlined, 'No pinned messages'),
-              const _ContextLine(
-                Icons.folder_outlined,
-                'Shared files will appear here',
-              ),
-              const Spacer(),
-              Text(
-                'Select a reply count to open a thread.',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
-          )
-        : Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (!compactHeader) ...[
-                AnimatedBuilder(
-                  animation: threadSearch,
-                  builder: (context, _) => threadSearch.isOpen
-                      ? TextField(
-                          controller: threadSearch.controller,
-                          focusNode: threadSearch.focus,
-                          decoration: InputDecoration(
-                            hintText: 'Search this thread',
-                            prefixIcon: const Icon(Icons.search),
-                            suffixIcon: IconButton(
-                              tooltip: 'Close search',
-                              icon: const Icon(Icons.close),
-                              onPressed: threadSearch.close,
+  Widget build(BuildContext context) => ColoredBox(
+    color: Theme.of(context).extension<_WorkspacePalette>()!.content,
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
+      child: message == null
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Conversation details',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                const _ContextLine(
+                  Icons.people_outline,
+                  'Workspace members appear in Members',
+                ),
+                const _ContextLine(
+                  Icons.push_pin_outlined,
+                  'No pinned messages',
+                ),
+                const _ContextLine(
+                  Icons.folder_outlined,
+                  'Shared files will appear here',
+                ),
+                const Spacer(),
+                Text(
+                  'Select a reply count to open a thread.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (!compactHeader) ...[
+                  AnimatedBuilder(
+                    animation: threadSearch,
+                    builder: (context, _) => threadSearch.isOpen
+                        ? TextField(
+                            controller: threadSearch.controller,
+                            focusNode: threadSearch.focus,
+                            decoration: InputDecoration(
+                              hintText: 'Search this thread',
+                              prefixIcon: const Icon(Icons.search),
+                              suffixIcon: IconButton(
+                                tooltip: 'Close search',
+                                icon: const Icon(Icons.close),
+                                onPressed: threadSearch.close,
+                              ),
+                            ),
+                          )
+                        : Row(
+                            children: [
+                              Expanded(
+                                child: _ThreadTopicActions(
+                                  onRequestTopic: onRequestTopic,
+                                  onEditTopic: () =>
+                                      unawaited(_editThreadTopic(context)),
+                                  child: ValueListenableBuilder<String?>(
+                                    valueListenable: topicOverride,
+                                    builder: (context, _, _) =>
+                                        _threadTitleSelector(context),
+                                  ),
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Close this thread',
+                                onPressed: onCloseCurrentThread,
+                                icon: const Icon(Icons.close, size: 18),
+                                constraints: const BoxConstraints.tightFor(
+                                  width: 28,
+                                  height: 32,
+                                ),
+                                padding: EdgeInsets.zero,
+                              ),
+                              if (filesOpen)
+                                TextButton.icon(
+                                  onPressed: onShowFiles,
+                                  icon: const Icon(
+                                    Icons.folder_open_outlined,
+                                    size: 18,
+                                  ),
+                                  label: const Text('Files'),
+                                ),
+                              IconButton(
+                                tooltip: 'Search this thread',
+                                onPressed: threadSearch.open,
+                                icon: const Icon(Icons.search),
+                              ),
+                              IconButton(
+                                tooltip: fullWindow
+                                    ? 'Return to conversation'
+                                    : 'Open thread full-window',
+                                onPressed: onToggleFullWindow,
+                                icon: Icon(
+                                  fullWindow
+                                      ? Icons.close_fullscreen
+                                      : Icons.open_in_full,
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Close thread panel',
+                                onPressed: () =>
+                                    unawaited(_closeAllThreads(context)),
+                                icon: const Icon(Icons.close),
+                              ),
+                            ],
+                          ),
+                  ),
+                  const Divider(),
+                ],
+                if (compactHeader) ...[
+                  Row(
+                    children: [
+                      if (threadSearch.isOpen)
+                        Expanded(
+                          child: TextField(
+                            controller: threadSearch.controller,
+                            focusNode: threadSearch.focus,
+                            autofocus: true,
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              hintText: 'Search this thread',
+                              prefixIcon: Icon(Icons.search),
                             ),
                           ),
                         )
-                      : Row(
-                          children: [
-                            Expanded(
-                              child: _ThreadTopicActions(
-                                onRequestTopic: onRequestTopic,
-                                onEditTopic: () =>
-                                    unawaited(_editThreadTopic(context)),
-                                child: ValueListenableBuilder<String?>(
-                                  valueListenable: topicOverride,
-                                  builder: (context, _, _) =>
-                                      _threadTitleSelector(context),
-                                ),
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: 'Close this thread',
-                              onPressed: onCloseCurrentThread,
-                              icon: const Icon(Icons.close, size: 18),
-                              constraints: const BoxConstraints.tightFor(
-                                width: 28,
-                                height: 32,
-                              ),
-                              padding: EdgeInsets.zero,
-                            ),
-                            if (filesOpen)
-                              TextButton.icon(
-                                onPressed: onShowFiles,
-                                icon: const Icon(
-                                  Icons.folder_open_outlined,
-                                  size: 18,
-                                ),
-                                label: const Text('Files'),
-                              ),
-                            IconButton(
-                              tooltip: 'Search this thread',
-                              onPressed: threadSearch.open,
-                              icon: const Icon(Icons.search),
-                            ),
-                            IconButton(
-                              tooltip: fullWindow
-                                  ? 'Return to conversation'
-                                  : 'Open thread full-window',
-                              onPressed: onToggleFullWindow,
-                              icon: Icon(
-                                fullWindow
-                                    ? Icons.close_fullscreen
-                                    : Icons.open_in_full,
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: 'Close thread panel',
-                              onPressed: () =>
-                                  unawaited(_closeAllThreads(context)),
-                              icon: const Icon(Icons.close),
-                            ),
-                          ],
-                        ),
-                ),
-                const Divider(),
-                const SizedBox(height: 12),
-              ],
-              if (compactHeader) ...[
-                Row(
-                  children: [
-                    Expanded(
-                      child: ValueListenableBuilder<String?>(
-                        valueListenable: topicOverride,
-                        builder: (context, _, _) =>
-                            _threadTitleSelector(context),
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: 'Close this thread',
-                      onPressed: onCloseCurrentThread,
-                      icon: const Icon(Icons.close, size: 18),
-                      constraints: const BoxConstraints.tightFor(
-                        width: 28,
-                        height: 32,
-                      ),
-                      padding: EdgeInsets.zero,
-                    ),
-                    IconButton(
-                      tooltip: 'Request thread topic',
-                      onPressed: onRequestTopic,
-                      icon: const Icon(Icons.auto_awesome_outlined),
-                    ),
-                    IconButton(
-                      tooltip: 'Edit thread topic',
-                      onPressed: () => unawaited(_editThreadTopic(context)),
-                      icon: const Icon(Icons.edit_outlined),
-                    ),
-                  ],
-                ),
-                const Divider(),
-                const SizedBox(height: 12),
-              ],
-              Expanded(
-                child: _ThreadMessageList(
-                  message: message!,
-                  replies: replies,
-                  messageBuilder:
-                      (message, groupedWithPrevious, flashOutline) =>
-                          _messageRow(
-                            message,
-                            groupedWithPrevious: groupedWithPrevious,
-                            flashOutline: flashOutline,
+                      else
+                        Expanded(
+                          child: ValueListenableBuilder<String?>(
+                            valueListenable: topicOverride,
+                            builder: (context, _, _) =>
+                                _threadTitleSelector(context),
                           ),
-                  threadSearch: threadSearch,
-                  replyTargetId: replyTargetId,
-                  onReplyTargetOpened: onReplyTargetOpened,
-                ),
-              ),
-              for (final status in typingStatuses)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: _WorkspaceLiveMessageRow(
-                    status: status,
-                    authorName: _memberLabel(status.senderPubkey),
-                    onOpenMention: onOpenMention,
+                        ),
+                      IconButton(
+                        tooltip: threadSearch.isOpen
+                            ? 'Close search'
+                            : 'Search this thread',
+                        onPressed: threadSearch.isOpen
+                            ? threadSearch.close
+                            : threadSearch.open,
+                        icon: Icon(
+                          threadSearch.isOpen
+                              ? Icons.search_off_outlined
+                              : Icons.search,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Close this thread',
+                        onPressed: onCloseCurrentThread,
+                        icon: const Icon(Icons.close, size: 18),
+                        constraints: const BoxConstraints.tightFor(
+                          width: 28,
+                          height: 32,
+                        ),
+                        padding: EdgeInsets.zero,
+                      ),
+                      IconButton(
+                        tooltip: 'Request thread topic',
+                        onPressed: onRequestTopic,
+                        icon: const Icon(Icons.auto_awesome_outlined),
+                      ),
+                      IconButton(
+                        tooltip: 'Edit thread topic',
+                        onPressed: () => unawaited(_editThreadTopic(context)),
+                        icon: const Icon(Icons.edit_outlined),
+                      ),
+                    ],
+                  ),
+                  const Divider(),
+                ],
+                Expanded(
+                  child: _ThreadMessageList(
+                    message: message!,
+                    replies: replies,
+                    messageBuilder:
+                        (message, groupedWithPrevious, flashOutline) =>
+                            _messageRow(
+                              message,
+                              groupedWithPrevious: groupedWithPrevious,
+                              flashOutline: flashOutline,
+                            ),
+                    threadSearch: threadSearch,
+                    replyTargetId: replyTargetId,
+                    onReplyTargetOpened: onReplyTargetOpened,
+                    liveMessages: [
+                      for (final status in typingStatuses)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: _WorkspaceLiveMessageRow(
+                            status: status,
+                            authorName: _memberLabel(status.senderPubkey),
+                            onOpenMention: onOpenMention,
+                          ),
+                        ),
+                    ],
                   ),
                 ),
-              SizedBox(
-                height: 28,
-                child: Row(
-                  children: [
-                    const Spacer(),
-                    Checkbox(
-                      value: alsoSendToMain,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      visualDensity: VisualDensity.compact,
-                      onChanged: (value) =>
-                          onAlsoSendToMainChanged(value ?? false),
-                    ),
-                    GestureDetector(
-                      onTap: () => onAlsoSendToMainChanged(!alsoSendToMain),
-                      child: Text(
-                        'Also send to main',
-                        style: Theme.of(context).textTheme.labelSmall,
-                      ),
-                    ),
-                  ],
+                WorkspaceComposer(
+                  composer: composer,
+                  composerFocus: composerFocus,
+                  hintText: 'Write a reply',
+                  alsoSendToMain: alsoSendToMain,
+                  onAlsoSendToMainChanged: onAlsoSendToMainChanged,
+                  sendToConversationLabel: title,
+                  mentionOptions: mentionOptions,
+                  onMentionSelected: onMentionSelected,
+                  onSend: onSend,
+                  onAttach: onAttach,
+                  voiceRecording: voiceRecording,
+                  voiceTranscribing: voiceTranscribing,
+                  voiceError: voiceError,
+                  onVoicePressed: onVoicePressed,
+                  voiceDurationLabel: voiceDurationLabel,
+                  onCancelVoiceRecording: onCancelVoiceRecording,
                 ),
-              ),
-              WorkspaceComposer(
-                composer: composer,
-                composerFocus: composerFocus,
-                hintText: 'Write a reply',
-                mentionOptions: mentionOptions,
-                onMentionSelected: onMentionSelected,
-                onSend: onSend,
-                onAttach: onAttach,
-                voiceRecording: voiceRecording,
-                voiceTranscribing: voiceTranscribing,
-                voiceError: voiceError,
-                onVoicePressed: onVoicePressed,
-                voiceDurationLabel: voiceDurationLabel,
-                onCancelVoiceRecording: onCancelVoiceRecording,
-              ),
-            ],
-          ),
+              ],
+            ),
+    ),
   );
 }
 
@@ -9552,6 +9879,7 @@ class _ThreadTitleDropdown extends StatefulWidget {
     required this.threads,
     required this.selectedThreadId,
     required this.hasUnreadOtherThread,
+    required this.threadUnreadCounts,
     required this.threadTitle,
     required this.onSelected,
   });
@@ -9560,6 +9888,7 @@ class _ThreadTitleDropdown extends StatefulWidget {
   final List<WorkspaceMessage> threads;
   final String selectedThreadId;
   final bool hasUnreadOtherThread;
+  final Map<String, int> threadUnreadCounts;
   final String Function(WorkspaceMessage thread) threadTitle;
   final ValueChanged<WorkspaceMessage> onSelected;
 
@@ -9631,13 +9960,26 @@ class _ThreadTitleDropdownState extends State<_ThreadTitleDropdown>
           for (final thread in widget.threads)
             PopupMenuItem(
               value: thread.id,
-              child: Text(
-                widget.threadTitle(thread),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: thread.id == widget.selectedThreadId
-                    ? const TextStyle(fontWeight: FontWeight.bold)
-                    : null,
+              child: AnimatedBuilder(
+                animation: _controller,
+                builder: (context, _) {
+                  final hasUnread =
+                      (widget.threadUnreadCounts[thread.id] ?? 0) > 0;
+                  return Text(
+                    widget.threadTitle(thread),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: hasUnread
+                          ? Color.lerp(foreground, primary, _controller.value)
+                          : null,
+                      fontWeight:
+                          thread.id == widget.selectedThreadId || hasUnread
+                          ? FontWeight.bold
+                          : null,
+                    ),
+                  );
+                },
               ),
             ),
         ],
@@ -9677,6 +10019,7 @@ class _ThreadMessageList extends StatefulWidget {
     required this.replies,
     required this.messageBuilder,
     required this.threadSearch,
+    required this.liveMessages,
     this.replyTargetId,
     required this.onReplyTargetOpened,
   });
@@ -9690,6 +10033,7 @@ class _ThreadMessageList extends StatefulWidget {
   )
   messageBuilder;
   final _ThreadSearchController threadSearch;
+  final List<Widget> liveMessages;
   final String? replyTargetId;
   final VoidCallback onReplyTargetOpened;
 
@@ -9699,15 +10043,21 @@ class _ThreadMessageList extends StatefulWidget {
 
 class _ThreadMessageListState extends State<_ThreadMessageList> {
   final _scrollController = ScrollController();
+  final _historyViewportKey = GlobalKey();
   final _messageKeys = <String, GlobalKey>{};
   String? _lastReplyId;
   String? _flashReplyId;
+  String? _stickyHistoryDate;
 
   @override
   void initState() {
     super.initState();
     _lastReplyId = _latestReplyId;
+    _scrollController.addListener(_updateStickyHistoryDate);
     if (widget.replyTargetId case final replyId?) _scrollToReply(replyId);
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _updateStickyHistoryDate(),
+    );
   }
 
   @override
@@ -9720,28 +10070,98 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
     if (_lastReplyId == _latestReplyId || widget.replyTargetId != null) return;
     _lastReplyId = _latestReplyId;
     _scrollToLatestReply();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _updateStickyHistoryDate(),
+    );
   }
 
   @override
   void dispose() {
-    _scrollController.dispose();
+    _scrollController
+      ..removeListener(_updateStickyHistoryDate)
+      ..dispose();
     super.dispose();
   }
 
   String? get _latestReplyId =>
       widget.replies.isEmpty ? null : widget.replies.last.id;
 
+  String _historyDateLabel(int seconds) {
+    final date = DateTime.fromMillisecondsSinceEpoch(seconds * 1000).toLocal();
+    final today = DateTime.now();
+    final day = DateTime(date.year, date.month, date.day);
+    final todayDay = DateTime(today.year, today.month, today.day);
+    if (day == todayDay) return 'Today';
+    if (day == todayDay.subtract(const Duration(days: 1))) return 'Yesterday';
+    const weekdays = [
+      'Monday',
+      'Tuesday',
+      'Wednesday',
+      'Thursday',
+      'Friday',
+      'Saturday',
+      'Sunday',
+    ];
+    const months = [
+      'January',
+      'February',
+      'March',
+      'April',
+      'May',
+      'June',
+      'July',
+      'August',
+      'September',
+      'October',
+      'November',
+      'December',
+    ];
+    return '${weekdays[date.weekday - 1]}, ${date.day} ${months[date.month - 1]} ${date.year}';
+  }
+
+  void _updateStickyHistoryDate() {
+    final viewport =
+        _historyViewportKey.currentContext?.findRenderObject() as RenderBox?;
+    if (!mounted || viewport == null) return;
+
+    final viewportTop = viewport.localToGlobal(Offset.zero).dy;
+    WorkspaceMessage? visibleMessage;
+    var nextMessageTop = double.infinity;
+    for (final message in [widget.message, ...widget.replies]) {
+      final box =
+          _messageKeys[message.id]?.currentContext?.findRenderObject()
+              as RenderBox?;
+      if (box == null) continue;
+      final top = box.localToGlobal(Offset.zero).dy;
+      final bottom = top + box.size.height;
+      if (top <= viewportTop && bottom >= viewportTop) {
+        visibleMessage = message;
+        break;
+      }
+      if (top > viewportTop && top < nextMessageTop) {
+        visibleMessage = message;
+        nextMessageTop = top;
+      }
+    }
+    final label = visibleMessage == null
+        ? null
+        : _historyDateLabel(visibleMessage.createdAt);
+    if (label != null && label != _stickyHistoryDate) {
+      setState(() => _stickyHistoryDate = label);
+    }
+  }
+
   void _scrollToLatestReply() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scrollController.hasClients) return;
       _scrollController.animateTo(
-        0,
+        _scrollController.position.maxScrollExtent,
         duration: const Duration(milliseconds: 180),
         curve: Curves.easeOut,
       );
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _scrollController.hasClients) {
-          _scrollController.jumpTo(0);
+          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
         }
       });
     });
@@ -9749,7 +10169,7 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
 
   void _scrollToReply(String replyId) {
     setState(() => _flashReplyId = replyId);
-    Future<void>.delayed(const Duration(milliseconds: 700), () {
+    Future<void>.delayed(const Duration(milliseconds: 1800), () {
       if (mounted && _flashReplyId == replyId) {
         setState(() => _flashReplyId = null);
       }
@@ -9793,60 +10213,81 @@ class _ThreadMessageListState extends State<_ThreadMessageList> {
         workspaceDisplayMessageText(
           widget.message.body,
         ).toLowerCase().contains(query);
-    return ListView(
-      controller: _scrollController,
-      reverse: true,
-      padding: EdgeInsets.zero,
+    final latestDate =
+        matchingReplies.lastOrNull?.createdAt ?? widget.message.createdAt;
+    final visibleHistoryDate =
+        _stickyHistoryDate ?? _historyDateLabel(latestDate);
+    return Column(
       children: [
-        for (var index = matchingReplies.length - 1; index >= 0; index--)
-          KeyedSubtree(
-            key: _messageKeys.putIfAbsent(
-              matchingReplies[index].id,
-              GlobalKey.new,
-            ),
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: widget.messageBuilder(
-                matchingReplies[index],
-                index > 0 &&
-                    isWorkspaceMessageGroupedWithPrevious(
-                      matchingReplies[index],
-                      matchingReplies[index - 1],
-                    ),
-                matchingReplies[index].id == _flashReplyId,
-              ),
-            ),
-          ),
-        if (query.isNotEmpty && matchingReplies.isEmpty && !sourceMatches)
-          const Padding(
-            padding: EdgeInsets.only(top: 32),
-            child: Center(child: Text('No matching messages in this thread.')),
-          ),
-        if (sourceMatches) ...[
-          const SizedBox(height: 12),
-          Row(
+        _WorkspaceDateDivider(label: visibleHistoryDate),
+        Expanded(
+          child: ListView(
+            key: _historyViewportKey,
+            controller: _scrollController,
+            padding: EdgeInsets.zero,
             children: [
-              Text(
-                '${matchingReplies.length} ${matchingReplies.length == 1 ? 'reply' : 'replies'}',
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  fontWeight: FontWeight.w600,
+              const SizedBox(height: 12),
+              if (sourceMatches) ...[
+                KeyedSubtree(
+                  key: _messageKeys.putIfAbsent(
+                    widget.message.id,
+                    GlobalKey.new,
+                  ),
+                  child: widget.messageBuilder(widget.message, false, false),
                 ),
+                const SizedBox(height: 10),
+              ],
+              Row(
+                children: [
+                  Text(
+                    '${matchingReplies.length} ${matchingReplies.length == 1 ? 'reply' : 'replies'}',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Divider(
+                      height: 1,
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.outlineVariant.withValues(alpha: 0.55),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Divider(
-                  height: 1,
-                  color: Theme.of(
-                    context,
-                  ).colorScheme.outlineVariant.withValues(alpha: 0.55),
+              const SizedBox(height: 10),
+              for (var index = 0; index < matchingReplies.length; index++)
+                KeyedSubtree(
+                  key: _messageKeys.putIfAbsent(
+                    matchingReplies[index].id,
+                    GlobalKey.new,
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: widget.messageBuilder(
+                      matchingReplies[index],
+                      index > 0 &&
+                          isWorkspaceMessageGroupedWithPrevious(
+                            matchingReplies[index],
+                            matchingReplies[index - 1],
+                          ),
+                      matchingReplies[index].id == _flashReplyId,
+                    ),
+                  ),
                 ),
-              ),
+              if (query.isEmpty) ...widget.liveMessages,
+              if (query.isNotEmpty && matchingReplies.isEmpty && !sourceMatches)
+                const Padding(
+                  padding: EdgeInsets.only(top: 32),
+                  child: Center(
+                    child: Text('No matching messages in this thread.'),
+                  ),
+                ),
             ],
           ),
-          const SizedBox(height: 10),
-          widget.messageBuilder(widget.message, false, false),
-        ],
+        ),
       ],
     );
   }
@@ -10110,6 +10551,9 @@ class WorkspaceComposer extends StatelessWidget {
     this.onVoicePressed,
     this.voiceDurationLabel = '00:00',
     this.onCancelVoiceRecording,
+    this.alsoSendToMain,
+    this.onAlsoSendToMainChanged,
+    this.sendToConversationLabel,
   });
 
   final TextEditingController composer;
@@ -10125,6 +10569,9 @@ class WorkspaceComposer extends StatelessWidget {
   final VoidCallback? onVoicePressed;
   final String voiceDurationLabel;
   final VoidCallback? onCancelVoiceRecording;
+  final bool? alsoSendToMain;
+  final ValueChanged<bool>? onAlsoSendToMainChanged;
+  final String? sendToConversationLabel;
 
   bool _isDesktop(TargetPlatform platform) => switch (platform) {
     TargetPlatform.linux ||
@@ -10177,6 +10624,21 @@ class WorkspaceComposer extends StatelessWidget {
     });
   }
 
+  bool _hasAgentMention(String text) {
+    final mentionController = composer is _WorkspaceMentionTextEditingController
+        ? composer as _WorkspaceMentionTextEditingController
+        : null;
+    return mentionController?.mentions.any(
+          (mention) =>
+              mention.kind == 'agent' &&
+              RegExp(
+                '(?<!\\w)@${RegExp.escape(mention.label)}(?![\\w-])',
+                caseSensitive: false,
+              ).hasMatch(text),
+        ) ??
+        false;
+  }
+
   @override
   Widget build(
     BuildContext context,
@@ -10227,7 +10689,7 @@ class WorkspaceComposer extends StatelessWidget {
                 child: TextField(
                   controller: composer,
                   focusNode: composerFocus,
-                  minLines: 1,
+                  minLines: desktop ? 1 : 2,
                   maxLines: 6,
                   textCapitalization: desktop
                       ? TextCapitalization.none
@@ -10256,6 +10718,10 @@ class WorkspaceComposer extends StatelessWidget {
                         : hintText,
                     filled: true,
                     fillColor: const Color(0xff142124),
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: desktop ? 12 : 8,
+                    ),
                     prefixIcon: IconButton(
                       tooltip: voiceRecording
                           ? 'Cancel recording'
@@ -10270,7 +10736,7 @@ class WorkspaceComposer extends StatelessWidget {
                             : null,
                       ),
                     ),
-                    suffixIcon: Row(
+                    suffixIcon: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         if (voiceTranscribing)
@@ -10280,6 +10746,56 @@ class WorkspaceComposer extends StatelessWidget {
                             icon: const SizedBox.square(
                               dimension: 18,
                               child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        if (alsoSendToMain case final enabled?
+                            when !_hasAgentMention(value.text))
+                          Semantics(
+                            button: true,
+                            toggled: enabled,
+                            label: 'Also send to $sendToConversationLabel',
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () =>
+                                  onAlsoSendToMainChanged?.call(!enabled),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (value.text.trim().isEmpty)
+                                    ConstrainedBox(
+                                      constraints: const BoxConstraints(
+                                        maxWidth: 120,
+                                      ),
+                                      child: Text(
+                                        'Also send to $sendToConversationLabel',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .labelSmall
+                                            ?.copyWith(
+                                              color: enabled
+                                                  ? Theme.of(
+                                                      context,
+                                                    ).colorScheme.primary
+                                                  : Theme.of(context)
+                                                        .colorScheme
+                                                        .onSurfaceVariant,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                      ),
+                                    ),
+                                  Transform.scale(
+                                    scale: 0.70,
+                                    child: Switch(
+                                      value: enabled,
+                                      onChanged: onAlsoSendToMainChanged,
+                                      materialTapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         if (voiceRecording || canSend)
@@ -11498,6 +12014,7 @@ class _ConversationMembersDialog extends StatelessWidget {
     required this.members,
     required this.agents,
     required this.workspaceMembers,
+    this.onManageAgents,
     required this.canManage,
     required this.memberLabel,
     required this.onAdd,
@@ -11507,6 +12024,7 @@ class _ConversationMembersDialog extends StatelessWidget {
   final List<WorkspaceChannelMember> members;
   final List<WorkspaceAgent> agents;
   final List<String> workspaceMembers;
+  final VoidCallback? onManageAgents;
   final bool canManage;
   final String Function(String pubkey) memberLabel;
   final Future<void> Function(String pubkey)? onAdd;
@@ -11595,6 +12113,15 @@ class _ConversationMembersDialog extends StatelessWidget {
       ),
     ),
     actions: [
+      if (onManageAgents != null)
+        TextButton.icon(
+          onPressed: () {
+            Navigator.pop(context);
+            onManageAgents!();
+          },
+          icon: const Icon(Icons.person_add_alt_1_outlined),
+          label: const Text('Manage agents'),
+        ),
       if (canManage && onAdd != null)
         TextButton.icon(
           onPressed: () => unawaited(_addMember(context)),
@@ -12771,6 +13298,18 @@ List<_DiagnosticEventData> _groupDiagnosticEvents(
         grouped.isNotEmpty &&
         grouped.last.category == _DiagnosticCategory.snapshot) {
       final previous = grouped.removeLast();
+      if (previous.title == 'Workspace synchronization' &&
+          event.title == 'Workspace synchronization') {
+        final count = previous.count + event.count;
+        grouped.add(
+          previous.copyWith(
+            detail:
+                'Recovered $count FIPS update gaps with workspace snapshots.',
+            count: count,
+          ),
+        );
+        continue;
+      }
       grouped.add(
         previous.copyWith(
           title: 'Snapshot exchange',
@@ -12801,6 +13340,22 @@ _DiagnosticEventData _diagnosticEvent(String entry) {
   final value = _diagnosticSummary(raw);
   final lower = raw.toLowerCase();
 
+  final gapSync = RegExp(
+    r'^FIPS workspace update gap detected; synchronizing workspace(?: \((\d+) times\))?$',
+  ).firstMatch(raw);
+  if (gapSync != null) {
+    final count = int.tryParse(gapSync.group(1) ?? '') ?? 1;
+    return _DiagnosticEventData(
+      timestamp: timestamp,
+      category: _DiagnosticCategory.snapshot,
+      title: 'Workspace synchronization',
+      raw: raw,
+      detail: count > 1
+          ? 'Recovered $count FIPS update gaps with workspace snapshots.'
+          : 'Recovered a gap in FIPS updates with a workspace snapshot.',
+      count: count,
+    );
+  }
   if (lower.contains('offer timed out') ||
       lower.contains('fallback') ||
       lower.contains('retrying') ||
@@ -12897,11 +13452,17 @@ class _WorkerConsolePage extends StatefulWidget {
   const _WorkerConsolePage({
     required this.data,
     required this.cache,
+    required this.workspace,
+    required this.workspaceRevision,
+    required this.onWorkspaceRequest,
     required this.onRequestRange,
   });
 
   final Map<String, dynamic> data;
   final Map<String, Map<String, dynamic>> cache;
+  final WorkspaceState workspace;
+  final ValueListenable<int> workspaceRevision;
+  final Future<void> Function(Map<String, Object?> request) onWorkspaceRequest;
   final Future<void> Function(
     String range,
     void Function(Map<String, dynamic>? data, String? error) onResult,
@@ -12917,12 +13478,71 @@ class _WorkerConsolePageState extends State<_WorkerConsolePage> {
   late String _selectedRange;
   bool _loadingRange = false;
   bool _showAllInterfaces = false;
+  bool _requestedDebugChannel = false;
+  final _debugComposer = TextEditingController();
+
+  String? get _debugChannelId => widget.workspace.channels
+      .where((channel) => channel.name == 'opencode-debug')
+      .firstOrNull
+      ?.id;
+
+  List<WorkspaceMessage> get _debugMessages {
+    final channelId = _debugChannelId;
+    if (channelId == null) return const [];
+    final messages = widget.workspace.messages[channelId] ?? const [];
+    return messages.length > 12
+        ? messages.sublist(messages.length - 12)
+        : messages;
+  }
 
   @override
   void initState() {
     super.initState();
     data = widget.data;
+    widget.workspaceRevision.addListener(_onWorkspaceRevision);
     _selectedRange = data['history_range']?.toString() ?? '24h';
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_selectRange(_selectedRange, refresh: true));
+      if (_debugChannelId == null && !_requestedDebugChannel) {
+        _requestedDebugChannel = true;
+        unawaited(
+          widget.onWorkspaceRequest({'action': 'get_opencode_debug_channel'}),
+        );
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.workspaceRevision.removeListener(_onWorkspaceRevision);
+    _debugComposer.dispose();
+    super.dispose();
+  }
+
+  void _onWorkspaceRevision() {
+    if (mounted) setState(() {});
+  }
+
+  void _sendDebugMessage() {
+    final channelId = _debugChannelId;
+    final body = _debugComposer.text.trim();
+    if (channelId == null || body.isEmpty) return;
+    _debugComposer.clear();
+    final agentId = widget.workspace.conversationAgents
+        .where((membership) => membership.channelId == channelId)
+        .map((membership) => membership.agentId)
+        .firstOrNull;
+    unawaited(
+      widget.onWorkspaceRequest({
+        'action': 'send_channel_message',
+        'channel_id': channelId,
+        'body': body,
+        if (agentId != null)
+          'mentions': [
+            {'kind': 'agent', 'id': agentId, 'label': 'OpenCode Debug'},
+          ],
+      }),
+    );
   }
 
   Future<void> _selectRange(String range, {bool refresh = false}) async {
@@ -12977,6 +13597,45 @@ class _WorkerConsolePageState extends State<_WorkerConsolePage> {
       unit++;
     }
     return '${readable.toStringAsFixed(unit == 0 ? 0 : 1)} ${units[unit]}';
+  }
+
+  Widget _hostDebugPanel() {
+    final channelId = _debugChannelId;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'OpenCode Debug',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            Text(
+              channelId == null
+                  ? 'Waiting for the admin debug channel.'
+                  : 'Connected to ~/code/phone.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 8),
+            for (final message in _debugMessages)
+              Text('${message.senderPubkey}: ${message.body}'),
+            TextField(
+              controller: _debugComposer,
+              enabled: channelId != null,
+              onSubmitted: (_) => _sendDebugMessage(),
+              decoration: InputDecoration(
+                hintText: 'Ask OpenCode to debug',
+                suffixIcon: IconButton(
+                  onPressed: _sendDebugMessage,
+                  icon: const Icon(Icons.send_outlined),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -13101,6 +13760,8 @@ class _WorkerConsolePageState extends State<_WorkerConsolePage> {
                     padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
                     child: Column(
                       children: [
+                        _hostDebugPanel(),
+                        const SizedBox(height: 16),
                         Align(
                           alignment: Alignment.centerRight,
                           child: Wrap(

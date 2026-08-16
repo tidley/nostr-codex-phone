@@ -1043,6 +1043,7 @@ async fn main() -> Result<()> {
     let workspace_path = worker_state_path(&codex_config.working_dir, "workspace.sqlite3");
     let workspace = WorkspaceStore::open(&workspace_path)?;
     initialize_workspace_members(&workspace, owner_peer_hex.as_deref(), &allowed_owner_hexes)?;
+    ensure_phone_debug_channel(&workspace, &codex_config).await?;
     let config = WorkerRuntimeConfig {
         messenger,
         worker_env,
@@ -1065,6 +1066,120 @@ async fn main() -> Result<()> {
     tokio::task::LocalSet::new()
         .run_until(run_worker_runtime(config))
         .await
+}
+
+async fn ensure_phone_debug_channel(
+    workspace: &WorkspaceStore,
+    codex_config: &CodexConfig,
+) -> Result<()> {
+    let phone_dir = PathBuf::from(env::var("HOME").unwrap_or_default()).join("code/phone");
+    let code_dir = phone_dir.parent().map(Path::to_path_buf);
+    if codex_config.working_dir.canonicalize().ok()
+        != code_dir.and_then(|path| path.canonicalize().ok())
+    {
+        return Ok(());
+    }
+    let Some(admin) = workspace
+        .members()?
+        .into_iter()
+        .find(|member| member.is_admin)
+    else {
+        return Ok(());
+    };
+    let session = list_opencode_sessions(codex_config)
+        .await
+        .ok()
+        .and_then(|sessions| {
+            sessions.into_iter().find(|session| {
+                session.directory.as_deref() == Some(phone_dir.to_string_lossy().as_ref())
+            })
+        });
+    let session_id = session
+        .as_ref()
+        .map(|session| session.id.clone())
+        .or_else(latest_phone_opencode_session_id);
+    let Some(session_id) = session_id else {
+        warn!("no active OpenCode session found for ~/code/phone; skipping debug channel binding");
+        return Ok(());
+    };
+    let channel = workspace
+        .channels()?
+        .into_iter()
+        .find(|channel| channel.name == "opencode-debug")
+        .map(Ok)
+        .unwrap_or_else(|| workspace.create_channel("opencode-debug", &admin.pubkey))?;
+    let profile = WorkspaceAgentOpenCodeProfile {
+        provider_id: session
+            .as_ref()
+            .and_then(|session| session.provider_id.clone()),
+        provider_name: session
+            .as_ref()
+            .and_then(|session| session.provider_id.clone()),
+        model_id: session
+            .as_ref()
+            .and_then(|session| session.model_id.clone()),
+        model_name: session
+            .as_ref()
+            .and_then(|session| session.model_id.clone()),
+        agent: session.as_ref().and_then(|session| session.agent.clone()),
+        workdir: Some(phone_dir.to_string_lossy().to_string()),
+        restart_on_failure: false,
+    };
+    let agent = workspace
+        .agents_for_conversation(Some(&channel.id), None, None)?
+        .into_iter()
+        .find(|agent| agent.name == "OpenCode Debug")
+        .map(Ok)
+        .unwrap_or_else(|| {
+            workspace.create_agent_with_profile(
+                "OpenCode Debug",
+                "Admin debugging chat for ~/code/phone",
+                "",
+                &[],
+                None,
+                profile,
+                Some(&session_id),
+                "ready",
+                None,
+                &admin.pubkey,
+            )
+        })?;
+    if agent.opencode_session_id.as_deref() != Some(&session_id) {
+        workspace.update_agent_session(&agent.id, Some(&session_id), "ready", None)?;
+    }
+    if !workspace.conversation_agents()?.iter().any(|membership| {
+        membership.agent_id == agent.id && membership.channel_id.as_deref() == Some(&channel.id)
+    }) {
+        workspace.add_conversation_agent(&agent.id, Some(&channel.id), None, None, &[])?;
+    }
+    info!(channel = %channel.name, session = %session_id, "ensured phone OpenCode debug channel");
+    Ok(())
+}
+
+fn latest_phone_opencode_session_id() -> Option<String> {
+    let home = env::var("HOME").ok()?;
+    let output = StdCommand::new(format!("{home}/.opencode/bin/opencode"))
+        .args([
+            "db",
+            "--format",
+            "tsv",
+            &format!(
+                "select id from session where time_archived is null and directory = '{home}/code/phone' order by time_updated desc limit 1"
+            ),
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .nth(1)?
+        .trim()
+        .strip_prefix("ses_")
+        .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        .map(|id| format!("ses_{id}"))
 }
 
 async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
@@ -1922,8 +2037,8 @@ async fn process_workspace_request(
                     sender_pubkey: sender.to_string(),
                     agent_id: None,
                     agent_name: None,
-                    // Draft text stays in this expiring encrypted update only.
-                    stage: request.body.clone(),
+                    stage: None,
+                    work_history: vec![],
                     channel_id: request.channel_id.clone(),
                     recipient_pubkey: request.recipient_pubkey.clone(),
                     member_pubkey: None,
@@ -2302,13 +2417,26 @@ async fn process_workspace_request(
             return Ok(());
         }
         "send_channel_message" => {
+            let channel_id = request.channel_id.as_deref().unwrap_or_default();
+            let parent_id = request.parent_id.as_deref().filter(|parent_id| {
+                workspace
+                    .channel_messages(channel_id)
+                    .map(|messages| messages.iter().any(|message| message.id == *parent_id))
+                    .unwrap_or(false)
+            });
+            if request.parent_id.is_some() && parent_id.is_none() {
+                warn!(
+                    channel_id,
+                    "stale thread parent; sending channel message to main"
+                );
+            }
             let message = workspace.add_channel_message_with_main_and_id(
                 sender,
-                request.channel_id.as_deref().unwrap_or_default(),
+                channel_id,
                 request.body.as_deref().unwrap_or_default(),
                 &request.attachments,
                 &request.mentions,
-                request.parent_id.as_deref(),
+                parent_id,
                 request.also_send_to_main,
                 request.message_id.as_deref(),
             )?;
@@ -2570,6 +2698,41 @@ async fn process_workspace_request(
                     .into_iter()
                     .map(conversation_preprompt_payload)
                     .collect(),
+                typing: None,
+            }
+        }
+        "get_opencode_debug_channel" => {
+            let channel = workspace
+                .channels()?
+                .into_iter()
+                .find(|channel| channel.name == "opencode-debug")
+                .context("OpenCode debug channel is unavailable")?;
+            let memberships = workspace
+                .conversation_agents()?
+                .into_iter()
+                .filter(|membership| membership.channel_id.as_deref() == Some(&channel.id))
+                .collect::<Vec<_>>();
+            let agent_ids = memberships
+                .iter()
+                .map(|membership| membership.agent_id.as_str())
+                .collect::<HashSet<_>>();
+            WorkspaceUpdate {
+                action: "opencode_debug_channel".to_string(),
+                revision: workspace.revision()?,
+                channels: vec![channel_payload(workspace, channel)?],
+                members: vec![],
+                messages: vec![],
+                agents: workspace
+                    .agents()?
+                    .into_iter()
+                    .filter(|agent| agent_ids.contains(agent.id.as_str()))
+                    .map(agent_payload)
+                    .collect(),
+                conversation_agents: memberships
+                    .into_iter()
+                    .map(conversation_agent_payload)
+                    .collect(),
+                conversation_preprompts: vec![],
                 typing: None,
             }
         }
@@ -3660,6 +3823,7 @@ async fn send_agent_typing(
     peer: Option<&str>,
     parent_id: Option<&str>,
     stage: Option<&str>,
+    work_history: &[String],
     expires_in: Option<Duration>,
     fips_only: bool,
 ) -> Result<()> {
@@ -3686,6 +3850,7 @@ async fn send_agent_typing(
             agent_id: Some(agent.id.clone()),
             agent_name: Some(agent.name.clone()),
             stage: stage.map(str::to_string),
+            work_history: work_history.to_vec(),
             channel_id: channel_id.map(str::to_string),
             recipient_pubkey: None,
             member_pubkey: member.map(str::to_string),
@@ -3754,7 +3919,27 @@ async fn run_workspace_agent_with_typing(
     suppress_typing: bool,
 ) -> Result<CodexRunResult> {
     const TYPING_LEASE: Duration = Duration::from_secs(6);
-    if !suppress_typing {
+    if suppress_typing {
+        // Topic updates follow a normal reply and can inherit its active lease.
+        // Clear it before the invisible control task begins.
+        if let Err(err) = send_agent_typing(
+            workspace,
+            messenger,
+            agent,
+            channel_id,
+            member,
+            peer,
+            parent_id,
+            Some(""),
+            &[],
+            None,
+            false,
+        )
+        .await
+        {
+            warn!(agent = %agent.id, "failed to clear agent typing state: {err:#}");
+        }
+    } else {
         if let Err(err) = send_agent_typing(
             workspace,
             messenger,
@@ -3764,6 +3949,7 @@ async fn run_workspace_agent_with_typing(
             peer,
             parent_id,
             None,
+            &[],
             Some(TYPING_LEASE),
             false,
         )
@@ -3824,14 +4010,16 @@ async fn run_workspace_agent_with_typing(
                 stage = Some(next_stage);
                 last_stage_sent = Instant::now();
                 if !suppress_typing {
-                    if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), false).await {
+                    let live_history = live_work_history(&work_history, stage_started_at);
+                    if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), &live_history, Some(TYPING_LEASE), false).await {
                         warn!(agent = %agent.id, "failed to send agent progress state: {err:#}");
                     }
                 }
             }
             _ = renew.tick() => {
                 if !suppress_typing {
-                    if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), Some(TYPING_LEASE), false).await {
+                    let live_history = live_work_history(&work_history, stage_started_at);
+                    if let Err(err) = send_agent_typing(workspace, messenger, agent, channel_id, member, peer, parent_id, stage.as_deref(), &live_history, Some(TYPING_LEASE), false).await {
                         warn!(agent = %agent.id, "failed to refresh agent typing state: {err:#}");
                     }
                 }
@@ -3840,7 +4028,17 @@ async fn run_workspace_agent_with_typing(
     };
     if !suppress_typing {
         if let Err(err) = send_agent_typing(
-            workspace, messenger, agent, channel_id, member, peer, parent_id, None, None, false,
+            workspace,
+            messenger,
+            agent,
+            channel_id,
+            member,
+            peer,
+            parent_id,
+            None,
+            &[],
+            None,
+            false,
         )
         .await
         {
@@ -3861,6 +4059,14 @@ async fn run_workspace_agent_with_typing(
 
 fn format_work_history_item(stage: &str, duration: Duration) -> String {
     format!("{}\t{}", format_duration(duration), stage)
+}
+
+fn live_work_history(work_history: &[String], stage_started_at: Option<Instant>) -> Vec<String> {
+    let mut history = work_history.to_vec();
+    if let (Some(last), Some(started_at)) = (history.last_mut(), stage_started_at) {
+        *last = format_work_history_item(last, started_at.elapsed());
+    }
+    history
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -7542,7 +7748,14 @@ fn structured_tool_result(
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("24h"),
             );
-            status["codex_status"] = codex_status_data(workdir, codex_bin);
+            let codex_status = codex_status_data(workdir, codex_bin);
+            status["codex_status"] = codex_status.clone();
+            if let Some(current) = status
+                .get_mut("current")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                current.insert("codex_status".to_string(), codex_status);
+            }
             status
         }
         _ => serde_json::json!({
@@ -7560,8 +7773,11 @@ fn structured_tool_result(
 }
 
 fn codex_status_data(workdir: &Path, codex_bin: &str) -> serde_json::Value {
-    match StdCommand::new(codex_bin)
-        .arg("status")
+    // `codex status` requires a terminal. The worker is normally a service,
+    // so run it in a quiet pseudo-terminal instead of inheriting its stdin.
+    let status_command = format!("exec {} status", shell_quote(codex_bin));
+    match StdCommand::new("script")
+        .args(["-qec", &status_command, "/dev/null"])
         .current_dir(workdir)
         .output()
     {
@@ -7572,11 +7788,17 @@ fn codex_status_data(workdir: &Path, codex_bin: &str) -> serde_json::Value {
                 "usage": codex_usage_data(&text),
             })
         }
-        Ok(output) => serde_json::json!({
-            "error": String::from_utf8_lossy(&output.stderr).trim(),
-        }),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            serde_json::json!({"error": if stderr.is_empty() { stdout } else { stderr }})
+        }
         Err(error) => serde_json::json!({"error": error.to_string()}),
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn codex_usage_data(text: &str) -> serde_json::Value {
@@ -10119,6 +10341,29 @@ mod tests {
         let status = codex_status_data(temp_dir.path(), "missing-codex-command");
 
         assert!(status["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()));
+    }
+
+    #[test]
+    fn includes_codex_status_in_current_system_status() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let request = serde_json::json!({
+            "tool_request": "system_status",
+            "request_id": "request-1",
+        })
+        .to_string();
+
+        let result = structured_tool_result(
+            &mut None,
+            "peer-1",
+            &request,
+            temp_dir.path(),
+            "missing-codex-command",
+        )
+        .unwrap();
+
+        assert!(result.data["current"]["codex_status"]["error"]
             .as_str()
             .is_some_and(|error| !error.is_empty()));
     }

@@ -92,7 +92,7 @@ Download the latest APK from GitHub Releases:
 https://github.com/tidley/nostr-codex-phone/releases
 ```
 
-Install on Android, then scan the worker QR code or paste the worker target details in Settings. A Linux desktop client can be built with `flutter build linux --release`. Keep each client and its worker on the same release version so structured tool views use the same wire contract.
+Install on Android, then scan the worker QR code or paste the worker target details in Settings. Linux and Windows desktop clients can be built with `flutter build linux --release` and `flutter build windows --release`; pushes to `main` publish the web client to GitHub Pages, while Windows releases remain a manual workflow. The release workflow also builds an Apple Silicon macOS worker. A macOS client release needs Apple signing and notarization before it can be distributed outside a development environment. Keep each client and its worker on the same release version so structured tool views use the same wire contract.
 
 ## Start A Worker
 
