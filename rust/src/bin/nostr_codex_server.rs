@@ -1912,6 +1912,7 @@ fn workspace_action_requires_admin(action: &str) -> bool {
             | "delete_agent"
             | "add_conversation_agent"
             | "remove_conversation_agent"
+            | "reactivate_thread_agent"
     )
 }
 
@@ -1962,6 +1963,198 @@ async fn process_workspace_request(
     let update = match request.action.as_str() {
         "request_thread_topic" => {
             agent_queues.enqueue_ephemeral_topic_request(workspace, sender, &request)?;
+            return Ok(());
+        }
+        "link_related_thread" | "replace_related_thread" | "clear_related_thread" => {
+            let channel_id = request.channel_id.as_deref();
+            let recipient = request.recipient_pubkey.as_deref();
+            let parent_id = request.parent_id.as_deref().unwrap_or_default();
+            let member = channel_id.is_none().then_some(sender);
+            workspace.validate_thread_root(parent_id, channel_id, member, recipient)?;
+            let active_related_thread = workspace.active_related_thread(parent_id)?;
+            let body = if request.action == "clear_related_thread" {
+                if active_related_thread.is_none() {
+                    return Ok(());
+                }
+                "[[RELATED_THREAD:CLEAR]]".to_string()
+            } else {
+                let related_parent_id = request.body.as_deref().unwrap_or_default().trim();
+                workspace.validate_related_thread(
+                    parent_id,
+                    related_parent_id,
+                    channel_id,
+                    member,
+                    recipient,
+                )?;
+                if active_related_thread.as_deref() == Some(related_parent_id) {
+                    return Ok(());
+                }
+                if request.action == "link_related_thread" && active_related_thread.is_some() {
+                    bail!("a related thread is already active; clear or replace it explicitly");
+                }
+                format!("[[RELATED_THREAD:{related_parent_id}]]")
+            };
+            let message = match channel_id {
+                Some(channel_id) => workspace.add_channel_message_with_main(
+                    sender,
+                    channel_id,
+                    &body,
+                    &[],
+                    &[],
+                    Some(parent_id),
+                    false,
+                )?,
+                None => workspace.add_direct_message_with_main(
+                    sender,
+                    recipient.unwrap_or_default(),
+                    &body,
+                    &[],
+                    &[],
+                    Some(parent_id),
+                    false,
+                )?,
+            };
+            let update = WorkspaceUpdate {
+                action: "message_created".to_string(),
+                revision: workspace.revision()?,
+                messages: vec![message_payload(message)],
+                channels: vec![],
+                members: vec![],
+                agents: vec![],
+                conversation_agents: vec![],
+                conversation_preprompts: vec![],
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            return Ok(());
+        }
+        "reactivate_thread_agent" => {
+            let channel_id = request.channel_id.as_deref();
+            let recipient = request.recipient_pubkey.as_deref();
+            let parent_id = request.parent_id.as_deref().unwrap_or_default();
+            let member = channel_id.is_none().then_some(sender);
+            workspace.validate_thread_root(parent_id, channel_id, member, recipient)?;
+            let related_parent_id = workspace
+                .active_related_thread(parent_id)?
+                .context("thread has no active related-thread reference")?;
+            workspace.validate_related_thread(
+                parent_id,
+                &related_parent_id,
+                channel_id,
+                member,
+                recipient,
+            )?;
+            // The linked root, not the client, selects the retained worker.
+            // If it cannot be resumed, clone its durable profile into a new worker.
+            let prior_agent =
+                workspace.thread_agent(&related_parent_id, channel_id, member, recipient)?;
+            let agent = match prior_agent
+                .as_ref()
+                .filter(|agent| thread_agent_is_reusable(agent))
+            {
+                Some(agent) => agent.clone(),
+                None => {
+                    let folder_scope =
+                        workspace.conversation_folder_scope(channel_id, member, recipient)?;
+                    let profile = prior_agent.as_ref().map_or_else(
+                        WorkspaceAgentOpenCodeProfile::default,
+                        |agent| WorkspaceAgentOpenCodeProfile {
+                            provider_id: agent.opencode_provider_id.clone(),
+                            provider_name: agent.opencode_provider_name.clone(),
+                            model_id: agent.opencode_model_id.clone(),
+                            model_name: agent.opencode_model_name.clone(),
+                            agent: agent.opencode_agent.clone(),
+                            workdir: agent.workdir.clone(),
+                            restart_on_failure: true,
+                        },
+                    );
+                    let mut agent_config =
+                        codex_config_for_workspace_agent(codex_config, &profile)?;
+                    if let Some(folder) = folder_scope.first() {
+                        agent_config.working_dir = PathBuf::from(folder);
+                    }
+                    let (session_id, session_status, session_error) =
+                        provision_workspace_agent_session(&agent_config).await;
+                    let Some(session_id) = session_id else {
+                        bail!(
+                            "could not create a replacement thread worker: {}",
+                            session_error.unwrap_or_else(
+                                || "unknown session provisioning failure".to_string()
+                            )
+                        );
+                    };
+                    let (name, role, traits, skills, preset) = prior_agent.as_ref().map_or_else(
+                        || {
+                            (
+                                "Thread continuation".to_string(),
+                                "Continue the linked thread from its latest handoff.".to_string(),
+                                String::new(),
+                                Vec::new(),
+                                None,
+                            )
+                        },
+                        |agent| {
+                            (
+                                format!("{} continuation", agent.name),
+                                agent.role.clone(),
+                                agent.traits.clone(),
+                                agent.skills.clone(),
+                                agent.preset.clone(),
+                            )
+                        },
+                    );
+                    let agent = workspace.create_agent_with_profile(
+                        &name,
+                        &role,
+                        &traits,
+                        &skills,
+                        preset.as_deref(),
+                        profile,
+                        Some(&session_id),
+                        &session_status,
+                        session_error.as_deref(),
+                        sender,
+                    )?;
+                    workspace.add_conversation_agent(
+                        &agent.id,
+                        channel_id,
+                        member,
+                        recipient,
+                        &[],
+                    )?;
+                    let update = WorkspaceUpdate {
+                        action: "agent_created".to_string(),
+                        revision: workspace.revision()?,
+                        channels: vec![],
+                        members: vec![],
+                        messages: vec![],
+                        agents: vec![agent_payload(agent.clone())],
+                        conversation_agents: workspace
+                            .conversation_agents()?
+                            .into_iter()
+                            .map(conversation_agent_payload)
+                            .collect(),
+                        conversation_preprompts: vec![],
+                        typing: None,
+                    };
+                    broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+                    agent
+                }
+            };
+            workspace.assign_thread_agent(&agent.id, parent_id, channel_id, member, recipient)?;
+            let trigger_message_id = workspace.latest_thread_message_id(parent_id)?;
+            let conversation = match channel_id {
+                Some(channel_id) => WorkspaceConversation::Channel(channel_id.to_string()),
+                None => {
+                    let mut participants = [
+                        sender.to_string(),
+                        recipient.unwrap_or_default().to_string(),
+                    ];
+                    participants.sort();
+                    WorkspaceConversation::Direct(participants[0].clone(), participants[1].clone())
+                }
+            };
+            agent_queues.enqueue(agent.id, conversation, trigger_message_id);
             return Ok(());
         }
         "set_thread_topic" => {
@@ -4206,6 +4399,10 @@ fn agent_scope_metrics(session_id: &str) -> Option<AgentScopeMetrics> {
         .and_then(|metrics| metrics.get(session_id).cloned())
 }
 
+fn thread_agent_is_reusable(agent: &WorkspaceAgent) -> bool {
+    agent.session_status == "ready" || agent.restart_on_failure
+}
+
 fn agent_availability(agent: &WorkspaceAgent, scope: Option<&AgentScopeMetrics>) -> String {
     if agent.session_status == "failed" || agent.session_error.is_some() {
         return "errored".to_string();
@@ -4413,8 +4610,19 @@ fn enqueue_conversation_agents(
             WorkspaceConversation::Direct(participants[0].clone(), participants[1].clone())
         }
     };
-    for agent in workspace.agents_for_conversation(channel_id, member, peer)? {
-        if conversation_agent_is_targeted(&agent.id, mentions) {
+    let message = workspace.message_by_id(trigger_message_id)?;
+    let parent_id = message
+        .as_ref()
+        .and_then(|message| message.parent_id.as_deref())
+        .unwrap_or(trigger_message_id);
+    let assigned_agent = workspace.thread_agent(parent_id, channel_id, member, peer)?;
+    let agents = assigned_agent
+        .as_ref()
+        .map(|agent| vec![agent.clone()])
+        .unwrap_or(workspace.agents_for_conversation(channel_id, member, peer)?);
+    for agent in agents {
+        // A thread assignment is deliberate: it takes precedence over mentions.
+        if assigned_agent.is_some() || conversation_agent_is_targeted(&agent.id, mentions) {
             queues.enqueue(
                 agent.id,
                 conversation.clone(),
@@ -4714,7 +4922,7 @@ async fn route_conversation_agents(
         if only_agent_id.is_some_and(|agent_id| agent.id != agent_id) {
             continue;
         }
-        if !conversation_agent_is_targeted(&agent.id, mentions) {
+        if only_agent_id.is_none() && !conversation_agent_is_targeted(&agent.id, mentions) {
             continue;
         }
         if agent.session_status != "ready" && agent.restart_on_failure {
@@ -4985,6 +5193,10 @@ async fn route_conversation_agents(
         if history_follow_up_failed || workspace_history_request_count(&result.response).is_some() {
             continue;
         }
+        if suppress_typing && !is_thread_topic_response(&result.response) {
+            warn!(agent = %agent.id, "discarded malformed thread topic response");
+            continue;
+        }
         if let Some(usage) = result.token_usage {
             let updated = workspace.record_agent_token_usage(
                 &agent.id,
@@ -5225,9 +5437,48 @@ fn workspace_thread_context(
         .filter(|message| {
             message.id == parent_id || message.parent_id.as_deref() == Some(parent_id)
         })
+        .filter(|message| !is_related_thread_control_message(&message.body))
         .map(|message| format!("{}: {}", message.sender_pubkey, message.body))
         .collect::<Vec<_>>();
-    Ok(truncate_workspace_agent_prompt_context(thread.join("\n")))
+    let referenced = workspace
+        .active_related_thread(parent_id)?
+        .map(|related_parent_id| {
+            let related = messages
+                .iter()
+                .filter(|message| {
+                    message.id == related_parent_id
+                        || message.parent_id.as_deref() == Some(related_parent_id.as_str())
+                })
+                .filter(|message| !is_related_thread_control_message(&message.body))
+                .map(|message| format!("{}: {}", message.sender_pubkey, message.body))
+                .collect::<Vec<_>>();
+            let excerpt = if related.len() <= 4 {
+                related
+            } else {
+                vec![
+                    related[0].clone(),
+                    related[1].clone(),
+                    related[related.len() - 2].clone(),
+                    related[related.len() - 1].clone(),
+                ]
+            };
+            format!("Referenced thread handoff:\n{}", excerpt.join("\n"))
+        });
+    Ok(truncate_workspace_agent_prompt_context(
+        [
+            referenced,
+            (!thread.is_empty()).then(|| format!("Current thread:\n{}", thread.join("\n"))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n\n"),
+    ))
+}
+
+fn is_related_thread_control_message(body: &str) -> bool {
+    let normalized = body.trim().to_ascii_uppercase();
+    normalized.starts_with("[[RELATED_THREAD:") && normalized.ends_with("]]")
 }
 
 fn workspace_history_request_count(response: &str) -> Option<usize> {
@@ -9903,6 +10154,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_ready_or_restartable_thread_agents_are_reusable() {
+        let mut agent = WorkspaceAgent {
+            id: "agent".to_string(),
+            name: "Agent".to_string(),
+            role: "Role".to_string(),
+            traits: String::new(),
+            skills: vec![],
+            preset: None,
+            opencode_provider_id: None,
+            opencode_provider_name: None,
+            opencode_model_id: None,
+            opencode_model_name: None,
+            opencode_agent: None,
+            workdir: None,
+            restart_on_failure: false,
+            opencode_session_id: None,
+            session_status: "failed".to_string(),
+            session_error: None,
+            session_context: None,
+            instance_id: "instance".to_string(),
+            created_by: "owner".to_string(),
+            created_at: 0,
+            initialized_at: None,
+            input_tokens: None,
+            output_tokens: None,
+        };
+        assert!(!thread_agent_is_reusable(&agent));
+        agent.restart_on_failure = true;
+        assert!(thread_agent_is_reusable(&agent));
+        agent.restart_on_failure = false;
+        agent.session_status = "ready".to_string();
+        assert!(thread_agent_is_reusable(&agent));
+    }
+
     #[tokio::test]
     async fn workspace_fips_capabilities_are_random_member_bound_and_single_use() {
         let capabilities = Arc::new(Mutex::new(HashMap::new()));
@@ -10083,6 +10369,52 @@ mod tests {
         assert!(!prompt.contains("[[WORKSPACE_HISTORY: N]]"));
         assert!(prompt.contains("Thread context:\nResearchBot: Proposed implementation."));
         assert!(prompt.ends_with("User message:\nFix the bug."));
+    }
+
+    #[test]
+    fn thread_context_includes_a_compact_related_thread_handoff() {
+        let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        workspace.add_member("owner").unwrap();
+        let channel = workspace.create_channel("engineering", "owner").unwrap();
+        let prior = workspace
+            .add_channel_message("owner", &channel.id, "Prior root", &[], &[], None)
+            .unwrap();
+        for body in [
+            "Prior first",
+            "Prior middle",
+            "Prior penultimate",
+            "Prior last",
+        ] {
+            workspace
+                .add_channel_message("owner", &channel.id, body, &[], &[], Some(&prior.id))
+                .unwrap();
+        }
+        let current = workspace
+            .add_channel_message("owner", &channel.id, "Current root", &[], &[], None)
+            .unwrap();
+        workspace
+            .add_channel_message(
+                "owner",
+                &channel.id,
+                &format!("[[RELATED_THREAD:{}]]", prior.id),
+                &[],
+                &[],
+                Some(&current.id),
+            )
+            .unwrap();
+
+        let context =
+            workspace_thread_context(&workspace, Some(&current.id), Some(&channel.id), None, None)
+                .unwrap();
+
+        assert!(context.contains("Referenced thread handoff:"));
+        assert!(context.contains("Prior root"));
+        assert!(context.contains("Prior first"));
+        assert!(!context.contains("Prior middle"));
+        assert!(context.contains("Prior penultimate"));
+        assert!(context.contains("Prior last"));
+        assert!(context.contains("Current thread:"));
+        assert!(!context.contains("[[RELATED_THREAD:"));
     }
 
     #[test]

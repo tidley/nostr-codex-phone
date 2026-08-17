@@ -128,10 +128,11 @@ impl WorkspaceStore {
                   CREATE TABLE IF NOT EXISTS workspace_notification_outbox (id INTEGER PRIMARY KEY, recipient TEXT NOT NULL, payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
                  CREATE TABLE IF NOT EXISTS workspace_agents (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, traits TEXT NOT NULL DEFAULT '', skills_json TEXT NOT NULL DEFAULT '[]', preset TEXT, opencode_provider_id TEXT, opencode_provider_name TEXT, opencode_model_id TEXT, opencode_model_name TEXT, opencode_agent TEXT, workdir TEXT, restart_on_failure INTEGER NOT NULL DEFAULT 1, opencode_session_id TEXT, session_status TEXT NOT NULL DEFAULT 'failed', session_error TEXT, session_context TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, initialized_at INTEGER, input_tokens INTEGER, output_tokens INTEGER);
                 CREATE TABLE IF NOT EXISTS workspace_agent_instances (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL REFERENCES workspace_agents(id), opencode_session_id TEXT, created_at INTEGER NOT NULL);
-                 CREATE TABLE IF NOT EXISTS workspace_conversation_agents (agent_id TEXT NOT NULL REFERENCES workspace_agents(id), channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT,
-                    folder_scope_json TEXT NOT NULL DEFAULT '[]',
-                    PRIMARY KEY (agent_id, channel_id, member_pubkey, peer_pubkey),
-                    CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+                  CREATE TABLE IF NOT EXISTS workspace_conversation_agents (agent_id TEXT NOT NULL REFERENCES workspace_agents(id), channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT,
+                     folder_scope_json TEXT NOT NULL DEFAULT '[]',
+                     PRIMARY KEY (agent_id, channel_id, member_pubkey, peer_pubkey),
+                     CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+                  CREATE TABLE IF NOT EXISTS workspace_thread_agents (parent_id TEXT PRIMARY KEY REFERENCES workspace_messages(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE);
                  CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL, folder_scope_json TEXT NOT NULL DEFAULT '[]',
                     PRIMARY KEY (channel_id, member_pubkey, peer_pubkey),
                     CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
@@ -354,8 +355,11 @@ impl WorkspaceStore {
              CREATE TRIGGER IF NOT EXISTS workspace_agent_instances_revision_update AFTER UPDATE ON workspace_agent_instances BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
              CREATE TRIGGER IF NOT EXISTS workspace_agent_instances_revision_delete AFTER DELETE ON workspace_agent_instances BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
              CREATE TRIGGER IF NOT EXISTS workspace_conversation_agents_revision_insert AFTER INSERT ON workspace_conversation_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
-             CREATE TRIGGER IF NOT EXISTS workspace_conversation_agents_revision_update AFTER UPDATE ON workspace_conversation_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
-             CREATE TRIGGER IF NOT EXISTS workspace_conversation_agents_revision_delete AFTER DELETE ON workspace_conversation_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_conversation_agents_revision_update AFTER UPDATE ON workspace_conversation_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_conversation_agents_revision_delete AFTER DELETE ON workspace_conversation_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_thread_agents_revision_insert AFTER INSERT ON workspace_thread_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_thread_agents_revision_update AFTER UPDATE ON workspace_thread_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_thread_agents_revision_delete AFTER DELETE ON workspace_thread_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
              CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_insert AFTER INSERT ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
              CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_update AFTER UPDATE ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
              CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_delete AFTER DELETE ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;",
@@ -1001,6 +1005,10 @@ impl WorkspaceStore {
             [&agent_id],
         )?;
         transaction.execute(
+            "DELETE FROM workspace_thread_agents WHERE agent_id = ?1",
+            [&agent_id],
+        )?;
+        transaction.execute(
             "DELETE FROM workspace_agent_instances WHERE agent_id = ?1",
             [&agent_id],
         )?;
@@ -1163,6 +1171,150 @@ impl WorkspaceStore {
             .into_iter()
             .filter(|agent| ids.contains(&agent.id))
             .collect())
+    }
+
+    /// Assigns an existing conversation agent to the root message of one thread.
+    pub fn assign_thread_agent(
+        &self,
+        agent_id: &str,
+        parent_id: &str,
+        channel_id: Option<&str>,
+        member: Option<&str>,
+        peer: Option<&str>,
+    ) -> Result<()> {
+        let agent_id = required("agent id", agent_id)?;
+        let parent_id = required("thread parent id", parent_id)?;
+        let parent = self.message(&parent_id)?;
+        if parent.parent_id.is_some() {
+            bail!("thread assignment requires the root parent message");
+        }
+        let matches_scope = match channel_id {
+            Some(channel_id) => parent.channel_id.as_deref() == Some(channel_id),
+            None => {
+                let (member, peer) =
+                    direct_participants(member.unwrap_or_default(), peer.unwrap_or_default())?;
+                direct_message_matches(&parent, &member, &peer)
+            }
+        };
+        if !matches_scope {
+            bail!("thread parent belongs to another conversation");
+        }
+        if !self
+            .agents_for_conversation(channel_id, member, peer)?
+            .iter()
+            .any(|agent| agent.id == agent_id)
+        {
+            bail!("agent is not assigned to this conversation");
+        }
+        self.conn.execute(
+            "INSERT INTO workspace_thread_agents (parent_id, agent_id) VALUES (?1, ?2) ON CONFLICT(parent_id) DO UPDATE SET agent_id = excluded.agent_id",
+            params![parent_id, agent_id],
+        )?;
+        Ok(())
+    }
+
+    /// Returns the assigned agent for a root thread, if that agent is still in scope.
+    pub fn thread_agent(
+        &self,
+        parent_id: &str,
+        channel_id: Option<&str>,
+        member: Option<&str>,
+        peer: Option<&str>,
+    ) -> Result<Option<WorkspaceAgent>> {
+        let parent_id = required("thread parent id", parent_id)?;
+        let Some(agent_id) = self
+            .conn
+            .query_row(
+                "SELECT agent_id FROM workspace_thread_agents WHERE parent_id = ?1",
+                [&parent_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .agents_for_conversation(channel_id, member, peer)?
+            .into_iter()
+            .find(|agent| agent.id == agent_id))
+    }
+
+    /// Returns the newest message in a root thread, including the root itself.
+    /// Reactivation uses this as the trigger so the retained agent receives the
+    /// new thread's compact handoff rather than replaying stale root text.
+    pub fn latest_thread_message_id(&self, parent_id: &str) -> Result<String> {
+        let parent_id = required("thread parent id", parent_id)?;
+        self.conn
+            .query_row(
+                "SELECT id FROM workspace_messages WHERE (id = ?1 OR parent_id = ?1) AND body NOT LIKE '[[RELATED_THREAD:%' ORDER BY rowid DESC LIMIT 1",
+                [&parent_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("thread parent message does not exist")
+    }
+
+    /// Validates a root thread within the caller's conversation scope.
+    pub fn validate_thread_root(
+        &self,
+        parent_id: &str,
+        channel_id: Option<&str>,
+        member: Option<&str>,
+        peer: Option<&str>,
+    ) -> Result<()> {
+        let parent_id = required("thread parent id", parent_id)?;
+        let message = self.message(&parent_id)?;
+        if message.parent_id.is_some() {
+            bail!("thread operations require root messages");
+        }
+        let in_scope = match channel_id {
+            Some(channel_id) => message.channel_id.as_deref() == Some(channel_id),
+            None => {
+                let (member, peer) =
+                    direct_participants(member.unwrap_or_default(), peer.unwrap_or_default())?;
+                direct_message_matches(&message, &member, &peer)
+            }
+        };
+        if !in_scope {
+            bail!("thread parent belongs to another conversation");
+        }
+        Ok(())
+    }
+
+    /// Validates a persisted related-thread marker without changing message
+    /// parentage. Both roots must remain in the caller's conversation scope.
+    pub fn validate_related_thread(
+        &self,
+        parent_id: &str,
+        related_parent_id: &str,
+        channel_id: Option<&str>,
+        member: Option<&str>,
+        peer: Option<&str>,
+    ) -> Result<()> {
+        let parent_id = required("thread parent id", parent_id)?;
+        let related_parent_id = required("related thread parent id", related_parent_id)?;
+        if parent_id == related_parent_id {
+            bail!("a thread cannot reference itself");
+        }
+        self.validate_thread_root(&parent_id, channel_id, member, peer)?;
+        self.validate_thread_root(&related_parent_id, channel_id, member, peer)?;
+        Ok(())
+    }
+
+    /// Returns the active related root. Marker history is append-only, and the
+    /// newest valid marker is authoritative. A clear marker returns `None`.
+    pub fn active_related_thread(&self, parent_id: &str) -> Result<Option<String>> {
+        let parent_id = required("thread parent id", parent_id)?;
+        let mut statement = self.conn.prepare(
+            "SELECT body FROM workspace_messages WHERE parent_id = ?1 ORDER BY rowid DESC",
+        )?;
+        let bodies = statement
+            .query_map([parent_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(bodies
+            .into_iter()
+            .find_map(|body| parse_related_thread_marker(&body))
+            .flatten())
     }
 
     pub fn add_channel_message(
@@ -1440,7 +1592,9 @@ impl WorkspaceStore {
         predicate: &str,
         params: P,
     ) -> Result<Vec<WorkspaceMessage>> {
-        let query = format!("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, work_history_json, created_at FROM workspace_messages WHERE {predicate} ORDER BY created_at, id");
+        // IDs are random and cannot break same-second timestamp ties reliably.
+        // Rowid preserves the append order used for thread previews and handoffs.
+        let query = format!("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, work_history_json, created_at FROM workspace_messages WHERE {predicate} ORDER BY created_at, rowid");
         let mut statement = self.conn.prepare(&query)?;
         let mut messages: Vec<WorkspaceMessage> = statement
             .query_map(params, message_from_row)?
@@ -1533,6 +1687,27 @@ impl WorkspaceStore {
             bail!("thread parent belongs to another direct conversation")
         }
         Ok(())
+    }
+}
+
+fn direct_message_matches(message: &WorkspaceMessage, member: &str, peer: &str) -> bool {
+    message.channel_id.is_none()
+        && ((message.sender_pubkey == member && message.recipient_pubkey.as_deref() == Some(peer))
+            || (message.sender_pubkey == peer
+                && message.recipient_pubkey.as_deref() == Some(member)))
+}
+
+/// `Some(None)` is an explicit append-only clear operation. Non-marker text is
+/// ignored so ordinary thread messages cannot change the active reference.
+fn parse_related_thread_marker(body: &str) -> Option<Option<String>> {
+    let value = body
+        .strip_prefix("[[RELATED_THREAD:")?
+        .strip_suffix("]]")?
+        .trim();
+    if value == "CLEAR" {
+        Some(None)
+    } else {
+        (!value.is_empty()).then(|| Some(value.to_string()))
     }
 }
 
@@ -2093,6 +2268,189 @@ mod tests {
             .conversation_agents()
             .unwrap();
         assert_eq!(memberships[0].folder_scope, scope);
+    }
+
+    #[test]
+    fn persists_and_reassigns_a_thread_agent_within_its_conversation() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let first = store
+            .create_agent(
+                "Scout",
+                "Researcher",
+                "",
+                &[],
+                None,
+                None,
+                "failed",
+                None,
+                "owner",
+            )
+            .unwrap();
+        let second = store
+            .create_agent(
+                "Guide",
+                "Reviewer",
+                "",
+                &[],
+                None,
+                None,
+                "failed",
+                None,
+                "owner",
+            )
+            .unwrap();
+        store
+            .add_conversation_agent(&first.id, Some(&channel.id), None, None, &[])
+            .unwrap();
+        store
+            .add_conversation_agent(&second.id, Some(&channel.id), None, None, &[])
+            .unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "help", &[], &[], None)
+            .unwrap();
+        store
+            .assign_thread_agent(&first.id, &root.id, Some(&channel.id), None, None)
+            .unwrap();
+        store
+            .assign_thread_agent(&second.id, &root.id, Some(&channel.id), None, None)
+            .unwrap();
+        drop(store);
+
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        assert_eq!(
+            store
+                .thread_agent(&root.id, Some(&channel.id), None, None)
+                .unwrap()
+                .unwrap()
+                .id,
+            second.id
+        );
+        assert!(store
+            .assign_thread_agent(&second.id, "missing", Some(&channel.id), None, None)
+            .is_err());
+        assert_eq!(store.latest_thread_message_id(&root.id).unwrap(), root.id);
+        assert!(store
+            .validate_related_thread(&root.id, &root.id, Some(&channel.id), None, None)
+            .is_err());
+    }
+
+    #[test]
+    fn skips_related_thread_markers_when_selecting_a_reactivation_trigger() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "help", &[], &[], None)
+            .unwrap();
+        let reply = store
+            .add_channel_message("owner", &channel.id, "details", &[], &[], Some(&root.id))
+            .unwrap();
+        store
+            .add_channel_message(
+                "owner",
+                &channel.id,
+                "[[RELATED_THREAD: earlier]]",
+                &[],
+                &[],
+                Some(&root.id),
+            )
+            .unwrap();
+
+        assert_eq!(store.latest_thread_message_id(&root.id).unwrap(), reply.id);
+    }
+
+    #[test]
+    fn tracks_one_active_related_thread_with_append_only_markers() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let first = store
+            .add_channel_message("owner", &channel.id, "first", &[], &[], None)
+            .unwrap();
+        let second = store
+            .add_channel_message("owner", &channel.id, "second", &[], &[], None)
+            .unwrap();
+        let third = store
+            .add_channel_message("owner", &channel.id, "third", &[], &[], None)
+            .unwrap();
+
+        store
+            .add_channel_message(
+                "owner",
+                &channel.id,
+                &format!("[[RELATED_THREAD:{}]]", first.id),
+                &[],
+                &[],
+                Some(&third.id),
+            )
+            .unwrap();
+        store
+            .add_channel_message(
+                "owner",
+                &channel.id,
+                "ordinary reply",
+                &[],
+                &[],
+                Some(&third.id),
+            )
+            .unwrap();
+        assert_eq!(
+            store.active_related_thread(&third.id).unwrap(),
+            Some(first.id.clone())
+        );
+
+        store
+            .add_channel_message(
+                "owner",
+                &channel.id,
+                &format!("[[RELATED_THREAD:{}]]", second.id),
+                &[],
+                &[],
+                Some(&third.id),
+            )
+            .unwrap();
+        assert_eq!(
+            store.active_related_thread(&third.id).unwrap(),
+            Some(second.id)
+        );
+
+        store
+            .add_channel_message(
+                "owner",
+                &channel.id,
+                "[[RELATED_THREAD:CLEAR]]",
+                &[],
+                &[],
+                Some(&third.id),
+            )
+            .unwrap();
+        assert_eq!(store.active_related_thread(&third.id).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_self_direct_messages_from_another_direct_conversation() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        store.add_member("member").unwrap();
+        let self_direct = store
+            .add_direct_message("owner", "owner", "private", &[], &[], None)
+            .unwrap();
+        let member_direct = store
+            .add_direct_message("owner", "member", "shared", &[], &[], None)
+            .unwrap();
+
+        assert!(store
+            .validate_related_thread(
+                &member_direct.id,
+                &self_direct.id,
+                None,
+                Some("owner"),
+                Some("member"),
+            )
+            .is_err());
     }
 
     #[test]

@@ -1438,6 +1438,42 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
             Ok(())
         }
         "list_agents" => Ok(()),
+        "reactivate_thread_agent" | "clear_related_thread"
+            if request
+                .parent_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && (request
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || request
+                        .recipient_pubkey
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty())) =>
+        {
+            Ok(())
+        }
+        "link_related_thread" | "replace_related_thread"
+            if request
+                .parent_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && request
+                    .body
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                && (request
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || request
+                        .recipient_pubkey
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty())) =>
+        {
+            Ok(())
+        }
         "add_conversation_agent" | "remove_conversation_agent"
             if request
                 .agent_id
@@ -2281,6 +2317,24 @@ mod tests {
             workspace_update.conversation_agents[0].folder_scope,
             ["/work/apps"]
         );
+    }
+
+    #[test]
+    fn validates_thread_agent_reactivation_requests() {
+        assert!(parse_wire_message(r#"{"workspace_request":{"action":"reactivate_thread_agent","channel_id":"channel-1","parent_id":"root-1"}}"#).is_ok());
+        assert!(parse_wire_message(r#"{"workspace_request":{"action":"reactivate_thread_agent","channel_id":"channel-1","agent_id":"untrusted","parent_id":"root-1"}}"#).is_ok());
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"reactivate_thread_agent","channel_id":"channel-1"}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn validates_related_thread_link_requests() {
+        assert!(parse_wire_message(r#"{"workspace_request":{"action":"link_related_thread","channel_id":"channel-1","parent_id":"root-1","body":"root-2"}}"#).is_ok());
+        assert!(parse_wire_message(r#"{"workspace_request":{"action":"replace_related_thread","channel_id":"channel-1","parent_id":"root-1","body":"root-2"}}"#).is_ok());
+        assert!(parse_wire_message(r#"{"workspace_request":{"action":"clear_related_thread","channel_id":"channel-1","parent_id":"root-1"}}"#).is_ok());
+        assert!(parse_wire_message(r#"{"workspace_request":{"action":"link_related_thread","channel_id":"channel-1","parent_id":"root-1"}}"#).is_err());
     }
 
     #[test]
