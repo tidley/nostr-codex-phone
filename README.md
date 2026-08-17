@@ -35,7 +35,7 @@ These focused-session screens were captured from a Pixel 5 connected to a tempor
 
 ## Team Workspace
 
-The workspace is a collaboration surface for people and OpenCode agents, not a stream of transient prompts. Channels and direct messages retain their history on the worker. Messages support Markdown, attachments, reactions, thread replies, and selectable text. Mentions offer only the people and agents who participate in the current conversation.
+The workspace is a collaboration surface for people and OpenCode agents, not a stream of transient prompts. Channels and direct messages retain their history on the worker. Messages support Markdown tables, attachments, reactions, thread replies, and selectable text. Hashtags can provide a fallback thread topic. Mentions offer only the people and agents who participate in the current conversation.
 
 Each conversation can have a short agent brief and a folder scope. The brief is prepended to the request that an attached agent receives. A folder scope limits the repositories and folders the agent is told to work in. Leaving the scope empty does not add an artificial folder restriction.
 

@@ -123,6 +123,51 @@ String? workspaceThreadTopic(Iterable<WorkspaceMessage> replies) {
   return null;
 }
 
+/// Returns prior threads that are safe to offer as continuations. Matching is
+/// deliberately exact: a suggestion must never silently join unrelated work.
+List<WorkspaceMessage> workspaceRelatedThreadCandidates(
+  Iterable<WorkspaceMessage> messages,
+  WorkspaceMessage current, {
+  bool includeWhenReferenced = false,
+}) {
+  final all = messages.toList(growable: false);
+  if (!includeWhenReferenced &&
+      workspaceActiveRelatedThreadId(all, current) != null) {
+    return const [];
+  }
+  final currentReplies = all
+      .where((message) => message.parentId == current.id)
+      .where((message) => !isWorkspaceRelatedThreadControlMessage(message))
+      .toList(growable: false);
+  if (currentReplies.length < 3) return const [];
+  final topic = _normalizedWorkspaceThreadTopic(
+    workspaceThreadTopic(currentReplies),
+  );
+  if (topic == null) return const [];
+  final candidates = all.where((root) {
+    if (root.parentId != null ||
+        root.id == current.id ||
+        root.createdAt >= current.createdAt ||
+        workspaceActiveRelatedThreadId(all, root) != null) {
+      return false;
+    }
+    final replies = all.where((message) => message.parentId == root.id);
+    return _normalizedWorkspaceThreadTopic(workspaceThreadTopic(replies)) ==
+            topic &&
+        replies.any((message) => isWorkspaceAgentSender(message.senderPubkey));
+  }).toList();
+  candidates.sort((left, right) => right.createdAt.compareTo(left.createdAt));
+  return candidates;
+}
+
+String? _normalizedWorkspaceThreadTopic(String? topic) {
+  final value = topic
+      ?.toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+      .trim();
+  return value == null || value.isEmpty ? null : value;
+}
+
 /// Extracts message hashtags that can be used as thread topics.
 List<String> workspaceMessageHashtags(String value) => RegExp(
   r'(?<![\w#])#[A-Za-z][A-Za-z0-9_-]*',
@@ -150,6 +195,57 @@ bool isWorkspaceThreadTopicResponse(WorkspaceMessage message) =>
 bool isWorkspaceThreadTopicControlMessage(WorkspaceMessage message) =>
     isWorkspaceThreadTopicRequest(message) ||
     isWorkspaceThreadTopicResponse(message);
+
+String? workspaceRelatedThreadId(WorkspaceMessage message) {
+  final match = _workspaceRelatedThreadMarker.firstMatch(message.body);
+  final id = match?.group(1)?.trim();
+  return id == null || id.isEmpty ? null : id;
+}
+
+bool isWorkspaceRelatedThreadControlMessage(WorkspaceMessage message) =>
+    _workspaceRelatedThreadMarker.hasMatch(message.body);
+
+final _workspaceRelatedThreadMarker = RegExp(
+  r'^\s*\[\[RELATED_THREAD:\s*([^\]\r\n]*)\]\]\s*$',
+  caseSensitive: false,
+);
+
+/// Returns the target set by the newest append-only marker. An empty marker
+/// explicitly clears an older reference.
+String? workspaceActiveRelatedThreadId(
+  Iterable<WorkspaceMessage> messages,
+  WorkspaceMessage current,
+) {
+  final markers =
+      messages
+          .where((message) => message.parentId == current.id)
+          .where(isWorkspaceRelatedThreadControlMessage)
+          .toList(growable: false)
+        ..sort((left, right) {
+          final created = left.createdAt.compareTo(right.createdAt);
+          return created != 0 ? created : left.id.compareTo(right.id);
+        });
+  return markers.isEmpty ? null : workspaceRelatedThreadId(markers.last);
+}
+
+/// Returns root threads whose active reference points to [current].
+List<WorkspaceMessage> workspaceRelatedThreadBacklinks(
+  Iterable<WorkspaceMessage> messages,
+  WorkspaceMessage current,
+) {
+  final all = messages.toList(growable: false);
+  final backlinks =
+      all
+          .where((candidate) => candidate.parentId == null)
+          .where((candidate) => candidate.id != current.id)
+          .where(
+            (candidate) =>
+                workspaceActiveRelatedThreadId(all, candidate) == current.id,
+          )
+          .toList(growable: false)
+        ..sort((left, right) => right.createdAt.compareTo(left.createdAt));
+  return backlinks;
+}
 
 bool isWorkspaceLocalSender(
   String senderPubkey,

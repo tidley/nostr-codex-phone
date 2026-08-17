@@ -140,6 +140,399 @@ void main() {
     );
   });
 
+  test('suggests only an older exact-topic thread with an agent response', () {
+    const oldRoot = WorkspaceMessage(
+      id: 'old',
+      senderPubkey: 'owner',
+      body: 'Previous task',
+      createdAt: 1,
+      channelId: 'channel-1',
+    );
+    const oldTopic = WorkspaceMessage(
+      id: 'old-topic',
+      senderPubkey: 'agent:builder',
+      body: '[[THREAD_TOPIC: Deployment logs]]',
+      createdAt: 2,
+      channelId: 'channel-1',
+      parentId: 'old',
+    );
+    const current = WorkspaceMessage(
+      id: 'current',
+      senderPubkey: 'owner',
+      body: 'New task',
+      createdAt: 10,
+      channelId: 'channel-1',
+    );
+    const currentTopic = WorkspaceMessage(
+      id: 'current-topic',
+      senderPubkey: 'agent:builder',
+      body: '[[THREAD_TOPIC: deployment logs]]',
+      createdAt: 11,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    const replyOne = WorkspaceMessage(
+      id: 'one',
+      senderPubkey: 'owner',
+      body: 'One',
+      createdAt: 12,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    const replyTwo = WorkspaceMessage(
+      id: 'two',
+      senderPubkey: 'owner',
+      body: 'Two',
+      createdAt: 13,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+
+    expect(
+      workspaceRelatedThreadCandidates([
+        oldRoot,
+        oldTopic,
+        current,
+        currentTopic,
+        replyOne,
+        replyTwo,
+      ], current).map((message) => message.id),
+      ['old'],
+    );
+  });
+
+  test(
+    'recognizes a persisted related-thread marker without displaying it',
+    () {
+      const marker = WorkspaceMessage(
+        id: 'marker',
+        senderPubkey: 'owner',
+        body: '[[RELATED_THREAD: prior-root ]]',
+        createdAt: 1,
+        channelId: 'channel-1',
+        parentId: 'current-root',
+      );
+
+      expect(workspaceRelatedThreadId(marker), 'prior-root');
+      expect(isWorkspaceRelatedThreadControlMessage(marker), isTrue);
+    },
+  );
+
+  test(
+    'uses only the newest related-thread marker and accepts a clear marker',
+    () {
+      const current = WorkspaceMessage(
+        id: 'current',
+        senderPubkey: 'owner',
+        body: 'Current task',
+        createdAt: 10,
+        channelId: 'channel-1',
+      );
+      const first = WorkspaceMessage(
+        id: 'first-link',
+        senderPubkey: 'owner',
+        body: '[[RELATED_THREAD: first ]]',
+        createdAt: 11,
+        channelId: 'channel-1',
+        parentId: 'current',
+      );
+      const replacement = WorkspaceMessage(
+        id: 'replacement-link',
+        senderPubkey: 'owner',
+        body: '[[RELATED_THREAD: replacement]]',
+        createdAt: 12,
+        channelId: 'channel-1',
+        parentId: 'current',
+      );
+      const clear = WorkspaceMessage(
+        id: 'clear-link',
+        senderPubkey: 'owner',
+        body: '[[RELATED_THREAD:]]',
+        createdAt: 13,
+        channelId: 'channel-1',
+        parentId: 'current',
+      );
+
+      expect(
+        workspaceActiveRelatedThreadId([current, first, replacement], current),
+        'replacement',
+      );
+      expect(isWorkspaceRelatedThreadControlMessage(clear), isTrue);
+      expect(workspaceRelatedThreadId(clear), isNull);
+      expect(
+        workspaceActiveRelatedThreadId([
+          current,
+          first,
+          replacement,
+          clear,
+        ], current),
+        isNull,
+      );
+    },
+  );
+
+  test('does not suggest a thread that already references another thread', () {
+    const oldRoot = WorkspaceMessage(
+      id: 'old',
+      senderPubkey: 'owner',
+      body: 'Old task',
+      createdAt: 1,
+      channelId: 'channel-1',
+    );
+    const oldTopic = WorkspaceMessage(
+      id: 'old-topic',
+      senderPubkey: 'agent:builder',
+      body: '[[THREAD_TOPIC: Deployment logs]]',
+      createdAt: 2,
+      channelId: 'channel-1',
+      parentId: 'old',
+    );
+    const oldLink = WorkspaceMessage(
+      id: 'old-link',
+      senderPubkey: 'owner',
+      body: '[[RELATED_THREAD: earlier]]',
+      createdAt: 3,
+      channelId: 'channel-1',
+      parentId: 'old',
+    );
+    const current = WorkspaceMessage(
+      id: 'current',
+      senderPubkey: 'owner',
+      body: 'Current task',
+      createdAt: 10,
+      channelId: 'channel-1',
+    );
+    const currentTopic = WorkspaceMessage(
+      id: 'current-topic',
+      senderPubkey: 'agent:builder',
+      body: '[[THREAD_TOPIC: Deployment logs]]',
+      createdAt: 11,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    const replyOne = WorkspaceMessage(
+      id: 'one',
+      senderPubkey: 'owner',
+      body: 'One',
+      createdAt: 12,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    const replyTwo = WorkspaceMessage(
+      id: 'two',
+      senderPubkey: 'owner',
+      body: 'Two',
+      createdAt: 13,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+
+    expect(
+      workspaceRelatedThreadCandidates([
+        oldRoot,
+        oldTopic,
+        oldLink,
+        current,
+        currentTopic,
+        replyOne,
+        replyTwo,
+      ], current),
+      isEmpty,
+    );
+  });
+
+  test('shows backlinks only for active related-thread references', () {
+    const prior = WorkspaceMessage(
+      id: 'prior',
+      senderPubkey: 'owner',
+      body: 'Prior task',
+      createdAt: 1,
+      channelId: 'channel-1',
+    );
+    const current = WorkspaceMessage(
+      id: 'current',
+      senderPubkey: 'owner',
+      body: 'Current task',
+      createdAt: 10,
+      channelId: 'channel-1',
+    );
+    const link = WorkspaceMessage(
+      id: 'link',
+      senderPubkey: 'owner',
+      body: '[[RELATED_THREAD:prior]]',
+      createdAt: 11,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    const clear = WorkspaceMessage(
+      id: 'clear',
+      senderPubkey: 'owner',
+      body: '[[RELATED_THREAD:]]',
+      createdAt: 12,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+
+    expect(
+      workspaceRelatedThreadBacklinks([
+        prior,
+        current,
+        link,
+      ], prior).map((message) => message.id),
+      ['current'],
+    );
+    expect(
+      workspaceRelatedThreadBacklinks([prior, current, link, clear], prior),
+      isEmpty,
+    );
+  });
+
+  test('does not suggest a thread that is already linked', () {
+    const prior = WorkspaceMessage(
+      id: 'prior',
+      senderPubkey: 'owner',
+      body: 'Prior task',
+      createdAt: 1,
+      channelId: 'channel-1',
+    );
+    const priorTopic = WorkspaceMessage(
+      id: 'prior-topic',
+      senderPubkey: 'agent:builder',
+      body: '[[THREAD_TOPIC: Deployment]]',
+      createdAt: 2,
+      channelId: 'channel-1',
+      parentId: 'prior',
+    );
+    const current = WorkspaceMessage(
+      id: 'current',
+      senderPubkey: 'owner',
+      body: 'Current task',
+      createdAt: 10,
+      channelId: 'channel-1',
+    );
+    const currentTopic = WorkspaceMessage(
+      id: 'current-topic',
+      senderPubkey: 'agent:builder',
+      body: '[[THREAD_TOPIC: Deployment]]',
+      createdAt: 11,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    const replyOne = WorkspaceMessage(
+      id: 'one',
+      senderPubkey: 'owner',
+      body: 'One',
+      createdAt: 12,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    const replyTwo = WorkspaceMessage(
+      id: 'two',
+      senderPubkey: 'owner',
+      body: 'Two',
+      createdAt: 13,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    const marker = WorkspaceMessage(
+      id: 'marker',
+      senderPubkey: 'owner',
+      body: '[[RELATED_THREAD:prior]]',
+      createdAt: 14,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+
+    expect(
+      workspaceRelatedThreadCandidates([
+        prior,
+        priorTopic,
+        current,
+        currentTopic,
+        replyOne,
+        replyTwo,
+        marker,
+      ], current),
+      isEmpty,
+    );
+  });
+
+  test('offers candidates when explicitly changing a reference', () {
+    const prior = WorkspaceMessage(
+      id: 'prior',
+      senderPubkey: 'owner',
+      body: 'Prior task',
+      createdAt: 1,
+      channelId: 'channel-1',
+    );
+    const priorTopic = WorkspaceMessage(
+      id: 'prior-topic',
+      senderPubkey: 'agent:builder',
+      body: '[[THREAD_TOPIC: Deployment]]',
+      createdAt: 2,
+      channelId: 'channel-1',
+      parentId: 'prior',
+    );
+    const current = WorkspaceMessage(
+      id: 'current',
+      senderPubkey: 'owner',
+      body: 'Current task',
+      createdAt: 10,
+      channelId: 'channel-1',
+    );
+    const currentTopic = WorkspaceMessage(
+      id: 'current-topic',
+      senderPubkey: 'agent:builder',
+      body: '[[THREAD_TOPIC: Deployment]]',
+      createdAt: 11,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    const replyOne = WorkspaceMessage(
+      id: 'reply-one',
+      senderPubkey: 'owner',
+      body: 'One',
+      createdAt: 12,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    const replyTwo = WorkspaceMessage(
+      id: 'reply-two',
+      senderPubkey: 'owner',
+      body: 'Two',
+      createdAt: 13,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    const marker = WorkspaceMessage(
+      id: 'marker',
+      senderPubkey: 'owner',
+      body: '[[RELATED_THREAD: other]]',
+      createdAt: 14,
+      channelId: 'channel-1',
+      parentId: 'current',
+    );
+    final messages = [
+      prior,
+      priorTopic,
+      current,
+      currentTopic,
+      replyOne,
+      replyTwo,
+      marker,
+    ];
+
+    expect(workspaceRelatedThreadCandidates(messages, current), isEmpty);
+    expect(
+      workspaceRelatedThreadCandidates(
+        messages,
+        current,
+        includeWhenReferenced: true,
+      ).map((message) => message.id),
+      ['prior'],
+    );
+  });
+
   test('retains thread topic responses in snapshots', () {
     final state = WorkspaceState();
     state.apply({
