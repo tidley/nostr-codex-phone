@@ -1736,6 +1736,27 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   List<WorkspaceMessage> get _threadReplies =>
       _thread == null ? const [] : _threadRepliesFor(_thread!);
 
+  List<String> _threadAgentNames(Iterable<WorkspaceMessage> replies) {
+    final names = <String>[];
+    for (final reply in replies) {
+      if (!isWorkspaceAgentSender(reply.senderPubkey)) continue;
+      final id = reply.senderPubkey.substring('agent:'.length);
+      final name =
+          widget.workspace.agents
+              .where((agent) => agent.id == id)
+              .firstOrNull
+              ?.name ??
+          'Agent';
+      if (!names.contains(name)) names.add(name);
+    }
+    return names;
+  }
+
+  bool _isThreadCompleted(WorkspaceMessage thread) =>
+      isWorkspaceThreadCompleted(
+        _activeMessages.where((message) => message.parentId == thread.id),
+      );
+
   String _threadKey(WorkspaceMessage thread) =>
       '${widget.workspace.conversationKeyForMessage(thread)}:${thread.id}';
 
@@ -2255,7 +2276,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _saveThreadDraft();
       if (!_openThreadIds.contains(thread.id)) _openThreadIds.add(thread.id);
       _thread = thread;
-      _threadPaneWidthFraction = 0.5;
       _alsoSendToMain = false;
       _threadReplyTargetId = replyTargetId;
       _restoreThreadDraft();
@@ -2292,7 +2312,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     final thread = _thread;
     if (thread == null) return Future.value();
     return widget.onRequest({
-      'action': isWorkspaceThreadCompleted(_threadReplies)
+      'action': _isThreadCompleted(thread)
           ? 'reopen_thread'
           : 'complete_thread',
       if (thread.channelId != null) 'channel_id': thread.channelId,
@@ -2729,6 +2749,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         key: ValueKey(_thread?.id),
         message: _thread,
         replies: _threadReplies,
+        threadAgentNames: _threadAgentNames(_threadReplies),
+        threadCompleted: _thread != null && _isThreadCompleted(_thread!),
         conversationMessages: _activeMessages,
         relatedThreadCandidates: _thread == null
             ? const []
@@ -2981,16 +3003,16 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                         icon: const Icon(Icons.search),
                       ),
                       IconButton(
-                        tooltip: isWorkspaceThreadCompleted(_threadReplies)
+                        tooltip: _thread != null && _isThreadCompleted(_thread!)
                             ? 'Mark thread incomplete'
                             : 'Mark thread complete',
                         onPressed: () =>
                             unawaited(_toggleSelectedThreadCompletion()),
                         icon: Icon(
-                          isWorkspaceThreadCompleted(_threadReplies)
+                          _thread != null && _isThreadCompleted(_thread!)
                               ? Icons.task_alt
                               : Icons.task_alt_outlined,
-                          color: isWorkspaceThreadCompleted(_threadReplies)
+                          color: _thread != null && _isThreadCompleted(_thread!)
                               ? const Color(0xff35d6a0)
                               : null,
                         ),
@@ -5291,489 +5313,477 @@ class _WorkspaceSidebar extends StatelessWidget {
 
     return ColoredBox(
       color: palette.sidebar,
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 18, 12, 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: PopupMenuButton<String>(
-                    tooltip: 'Switch workspace',
-                    onSelected: (value) {
-                      if (value == 'join') {
-                        onSelect(_WorkspaceSection.access, 'access');
-                        return;
-                      }
-                      if (value == 'leave') {
-                        final activeSpace = this.activeSpace;
-                        if (activeSpace != null) onLeaveSpace(activeSpace);
-                        return;
-                      }
-                      final matches = spaces.where(
-                        (space) => 'space:${space.id}' == value,
-                      );
-                      if (matches.isNotEmpty) onSwitchSpace(matches.first);
-                    },
-                    itemBuilder: (context) => [
-                      for (final space in spaces)
-                        CheckedPopupMenuItem(
-                          value: 'space:${space.id}',
-                          checked: space.id == activeSpace?.id,
-                          child: _UnreadConversationLabel(
-                            label: space.displayName,
-                            unread:
-                                space.id != activeSpace?.id &&
-                                hasUnreadOtherSpaces,
-                            pulse: otherWorkspaceAttentionVersion,
-                            attentionColor: const Color(0xff35d6a0),
-                            style: Theme.of(context).textTheme.bodyLarge
-                                ?.copyWith(
-                                  color:
-                                      fipsConnectedSpaceIds.contains(space.id)
-                                      ? const Color(0xff35d6a0)
-                                      : Colors.white,
-                                ),
-                          ),
+      child: _SidebarScrollLayout(
+        color: palette.sidebar,
+        header: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 18, 12, 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: PopupMenuButton<String>(
+                  tooltip: 'Switch workspace',
+                  onSelected: (value) {
+                    if (value == 'join') {
+                      onSelect(_WorkspaceSection.access, 'access');
+                      return;
+                    }
+                    if (value == 'leave') {
+                      final activeSpace = this.activeSpace;
+                      if (activeSpace != null) onLeaveSpace(activeSpace);
+                      return;
+                    }
+                    final matches = spaces.where(
+                      (space) => 'space:${space.id}' == value,
+                    );
+                    if (matches.isNotEmpty) onSwitchSpace(matches.first);
+                  },
+                  itemBuilder: (context) => [
+                    for (final space in spaces)
+                      CheckedPopupMenuItem(
+                        value: 'space:${space.id}',
+                        checked: space.id == activeSpace?.id,
+                        child: _UnreadConversationLabel(
+                          label: space.displayName,
+                          unread:
+                              space.id != activeSpace?.id &&
+                              hasUnreadOtherSpaces,
+                          pulse: otherWorkspaceAttentionVersion,
+                          attentionColor: const Color(0xff35d6a0),
+                          style: Theme.of(context).textTheme.bodyLarge
+                              ?.copyWith(
+                                color: fipsConnectedSpaceIds.contains(space.id)
+                                    ? const Color(0xff35d6a0)
+                                    : Colors.white,
+                              ),
                         ),
-                      if (activeSpace != null) ...[
-                        const PopupMenuDivider(),
-                        const PopupMenuItem(
-                          value: 'leave',
-                          child: ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: Icon(Icons.logout_outlined),
-                            title: Text('Leave workspace'),
-                          ),
-                        ),
-                      ],
-                      if (spaces.isNotEmpty) const PopupMenuDivider(),
+                      ),
+                    if (activeSpace != null) ...[
+                      const PopupMenuDivider(),
                       const PopupMenuItem(
-                        value: 'join',
+                        value: 'leave',
                         child: ListTile(
                           contentPadding: EdgeInsets.zero,
-                          leading: Icon(Icons.group_add_outlined),
-                          title: Text('Join space'),
+                          leading: Icon(Icons.logout_outlined),
+                          title: Text('Leave workspace'),
                         ),
                       ),
                     ],
-                    child: Row(
-                      children: [
-                        Flexible(
-                          child: _UnreadConversationLabel(
-                            label:
-                                activeSpace?.displayName ?? 'Select workspace',
-                            unread: hasUnreadOtherSpaces,
-                            pulse: otherWorkspaceAttentionVersion,
-                            attentionColor: const Color(0xff35d6a0),
-                            style: Theme.of(context).textTheme.titleLarge
-                                ?.copyWith(
-                                  fontSize: 24,
-                                  fontWeight: FontWeight.bold,
-                                  color: fipsConnected
-                                      ? const Color(0xff25d57f)
-                                      : null,
-                                ),
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        Icon(Icons.expand_more, color: palette.label),
-                      ],
-                    ),
-                  ),
-                ),
-                IconButton(
-                  onPressed: onToggleActiveConversationMuted,
-                  icon: Icon(
-                    activeConversationMuted
-                        ? Icons.notifications_off_outlined
-                        : Icons.notifications_none,
-                  ),
-                  tooltip: activeConversationMuted
-                      ? 'Unmute conversation'
-                      : 'Mute conversation',
-                ),
-                IconButton(
-                  onPressed: onToggleCollapsed,
-                  icon: const Icon(Icons.menu),
-                  tooltip: 'Collapse sidebar',
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-              children: [
-                const SizedBox(height: 8),
-                Container(
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                      color: threadsSelected
-                          ? Theme.of(
-                              context,
-                            ).colorScheme.primary.withValues(alpha: 0.38)
-                          : Colors.transparent,
-                    ),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: ListTile(
-                    dense: true,
-                    selected: threadsSelected,
-                    selectedTileColor: palette.selected,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-                    minLeadingWidth: 24,
-                    horizontalTitleGap: 8,
-                    leading: const Icon(Icons.forum_outlined, size: 19),
-                    title: const Text('Threads'),
-                    trailing: recentThreads.isEmpty
-                        ? null
-                        : Text(
-                            '${recentThreads.length}',
-                            style: Theme.of(context).textTheme.labelSmall,
-                          ),
-                    onTap: onShowThreads,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                _SidebarSection(
-                  id: 'conversations',
-                  expanded: sidebarSections['conversations'] ?? true,
-                  onExpandedChanged: (expanded) =>
-                      onSidebarSectionChanged('conversations', expanded),
-                  title: 'Conversations',
-                  icon: Icons.forum_outlined,
-                  hasUnread: visibleChannels.any(
-                    (channel) => hasUnreadActivity(channel.id),
-                  ),
-                  action: IconButton(
-                    onPressed: onCreateChannel,
-                    icon: const Icon(Icons.add, size: 18),
-                    tooltip: 'Create channel',
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  children: [
-                    if (pinnedChannels.isEmpty && otherChannels.isEmpty)
-                      const ListTile(
-                        dense: true,
-                        title: Text('No channels yet'),
+                    if (spaces.isNotEmpty) const PopupMenuDivider(),
+                    const PopupMenuItem(
+                      value: 'join',
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.group_add_outlined),
+                        title: Text('Join space'),
                       ),
-                    for (final entry in pinnedChannels.indexed) ...[
-                      item(
-                        Icons.push_pin_outlined,
-                        entry.$2.name,
-                        selected: selected == entry.$2.id,
-                        unreadCount: unreadCountForConversation(entry.$2.id),
-                        activity: activityLabels[entry.$2.id],
-                        action: conversationAction(
-                          _WorkspaceSection.channel,
-                          entry.$2.id,
-                          conversationPreferences[entry.$2.id]?.pinned == true,
-                          muted(entry.$2.id),
-                        ),
-                        onTap: () =>
-                            onSelect(_WorkspaceSection.channel, entry.$2.id),
-                        onLongPress: () => _showConversationActions(
-                          context,
-                          _WorkspaceSection.channel,
-                          entry.$2.id,
-                        ),
-                      ),
-                    ],
-                    if (pinnedChannels.isNotEmpty && otherChannels.isNotEmpty)
-                      const Divider(height: 16, indent: 12, endIndent: 12),
-                    for (final channel in otherChannels)
-                      item(
-                        Icons.tag,
-                        channel.name,
-                        selected: selected == channel.id,
-                        unreadCount: unreadCountForConversation(channel.id),
-                        activity: activityLabels[channel.id],
-                        action: conversationAction(
-                          _WorkspaceSection.channel,
-                          channel.id,
-                          false,
-                          muted(channel.id),
-                        ),
-                        onTap: () =>
-                            onSelect(_WorkspaceSection.channel, channel.id),
-                        onLongPress: () => _showConversationActions(
-                          context,
-                          _WorkspaceSection.channel,
-                          channel.id,
-                        ),
-                      ),
+                    ),
                   ],
-                ),
-                const SizedBox(height: 16),
-                _SidebarSection(
-                  id: 'direct-messages',
-                  expanded: sidebarSections['direct-messages'] ?? true,
-                  onExpandedChanged: (expanded) =>
-                      onSidebarSectionChanged('direct-messages', expanded),
-                  title: 'Direct messages',
-                  icon: Icons.forum_outlined,
-                  hasUnread: visibleMembers.any(
-                    (member) => hasUnreadActivity(
-                      WorkspaceState.directKey(ownPubkey, member),
-                    ),
-                  ),
-                  action: IconButton(
-                    onPressed: onCreateDirect,
-                    icon: const Icon(Icons.add, size: 18),
-                    tooltip: 'New direct message',
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  children: [
-                    if (pinnedMembers.isEmpty && otherMembers.isEmpty)
-                      const ListTile(
-                        dense: true,
-                        title: Text('No direct messages yet'),
-                      ),
-                    for (final entry in pinnedMembers.indexed) ...[
-                      item(
-                        Icons.push_pin_outlined,
-                        memberLabel(entry.$2),
-                        leading: _WorkspaceFrogAvatar(
-                          identity: entry.$2,
-                          label: memberLabel(entry.$2),
-                          radius: 16,
-                        ),
-                        selected: direct == entry.$2,
-                        fipsConnected: fipsConnectedPeers.contains(entry.$2),
-                        unreadCount: unreadCountForConversation(
-                          WorkspaceState.directKey(ownPubkey, entry.$2),
-                        ),
-                        activity:
-                            activityLabels[WorkspaceState.directKey(
-                              ownPubkey,
-                              entry.$2,
-                            )],
-                        action: conversationAction(
-                          _WorkspaceSection.direct,
-                          entry.$2,
-                          conversationPreferences[WorkspaceState.directKey(
-                                    ownPubkey,
-                                    entry.$2,
-                                  )]
-                                  ?.pinned ==
-                              true,
-                          muted(WorkspaceState.directKey(ownPubkey, entry.$2)),
-                        ),
-                        onTap: () =>
-                            onSelect(_WorkspaceSection.direct, entry.$2),
-                        onLongPress: () => _showConversationActions(
-                          context,
-                          _WorkspaceSection.direct,
-                          entry.$2,
-                        ),
-                      ),
-                    ],
-                    if (pinnedMembers.isNotEmpty && otherMembers.isNotEmpty)
-                      const Divider(height: 16, indent: 12, endIndent: 12),
-                    for (final member in otherMembers)
-                      item(
-                        Icons.forum_outlined,
-                        memberLabel(member),
-                        leading: _WorkspaceFrogAvatar(
-                          identity: member,
-                          label: memberLabel(member),
-                          radius: 16,
-                        ),
-                        selected: direct == member,
-                        fipsConnected: fipsConnectedPeers.contains(member),
-                        unreadCount: unreadCountForConversation(
-                          WorkspaceState.directKey(ownPubkey, member),
-                        ),
-                        activity:
-                            activityLabels[WorkspaceState.directKey(
-                              ownPubkey,
-                              member,
-                            )],
-                        action: conversationAction(
-                          _WorkspaceSection.direct,
-                          member,
-                          false,
-                          muted(WorkspaceState.directKey(ownPubkey, member)),
-                        ),
-                        onTap: () => onSelect(_WorkspaceSection.direct, member),
-                        onLongPress: () => _showConversationActions(
-                          context,
-                          _WorkspaceSection.direct,
-                          member,
-                        ),
-                      ),
-                  ],
-                ),
-                if (archivedChannels.isNotEmpty ||
-                    archivedMembers.isNotEmpty) ...[
-                  const SizedBox(height: 16),
-                  _SidebarSection(
-                    id: 'archived',
-                    expanded: sidebarSections['archived'] ?? true,
-                    onExpandedChanged: (expanded) =>
-                        onSidebarSectionChanged('archived', expanded),
-                    title: 'Archived',
-                    icon: Icons.inventory_2_outlined,
-                    hasUnread:
-                        archivedChannels.any(
-                          (channel) => hasUnreadActivity(channel.id),
-                        ) ||
-                        archivedMembers.any(
-                          (member) => hasUnreadActivity(
-                            WorkspaceState.directKey(ownPubkey, member),
-                          ),
-                        ),
+                  child: Row(
                     children: [
-                      for (final channel in archivedChannels)
-                        item(
-                          Icons.inventory_2_outlined,
-                          channel.name,
-                          selected: selected == channel.id,
-                          unreadCount: unreadCountForConversation(channel.id),
-                          activity: activityLabels[channel.id],
-                          action: conversationAction(
-                            _WorkspaceSection.channel,
-                            channel.id,
-                            conversationPreferences[channel.id]?.pinned == true,
-                            muted(channel.id),
-                          ),
-                          onTap: () =>
-                              onSelect(_WorkspaceSection.channel, channel.id),
-                          onLongPress: () => _showConversationActions(
-                            context,
-                            _WorkspaceSection.channel,
-                            channel.id,
-                          ),
+                      Flexible(
+                        child: _UnreadConversationLabel(
+                          label: activeSpace?.displayName ?? 'Select workspace',
+                          unread: hasUnreadOtherSpaces,
+                          pulse: otherWorkspaceAttentionVersion,
+                          attentionColor: const Color(0xff35d6a0),
+                          style: Theme.of(context).textTheme.titleLarge
+                              ?.copyWith(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                color: fipsConnected
+                                    ? const Color(0xff25d57f)
+                                    : null,
+                              ),
                         ),
-                      for (final member in archivedMembers)
-                        item(
-                          Icons.inventory_2_outlined,
-                          memberLabel(member),
-                          leading: _WorkspaceFrogAvatar(
-                            identity: member,
-                            label: memberLabel(member),
-                            radius: 16,
-                          ),
-                          selected: direct == member,
-                          unreadCount: unreadCountForConversation(
-                            WorkspaceState.directKey(ownPubkey, member),
-                          ),
-                          activity:
-                              activityLabels[WorkspaceState.directKey(
-                                ownPubkey,
-                                member,
-                              )],
-                          action: conversationAction(
-                            _WorkspaceSection.direct,
-                            member,
-                            conversationPreferences[WorkspaceState.directKey(
-                                      ownPubkey,
-                                      member,
-                                    )]
-                                    ?.pinned ==
-                                true,
-                            muted(WorkspaceState.directKey(ownPubkey, member)),
-                          ),
-                          onTap: () =>
-                              onSelect(_WorkspaceSection.direct, member),
-                          onLongPress: () => _showConversationActions(
-                            context,
-                            _WorkspaceSection.direct,
-                            member,
-                          ),
-                        ),
-                    ],
-                  ),
-                ],
-                const SizedBox(height: 16),
-                if (canManageAgents) ...[
-                  _SidebarSection(
-                    id: 'sessions',
-                    expanded: sidebarSections['sessions'] ?? true,
-                    onExpandedChanged: (expanded) =>
-                        onSidebarSectionChanged('sessions', expanded),
-                    title: 'Sessions',
-                    icon: Icons.terminal_outlined,
-                    children: [
-                      for (final session in sessions.take(3))
-                        item(
-                          Icons.terminal_outlined,
-                          session.displayName,
-                          reserveActivity: false,
-                          onTap: onSessions,
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                ],
-                _SidebarSection(
-                  id: 'workspace',
-                  expanded: sidebarSections['workspace'] ?? true,
-                  onExpandedChanged: (expanded) =>
-                      onSidebarSectionChanged('workspace', expanded),
-                  title: 'Workspace',
-                  icon: Icons.workspaces_outline,
-                  children: [
-                    item(
-                      Icons.people_outline,
-                      'Members',
-                      reserveActivity: false,
-                      selected: section == _WorkspaceSection.people,
-                      onTap: () => onSelect(_WorkspaceSection.people, 'people'),
-                    ),
-                    item(
-                      Icons.admin_panel_settings_outlined,
-                      'Access',
-                      reserveActivity: false,
-                      selected: section == _WorkspaceSection.access,
-                      onTap: () => onSelect(_WorkspaceSection.access, 'access'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                _SidebarSection(
-                  id: 'maintenance',
-                  expanded: sidebarSections['maintenance'] ?? true,
-                  onExpandedChanged: (expanded) =>
-                      onSidebarSectionChanged('maintenance', expanded),
-                  title: 'Maintenance',
-                  icon: Icons.build_outlined,
-                  children: [
-                    if (isWorkspaceAdmin)
-                      item(
-                        Icons.monitor_heart_outlined,
-                        'Host',
-                        reserveActivity: false,
-                        onTap: onWorkerConsole,
                       ),
-                    item(
-                      Icons.bug_report_outlined,
-                      'Network',
-                      reserveActivity: false,
-                      onTap: onDiagnostics,
-                    ),
-                  ],
+                      const SizedBox(width: 4),
+                      Icon(Icons.expand_more, color: palette.label),
+                    ],
+                  ),
                 ),
-              ],
-            ),
+              ),
+              IconButton(
+                onPressed: onToggleActiveConversationMuted,
+                icon: Icon(
+                  activeConversationMuted
+                      ? Icons.notifications_off_outlined
+                      : Icons.notifications_none,
+                ),
+                tooltip: activeConversationMuted
+                    ? 'Unmute conversation'
+                    : 'Mute conversation',
+              ),
+              IconButton(
+                onPressed: onToggleCollapsed,
+                icon: const Icon(Icons.menu),
+                tooltip: 'Collapse sidebar',
+              ),
+            ],
           ),
-          const Divider(height: 1),
-          Semantics(
-            button: true,
-            label: 'Open settings',
-            child: InkWell(
-              onTap: onSettings,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 10, 18, 12),
-                child: Row(children: [const Icon(Icons.settings_outlined)]),
+        ),
+        scrollable: ListView(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          children: [
+            const SizedBox(height: 8),
+            Container(
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: threadsSelected
+                      ? Theme.of(
+                          context,
+                        ).colorScheme.primary.withValues(alpha: 0.38)
+                      : Colors.transparent,
+                ),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: ListTile(
+                dense: true,
+                selected: threadsSelected,
+                selectedTileColor: palette.selected,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                minLeadingWidth: 24,
+                horizontalTitleGap: 8,
+                leading: const Icon(Icons.forum_outlined, size: 19),
+                title: const Text('Threads'),
+                trailing: recentThreads.isEmpty
+                    ? null
+                    : Text(
+                        '${recentThreads.length}',
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                onTap: onShowThreads,
               ),
             ),
+            const SizedBox(height: 16),
+            _SidebarSection(
+              id: 'conversations',
+              expanded: sidebarSections['conversations'] ?? true,
+              onExpandedChanged: (expanded) =>
+                  onSidebarSectionChanged('conversations', expanded),
+              title: 'Conversations',
+              icon: Icons.forum_outlined,
+              hasUnread: visibleChannels.any(
+                (channel) => hasUnreadActivity(channel.id),
+              ),
+              action: IconButton(
+                onPressed: onCreateChannel,
+                icon: const Icon(Icons.add, size: 18),
+                tooltip: 'Create channel',
+                visualDensity: VisualDensity.compact,
+              ),
+              children: [
+                if (pinnedChannels.isEmpty && otherChannels.isEmpty)
+                  const ListTile(dense: true, title: Text('No channels yet')),
+                for (final entry in pinnedChannels.indexed) ...[
+                  item(
+                    Icons.push_pin_outlined,
+                    entry.$2.name,
+                    selected: selected == entry.$2.id,
+                    unreadCount: unreadCountForConversation(entry.$2.id),
+                    activity: activityLabels[entry.$2.id],
+                    action: conversationAction(
+                      _WorkspaceSection.channel,
+                      entry.$2.id,
+                      conversationPreferences[entry.$2.id]?.pinned == true,
+                      muted(entry.$2.id),
+                    ),
+                    onTap: () =>
+                        onSelect(_WorkspaceSection.channel, entry.$2.id),
+                    onLongPress: () => _showConversationActions(
+                      context,
+                      _WorkspaceSection.channel,
+                      entry.$2.id,
+                    ),
+                  ),
+                ],
+                if (pinnedChannels.isNotEmpty && otherChannels.isNotEmpty)
+                  const Divider(height: 16, indent: 12, endIndent: 12),
+                for (final channel in otherChannels)
+                  item(
+                    Icons.tag,
+                    channel.name,
+                    selected: selected == channel.id,
+                    unreadCount: unreadCountForConversation(channel.id),
+                    activity: activityLabels[channel.id],
+                    action: conversationAction(
+                      _WorkspaceSection.channel,
+                      channel.id,
+                      false,
+                      muted(channel.id),
+                    ),
+                    onTap: () =>
+                        onSelect(_WorkspaceSection.channel, channel.id),
+                    onLongPress: () => _showConversationActions(
+                      context,
+                      _WorkspaceSection.channel,
+                      channel.id,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _SidebarSection(
+              id: 'direct-messages',
+              expanded: sidebarSections['direct-messages'] ?? true,
+              onExpandedChanged: (expanded) =>
+                  onSidebarSectionChanged('direct-messages', expanded),
+              title: 'Direct messages',
+              icon: Icons.forum_outlined,
+              hasUnread: visibleMembers.any(
+                (member) => hasUnreadActivity(
+                  WorkspaceState.directKey(ownPubkey, member),
+                ),
+              ),
+              action: IconButton(
+                onPressed: onCreateDirect,
+                icon: const Icon(Icons.add, size: 18),
+                tooltip: 'New direct message',
+                visualDensity: VisualDensity.compact,
+              ),
+              children: [
+                if (pinnedMembers.isEmpty && otherMembers.isEmpty)
+                  const ListTile(
+                    dense: true,
+                    title: Text('No direct messages yet'),
+                  ),
+                for (final entry in pinnedMembers.indexed) ...[
+                  item(
+                    Icons.push_pin_outlined,
+                    memberLabel(entry.$2),
+                    leading: _WorkspaceFrogAvatar(
+                      identity: entry.$2,
+                      label: memberLabel(entry.$2),
+                      radius: 16,
+                    ),
+                    selected: direct == entry.$2,
+                    fipsConnected: fipsConnectedPeers.contains(entry.$2),
+                    unreadCount: unreadCountForConversation(
+                      WorkspaceState.directKey(ownPubkey, entry.$2),
+                    ),
+                    activity:
+                        activityLabels[WorkspaceState.directKey(
+                          ownPubkey,
+                          entry.$2,
+                        )],
+                    action: conversationAction(
+                      _WorkspaceSection.direct,
+                      entry.$2,
+                      conversationPreferences[WorkspaceState.directKey(
+                                ownPubkey,
+                                entry.$2,
+                              )]
+                              ?.pinned ==
+                          true,
+                      muted(WorkspaceState.directKey(ownPubkey, entry.$2)),
+                    ),
+                    onTap: () => onSelect(_WorkspaceSection.direct, entry.$2),
+                    onLongPress: () => _showConversationActions(
+                      context,
+                      _WorkspaceSection.direct,
+                      entry.$2,
+                    ),
+                  ),
+                ],
+                if (pinnedMembers.isNotEmpty && otherMembers.isNotEmpty)
+                  const Divider(height: 16, indent: 12, endIndent: 12),
+                for (final member in otherMembers)
+                  item(
+                    Icons.forum_outlined,
+                    memberLabel(member),
+                    leading: _WorkspaceFrogAvatar(
+                      identity: member,
+                      label: memberLabel(member),
+                      radius: 16,
+                    ),
+                    selected: direct == member,
+                    fipsConnected: fipsConnectedPeers.contains(member),
+                    unreadCount: unreadCountForConversation(
+                      WorkspaceState.directKey(ownPubkey, member),
+                    ),
+                    activity:
+                        activityLabels[WorkspaceState.directKey(
+                          ownPubkey,
+                          member,
+                        )],
+                    action: conversationAction(
+                      _WorkspaceSection.direct,
+                      member,
+                      false,
+                      muted(WorkspaceState.directKey(ownPubkey, member)),
+                    ),
+                    onTap: () => onSelect(_WorkspaceSection.direct, member),
+                    onLongPress: () => _showConversationActions(
+                      context,
+                      _WorkspaceSection.direct,
+                      member,
+                    ),
+                  ),
+              ],
+            ),
+            if (archivedChannels.isNotEmpty || archivedMembers.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              _SidebarSection(
+                id: 'archived',
+                expanded: sidebarSections['archived'] ?? true,
+                onExpandedChanged: (expanded) =>
+                    onSidebarSectionChanged('archived', expanded),
+                title: 'Archived',
+                icon: Icons.inventory_2_outlined,
+                hasUnread:
+                    archivedChannels.any(
+                      (channel) => hasUnreadActivity(channel.id),
+                    ) ||
+                    archivedMembers.any(
+                      (member) => hasUnreadActivity(
+                        WorkspaceState.directKey(ownPubkey, member),
+                      ),
+                    ),
+                children: [
+                  for (final channel in archivedChannels)
+                    item(
+                      Icons.inventory_2_outlined,
+                      channel.name,
+                      selected: selected == channel.id,
+                      unreadCount: unreadCountForConversation(channel.id),
+                      activity: activityLabels[channel.id],
+                      action: conversationAction(
+                        _WorkspaceSection.channel,
+                        channel.id,
+                        conversationPreferences[channel.id]?.pinned == true,
+                        muted(channel.id),
+                      ),
+                      onTap: () =>
+                          onSelect(_WorkspaceSection.channel, channel.id),
+                      onLongPress: () => _showConversationActions(
+                        context,
+                        _WorkspaceSection.channel,
+                        channel.id,
+                      ),
+                    ),
+                  for (final member in archivedMembers)
+                    item(
+                      Icons.inventory_2_outlined,
+                      memberLabel(member),
+                      leading: _WorkspaceFrogAvatar(
+                        identity: member,
+                        label: memberLabel(member),
+                        radius: 16,
+                      ),
+                      selected: direct == member,
+                      unreadCount: unreadCountForConversation(
+                        WorkspaceState.directKey(ownPubkey, member),
+                      ),
+                      activity:
+                          activityLabels[WorkspaceState.directKey(
+                            ownPubkey,
+                            member,
+                          )],
+                      action: conversationAction(
+                        _WorkspaceSection.direct,
+                        member,
+                        conversationPreferences[WorkspaceState.directKey(
+                                  ownPubkey,
+                                  member,
+                                )]
+                                ?.pinned ==
+                            true,
+                        muted(WorkspaceState.directKey(ownPubkey, member)),
+                      ),
+                      onTap: () => onSelect(_WorkspaceSection.direct, member),
+                      onLongPress: () => _showConversationActions(
+                        context,
+                        _WorkspaceSection.direct,
+                        member,
+                      ),
+                    ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 16),
+            if (canManageAgents) ...[
+              _SidebarSection(
+                id: 'sessions',
+                expanded: sidebarSections['sessions'] ?? true,
+                onExpandedChanged: (expanded) =>
+                    onSidebarSectionChanged('sessions', expanded),
+                title: 'Sessions',
+                icon: Icons.terminal_outlined,
+                children: [
+                  for (final session in sessions.take(3))
+                    item(
+                      Icons.terminal_outlined,
+                      session.displayName,
+                      reserveActivity: false,
+                      onTap: onSessions,
+                    ),
+                ],
+              ),
+              const SizedBox(height: 16),
+            ],
+            _SidebarSection(
+              id: 'workspace',
+              expanded: sidebarSections['workspace'] ?? true,
+              onExpandedChanged: (expanded) =>
+                  onSidebarSectionChanged('workspace', expanded),
+              title: 'Workspace',
+              icon: Icons.workspaces_outline,
+              children: [
+                item(
+                  Icons.people_outline,
+                  'Members',
+                  reserveActivity: false,
+                  selected: section == _WorkspaceSection.people,
+                  onTap: () => onSelect(_WorkspaceSection.people, 'people'),
+                ),
+                item(
+                  Icons.admin_panel_settings_outlined,
+                  'Access',
+                  reserveActivity: false,
+                  selected: section == _WorkspaceSection.access,
+                  onTap: () => onSelect(_WorkspaceSection.access, 'access'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _SidebarSection(
+              id: 'maintenance',
+              expanded: sidebarSections['maintenance'] ?? true,
+              onExpandedChanged: (expanded) =>
+                  onSidebarSectionChanged('maintenance', expanded),
+              title: 'Maintenance',
+              icon: Icons.build_outlined,
+              children: [
+                if (isWorkspaceAdmin)
+                  item(
+                    Icons.monitor_heart_outlined,
+                    'Host',
+                    reserveActivity: false,
+                    onTap: onWorkerConsole,
+                  ),
+                item(
+                  Icons.bug_report_outlined,
+                  'Network',
+                  reserveActivity: false,
+                  onTap: onDiagnostics,
+                ),
+              ],
+            ),
+          ],
+        ),
+        footer: Semantics(
+          button: true,
+          label: 'Open settings',
+          child: InkWell(
+            onTap: onSettings,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 10, 18, 12),
+              child: Row(children: [const Icon(Icons.settings_outlined)]),
+            ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -5804,6 +5814,65 @@ class _WorkspaceSidebar extends StatelessWidget {
             latest > message.createdAt ? latest : message.createdAt,
       ) ??
       0;
+}
+
+class _SidebarScrollLayout extends StatefulWidget {
+  const _SidebarScrollLayout({
+    required this.color,
+    required this.header,
+    required this.scrollable,
+    required this.footer,
+  });
+
+  final Color color;
+  final Widget header;
+  final Widget scrollable;
+  final Widget footer;
+
+  @override
+  State<_SidebarScrollLayout> createState() => _SidebarScrollLayoutState();
+}
+
+class _SidebarScrollLayoutState extends State<_SidebarScrollLayout> {
+  var _hasScrolled = false;
+
+  bool _updateScrollShadow(ScrollNotification notification) {
+    if (notification.metrics.axis != Axis.vertical) return false;
+    final hasScrolled = notification.metrics.pixels > 0;
+    if (hasScrolled != _hasScrolled) setState(() => _hasScrolled = hasScrolled);
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOut,
+        decoration: BoxDecoration(
+          color: widget.color,
+          boxShadow: _hasScrolled
+              ? [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.28),
+                    offset: const Offset(0, 3),
+                    blurRadius: 10,
+                  ),
+                ]
+              : null,
+        ),
+        child: widget.header,
+      ),
+      Expanded(
+        child: NotificationListener<ScrollNotification>(
+          onNotification: _updateScrollShadow,
+          child: widget.scrollable,
+        ),
+      ),
+      const Divider(height: 1),
+      widget.footer,
+    ],
+  );
 }
 
 class _SidebarHoverActions extends StatefulWidget {
@@ -8589,29 +8658,31 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                   child: _threadTopicTag(context, topic),
                 ),
               ],
+              if (widget.threadCompleted) ...[
+                const SizedBox(width: 5),
+                const Tooltip(
+                  message: 'Thread complete',
+                  child: Icon(
+                    Icons.task_alt,
+                    size: 15,
+                    color: Color(0xff35d6a0),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
         const SizedBox(height: 10),
         if (_messageText.isNotEmpty)
-          DefaultTextStyle.merge(
-            style: widget.threadCompleted
-                ? TextStyle(
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.onSurface.withValues(alpha: 0.62),
-                  )
-                : null,
-            child: _WorkspaceMessageBody(
-              text: _messageText,
-              mentions: widget.message.mentions,
-              onOpenMessageReference: widget.onOpenMessageReference,
-              onOpenMention: widget.onOpenMention,
-              onOpenTopic: widget.onOpenTopic,
-              searchQuery: widget.searchQuery,
-              expanded: widget.isMessageExpanded,
-              onExpandedChanged: widget.onMessageExpandedChanged,
-            ),
+          _WorkspaceMessageBody(
+            text: _messageText,
+            mentions: widget.message.mentions,
+            onOpenMessageReference: widget.onOpenMessageReference,
+            onOpenMention: widget.onOpenMention,
+            onOpenTopic: widget.onOpenTopic,
+            searchQuery: widget.searchQuery,
+            expanded: widget.isMessageExpanded,
+            onExpandedChanged: widget.onMessageExpandedChanged,
           ),
         if (widget.message.reactions.isNotEmpty)
           Wrap(
@@ -8876,18 +8947,6 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                                   ? null
                                   : maxBubbleWidth,
                             ),
-                            if (widget.threadCompleted)
-                              const Padding(
-                                padding: EdgeInsets.only(top: 5),
-                                child: Tooltip(
-                                  message: 'Thread complete',
-                                  child: Icon(
-                                    Icons.task_alt,
-                                    size: 15,
-                                    color: Color(0xff35d6a0),
-                                  ),
-                                ),
-                              ),
                             if (replyControls != null) ...[replyControls],
                           ],
                         ),
@@ -8998,7 +9057,10 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
               ? Alignment.centerLeft
               : Alignment.center,
           heightFactor: 1,
-          child: bubble,
+          child: Opacity(
+            opacity: widget.threadCompleted ? 0.58 : 1,
+            child: bubble,
+          ),
         );
       },
     );
@@ -10244,7 +10306,7 @@ class _ThreadTopicActionsState extends State<_ThreadTopicActions> {
     onExit: (_) => setState(() => _hovered = false),
     child: Row(
       children: [
-        Expanded(child: widget.child),
+        Flexible(fit: FlexFit.loose, child: widget.child),
         if (_hovered)
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -10271,6 +10333,8 @@ class _WorkspaceContext extends StatelessWidget {
     super.key,
     required this.message,
     required this.replies,
+    required this.threadAgentNames,
+    required this.threadCompleted,
     required this.conversationMessages,
     required this.relatedThreadCandidates,
     required this.title,
@@ -10326,6 +10390,8 @@ class _WorkspaceContext extends StatelessWidget {
   });
   final WorkspaceMessage? message;
   final List<WorkspaceMessage> replies;
+  final List<String> threadAgentNames;
+  final bool threadCompleted;
   final List<WorkspaceMessage> conversationMessages;
   final List<WorkspaceMessage> relatedThreadCandidates;
   final String title;
@@ -10433,24 +10499,40 @@ class _WorkspaceContext extends StatelessWidget {
       (thread) =>
           thread.id != message?.id && (threadUnreadCounts[thread.id] ?? 0) > 0,
     );
-    if (openThreads.length < 2) {
-      return Text(
-        title,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: Theme.of(
-          context,
-        ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-      );
-    }
-    return _ThreadTitleDropdown(
-      title: title,
-      threads: openThreads,
-      selectedThreadId: message!.id,
-      hasUnreadOtherThread: hasUnreadOtherThread,
-      threadUnreadCounts: threadUnreadCounts,
-      threadTitle: (thread) => _threadTitleFor(thread),
-      onSelected: onSelectThread,
+    final titleControl = openThreads.length < 2
+        ? Text(
+            title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(
+              context,
+            ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+          )
+        : _ThreadTitleDropdown(
+            title: title,
+            threads: openThreads,
+            selectedThreadId: message!.id,
+            hasUnreadOtherThread: hasUnreadOtherThread,
+            threadUnreadCounts: threadUnreadCounts,
+            threadTitle: (thread) => _threadTitleFor(thread),
+            onSelected: onSelectThread,
+          );
+    if (threadAgentNames.isEmpty) return titleControl;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(child: titleControl),
+        const SizedBox(width: 6),
+        Text(
+          '[${threadAgentNames.join(', ')}]',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
     );
   }
 
@@ -10710,15 +10792,15 @@ class _WorkspaceContext extends StatelessWidget {
                         ),
                       ),
                       IconButton(
-                        tooltip: isWorkspaceThreadCompleted(replies)
+                        tooltip: threadCompleted
                             ? 'Mark thread incomplete'
                             : 'Mark thread complete',
                         onPressed: () => unawaited(onCompleteThread()),
                         icon: Icon(
-                          isWorkspaceThreadCompleted(replies)
+                          threadCompleted
                               ? Icons.task_alt
                               : Icons.task_alt_outlined,
-                          color: isWorkspaceThreadCompleted(replies)
+                          color: threadCompleted
                               ? const Color(0xff35d6a0)
                               : null,
                         ),

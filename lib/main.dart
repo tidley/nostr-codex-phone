@@ -8390,6 +8390,13 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
     final bootstrap = request['action'] == 'list_fallback';
     final messageId = request['message_id']?.toString();
+    final isWorkspaceMessage =
+        action == 'send_channel_message' || action == 'send_direct_message';
+    // Render locally before transport work so desktop sends do not wait for a
+    // FIPS receipt or a Nostr round trip before appearing in the conversation.
+    if (addOptimisticMessage && isWorkspaceMessage) {
+      _addOptimisticWorkspaceMessage(request);
+    }
     final workspaceTarget = _computerServiceTarget;
     if (!preferNostr &&
         !bootstrap &&
@@ -8404,29 +8411,31 @@ Return a concise catch-up summary of what happened after that point: completed w
         unawaited(fipsWorkspaceSnapshotStop(workspaceKey: _workspaceFipsKey));
         _scheduleWorkspaceFipsRetryFor(_workspaceWorkerKey);
       } else {
-      try {
-        await fipsWorkspaceSendWire(
-          workspaceKey: _workspaceFipsKey,
-          frame: jsonEncode({'workspace_request': request}),
-          messageId: BigInt.from(++_workspaceFipsNextMessageId),
-        );
-        if (addOptimisticMessage) _addOptimisticWorkspaceMessage(request);
-        if (workspaceTarget != null &&
-            _queueWorkspaceRequestForRetry(
-              workspaceTarget,
-              request,
-              preferNostr: true,
-            )) {
+        try {
+          await fipsWorkspaceSendWire(
+            workspaceKey: _workspaceFipsKey,
+            frame: jsonEncode({'workspace_request': request}),
+            messageId: BigInt.from(++_workspaceFipsNextMessageId),
+          );
+          if (addOptimisticMessage && !isWorkspaceMessage) {
+            _addOptimisticWorkspaceMessage(request);
+          }
+          if (workspaceTarget != null &&
+              _queueWorkspaceRequestForRetry(
+                workspaceTarget,
+                request,
+                preferNostr: true,
+              )) {
+            _recordDiagnostic(
+              'Awaiting worker receipt for FIPS workspace message $messageId',
+            );
+          }
+          return;
+        } catch (error) {
           _recordDiagnostic(
-            'Awaiting worker receipt for FIPS workspace message $messageId',
+            'FIPS workspace send failed; using Nostr fallback: $error',
           );
         }
-        return;
-      } catch (error) {
-        _recordDiagnostic(
-          'FIPS workspace send failed; using Nostr fallback: $error',
-        );
-      }
       }
     }
     try {
@@ -8448,14 +8457,18 @@ Return a concise catch-up summary of what happened after that point: completed w
         sender: () =>
             _nostr.sendQuery(jsonEncode({'workspace_request': request})),
       );
-      if (addOptimisticMessage) _addOptimisticWorkspaceMessage(request);
+      if (addOptimisticMessage && !isWorkspaceMessage) {
+        _addOptimisticWorkspaceMessage(request);
+      }
       if (messageId != null &&
           _queueWorkspaceRequestForRetry(
             workspaceTarget,
             request,
             preferNostr: true,
           )) {
-        _recordDiagnostic('Awaiting worker receipt for workspace message $messageId');
+        _recordDiagnostic(
+          'Awaiting worker receipt for workspace message $messageId',
+        );
       }
     } catch (error) {
       if (workspaceTarget != null &&
@@ -8477,10 +8490,9 @@ Return a concise catch-up summary of what happened after that point: completed w
 
   bool _queueWorkspaceRequestForRetry(
     RepoTarget target,
-    Map<String, Object?> request,
-    {required bool preferNostr,
-    }
-  ) {
+    Map<String, Object?> request, {
+    required bool preferNostr,
+  }) {
     final action = request['action'];
     if (action != 'send_channel_message' && action != 'send_direct_message') {
       return false;
@@ -9083,6 +9095,23 @@ Return a concise catch-up summary of what happened after that point: completed w
       ) {
         final heartbeat = session!.heartbeat.value;
         if (heartbeat.connectionState != 'active') return;
+        final lastReceivedAt = heartbeat.lastHeartbeatAt;
+        if (lastReceivedAt != null &&
+            DateTime.now().difference(lastReceivedAt) >=
+                const Duration(seconds: 15)) {
+          final activeSession = session!;
+          activeSession.generation++;
+          _setWorkspaceFipsConnectionState(
+            'reconnecting',
+            session: activeSession,
+          );
+          _recordDiagnostic(
+            'FIPS workspace heartbeat is stale; using Nostr while reconnecting',
+          );
+          unawaited(fipsWorkspaceSnapshotStop(workspaceKey: _workspaceFipsKey));
+          _scheduleWorkspaceFipsRetryFor(_workspaceWorkerKey);
+          return;
+        }
         // Notify the diagnostics panel so elapsed times stay live.
         session.heartbeat.value = _WorkspaceFipsHeartbeat(
           connectionState: heartbeat.connectionState,
@@ -9267,6 +9296,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         return;
       }
       session.retryTimer = null;
+      _setWorkspaceFipsConnectionState('reconnecting', session: session);
       _recordDiagnostic('FIPS workspace snapshot: retrying');
       unawaited(
         _sendWorkspaceRequest({'action': 'list', 'fips_snapshot': true}),
