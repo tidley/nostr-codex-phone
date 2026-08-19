@@ -8588,11 +8588,11 @@ fn structured_tool_result(
 }
 
 fn codex_status_data(workdir: &Path, codex_bin: &str) -> serde_json::Value {
-    // `codex status` requires a terminal. The worker is normally a service,
-    // so run it in a quiet pseudo-terminal instead of inheriting its stdin.
-    let status_command = format!("exec {} status", shell_quote(codex_bin));
-    match StdCommand::new("script")
-        .args(["-qec", &status_command, "/dev/null"])
+    // `codex status` is interpreted as a prompt and opens the interactive TUI.
+    // Login status is the CLI's supported non-interactive status command.
+    let status_command = format!("{} login status", shell_quote(codex_bin));
+    match StdCommand::new("sh")
+        .args(["-c", &status_command])
         .current_dir(workdir)
         .output()
     {
