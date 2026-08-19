@@ -56,7 +56,7 @@ use rust_lib_nostr_codex_phone::workspace::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::time::{interval, sleep, MissedTickBehavior};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct AgentScopeMetrics {
@@ -439,23 +439,21 @@ impl WorkspaceAgentQueues {
         };
         let parent_id = request.parent_id.as_deref().unwrap_or_default().to_string();
         let body = request.body.as_deref().unwrap_or_default().to_string();
-        for agent in workspace.agents_for_conversation(
+        if let Some(agent) = workspace.conversation_coordinator(
             request.channel_id.as_deref(),
             request.channel_id.as_deref().is_none().then_some(sender),
             request.recipient_pubkey.as_deref(),
         )? {
-            if conversation_agent_is_targeted(&agent.id, &request.mentions) {
-                self.enqueue_job(
-                    agent.id,
-                    WorkspaceAgentJob {
-                        conversation: conversation.clone(),
-                        trigger_message_id: parent_id.clone(),
-                        ephemeral_body: Some(body.clone()),
-                        mentions: request.mentions.clone(),
-                        reply_parent_id: Some(parent_id.clone()),
-                    },
-                );
-            }
+            self.enqueue_job(
+                agent.id,
+                WorkspaceAgentJob {
+                    conversation,
+                    trigger_message_id: parent_id.clone(),
+                    ephemeral_body: Some(body),
+                    mentions: vec![],
+                    reply_parent_id: Some(parent_id),
+                },
+            );
         }
         Ok(())
     }
@@ -1733,6 +1731,11 @@ async fn flush_workspace_notification_outbox(
                     delivered = true;
                     break;
                 }
+                Err(err) if err.to_string().contains("message too long") => {
+                    warn!(id = notification.id, recipient = %notification.recipient, "discarding oversized workspace notification");
+                    delivered = true;
+                    break;
+                }
                 Err(err) if attempt == 2 => {
                     warn!(id = notification.id, recipient = %notification.recipient, "workspace notification remains pending: {err:#}")
                 }
@@ -1913,6 +1916,7 @@ fn workspace_action_requires_admin(action: &str) -> bool {
             | "add_conversation_agent"
             | "remove_conversation_agent"
             | "reactivate_thread_agent"
+            | "system_status"
     )
 }
 
@@ -1961,6 +1965,33 @@ async fn process_workspace_request(
         bail!("Only workspace owners and admins can remove members.");
     }
     let update = match request.action.as_str() {
+        "system_status" => {
+            let mut status = worker_system_status_data(
+                &codex_config.working_dir,
+                request.history_range.as_deref().unwrap_or("24h"),
+            );
+            let codex_status = codex_status_data(&codex_config.working_dir, &codex_config.bin);
+            status["codex_status"] = codex_status.clone();
+            if let Some(current) = status
+                .get_mut("current")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                current.insert("codex_status".to_string(), codex_status);
+            }
+            outbound
+                .send(
+                    messenger,
+                    sender,
+                    WireMessage::tool_result(ToolResult {
+                        tool: "system_status".to_string(),
+                        request_id: request.request_id.unwrap_or_default(),
+                        workdir: codex_config.working_dir.to_string_lossy().to_string(),
+                        data: status,
+                    }),
+                )
+                .await?;
+            return Ok(());
+        }
         "request_thread_topic" => {
             agent_queues.enqueue_ephemeral_topic_request(workspace, sender, &request)?;
             return Ok(());
@@ -2157,6 +2188,32 @@ async fn process_workspace_request(
             agent_queues.enqueue(agent.id, conversation, trigger_message_id);
             return Ok(());
         }
+        "complete_thread" | "reopen_thread" => {
+            let channel_id = request.channel_id.as_deref();
+            let recipient = request.recipient_pubkey.as_deref();
+            let parent_id = request.parent_id.as_deref().unwrap_or_default();
+            let Some(message) = (if request.action == "complete_thread" {
+                workspace.complete_thread(sender, parent_id, channel_id, recipient)
+            } else {
+                workspace.reopen_thread(sender, parent_id, channel_id, recipient)
+            })?
+            else {
+                return Ok(());
+            };
+            let update = WorkspaceUpdate {
+                action: "message_created".to_string(),
+                revision: workspace.revision()?,
+                messages: vec![message_payload(message)],
+                channels: vec![],
+                members: vec![],
+                agents: vec![],
+                conversation_agents: vec![],
+                conversation_preprompts: vec![],
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            return Ok(());
+        }
         "set_thread_topic" => {
             let message = match request.channel_id.as_deref() {
                 Some(channel_id) => workspace.add_channel_message_with_main(
@@ -2287,13 +2344,17 @@ async fn process_workspace_request(
                 return Ok(());
             }
             let capability = issue_workspace_fips_capability(fips_capabilities, sender).await;
+            let issued_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             // The capability upgrades this client to FIPS after the Nostr
             // bootstrap snapshot has made its workspace usable.
             messenger
                 .send_wire_to_pubkey(
                     sender,
                     WireMessage::workspace_update(WorkspaceUpdate {
-                        action: format!("fips_snapshot_offer:{capability}"),
+                        action: format!("fips_snapshot_offer:v2:{capability}:{issued_at}"),
                         revision: workspace.revision()?,
                         channels: vec![],
                         members: vec![],
@@ -2408,14 +2469,30 @@ async fn process_workspace_request(
                 request.body.as_deref().unwrap_or_default(),
                 &folder_scope,
             )?;
+            let (coordinator, workers) = ensure_conversation_team(
+                workspace,
+                codex_config,
+                sender,
+                Some(&channel.id),
+                None,
+                None,
+            )
+            .await?;
             let update = WorkspaceUpdate {
                 action: "channel_created".to_string(),
                 revision: workspace.revision()?,
                 channels: vec![channel_payload(workspace, channel)?],
                 members: vec![],
                 messages: vec![],
-                agents: vec![],
-                conversation_agents: vec![],
+                agents: std::iter::once(coordinator)
+                    .chain(workers)
+                    .map(agent_payload)
+                    .collect(),
+                conversation_agents: workspace
+                    .conversation_agents()?
+                    .into_iter()
+                    .map(conversation_agent_payload)
+                    .collect(),
                 conversation_preprompts: workspace
                     .conversation_preprompts()?
                     .into_iter()
@@ -2637,6 +2714,15 @@ async fn process_workspace_request(
                 request.also_send_to_main,
                 request.message_id.as_deref(),
             )?;
+            let (coordinator, workers) = ensure_conversation_team(
+                workspace,
+                codex_config,
+                sender,
+                Some(channel_id),
+                None,
+                None,
+            )
+            .await?;
             let message_id = message.id.clone();
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
@@ -2644,8 +2730,15 @@ async fn process_workspace_request(
                 channels: vec![],
                 members: vec![],
                 messages: vec![message_payload(message)],
-                agents: vec![],
-                conversation_agents: vec![],
+                agents: std::iter::once(coordinator)
+                    .chain(workers)
+                    .map(agent_payload)
+                    .collect(),
+                conversation_agents: workspace
+                    .conversation_agents()?
+                    .into_iter()
+                    .map(conversation_agent_payload)
+                    .collect(),
                 conversation_preprompts: vec![],
                 typing: None,
             };
@@ -2662,12 +2755,18 @@ async fn process_workspace_request(
             enqueue_conversation_agents(
                 workspace,
                 agent_queues,
+                messenger,
+                outbound,
+                codex_config,
+                sender,
                 Some(request.channel_id.as_deref().unwrap_or_default()),
                 None,
                 None,
                 &request.mentions,
+                request.parent_id.is_none() && request.route_agent,
                 &message_id,
-            )?;
+            )
+            .await?;
             return Ok(());
         }
         "send_direct_message" => {
@@ -2686,6 +2785,15 @@ async fn process_workspace_request(
                 request.also_send_to_main,
                 request.message_id.as_deref(),
             )?;
+            let (coordinator, workers) = ensure_conversation_team(
+                workspace,
+                codex_config,
+                sender,
+                None,
+                Some(sender),
+                request.recipient_pubkey.as_deref(),
+            )
+            .await?;
             let message_id = message.id.clone();
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
@@ -2693,8 +2801,15 @@ async fn process_workspace_request(
                 channels: vec![],
                 members: vec![],
                 messages: vec![message_payload(message)],
-                agents: vec![],
-                conversation_agents: vec![],
+                agents: std::iter::once(coordinator)
+                    .chain(workers)
+                    .map(agent_payload)
+                    .collect(),
+                conversation_agents: workspace
+                    .conversation_agents()?
+                    .into_iter()
+                    .map(conversation_agent_payload)
+                    .collect(),
                 conversation_preprompts: vec![],
                 typing: None,
             };
@@ -2716,12 +2831,18 @@ async fn process_workspace_request(
             enqueue_conversation_agents(
                 workspace,
                 agent_queues,
+                messenger,
+                outbound,
+                codex_config,
+                sender,
                 None,
                 Some(sender),
                 request.recipient_pubkey.as_deref(),
                 &request.mentions,
+                request.parent_id.is_none() && request.route_agent,
                 &message_id,
-            )?;
+            )
+            .await?;
             return Ok(());
         }
         "call_invite" | "call_answer" | "call_hangup" => {
@@ -3664,6 +3785,15 @@ async fn send_channel_history(
     let message_chunks =
         nostr_workspace_message_chunks(&messages, &transfer_id, "channel_messages")?;
     let total_chunks = message_chunks.len() + 1;
+    let conversation_agents = workspace
+        .conversation_agents()?
+        .into_iter()
+        .filter(|membership| membership.channel_id.as_deref() == Some(channel_id))
+        .collect::<Vec<_>>();
+    let conversation_agent_ids = conversation_agents
+        .iter()
+        .map(|membership| membership.agent_id.as_str())
+        .collect::<HashSet<_>>();
     info!(
         channel_id,
         count = messages.len(),
@@ -3675,11 +3805,14 @@ async fn send_channel_history(
         channels: vec![],
         members: vec![],
         messages: vec![],
-        agents: vec![],
-        conversation_agents: workspace
-            .conversation_agents()?
+        agents: workspace
+            .agents()?
             .into_iter()
-            .filter(|membership| membership.channel_id.as_deref() == Some(channel_id))
+            .filter(|agent| conversation_agent_ids.contains(agent.id.as_str()))
+            .map(agent_payload)
+            .collect(),
+        conversation_agents: conversation_agents
+            .into_iter()
             .map(conversation_agent_payload)
             .collect(),
         conversation_preprompts: workspace
@@ -4587,13 +4720,136 @@ async fn provision_workspace_agent_session(
     }
 }
 
-fn enqueue_conversation_agents(
+/// Each conversation owns exactly one persistent, model-backed A0 coordinator.
+async fn ensure_conversation_coordinator(
+    workspace: &WorkspaceStore,
+    codex_config: &CodexConfig,
+    created_by: &str,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+) -> Result<WorkspaceAgent> {
+    if let Some(agent) = workspace.conversation_coordinator(channel_id, member, peer)? {
+        let agent = if agent.name != "A0" {
+            workspace.rename_agent(&agent.id, "A0")?
+        } else {
+            agent
+        };
+        if agent.session_status != "ready" || agent.opencode_session_id.is_none() {
+            let (session_id, status, session_error) =
+                provision_workspace_agent_session(codex_config).await;
+            return workspace.update_agent_session(
+                &agent.id,
+                session_id.as_deref(),
+                &status,
+                session_error.as_deref(),
+            );
+        }
+        return Ok(agent);
+    }
+    let (session_id, session_status, session_error) =
+        provision_workspace_agent_session(codex_config).await;
+    let coordinator = workspace.create_agent_with_profile(
+        "A0",
+        "Task coordinator",
+        "Coordinate routed main-conversation tasks privately: identify their semantic topic, select the worker that should handle each task, and keep related-thread handoffs compact. When directly mentioned as @A0, answer the user in the current conversation or thread without allocating a worker unless the user explicitly asks for delegation.",
+        &[],
+        None,
+        WorkspaceAgentOpenCodeProfile::default(),
+        session_id.as_deref(),
+        &session_status,
+        session_error.as_deref(),
+        created_by,
+    )?;
+    if workspace.set_conversation_coordinator(&coordinator.id, channel_id, member, peer)? {
+        return Ok(coordinator);
+    }
+    // Another request won the race. Do not retain an unowned duplicate A1.
+    workspace.delete_agent(&coordinator.id)?;
+    workspace
+        .conversation_coordinator(channel_id, member, peer)?
+        .context("conversation coordinator was not persisted")
+}
+
+/// Adopts a conversation into the A0 coordinator model. Workers are created
+/// lazily only when A0 routes a task.
+async fn ensure_conversation_team(
+    workspace: &WorkspaceStore,
+    codex_config: &CodexConfig,
+    created_by: &str,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+) -> Result<(WorkspaceAgent, Vec<WorkspaceAgent>)> {
+    let coordinator = ensure_conversation_coordinator(
+        workspace, codex_config, created_by, channel_id, member, peer,
+    )
+    .await?;
+    Ok((coordinator, vec![]))
+}
+
+async fn ensure_routed_worker(
+    workspace: &WorkspaceStore,
+    codex_config: &CodexConfig,
+    created_by: &str,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+    parent_id: &str,
+    all_workers_busy: bool,
+) -> Result<WorkspaceAgent> {
+    if !all_workers_busy {
+        if let Some(worker) = workspace.assign_oldest_available_thread_agent(parent_id, channel_id, member, peer)? {
+            return Ok(worker);
+        }
+    }
+    let next_number = workspace
+        .agents_for_conversation(channel_id, member, peer)?
+        .iter()
+        .filter_map(|agent| agent.name.strip_prefix('A')?.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let folder_scope = workspace.conversation_folder_scope(channel_id, member, peer)?;
+    let mut agent_config = codex_config.clone();
+    if let Some(folder) = folder_scope.first() {
+        agent_config.working_dir = PathBuf::from(folder);
+    }
+    let (session_id, status, session_error) = provision_workspace_agent_session(&agent_config).await;
+    let worker = workspace.create_agent_with_profile(
+        &format!("A{next_number}"),
+        "Conversation worker",
+        "Work on routed tasks in this conversation. Preserve thread ownership for replies and completion.",
+        &[],
+        None,
+        WorkspaceAgentOpenCodeProfile::default(),
+        session_id.as_deref(),
+        &status,
+        session_error.as_deref(),
+        created_by,
+    )?;
+    workspace.add_conversation_agent(&worker.id, channel_id, member, peer, &folder_scope)?;
+    if all_workers_busy {
+        workspace.assign_thread_agent(&worker.id, parent_id, channel_id, member, peer)?;
+        return Ok(worker);
+    }
+    workspace
+        .assign_oldest_available_thread_agent(parent_id, channel_id, member, peer)?
+        .context("new routed worker was not assigned")
+}
+
+async fn enqueue_conversation_agents(
     workspace: &WorkspaceStore,
     queues: &mut WorkspaceAgentQueues,
+    messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
+    _codex_config: &CodexConfig,
+    _sender: &str,
     channel_id: Option<&str>,
     member: Option<&str>,
     peer: Option<&str>,
     mentions: &[WorkspaceMentionPayload],
+    route_agent: bool,
     trigger_message_id: &str,
 ) -> Result<()> {
     let conversation = match channel_id {
@@ -4615,7 +4871,93 @@ fn enqueue_conversation_agents(
         .as_ref()
         .and_then(|message| message.parent_id.as_deref())
         .unwrap_or(trigger_message_id);
-    let assigned_agent = workspace.thread_agent(parent_id, channel_id, member, peer)?;
+    let coordinator = workspace.conversation_coordinator(channel_id, member, peer)?;
+    let coordinator_targeted = coordinator
+        .as_ref()
+        .is_some_and(|agent| conversation_agent_is_targeted(&agent.id, mentions));
+    let coordinator_delegates = coordinator_targeted
+        && message
+            .as_ref()
+            .is_some_and(|message| a0_requests_delegation(&message.body));
+    // A direct @A0 request is a visible coordinator conversation. It must not
+    // allocate a worker, even when the main-message route toggle is enabled.
+    if coordinator_targeted && !coordinator_delegates {
+        let coordinator = coordinator.context("targeted conversation coordinator is missing")?;
+        info!(
+            trigger = trigger_message_id,
+            agent = %coordinator.id,
+            mentions = ?mentions,
+            "queueing targeted conversation coordinator turn"
+        );
+        queues.enqueue(coordinator.id, conversation, trigger_message_id.to_string());
+        return Ok(());
+    }
+    let is_routed_root = (route_agent || coordinator_delegates)
+        && message.as_ref().is_some_and(|message| {
+            message.parent_id.is_none() && !message.sender_pubkey.starts_with("agent:")
+        });
+    let mut assigned_agent = workspace.thread_agent(parent_id, channel_id, member, peer)?;
+    if is_routed_root && assigned_agent.is_none() {
+        observe_and_link_related_thread(
+            workspace,
+            _codex_config,
+            channel_id,
+            member,
+            peer,
+            parent_id,
+        )
+        .await;
+        let workers = workspace.agents_for_conversation(channel_id, member, peer)?;
+        let active_workers = queues.active_turns.lock().await;
+        let all_workers_busy = !workers.is_empty()
+            && workers
+                .iter()
+                .all(|worker| active_workers.contains_key(&worker.id));
+        drop(active_workers);
+        assigned_agent = Some(
+            ensure_routed_worker(
+                workspace,
+                _codex_config,
+                _sender,
+                channel_id,
+                member,
+                peer,
+                parent_id,
+                all_workers_busy,
+            )
+            .await?,
+        );
+        // Claim the worker before its queue task starts. Without this early
+        // reservation, rapid routed roots can all observe it as idle.
+        queues
+            .active_turns
+            .lock()
+            .await
+            .entry(assigned_agent.as_ref().expect("assigned worker").id.clone())
+            .or_insert_with(CodexCancelToken::new);
+        // The message-created update precedes lazy worker allocation. Publish
+        // the allocated worker before its typing lease so clients can resolve
+        // its name and include it in the conversation member list.
+        let update = WorkspaceUpdate {
+            action: "conversation_agents_updated".to_string(),
+            revision: workspace.revision()?,
+            channels: vec![],
+            members: vec![],
+            messages: vec![],
+            agents: assigned_agent
+                .as_ref()
+                .map(|agent| vec![agent_payload(agent.clone())])
+                .unwrap_or_default(),
+            conversation_agents: workspace
+                .conversation_agents()?
+                .into_iter()
+                .map(conversation_agent_payload)
+                .collect(),
+            conversation_preprompts: vec![],
+            typing: None,
+        };
+        broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+    }
     let agents = assigned_agent
         .as_ref()
         .map(|agent| vec![agent.clone()])
@@ -4623,14 +4965,127 @@ fn enqueue_conversation_agents(
     for agent in agents {
         // A thread assignment is deliberate: it takes precedence over mentions.
         if assigned_agent.is_some() || conversation_agent_is_targeted(&agent.id, mentions) {
+            info!(
+                trigger = trigger_message_id,
+                agent = %agent.id,
+                assigned = assigned_agent.is_some(),
+                mentions = ?mentions,
+                "queueing workspace agent turn"
+            );
             queues.enqueue(
                 agent.id,
                 conversation.clone(),
                 trigger_message_id.to_string(),
             );
+        } else {
+            debug!(
+                trigger = trigger_message_id,
+                agent = %agent.id,
+                mentions = ?mentions,
+                "workspace agent was not targeted"
+            );
         }
     }
     Ok(())
+}
+
+fn a0_requests_delegation(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    ["assign this", "delegate this", "assign to a worker", "route this"]
+        .iter()
+        .any(|phrase| body.contains(phrase))
+}
+
+/// A0's private turn gives routing semantic awareness without emitting a second
+/// user-facing reply. A valid suggestion is persisted as the normal durable
+/// related-thread marker that workers already receive as compact history.
+async fn observe_and_link_related_thread(
+    workspace: &WorkspaceStore,
+    codex_config: &CodexConfig,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+    parent_id: &str,
+) {
+    let Ok(Some(coordinator)) = workspace.conversation_coordinator(channel_id, member, peer) else {
+        return;
+    };
+    let Some(session_id) = coordinator.opencode_session_id.as_deref() else {
+        return;
+    };
+    let Ok(config) = codex_config_for_workspace_agent_record(codex_config, &coordinator) else {
+        return;
+    };
+    let messages = match channel_id {
+        Some(channel_id) => workspace.channel_messages(channel_id),
+        None => workspace.direct_messages(member.unwrap_or_default(), peer.unwrap_or_default()),
+    };
+    let Ok(messages) = messages else { return };
+    let candidates = messages
+        .iter()
+        .filter(|message| message.parent_id.is_none() && message.id != parent_id)
+        .rev()
+        .take(12)
+        .map(|message| format!("{}: {}", message.id, message.body))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return;
+    }
+    let current = messages.iter().find(|message| message.id == parent_id);
+    let Some(current) = current else { return };
+    let prompt = format!(
+        "You are A0, a conversation coordinator. Determine whether this new task continues one prior thread. Return only `[[RELATED_THREAD:<id>]]` using an offered id, or `[[NO_RELATED_THREAD]]`.\n\nNew task:\n{}\n\nPrior threads:\n{}",
+        current.body,
+        candidates.join("\n")
+    );
+    let Ok(result) = run_codex_session_with_cancel_and_events(
+        &prompt,
+        &config,
+        Some(session_id),
+        None,
+        None,
+    )
+    .await else { return };
+    let Some(related_id) = result
+        .response
+        .trim()
+        .strip_prefix("[[RELATED_THREAD:")
+        .and_then(|value| value.strip_suffix("]]"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    if workspace
+        .validate_related_thread(parent_id, related_id, channel_id, member, peer)
+        .is_err()
+    {
+        return;
+    }
+    let _ = match channel_id {
+        Some(channel_id) => workspace.add_channel_message_with_main(
+            &format!("agent:{}", coordinator.id),
+            channel_id,
+            &format!("[[RELATED_THREAD:{related_id}]]"),
+            &[],
+            &[],
+            Some(parent_id),
+            false,
+        ),
+        None => workspace.add_direct_message_with_main(
+            &format!("agent:{}", coordinator.id),
+            peer.unwrap_or_default(),
+            &format!("[[RELATED_THREAD:{related_id}]]"),
+            &[],
+            &[],
+            Some(parent_id),
+            false,
+        ),
+    };
+}
+
+fn should_auto_allocate_main_message(route_agent: bool, message: &WorkspaceMessage) -> bool {
+    route_agent && message.parent_id.is_none() && !message.sender_pubkey.starts_with("agent:")
 }
 
 async fn workspace_agent_queue_worker(
@@ -4658,6 +5113,7 @@ async fn workspace_agent_queue_worker(
         {
             warn!(agent = %agent_id, trigger = %job.trigger_message_id, "workspace agent job failed: {err:#}");
         }
+        active_turns.lock().await.remove(&agent_id);
     }
 }
 
@@ -4718,7 +5174,17 @@ async fn process_workspace_agent_job(
     }
     let body =
         workspace_message_body_with_text_attachments(&message, audio_config, messenger).await;
-    let reply_parent_id = workspace_agent_reply_parent_id(&message);
+    let coordinator_id = match (&message.channel_id, &message.recipient_pubkey) {
+        (Some(channel_id), None) => workspace
+            .conversation_coordinator(Some(channel_id), None, None)?
+            .map(|agent| agent.id),
+        (None, Some(recipient)) => workspace
+            .conversation_coordinator(None, Some(&message.sender_pubkey), Some(recipient))?
+            .map(|agent| agent.id),
+        _ => None,
+    };
+    let reply_parent_id =
+        workspace_agent_reply_parent_id_for(&message, agent_id, coordinator_id.as_deref());
 
     match (&message.channel_id, &message.recipient_pubkey) {
         (Some(channel_id), None) => {
@@ -4731,7 +5197,7 @@ async fn process_workspace_agent_job(
                 Some(channel_id),
                 None,
                 None,
-                Some(reply_parent_id),
+                reply_parent_id,
                 &body,
                 &message.mentions,
                 active_turns,
@@ -4748,7 +5214,7 @@ async fn process_workspace_agent_job(
                 None,
                 Some(&message.sender_pubkey),
                 Some(recipient),
-                Some(reply_parent_id),
+                reply_parent_id,
                 &body,
                 &message.mentions,
                 active_turns,
@@ -4792,6 +5258,18 @@ async fn workspace_message_body_with_text_attachments(
 
 fn workspace_agent_reply_parent_id(message: &WorkspaceMessage) -> &str {
     message.parent_id.as_deref().unwrap_or(&message.id)
+}
+
+fn workspace_agent_reply_parent_id_for<'a>(
+    message: &'a WorkspaceMessage,
+    agent_id: &str,
+    coordinator_id: Option<&str>,
+) -> Option<&'a str> {
+    if message.parent_id.is_none() && coordinator_id == Some(agent_id) {
+        None
+    } else {
+        Some(workspace_agent_reply_parent_id(message))
+    }
 }
 
 fn workspace_agent_profile_from_request(
@@ -4918,7 +5396,13 @@ async fn route_conversation_agents(
     active_turns: &Arc<Mutex<HashMap<String, CodexCancelToken>>>,
 ) -> Result<()> {
     let preprompts = workspace.conversation_preprompts()?;
-    for mut agent in workspace.agents_for_conversation(channel_id, member, peer)? {
+    let mut agents = workspace.agents_for_conversation(channel_id, member, peer)?;
+    if let Some(coordinator) = workspace.conversation_coordinator(channel_id, member, peer)? {
+        if only_agent_id == Some(coordinator.id.as_str()) {
+            agents.push(coordinator);
+        }
+    }
+    for mut agent in agents {
         if only_agent_id.is_some_and(|agent_id| agent.id != agent_id) {
             continue;
         }
@@ -4997,8 +5481,25 @@ async fn route_conversation_agents(
             })
             .map(|preprompt| preprompt.preprompt.as_str())
             .unwrap_or_default();
-        let thread_context =
-            workspace_thread_context(workspace, parent_id, channel_id, member, peer)?;
+        let first_thread_turn = parent_id.is_some_and(|parent_id| {
+            let messages = match channel_id {
+                Some(channel_id) => workspace.channel_messages(channel_id),
+                None => workspace.direct_messages(member.unwrap_or_default(), peer.unwrap_or_default()),
+            };
+            messages
+                .map(|messages| {
+                    !messages.iter().any(|message| {
+                        message.parent_id.as_deref() == Some(parent_id)
+                            && message.sender_pubkey == format!("agent:{}", agent.id)
+                    })
+                })
+                .unwrap_or(false)
+        });
+        let thread_context = if first_thread_turn {
+            workspace_thread_context(workspace, parent_id, channel_id, member, peer)?
+        } else {
+            String::new()
+        };
         let suppress_typing = body.trim().starts_with("[[THREAD_TOPIC_REQUEST]]");
         let prompt = match conversation_scope_prompt(folder_scope, &agent_config) {
             Ok(scope) => format!(
@@ -5192,6 +5693,33 @@ async fn route_conversation_agents(
         // A history request is an internal control response, never a message to show in the thread.
         if history_follow_up_failed || workspace_history_request_count(&result.response).is_some() {
             continue;
+        }
+        if is_workspace_agent_progress_only_response(&result.response) {
+            info!(agent = %agent.id, "continuing workspace agent after plan-only response");
+            let prompt = "Do the requested work now. Use the available tools and do not send another plan, acknowledgement, or progress update. Reply only after completing the work, or state a concrete blocker that prevents completion.";
+            match run_workspace_agent_with_typing(
+                workspace,
+                messenger,
+                &agent,
+                channel_id,
+                member,
+                peer,
+                parent_id,
+                prompt,
+                &agent_config,
+                &active_session_id,
+                active_turns,
+                suppress_typing,
+            )
+            .await
+            {
+                Ok(next) if !next.response.trim().is_empty() => result = next,
+                Ok(_) => continue,
+                Err(err) => {
+                    warn!(agent = %agent.id, "workspace agent continuation failed: {err:#}");
+                    continue;
+                }
+            }
         }
         if suppress_typing && !is_thread_topic_response(&result.response) {
             warn!(agent = %agent.id, "discarded malformed thread topic response");
@@ -5404,7 +5932,7 @@ fn conversation_agent_initialization_prompt(agent_traits: &str) -> String {
     let traits = agent_traits.trim();
     let traits = (!traits.is_empty()).then(|| format!("\n\nAgent instructions:\n{traits}"));
     format!(
-        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying. Ignore any earlier instruction to reply with `READY`; answer the user message that follows. For implementation requests, do the work in this turn. Do not stop after stating a plan or ask for permission to proceed unless the user requested a plan or you have a concrete blocker.{}",
+        "You are in a shared conversation. Other participants' messages are not automatically in your context. If you need recent context, reply with only `[[WORKSPACE_HISTORY: N]]`, where N is 5, 10, 15, and so on up to {WORKSPACE_HISTORY_REQUEST_MAX}. You will then receive that many recent messages before replying. Do not call `list_channel_messages` or `list_direct_messages`; those client endpoints do not have your conversation ID. Ignore any earlier instruction to reply with `READY`; answer the user message that follows. For implementation requests, do the work in this turn. Do not stop after stating a plan or ask for permission to proceed unless the user requested a plan or you have a concrete blocker.{}",
         traits.unwrap_or_default(),
     )
 }
@@ -5416,6 +5944,13 @@ fn conversation_agent_prompt(thread_context: &str, body: &str) -> String {
     }
     sections.push(format!("User message:\n{body}"));
     sections.join("\n\n")
+}
+
+fn is_workspace_agent_progress_only_response(response: &str) -> bool {
+    let response = response.trim().to_ascii_lowercase();
+    response.starts_with("i'll ")
+        || response.starts_with("i will ")
+        || response.starts_with("let me ")
 }
 
 fn workspace_thread_context(
@@ -9798,6 +10333,9 @@ fn codex_status_from_event(event: &serde_json::Value) -> Option<(String, bool)> 
             let part = event.pointer("/properties/part")?;
             match part.get("type").and_then(serde_json::Value::as_str) {
                 Some("tool") => {
+                    if let Some(todos) = opencode_todos_from_event(event) {
+                        return Some((format_todo_status(todos), true));
+                    }
                     let state = part
                         .pointer("/state/status")
                         .and_then(serde_json::Value::as_str)?;
@@ -9818,9 +10356,7 @@ fn codex_status_from_event(event: &serde_json::Value) -> Option<(String, bool)> 
             }
         }
         Some("todo.updated") => {
-            let todos = event
-                .pointer("/properties/todos")
-                .and_then(serde_json::Value::as_array)?;
+            let todos = opencode_todos_from_event(event)?;
             Some((format_todo_status(todos), true))
         }
         Some("permission.updated") => Some((
@@ -9846,6 +10382,19 @@ fn codex_status_from_event(event: &serde_json::Value) -> Option<(String, bool)> 
         }
         _ => None,
     }
+}
+
+// OpenCode sends todos as a top-level update in newer versions and as tool
+// input in others. Handle both so the phone receives the checklist itself.
+fn opencode_todos_from_event(event: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    [
+        "/properties/todos",
+        "/todos",
+        "/properties/part/state/input/todos",
+        "/part/state/input/todos",
+    ]
+    .iter()
+    .find_map(|path| event.pointer(path).and_then(serde_json::Value::as_array))
 }
 
 // OpenCode uses different event shapes across CLI versions. Prefer the task
@@ -10189,6 +10738,72 @@ mod tests {
         assert!(thread_agent_is_reusable(&agent));
     }
 
+    #[test]
+    fn only_flagged_main_messages_auto_allocate_workers() {
+        let root = WorkspaceMessage {
+            id: "root".to_string(),
+            channel_id: Some("channel".to_string()),
+            recipient_pubkey: None,
+            sender_pubkey: "member".to_string(),
+            body: "hello".to_string(),
+            attachments: vec![],
+            mentions: vec![],
+            parent_id: None,
+            also_send_to_main: false,
+            pinned: false,
+            reactions: vec![],
+            work_history: vec![],
+            created_at: 0,
+        };
+        assert!(should_auto_allocate_main_message(true, &root));
+        assert!(!should_auto_allocate_main_message(false, &root));
+        let reply = WorkspaceMessage {
+            parent_id: Some("root".to_string()),
+            ..root
+        };
+        assert!(!should_auto_allocate_main_message(true, &reply));
+    }
+
+    #[test]
+    fn targeted_coordinator_replies_in_place() {
+        let root = WorkspaceMessage {
+            id: "root".to_string(),
+            channel_id: Some("channel".to_string()),
+            recipient_pubkey: None,
+            sender_pubkey: "member".to_string(),
+            body: "@A0 summarize this conversation".to_string(),
+            attachments: vec![],
+            mentions: vec![WorkspaceMentionPayload {
+                kind: "agent".to_string(),
+                id: "a0".to_string(),
+                label: "A0".to_string(),
+            }],
+            parent_id: None,
+            also_send_to_main: false,
+            pinned: false,
+            reactions: vec![],
+            work_history: vec![],
+            created_at: 0,
+        };
+        assert_eq!(
+            workspace_agent_reply_parent_id_for(&root, "a0", Some("a0")),
+            None
+        );
+        assert_eq!(
+            workspace_agent_reply_parent_id_for(&root, "a1", Some("a0")),
+            Some("root")
+        );
+
+        let reply = WorkspaceMessage {
+            parent_id: Some("root".to_string()),
+            ..root
+        };
+        assert_eq!(
+            workspace_agent_reply_parent_id_for(&reply, "a0", Some("a0")),
+            Some("root")
+        );
+    }
+
     #[tokio::test]
     async fn workspace_fips_capabilities_are_random_member_bound_and_single_use() {
         let capabilities = Arc::new(Mutex::new(HashMap::new()));
@@ -10264,6 +10879,19 @@ mod tests {
                 ..message
             },
             &conversation,
+        ));
+    }
+
+    #[test]
+    fn detects_plan_only_workspace_agent_responses() {
+        assert!(is_workspace_agent_progress_only_response(
+            "I'll implement the requested change now."
+        ));
+        assert!(is_workspace_agent_progress_only_response(
+            "Let me inspect the repository."
+        ));
+        assert!(!is_workspace_agent_progress_only_response(
+            "Implemented the requested change."
         ));
     }
 
@@ -10912,6 +11540,37 @@ mod tests {
         assert_eq!(
             format_todo_status(todos.as_array().unwrap()),
             "OpenCode todos: 1/3 complete\n[x] Inspect status routing\n[~] Show updates on the phone\n[ ] Run checks"
+        );
+    }
+
+    #[test]
+    fn shows_todos_embedded_in_opencode_tool_updates() {
+        let event = serde_json::json!({
+            "type": "message.part.updated",
+            "properties": {
+                "part": {
+                    "type": "tool",
+                    "state": {
+                        "status": "running",
+                        "title": "3 todos",
+                        "input": {
+                            "todos": [
+                                {"content": "Inspect status routing", "status": "completed"},
+                                {"content": "Show updates on the phone", "status": "in_progress"},
+                                {"content": "Run checks", "status": "pending"}
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            codex_status_from_event(&event),
+            Some((
+                "OpenCode todos: 1/3 complete\n[x] Inspect status routing\n[~] Show updates on the phone\n[ ] Run checks".to_string(),
+                true,
+            ))
         );
     }
 

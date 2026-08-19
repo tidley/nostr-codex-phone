@@ -89,7 +89,9 @@ impl NostrMessenger {
             .await
             .context("failed to subscribe to GiftWrap DMs")?;
 
-        let (tx, rx) = mpsc::channel(128);
+        // Workspace snapshots and relay catch-up can arrive in bursts. Keep
+        // durable user requests queued instead of dropping them behind traffic.
+        let (tx, rx) = mpsc::channel(4096);
         let listener_keys = keys.clone();
         let listener_receive_peers = receive_peers.clone();
         let listener_client = client.clone();
