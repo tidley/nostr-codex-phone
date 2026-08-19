@@ -233,6 +233,95 @@ void main() {
     focus.dispose();
   });
 
+  testWidgets('composer exposes a reversible thread completion toggle inline', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    final focus = FocusNode();
+    var completed = false;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Material(
+          child: WorkspaceComposer(
+            composer: controller,
+            composerFocus: focus,
+            hintText: 'Reply',
+            mentionOptions: const [],
+            onMentionSelected: (_) {},
+            onSend: () {},
+            onAttach: () async {},
+            canCompleteThread: true,
+            onCompleteThread: () async => completed = true,
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byTooltip('Mark thread complete'));
+    await tester.pump();
+
+    expect(completed, isTrue);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Material(
+          child: WorkspaceComposer(
+            composer: controller,
+            composerFocus: focus,
+            hintText: 'Reply',
+            mentionOptions: const [],
+            onMentionSelected: (_) {},
+            onSend: () {},
+            onAttach: () async {},
+            canCompleteThread: true,
+            threadCompleted: true,
+            onCompleteThread: () async => completed = false,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byTooltip('Mark thread incomplete'), findsOneWidget);
+    await tester.tap(find.byTooltip('Mark thread incomplete'));
+    await tester.pump();
+    expect(completed, isFalse);
+    controller.dispose();
+    focus.dispose();
+  });
+
+  testWidgets('composer toggles root-message routing to the router agent', (
+    tester,
+  ) async {
+    final controller = TextEditingController();
+    final focus = FocusNode();
+    bool? routed;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Material(
+          child: WorkspaceComposer(
+            composer: controller,
+            composerFocus: focus,
+            hintText: 'Message',
+            mentionOptions: const [],
+            onMentionSelected: (_) {},
+            onSend: () {},
+            onAttach: () async {},
+            routeMainToAgent: true,
+            onRouteMainToAgentChanged: (value) => routed = value,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byTooltip('Sending to router agent'), findsOneWidget);
+    await tester.tap(find.byTooltip('Sending to router agent'));
+    await tester.pump();
+    expect(routed, isFalse);
+    controller.dispose();
+    focus.dispose();
+  });
+
   testWidgets('composer mention suggestions can be selected', (tester) async {
     final controller = TextEditingController(text: '@');
     final focus = FocusNode();

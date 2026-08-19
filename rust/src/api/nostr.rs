@@ -616,7 +616,15 @@ pub async fn fips_workspace_snapshot_connect(
             .unwrap_or(u64::MAX - 1),
         assembler: FipsApplicationFrameAssembler::default(),
     };
-    workspace_snapshot_send_frame(&mut client, capability.into_bytes()).await?;
+    // A stale capability after a worker restart can leave the underlying FIPS
+    // connection retrying forever. Return control to Dart so it can fall back
+    // to Nostr and request a fresh, member-bound capability.
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        workspace_snapshot_send_frame(&mut client, capability.into_bytes()),
+    )
+    .await
+    .map_err(|_| anyhow!("FIPS workspace capability handshake timed out"))??;
     let replaced = WORKSPACE_SNAPSHOT_CLIENTS
         .lock()
         .await
@@ -680,6 +688,7 @@ pub async fn fips_workspace_snapshot_receive(
 
 /// Send one JSON workspace control frame over the dedicated reliable stream.
 pub async fn fips_workspace_snapshot_send(workspace_key: String, frame: String) -> Result<()> {
+    let envelope = workspace_fips_control_envelope(&frame)?;
     let workspace_key = workspace_transport_key(&workspace_key)?;
     let transport = WORKSPACE_SNAPSHOT_CLIENTS
         .lock()
@@ -688,7 +697,7 @@ pub async fn fips_workspace_snapshot_send(workspace_key: String, frame: String) 
         .cloned()
         .ok_or_else(|| anyhow!("FIPS workspace transport is not active"))?;
     let mut transport = transport.lock().await;
-    workspace_snapshot_send_frame(&mut transport, frame.into_bytes()).await
+    workspace_snapshot_send_frame(&mut transport, envelope).await
 }
 
 /// Send one application envelope on the persistent workspace FIPS service.
@@ -716,6 +725,18 @@ fn workspace_fips_app_envelope(frame: &str, message_id: u64) -> Result<Vec<u8>> 
     }
     parse_wire_message(frame)?;
     Ok(FipsApplicationEnvelope::app(message_id, frame.to_string())?.encode()?)
+}
+
+fn workspace_fips_control_envelope(frame: &str) -> Result<Vec<u8>> {
+    let envelope = FipsApplicationEnvelope::decode(frame.as_bytes())?;
+    if envelope.version != 1
+        || envelope.message_id.is_some()
+        || envelope.frame.is_some()
+        || !matches!(envelope.kind.as_str(), "ping" | "pong")
+    {
+        bail!("FIPS workspace control envelope is invalid");
+    }
+    Ok(envelope.encode()?)
 }
 
 pub async fn fips_workspace_snapshot_stop(workspace_key: String) -> Result<()> {
@@ -1422,6 +1443,16 @@ mod tests {
         );
         assert!(workspace_fips_app_envelope("not a wire message", 7).is_err());
         assert!(workspace_fips_app_envelope(r#"{"query":"hello"}"#, 0).is_err());
+    }
+
+    #[test]
+    fn workspace_control_envelope_accepts_only_ping_and_pong() {
+        let ping = workspace_fips_control_envelope(r#"{"version":1,"type":"ping"}"#).unwrap();
+        assert_eq!(FipsApplicationEnvelope::decode(&ping).unwrap().kind, "ping");
+        assert!(workspace_fips_control_envelope(r#"{"version":1,"type":"app"}"#).is_err());
+        assert!(
+            workspace_fips_control_envelope(r#"{"version":1,"type":"pong","frame":"x"}"#).is_err()
+        );
     }
 
     #[test]

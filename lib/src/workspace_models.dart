@@ -205,6 +205,23 @@ String? workspaceRelatedThreadId(WorkspaceMessage message) {
 bool isWorkspaceRelatedThreadControlMessage(WorkspaceMessage message) =>
     _workspaceRelatedThreadMarker.hasMatch(message.body);
 
+bool isWorkspaceThreadCompletionControlMessage(WorkspaceMessage message) =>
+    message.body.trim() == '[[THREAD_COMPLETED]]' ||
+    message.body.trim() == '[[THREAD_REOPENED]]';
+
+bool isWorkspaceThreadCompleted(Iterable<WorkspaceMessage> replies) {
+  final controls =
+      replies
+          .where(isWorkspaceThreadCompletionControlMessage)
+          .toList(growable: false)
+        ..sort((left, right) {
+          final created = left.createdAt.compareTo(right.createdAt);
+          return created != 0 ? created : left.id.compareTo(right.id);
+        });
+  return controls.isNotEmpty &&
+      controls.last.body.trim() == '[[THREAD_COMPLETED]]';
+}
+
 final _workspaceRelatedThreadMarker = RegExp(
   r'^\s*\[\[RELATED_THREAD:\s*([^\]\r\n]*)\]\]\s*$',
   caseSensitive: false,
@@ -1064,6 +1081,9 @@ class WorkspaceState {
     );
     if ((isSnapshot && !isPartialSnapshot && hasConversationAgentSnapshot) ||
         (isSnapshotHeader && incomingConversationAgents.isNotEmpty) ||
+        ((data['action'] == 'channel_created' ||
+                data['action'] == 'message_created') &&
+            incomingConversationAgents.isNotEmpty) ||
         (data['action'] == 'agent_created' &&
             incomingConversationAgents.isNotEmpty) ||
         data['action'] == 'agents' ||

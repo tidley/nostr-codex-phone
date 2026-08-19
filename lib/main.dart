@@ -108,6 +108,8 @@ class _WorkspaceFipsSession {
   int? snapshotGeneration;
   int nextMessageId = 0;
   int lastReceivedMessageId = 0;
+  int retryAttempt = 0;
+  bool offerRequestInFlight = false;
   final Set<int> receivedMessageIds = <int>{};
   final ValueNotifier<_WorkspaceFipsHeartbeat> heartbeat = ValueNotifier(
     const _WorkspaceFipsHeartbeat(),
@@ -128,6 +130,20 @@ class _WorkspaceFipsSession {
     heartbeat.dispose();
     peers.dispose();
   }
+}
+
+class _PendingWorkspaceRequest {
+  _PendingWorkspaceRequest({
+    required this.target,
+    required this.request,
+    required this.preferNostr,
+  });
+
+  final RepoTarget target;
+  final Map<String, Object?> request;
+  final bool preferNostr;
+  int attempts = 0;
+  Timer? retryTimer;
 }
 
 class _WorkspaceWorkerState {
@@ -821,6 +837,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Future<void>? _nostrRestartInFlight;
   final _workspaceVoiceResult = ValueNotifier<_WorkspaceVoiceResult?>(null);
   bool _workspaceVoicePending = false;
+  final _pendingWorkspaceRequests = <String, _PendingWorkspaceRequest>{};
   String _workspaceDisplayName = '';
   Map<String, String> _workspaceMemberAliases = {};
   Map<String, WorkspaceConversationPreference>
@@ -1061,6 +1078,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       state.fips.heartbeatTicker?.cancel();
     }
     _workspaceInviteTimer?.cancel();
+    for (final pending in _pendingWorkspaceRequests.values) {
+      pending.retryTimer?.cancel();
+    }
     for (final workerKey in _workspaceWorkers.keys) {
       unawaited(_saveWorkspaceCache(workerKey: workerKey));
     }
@@ -1935,7 +1955,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         selectionGeneration == _workspaceSelectionGeneration &&
         _connected &&
         _connectedPeerPubkey == target.pubkey) {
-      await _sendWorkspaceRequest({'action': 'list'});
+      _startWorkspaceFipsSupervisor(target.pubkey);
     }
   }
 
@@ -4241,14 +4261,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   set _workspaceFocusedConversationKey(String value) =>
       _activeWorkspaceWorker.focusedConversationKey = value;
   _WorkspaceFipsSession get _workspaceFips => _activeWorkspaceWorker.fips;
-  bool get _workspaceFipsSnapshotInFlight => _workspaceFips.snapshotInFlight;
   String get _workspaceFipsConnectionState => _workspaceFips.connectionState;
   ValueNotifier<_WorkspaceFipsHeartbeat> get _workspaceFipsHeartbeat =>
       _workspaceFips.heartbeat;
   ValueNotifier<List<String>> get _workspaceFipsPeers => _workspaceFips.peers;
-  Timer? get _workspaceFipsRetryTimer => _workspaceFips.retryTimer;
-  set _workspaceFipsRetryTimer(Timer? value) =>
-      _workspaceFips.retryTimer = value;
   int get _workspaceFipsNextMessageId => _workspaceFips.nextMessageId;
   set _workspaceFipsNextMessageId(int value) =>
       _workspaceFips.nextMessageId = value;
@@ -4569,7 +4585,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             }),
           ),
         );
-        _awaitWorkspaceFipsOfferFor(target.pubkey);
+        _startWorkspaceFipsSupervisor(target.pubkey);
       } catch (error) {
         _recordDiagnostic(
           'FIPS workspace bootstrap failed for ${target.displayName}: $error',
@@ -4947,6 +4963,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       unawaited(_fetchRecentInboxMessages());
       // The workspace cache stays visible until a complete replacement snapshot arrives.
       unawaited(_sendWorkspaceRequest({'action': 'list'}));
+      for (final messageId in _pendingWorkspaceRequests.keys.toList()) {
+        unawaited(_retryPendingWorkspaceRequest(messageId));
+      }
       await Future<void>.delayed(const Duration(milliseconds: 900));
     } catch (error) {
       if (mounted) {
@@ -5185,7 +5204,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             unawaited(_sendWorkspaceRequest({'action': 'list_fallback'}));
             return true;
           }
-          if (worker.fips.snapshotInFlight) {
+          if (worker.fips.snapshotInFlight ||
+              worker.fips.connectionState == 'active') {
+            // An advert can be repeated while the direct node is healthy. It
+            // is not permission to replace that long-lived route.
             return true;
           }
           worker.fips.generation++;
@@ -5197,6 +5219,13 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         }
         final isMessageCreated =
             update is Map && update['action'] == 'message_created';
+        final confirmedMessageIds = update is Map && update['messages'] is List
+            ? (update['messages'] as List)
+                  .whereType<Map>()
+                  .map((message) => message['id']?.toString())
+                  .whereType<String>()
+                  .toList(growable: false)
+            : const <String>[];
         String? inactiveAgentConversationKey;
         setState(() {
           final addedMessages = worker.workspace.apply(
@@ -5253,6 +5282,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           }
           worker.revision.value++;
         });
+        for (final messageId in confirmedMessageIds) {
+          _clearPendingWorkspaceRequest(messageId);
+        }
         _scheduleWorkspaceCacheSave(workerKey: workerKey);
         if (inactiveAgentConversationKey != null) {
           _playInactiveSessionReplyAlert();
@@ -6098,7 +6130,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     String? workspaceConversationKey,
     void Function(ToolResultPayload result)? onResult,
   }) async {
-    if (_sending || !await _ensureConnectedForSend()) return;
+    if (_sending) return;
+    final ready = tool == 'system_status'
+        ? _computerServiceTarget != null &&
+              await _ensureConnectedToWorkspaceService(_computerServiceTarget!)
+        : await _ensureConnectedForSend();
+    if (!ready) return;
     final conversationKey = _activeConversationKey;
     final label = visibleText ?? tool.replaceAll('_', ' ');
     final requestId = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
@@ -6122,10 +6159,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _status = 'Requesting $label...';
     });
     try {
-      await _sendWithAutoRecovery(
-        label: '$label request',
-        sender: () => _sendQueryPreferFips(payload),
-      );
+      if (tool == 'system_status') {
+        await _sendWorkspaceRequest({
+          'action': 'system_status',
+          'request_id': requestId,
+          ...extra,
+        });
+      } else {
+        await _sendWithAutoRecovery(
+          label: '$label request',
+          sender: () => _sendQueryPreferFips(payload),
+        );
+      }
       if (!mounted) return;
       setState(() {
         _status = 'Waiting for $label...';
@@ -8328,40 +8373,162 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
   }
 
-  Future<void> _sendWorkspaceRequest(Map<String, Object?> request) async {
+  Future<void> _sendWorkspaceRequest(
+    Map<String, Object?> request, {
+    bool addOptimisticMessage = true,
+    bool preferNostr = false,
+  }) async {
     if (request['action'] == 'refresh') {
       request = {'action': 'list'};
     }
-    _addOptimisticWorkspaceMessage(request);
+    final action = request['action'];
+    if ((action == 'send_channel_message' || action == 'send_direct_message') &&
+        request['message_id']?.toString().isNotEmpty != true) {
+      request = Map<String, Object?>.from(request)
+        ..['message_id'] =
+            'client-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
+    }
     final bootstrap = request['action'] == 'list_fallback';
-    if (!bootstrap && _workspaceFipsConnectionState == 'active') {
+    final messageId = request['message_id']?.toString();
+    final workspaceTarget = _computerServiceTarget;
+    if (!preferNostr &&
+        !bootstrap &&
+        _workspaceFipsConnectionState == 'active') {
+      if (!_workspaceFipsRouteIsFresh()) {
+        final session = _workspaceFips;
+        session.generation++;
+        _setWorkspaceFipsConnectionState('reconnecting', session: session);
+        _recordDiagnostic(
+          'FIPS workspace route is stale; using Nostr while reconnecting',
+        );
+        unawaited(fipsWorkspaceSnapshotStop(workspaceKey: _workspaceFipsKey));
+        _scheduleWorkspaceFipsRetryFor(_workspaceWorkerKey);
+      } else {
       try {
         await fipsWorkspaceSendWire(
           workspaceKey: _workspaceFipsKey,
           frame: jsonEncode({'workspace_request': request}),
           messageId: BigInt.from(++_workspaceFipsNextMessageId),
         );
-        // A live FIPS route is the only transport for all worker requests,
-        // including durable messages and their inline large-text payloads.
+        if (addOptimisticMessage) _addOptimisticWorkspaceMessage(request);
+        if (workspaceTarget != null &&
+            _queueWorkspaceRequestForRetry(
+              workspaceTarget,
+              request,
+              preferNostr: true,
+            )) {
+          _recordDiagnostic(
+            'Awaiting worker receipt for FIPS workspace message $messageId',
+          );
+        }
         return;
       } catch (error) {
         _recordDiagnostic(
-          'FIPS workspace send failed; recovering with Nostr: $error',
+          'FIPS workspace send failed; using Nostr fallback: $error',
         );
-        _setWorkspaceFipsConnectionState('reconnecting');
-        _scheduleWorkspaceFipsRetry();
+      }
       }
     }
-    final workspaceTarget = _computerServiceTarget;
-    if (workspaceTarget == null ||
-        !await _ensureConnectedToWorkspaceService(workspaceTarget)) {
+    try {
+      if (workspaceTarget == null) {
+        throw StateError('No workspace service is selected');
+      }
+      // A FIPS session may be active while its Nostr inbox is stopped. Fallback
+      // must explicitly establish Nostr rather than treating FIPS as connected.
+      if (!await _ensureConnectedToWorkspaceService(
+        workspaceTarget,
+        requireNostr: true,
+      )) {
+        throw StateError(
+          'Could not connect to the workspace service over Nostr',
+        );
+      }
+      await _sendWithAutoRecovery(
+        label: 'Workspace request',
+        sender: () =>
+            _nostr.sendQuery(jsonEncode({'workspace_request': request})),
+      );
+      if (addOptimisticMessage) _addOptimisticWorkspaceMessage(request);
+      if (messageId != null &&
+          _queueWorkspaceRequestForRetry(
+            workspaceTarget,
+            request,
+            preferNostr: true,
+          )) {
+        _recordDiagnostic('Awaiting worker receipt for workspace message $messageId');
+      }
+    } catch (error) {
+      if (workspaceTarget != null &&
+          _queueWorkspaceRequestForRetry(
+            workspaceTarget,
+            request,
+            preferNostr: true,
+          )) {
+        if (mounted) {
+          setState(
+            () => _status = 'Message queued; reconnecting to workspace...',
+          );
+        }
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  bool _queueWorkspaceRequestForRetry(
+    RepoTarget target,
+    Map<String, Object?> request,
+    {required bool preferNostr,
+    }
+  ) {
+    final action = request['action'];
+    if (action != 'send_channel_message' && action != 'send_direct_message') {
+      return false;
+    }
+    final messageId = request['message_id']?.toString();
+    if (messageId == null || messageId.isEmpty) return false;
+    final pending = _pendingWorkspaceRequests.putIfAbsent(
+      messageId,
+      () => _PendingWorkspaceRequest(
+        target: target,
+        request: Map<String, Object?>.from(request),
+        preferNostr: preferNostr,
+      ),
+    );
+    pending.retryTimer?.cancel();
+    pending.attempts++;
+    final seconds = (pending.attempts * 5).clamp(5, 30).toInt();
+    pending.retryTimer = Timer(Duration(seconds: seconds), () {
+      unawaited(_retryPendingWorkspaceRequest(messageId));
+    });
+    _recordDiagnostic('Workspace message $messageId queued for Nostr retry');
+    return true;
+  }
+
+  Future<void> _retryPendingWorkspaceRequest(String messageId) async {
+    final pending = _pendingWorkspaceRequests[messageId];
+    if (pending == null || !mounted) return;
+    pending.retryTimer = null;
+    // The selected workspace determines the active Nostr recipient. Wait until
+    // this workspace is selected instead of accidentally sending to another.
+    if (_computerServiceTarget?.pubkey.trim() != pending.target.pubkey.trim()) {
+      _queueWorkspaceRequestForRetry(
+        pending.target,
+        pending.request,
+        preferNostr: pending.preferNostr,
+      );
       return;
     }
-    await _sendWithAutoRecovery(
-      label: 'Workspace request',
-      sender: () =>
-          _nostr.sendQuery(jsonEncode({'workspace_request': request})),
+    await _sendWorkspaceRequest(
+      pending.request,
+      addOptimisticMessage: false,
+      preferNostr: pending.preferNostr,
     );
+  }
+
+  void _clearPendingWorkspaceRequest(String? messageId) {
+    if (messageId == null || messageId.isEmpty) return;
+    _pendingWorkspaceRequests.remove(messageId)?.retryTimer?.cancel();
   }
 
   void _addOptimisticWorkspaceMessage(Map<String, Object?> request) {
@@ -8415,8 +8582,9 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
     final sender = _ownPubkeyHex ?? _ownPubkey;
     if (sender == null || sender.isEmpty) return;
-    final messageId =
-        'client-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
+    final messageId = request['message_id']?.toString().isNotEmpty == true
+        ? request['message_id']!.toString()
+        : 'client-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
     request['message_id'] = messageId;
     final message = WorkspaceMessage.fromJson({
       'id': messageId,
@@ -8448,16 +8616,25 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   String? _workspaceFipsCapabilityFromOffer(String action) {
-    const prefix = 'fips_snapshot_offer:';
-    final capability = action.startsWith(prefix)
-        ? action.substring(prefix.length)
-        : null;
-    // A 32-byte URL-safe base64 value is 43 characters. Reject malformed
-    // signaling before it reaches the native transport.
-    return capability != null &&
-            RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(capability)
-        ? capability
-        : null;
+    const prefix = 'fips_snapshot_offer:v2:';
+    if (!action.startsWith(prefix)) return null;
+    final parts = action.substring(prefix.length).split(':');
+    if (parts.length != 2 ||
+        !RegExp(r'^[A-Za-z0-9_-]{43}$').hasMatch(parts[0])) {
+      return null;
+    }
+    final issuedAt = int.tryParse(parts[1]);
+    if (issuedAt == null) return null;
+    final age = DateTime.now().difference(
+      DateTime.fromMillisecondsSinceEpoch(issuedAt * 1000),
+    );
+    // Capabilities are single-use and expire on the worker. Reject replayed
+    // relay history instead of starting a direct session with a dead token.
+    if (age > const Duration(seconds: 90) ||
+        age < const Duration(seconds: -30)) {
+      return null;
+    }
+    return parts[0];
   }
 
   void _updateFipsMesh(String workerKey, Object? members) {
@@ -8601,11 +8778,13 @@ Return a concise catch-up summary of what happened after that point: completed w
       session.lastReceivedMessageId = 0;
       var lastFrameAt = DateTime.now();
       while (mounted) {
+        if (sessionGeneration != session.generation) return;
         if (!_workspaceFipsEnabled.value) return;
         final frame = await fipsWorkspaceSnapshotReceive(
           workspaceKey: workerKey,
           timeoutMs: BigInt.from(5000),
         );
+        if (sessionGeneration != session.generation) return;
         if (frame == null) {
           if (DateTime.now().difference(lastFrameAt) >=
               const Duration(seconds: 45)) {
@@ -8629,6 +8808,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         }
         switch (envelope['type']) {
           case 'hello':
+            _recordWorkspaceFipsHeartbeat(session: session);
             _setWorkspaceFipsConnectionState('connected', session: session);
             continue;
           case 'ping':
@@ -8655,6 +8835,7 @@ Return a concise catch-up summary of what happened after that point: completed w
             if (decoded['workspace_update'] is! Map) {
               throw const FormatException('FIPS workspace frame is invalid');
             }
+            _recordWorkspaceFipsHeartbeat(session: session);
             if (!mounted) return;
             setState(() {
               worker.workspace.apply(
@@ -8669,6 +8850,7 @@ Return a concise catch-up summary of what happened after that point: completed w
             if (_isFinalWorkspaceSnapshotFrame(decoded)) {
               snapshotComplete = true;
               session.retryTimer?.cancel();
+              session.retryAttempt = 0;
               session.offerTimer?.cancel();
               _setWorkspaceFipsConnectionState('active', session: session);
             }
@@ -8703,12 +8885,14 @@ Return a concise catch-up summary of what happened after that point: completed w
             if (wireJson is Map && wireJson['workspace_update'] is Map) {
               final update = wireJson['workspace_update'] as Map;
               if (update['action'] == 'fips_mesh') {
+                _recordWorkspaceFipsHeartbeat(session: session);
                 _updateFipsMesh(workerKey, update['members']);
                 _setWorkspaceFipsConnectionState('active', session: session);
                 continue;
               }
               if (update['action'] == 'fips_presence_offer' ||
                   update['action'] == 'fips_presence_ready') {
+                _recordWorkspaceFipsHeartbeat(session: session);
                 unawaited(
                   _handleFipsPresenceUpdate(
                     workerKey,
@@ -8730,8 +8914,11 @@ Return a concise catch-up summary of what happened after that point: completed w
                 'FIPS workspace app wire message is invalid',
               );
             }
+            _recordWorkspaceFipsHeartbeat(session: session);
             _receiveMessage(message);
             _setWorkspaceFipsConnectionState('active', session: session);
+            session.retryTimer?.cancel();
+            session.retryAttempt = 0;
             if (missedUpdate) {
               _scheduleWorkspaceFipsGapSync(workerKey);
             }
@@ -8760,19 +8947,23 @@ Return a concise catch-up summary of what happened after that point: completed w
       if (fipsEnabled) {
         _recordDiagnostic(
           directRouteUnavailable
-              ? 'FIPS direct route is unavailable; using Nostr until FIPS is toggled: $error'
+              ? 'FIPS direct route is unavailable; using Nostr until FIPS reconnects: $error'
               : 'FIPS workspace ${snapshotComplete ? 'session' : 'bootstrap'} failed, using Nostr: $error',
         );
       }
       if (workerKey == _workspaceWorkerKey) {
         try {
+          // A FIPS outage can coincide with a stale relay sender: relays may
+          // accept its events while the worker never receives them. Rebuild it
+          // before the fallback request rather than trusting its local state.
+          await _restartNostrForSendRecovery();
           await _sendWorkspaceRequest({'action': 'list_fallback'});
         } catch (fallbackError) {
           _recordDiagnostic('Nostr workspace fallback failed: $fallbackError');
         }
       }
       if (fipsEnabled && workerKey == _workspaceWorkerKey) {
-        _scheduleWorkspaceFipsRetry();
+        _scheduleWorkspaceFipsRetryFor(workerKey);
       }
     } finally {
       if (sessionGeneration == session.generation) {
@@ -8785,6 +8976,13 @@ Return a concise catch-up summary of what happened after that point: completed w
       if (session.snapshotGeneration == sessionGeneration) {
         session.snapshotInFlight = false;
         session.snapshotGeneration = null;
+        // A retry timer can fire while native receive is still unwinding and
+        // observe snapshotInFlight. Resume discovery after cleanup so that
+        // race cannot strand the session on an expired capability.
+        if (_workspaceFipsEnabled.value &&
+            session.connectionState != 'active') {
+          _startWorkspaceFipsSupervisor(workerKey);
+        }
       }
     }
   }
@@ -8877,6 +9075,8 @@ Return a concise catch-up summary of what happened after that point: completed w
       session.heartbeat.value = _WorkspaceFipsHeartbeat(connectionState: state);
     }
     if (state == 'active' && identical(session, _workspaceFips)) {
+      // Mesh refresh is application traffic. Do not use it to drive the FIPS
+      // route lifecycle; the supervisor owns reconnects and offers.
       unawaited(_sendWorkspaceRequest({'action': 'fips_mesh'}));
       session.heartbeatTicker ??= Timer.periodic(const Duration(seconds: 1), (
         _,
@@ -8911,6 +9111,13 @@ Return a concise catch-up summary of what happened after that point: completed w
     );
   }
 
+  bool _workspaceFipsRouteIsFresh() {
+    final heartbeat = _workspaceFips.heartbeat.value;
+    final lastReceivedAt = heartbeat.lastHeartbeatAt;
+    return lastReceivedAt != null &&
+        DateTime.now().difference(lastReceivedAt) < const Duration(seconds: 12);
+  }
+
   void _setWorkspaceFipsEnabled(bool enabled) {
     if (kIsWeb && enabled) {
       _recordDiagnostic(
@@ -8940,7 +9147,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     if (enabled) {
       _setWorkspaceFipsConnectionState('disconnected');
       _recordDiagnostic('FIPS workspace transport enabled');
-      unawaited(_sendWorkspaceRequest({'action': 'list'}));
+      _startWorkspaceFipsSupervisor(_workspaceWorkerKey);
       return;
     }
     _recordDiagnostic('FIPS workspace transport disabled; using Nostr');
@@ -8964,10 +9171,6 @@ Return a concise catch-up summary of what happened after that point: completed w
     }
   }
 
-  void _awaitWorkspaceFipsOffer() {
-    _awaitWorkspaceFipsOfferFor(_workspaceWorkerKey);
-  }
-
   void _scheduleWorkspaceFipsGapSync(String workerKey) {
     final session = _workspaceWorkerForKey(workerKey).fips;
     if (session.gapSyncTimer?.isActive ?? false) return;
@@ -8983,36 +9186,87 @@ Return a concise catch-up summary of what happened after that point: completed w
     });
   }
 
-  void _awaitWorkspaceFipsOfferFor(String workerKey) {
+  void _startWorkspaceFipsSupervisor(String workerKey) {
     final session = _workspaceWorkerForKey(workerKey).fips;
-    if (session.snapshotInFlight ||
+    if (kIsWeb ||
+        !_workspaceFipsEnabled.value ||
+        session.snapshotInFlight ||
         session.connectionState == 'active' ||
-        (session.offerTimer?.isActive ?? false)) {
+        session.offerRequestInFlight ||
+        (session.offerTimer?.isActive ?? false) ||
+        (session.retryTimer?.isActive ?? false)) {
       return;
     }
+    unawaited(_requestWorkspaceFipsOffer(workerKey));
+  }
+
+  Future<void> _requestWorkspaceFipsOffer(String workerKey) async {
+    final worker = _workspaceWorkerForKey(workerKey);
+    final session = worker.fips;
+    final target = _computerServiceTargets
+        .where((target) => target.pubkey.trim().toLowerCase() == workerKey)
+        .firstOrNull;
+    if (target == null || session.offerRequestInFlight) return;
+    session.offerRequestInFlight = true;
+    try {
+      // Nostr is only the authenticated discovery/fallback channel. Rebuilding
+      // its inbox must not stop or replace this worker's FIPS client.
+      if (!await _ensureConnectedToWorkspaceService(
+        target,
+        requireNostr: true,
+      )) {
+        throw StateError('Nostr discovery route is unavailable');
+      }
+      await _sendWithAutoRecovery(
+        label: 'FIPS workspace offer',
+        sender: () => _nostr.sendQuery(
+          jsonEncode({
+            'workspace_request': {'action': 'list', 'fips_snapshot': true},
+          }),
+        ),
+      );
+      if (!mounted ||
+          !_workspaceFipsEnabled.value ||
+          session.connectionState == 'active') {
+        return;
+      }
+      session.offerTimer?.cancel();
+      _recordDiagnostic('FIPS workspace snapshot requested');
+      session.offerTimer = Timer(const Duration(seconds: 20), () {
+        if (!_workspaceFipsEnabled.value ||
+            session.snapshotInFlight ||
+            session.connectionState == 'active') {
+          return;
+        }
+        _recordDiagnostic('FIPS workspace offer timed out; using Nostr');
+        _scheduleWorkspaceFipsRetryFor(workerKey);
+      });
+    } catch (error) {
+      _recordDiagnostic('FIPS workspace offer failed: $error');
+      _scheduleWorkspaceFipsRetryFor(workerKey);
+    } finally {
+      session.offerRequestInFlight = false;
+    }
+  }
+
+  void _scheduleWorkspaceFipsRetryFor(String workerKey) {
+    final session = _workspaceWorkerForKey(workerKey).fips;
+    if (!_workspaceFipsEnabled.value) return;
+    session.retryTimer?.cancel();
     session.offerTimer?.cancel();
-    _recordDiagnostic('FIPS workspace snapshot requested');
-    session.offerTimer = Timer(const Duration(seconds: 20), () {
+    session.retryAttempt = (session.retryAttempt + 1).clamp(1, 5);
+    final seconds = 5 * (1 << (session.retryAttempt - 1));
+    final delay = Duration(seconds: seconds.clamp(5, 60));
+    _recordDiagnostic(
+      'FIPS workspace snapshot: retrying in ${delay.inSeconds}s',
+    );
+    session.retryTimer = Timer(delay, () {
       if (!_workspaceFipsEnabled.value ||
           session.snapshotInFlight ||
           session.connectionState == 'active') {
         return;
       }
-      _recordDiagnostic('FIPS workspace offer timed out; using Nostr');
-      if (workerKey == _workspaceWorkerKey) {
-        unawaited(_stopWorkspaceFipsAndFallback());
-        _scheduleWorkspaceFipsRetry();
-      }
-    });
-  }
-
-  void _scheduleWorkspaceFipsRetry() {
-    if (!_workspaceFipsEnabled.value) return;
-    _workspaceFipsRetryTimer?.cancel();
-    const delay = Duration(minutes: 1);
-    _recordDiagnostic('FIPS workspace snapshot: retrying in 1m');
-    _workspaceFipsRetryTimer = Timer(delay, () {
-      if (_workspaceFipsSnapshotInFlight) return;
+      session.retryTimer = null;
       _recordDiagnostic('FIPS workspace snapshot: retrying');
       unawaited(
         _sendWorkspaceRequest({'action': 'list', 'fips_snapshot': true}),

@@ -230,6 +230,10 @@ pub struct WorkspaceRequest {
     /// Client-generated ID used to reconcile optimistic message delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_range: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MediaReference>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -238,6 +242,9 @@ pub struct WorkspaceRequest {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub also_send_to_main: bool,
+    /// Route an unaddressed main-conversation message to the next worker.
+    #[serde(default)]
+    pub route_agent: bool,
     #[serde(default)]
     pub pinned: bool,
     /// Client supports FIPS reliable-stream workspace snapshot delivery.
@@ -1377,6 +1384,18 @@ fn validate_redeem_invite(invite: &RedeemInvite) -> Result<()> {
 fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
     match request.action.as_str() {
         "list" | "fips_mesh" => Ok(()),
+        "system_status"
+            if request
+                .request_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && matches!(
+                    request.history_range.as_deref().unwrap_or("24h"),
+                    "1h" | "24h" | "1w" | "all"
+                ) =>
+        {
+            Ok(())
+        }
         "typing"
             if request
                 .expires_in_seconds
@@ -1438,7 +1457,10 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
             Ok(())
         }
         "list_agents" => Ok(()),
-        "reactivate_thread_agent" | "clear_related_thread"
+        "reactivate_thread_agent"
+        | "clear_related_thread"
+        | "complete_thread"
+        | "reopen_thread"
             if request
                 .parent_id
                 .as_deref()
@@ -2110,6 +2132,14 @@ mod tests {
         .is_ok());
         assert!(parse_wire_message(
             r#"{"workspace_request":{"action":"set_thread_topic","channel_id":"c1","parent_id":"p1","body":"Release checklist"}}"#
+        )
+        .is_err());
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"system_status","request_id":"status-1","history_range":"24h"}}"#
+        )
+        .is_ok());
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"system_status","request_id":"status-1","history_range":"forever"}}"#
         )
         .is_err());
     }

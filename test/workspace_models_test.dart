@@ -1090,6 +1090,17 @@ void main() {
             'created_at': 42,
           },
         ],
+        'agents': [
+          {'id': 'r1', 'name': 'R1', 'role': 'Round-robin coordinator'},
+          {'id': 'a1', 'name': 'A1', 'role': 'Round-robin worker'},
+          {'id': 'a2', 'name': 'A2', 'role': 'Round-robin worker'},
+          {'id': 'a3', 'name': 'A3', 'role': 'Round-robin worker'},
+        ],
+        'conversation_agents': [
+          {'agent_id': 'a1', 'channel_id': 'channel-1'},
+          {'agent_id': 'a2', 'channel_id': 'channel-1'},
+          {'agent_id': 'a3', 'channel_id': 'channel-1'},
+        ],
       },
     });
 
@@ -1097,6 +1108,56 @@ void main() {
     expect(state.channels.single.id, 'channel-1');
     expect(state.channels.single.name, 'engineering');
     expect(state.channels.single.createdBy, 'owner');
+    expect(state.conversationAgents.map((agent) => agent.agentId), [
+      'a1',
+      'a2',
+      'a3',
+    ]);
+  });
+
+  test('latest thread completion control determines the thread state', () {
+    WorkspaceMessage message(String id, String body, int createdAt) =>
+        WorkspaceMessage(
+          id: id,
+          senderPubkey: 'member',
+          body: body,
+          createdAt: createdAt,
+        );
+
+    expect(
+      isWorkspaceThreadCompleted([
+        message('complete', '[[THREAD_COMPLETED]]', 1),
+        message('reopen', '[[THREAD_REOPENED]]', 2),
+      ]),
+      isFalse,
+    );
+    expect(
+      isWorkspaceThreadCompleted([
+        message('reopen', '[[THREAD_REOPENED]]', 1),
+        message('complete', '[[THREAD_COMPLETED]]', 2),
+      ]),
+      isTrue,
+    );
+  });
+
+  test('recognizes hidden thread completion control messages', () {
+    const complete = WorkspaceMessage(
+      id: 'complete',
+      senderPubkey: 'member',
+      body: '[[THREAD_COMPLETED]]',
+      createdAt: 1,
+      parentId: 'root',
+    );
+    const reopen = WorkspaceMessage(
+      id: 'reopen',
+      senderPubkey: 'member',
+      body: '[[THREAD_REOPENED]]',
+      createdAt: 2,
+      parentId: 'root',
+    );
+
+    expect(isWorkspaceThreadCompletionControlMessage(complete), isTrue);
+    expect(isWorkspaceThreadCompletionControlMessage(reopen), isTrue);
   });
 
   test('channel member count excludes workspace agents', () {
