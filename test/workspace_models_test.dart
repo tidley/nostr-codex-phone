@@ -19,14 +19,16 @@ void main() {
     expect(defaultFolder.workdir, isNull);
   });
 
-  test('decodes persisted conversation pin and archive preferences', () {
+  test('decodes persisted conversation preferences and defaults routing on', () {
     final preferences = decodeWorkspaceConversationPreferences(
-      '{"channel":{"pinned":true,"archived":false},"direct":{"archived":true}}',
+      '{"channel":{"pinned":true,"archived":false,"route_to_a0":false},"direct":{"archived":true}}',
     );
 
     expect(preferences['channel']!.pinned, isTrue);
     expect(preferences['channel']!.archived, isFalse);
+    expect(preferences['channel']!.routeToA0, isFalse);
     expect(preferences['direct']!.archived, isTrue);
+    expect(preferences['direct']!.routeToA0, isTrue);
   });
 
   test(
@@ -271,7 +273,7 @@ void main() {
     },
   );
 
-  test('does not suggest a thread that already references another thread', () {
+  test('suggests a thread that already references another thread', () {
     const oldRoot = WorkspaceMessage(
       id: 'old',
       senderPubkey: 'owner',
@@ -337,7 +339,7 @@ void main() {
         replyOne,
         replyTwo,
       ], current),
-      isEmpty,
+      hasLength(1),
     );
   });
 

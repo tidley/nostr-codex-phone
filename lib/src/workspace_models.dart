@@ -23,16 +23,19 @@ class WorkspaceConversationPreference {
     this.pinned = false,
     this.archived = false,
     this.muted = false,
+    this.routeToA0 = true,
   });
 
   final bool pinned;
   final bool archived;
   final bool muted;
+  final bool routeToA0;
 
   Map<String, bool> toJson() => {
     'pinned': pinned,
     'archived': archived,
     'muted': muted,
+    'route_to_a0': routeToA0,
   };
 }
 
@@ -49,6 +52,7 @@ decodeWorkspaceConversationPreferences(String? raw) {
             pinned: entry.value['pinned'] == true,
             archived: entry.value['archived'] == true,
             muted: entry.value['muted'] == true,
+            routeToA0: entry.value['route_to_a0'] != false,
           ),
     };
   } catch (_) {
@@ -147,8 +151,7 @@ List<WorkspaceMessage> workspaceRelatedThreadCandidates(
   final candidates = all.where((root) {
     if (root.parentId != null ||
         root.id == current.id ||
-        root.createdAt >= current.createdAt ||
-        workspaceActiveRelatedThreadId(all, root) != null) {
+        root.createdAt >= current.createdAt) {
       return false;
     }
     final replies = all.where((message) => message.parentId == root.id);
@@ -754,12 +757,14 @@ class WorkspaceConversationPreprompt {
   const WorkspaceConversationPreprompt({
     required this.preprompt,
     this.folderScope = const [],
+    this.agentRoutingEnabled = false,
     this.channelId,
     this.memberPubkey,
     this.peerPubkey,
   });
   final String preprompt;
   final List<String> folderScope;
+  final bool agentRoutingEnabled;
   final String? channelId;
   final String? memberPubkey;
   final String? peerPubkey;
@@ -771,6 +776,7 @@ class WorkspaceConversationPreprompt {
             .map((path) => path.toString().trim())
             .where((path) => path.isNotEmpty)
             .toList(growable: false),
+        agentRoutingEnabled: json['agent_routing_enabled'] == true,
         channelId: json['channel_id']?.toString(),
         memberPubkey: json['member_pubkey']?.toString(),
         peerPubkey: json['peer_pubkey']?.toString(),
@@ -779,6 +785,7 @@ class WorkspaceConversationPreprompt {
   Map<String, Object?> toJson() => {
     'preprompt': preprompt,
     'folder_scope': folderScope,
+    'agent_routing_enabled': agentRoutingEnabled,
     if (channelId != null) 'channel_id': channelId,
     if (memberPubkey != null) 'member_pubkey': memberPubkey,
     if (peerPubkey != null) 'peer_pubkey': peerPubkey,
@@ -1287,6 +1294,24 @@ class WorkspaceState {
       }
     }
     return const [];
+  }
+
+  bool conversationAgentRoutingEnabled({
+    required String? channelId,
+    required String ownPubkey,
+    required String? peerPubkey,
+  }) {
+    for (final prompt in conversationPreprompts) {
+      if (channelId != null && prompt.channelId == channelId) {
+        return prompt.agentRoutingEnabled;
+      }
+      if (channelId == null &&
+          {prompt.memberPubkey, prompt.peerPubkey}.contains(ownPubkey) &&
+          {prompt.memberPubkey, prompt.peerPubkey}.contains(peerPubkey)) {
+        return prompt.agentRoutingEnabled;
+      }
+    }
+    return false;
   }
 
   List<String> directPeers(String ownPubkey) {

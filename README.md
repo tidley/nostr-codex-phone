@@ -86,13 +86,13 @@ The browser layout and file contents are returned as structured NIP-17/NIP-59 Gi
 
 ## Install Clients
 
-Download the latest APK from GitHub Releases:
+Download the latest Android APK or Debian Linux package from GitHub Releases:
 
 ```text
 https://github.com/tidley/nostr-codex-phone/releases
 ```
 
-Install on Android, then scan the worker QR code or paste the worker target details in Settings. Linux and Windows desktop clients can be built with `flutter build linux --release` and `flutter build windows --release`; pushes to `main` publish the web client to GitHub Pages, while Windows releases remain a manual workflow. The release workflow also builds an Apple Silicon macOS worker. A macOS client release needs Apple signing and notarization before it can be distributed outside a development environment. Keep each client and its worker on the same release version so structured tool views use the same wire contract.
+Install the Android APK, or install the Debian package with `sudo apt install ./nostr-codex-phone_<version>_amd64.deb`, then scan the worker QR code or paste the worker target details in Settings. Build a local Debian package with `bash scripts/build-linux-deb.sh <version>` after `flutter build linux --release`. Windows clients can be built with `flutter build windows --release`; pushes to `main` publish the web client to GitHub Pages, while Windows releases remain a manual workflow. The release workflow also builds an Apple Silicon macOS worker. A macOS client release needs Apple signing and notarization before it can be distributed outside a development environment. Keep each client and its worker on the same release version so structured tool views use the same wire contract.
 
 ## Start A Worker
 
