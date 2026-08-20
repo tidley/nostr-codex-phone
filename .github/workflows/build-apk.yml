@@ -22,6 +22,8 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - run: sudo apt-get update && sudo apt-get install --yes libgtk-3-dev ninja-build
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
@@ -37,6 +39,10 @@ jobs:
           printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=app/nostr-codex-phone-release.jks\n' '${{ secrets.ANDROID_KEYSTORE_PASSWORD }}' '${{ secrets.ANDROID_KEYSTORE_PASSWORD }}' '${{ secrets.ANDROID_KEY_ALIAS }}' > android/key.properties
 
       - run: flutter build apk --release
+      - run: flutter build linux --release
+      - id: version
+        run: echo "value=${{ inputs.tag }}" | sed 's/^value=v/value=/' >> "$GITHUB_OUTPUT"
+      - run: bash scripts/build-linux-deb.sh "${{ steps.version.outputs.value }}"
       - run: cargo build --release --manifest-path rust/Cargo.toml --bin nostr-codex-server
       - run: cp rust/target/release/nostr-codex-server build/nostr-codex-worker-linux-x64
 
@@ -45,6 +51,7 @@ jobs:
           name: nostr-codex-phone-release-assets
           path: |
             build/app/outputs/flutter-apk/app-release.apk
+            build/nostr-codex-phone_${{ steps.version.outputs.value }}_amd64.deb
             build/nostr-codex-worker-linux-x64
 
       - uses: softprops/action-gh-release@v2
@@ -54,4 +61,5 @@ jobs:
           generate_release_notes: true
           files: |
             build/app/outputs/flutter-apk/app-release.apk
+            build/nostr-codex-phone_${{ steps.version.outputs.value }}_amd64.deb
             build/nostr-codex-worker-linux-x64

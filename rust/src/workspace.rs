@@ -99,6 +99,7 @@ pub struct WorkspaceConversationPreprompt {
     pub peer_pubkey: Option<String>,
     pub preprompt: String,
     pub folder_scope: Vec<String>,
+    pub agent_routing_enabled: bool,
 }
 
 pub struct WorkspaceStore {
@@ -147,7 +148,7 @@ impl WorkspaceStore {
                       CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
                   CREATE UNIQUE INDEX IF NOT EXISTS workspace_channel_round_robin ON workspace_conversation_round_robin(channel_id) WHERE channel_id IS NOT NULL;
                   CREATE UNIQUE INDEX IF NOT EXISTS workspace_direct_round_robin ON workspace_conversation_round_robin(member_pubkey, peer_pubkey) WHERE channel_id IS NULL;
-                 CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL, folder_scope_json TEXT NOT NULL DEFAULT '[]',
+                  CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL, folder_scope_json TEXT NOT NULL DEFAULT '[]', agent_routing_enabled INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (channel_id, member_pubkey, peer_pubkey),
                     CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
                 CREATE INDEX IF NOT EXISTS workspace_messages_channel ON workspace_messages(channel_id, created_at);
@@ -337,6 +338,15 @@ impl WorkspaceStore {
         {
             conn.execute(
                 "ALTER TABLE workspace_conversation_preprompts ADD COLUMN folder_scope_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
+        if !conversation_preprompt_columns
+            .iter()
+            .any(|column| column == "agent_routing_enabled")
+        {
+            conn.execute(
+                "ALTER TABLE workspace_conversation_preprompts ADD COLUMN agent_routing_enabled INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
         }
@@ -973,6 +983,24 @@ impl WorkspaceStore {
         Ok(())
     }
 
+    pub fn set_agent_restart_on_failure(
+        &self,
+        agent_id: &str,
+        restart_on_failure: bool,
+    ) -> Result<WorkspaceAgent> {
+        if self.conn.execute(
+            "UPDATE workspace_agents SET restart_on_failure = ?2 WHERE id = ?1",
+            params![required("agent id", agent_id)?, restart_on_failure],
+        )? == 0
+        {
+            bail!("agent does not exist");
+        }
+        self.agents()?
+            .into_iter()
+            .find(|agent| agent.id == agent_id)
+            .context("updated agent is missing")
+    }
+
     pub fn record_agent_token_usage(
         &self,
         agent_id: &str,
@@ -1080,7 +1108,7 @@ impl WorkspaceStore {
     }
 
     pub fn conversation_preprompts(&self) -> Result<Vec<WorkspaceConversationPreprompt>> {
-        let mut statement = self.conn.prepare("SELECT channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json FROM workspace_conversation_preprompts ORDER BY channel_id, member_pubkey, peer_pubkey")?;
+        let mut statement = self.conn.prepare("SELECT channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json, agent_routing_enabled FROM workspace_conversation_preprompts ORDER BY channel_id, member_pubkey, peer_pubkey")?;
         let preprompts = statement
             .query_map([], conversation_preprompt_from_row)?
             .collect::<rusqlite::Result<_>>()?;
@@ -1118,6 +1146,66 @@ impl WorkspaceStore {
             self.conn.execute("INSERT INTO workspace_conversation_preprompts (channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json) VALUES (?1, ?2, ?3, ?4, ?5)", params![channel_id, member, peer, preprompt, serde_json::to_string(folder_scope)?])?;
         }
         Ok(())
+    }
+
+    pub fn set_conversation_agent_routing(
+        &self,
+        channel_id: Option<&str>,
+        member: Option<&str>,
+        peer: Option<&str>,
+        enabled: bool,
+    ) -> Result<()> {
+        let (channel_id, member, peer) = match (channel_id, member, peer) {
+            (Some(channel_id), None, None) => {
+                self.require_channel(channel_id)?;
+                (Some(channel_id.to_string()), None, None)
+            }
+            (None, Some(member), Some(peer)) => {
+                let (member, peer) = direct_participants(member, peer)?;
+                if !self.is_member(&member)? || !self.is_member(&peer)? {
+                    bail!("direct conversation participant is not a workspace member");
+                }
+                (None, Some(member), Some(peer))
+            }
+            _ => bail!("conversation must be a channel or a direct message"),
+        };
+        let existing = self.conn.query_row(
+            "SELECT preprompt, folder_scope_json FROM workspace_conversation_preprompts WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3",
+            params![channel_id, member, peer],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional()?;
+        self.conn.execute("DELETE FROM workspace_conversation_preprompts WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3", params![channel_id, member, peer])?;
+        if enabled || existing.is_some() {
+            let (preprompt, folder_scope) =
+                existing.unwrap_or_else(|| (String::new(), "[]".to_string()));
+            self.conn.execute("INSERT INTO workspace_conversation_preprompts (channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json, agent_routing_enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![channel_id, member, peer, preprompt, folder_scope, enabled])?;
+        }
+        Ok(())
+    }
+
+    pub fn conversation_agent_routing_enabled(
+        &self,
+        channel_id: Option<&str>,
+        member: Option<&str>,
+        peer: Option<&str>,
+    ) -> Result<bool> {
+        let enabled = match (channel_id, member, peer) {
+            (Some(channel_id), None, None) => self.conn.query_row(
+                "SELECT agent_routing_enabled FROM workspace_conversation_preprompts WHERE channel_id = ?1 AND member_pubkey IS NULL AND peer_pubkey IS NULL",
+                [channel_id],
+                |row| row.get::<_, bool>(0),
+            ).optional()?,
+            (None, Some(member), Some(peer)) => {
+                let (member, peer) = direct_participants(member, peer)?;
+                self.conn.query_row(
+                    "SELECT agent_routing_enabled FROM workspace_conversation_preprompts WHERE channel_id IS NULL AND member_pubkey = ?1 AND peer_pubkey = ?2",
+                    params![member, peer],
+                    |row| row.get::<_, bool>(0),
+                ).optional()?
+            }
+            _ => bail!("conversation must be a channel or a direct message"),
+        };
+        Ok(enabled.unwrap_or(false))
     }
 
     pub fn conversation_folder_scope(
@@ -1354,7 +1442,8 @@ impl WorkspaceStore {
             if workers.is_empty() {
                 return Ok(None);
             }
-            let next_worker = self.round_robin_next_worker(channel_id, member, peer, workers.len())?;
+            let next_worker =
+                self.round_robin_next_worker(channel_id, member, peer, workers.len())?;
             let agent = (0..workers.len())
                 .map(|offset| (next_worker + offset) % workers.len())
                 .map(|index| (index, workers[index].clone()))
@@ -1557,7 +1646,6 @@ impl WorkspaceStore {
         }
         Ok(())
     }
-
 
     /// Returns the assigned agent for a root thread, if that agent is still in scope.
     pub fn thread_agent(
@@ -2102,6 +2190,7 @@ fn conversation_preprompt_from_row(
         peer_pubkey: row.get(2)?,
         preprompt: row.get(3)?,
         folder_scope: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+        agent_routing_enabled: row.get(5)?,
     })
 }
 fn direct_participants(member: &str, peer: &str) -> Result<(String, String)> {
@@ -3235,6 +3324,38 @@ mod tests {
             .set_conversation_preprompt(Some(&channel.id), None, None, "", &[])
             .unwrap();
         assert_eq!(store.conversation_preprompts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn persists_conversation_agent_routing_for_channels_and_direct_messages() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        store.add_member("owner").unwrap();
+        store.add_member("member").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+
+        store
+            .set_conversation_agent_routing(Some(&channel.id), None, None, true)
+            .unwrap();
+        store
+            .set_conversation_agent_routing(None, Some("owner"), Some("member"), true)
+            .unwrap();
+        drop(store);
+
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        assert!(store
+            .conversation_agent_routing_enabled(Some(&channel.id), None, None)
+            .unwrap());
+        assert!(store
+            .conversation_agent_routing_enabled(None, Some("member"), Some("owner"))
+            .unwrap());
+
+        store
+            .set_conversation_agent_routing(Some(&channel.id), None, None, false)
+            .unwrap();
+        assert!(!store
+            .conversation_agent_routing_enabled(Some(&channel.id), None, None)
+            .unwrap());
     }
 
     #[test]

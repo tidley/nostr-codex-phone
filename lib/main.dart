@@ -1583,6 +1583,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     bool? pinned,
     bool? archived,
     bool? muted,
+    bool? routeToA0,
   }) {
     final key = _workspacePreferenceKey(conversationKey);
     final current =
@@ -1592,9 +1593,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       pinned: pinned ?? current.pinned,
       archived: archived ?? current.archived,
       muted: muted ?? current.muted,
+      routeToA0: routeToA0 ?? current.routeToA0,
     );
     setState(() {
-      if (!next.pinned && !next.archived && !next.muted) {
+      if (!next.pinned && !next.archived && !next.muted && next.routeToA0) {
         _workspaceConversationPreferences.remove(key);
       } else {
         _workspaceConversationPreferences[key] = next;
@@ -6577,8 +6579,10 @@ Return a concise catch-up summary of what happened after that point: completed w
   }
 
   Future<List<RepoChoice>> _requestRepoChoices({String? path}) async {
-    if (!await _ensureConnectedToParentService()) {
-      throw StateError('Connect to the computer service first');
+    final target = _computerServiceTarget;
+    if (target == null ||
+        !await _ensureConnectedToWorkspaceService(target, requireNostr: true)) {
+      throw StateError('Connect to the workspace worker first');
     }
     final requestPath = path?.trim() ?? '';
     final existing = _pendingRepoListCompleters[requestPath];

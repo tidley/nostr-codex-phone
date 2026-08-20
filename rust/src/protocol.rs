@@ -437,6 +437,8 @@ pub struct WorkspaceConversationPrepromptPayload {
     pub preprompt: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folder_scope: Vec<String>,
+    #[serde(default)]
+    pub agent_routing_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1453,6 +1455,18 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
                         .recipient_pubkey
                         .as_deref()
                         .is_some_and(|id| !id.trim().is_empty())) =>
+        {
+            Ok(())
+        }
+        "set_conversation_agent_routing"
+            if request
+                .channel_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                || request
+                    .recipient_pubkey
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()) =>
         {
             Ok(())
         }

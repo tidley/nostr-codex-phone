@@ -1916,8 +1916,18 @@ fn workspace_action_requires_admin(action: &str) -> bool {
             | "add_conversation_agent"
             | "remove_conversation_agent"
             | "reactivate_thread_agent"
+            | "set_conversation_agent_routing"
             | "system_status"
     )
+}
+
+fn starts_agent_enabled_conversation(request: &WorkspaceRequest) -> bool {
+    request.parent_id.is_none()
+        && (request.route_agent
+            || request
+                .mentions
+                .iter()
+                .any(|mention| mention.kind == "agent"))
 }
 
 async fn process_workspace_request(
@@ -1934,9 +1944,10 @@ async fn process_workspace_request(
     agent_queues: &mut WorkspaceAgentQueues,
     fips_capabilities: &Arc<Mutex<HashMap<String, (String, Instant)>>>,
 ) -> Result<()> {
+    let sender_is_admin = workspace.is_admin(sender)?;
     if workspace_action_requires_admin(&request.action)
         && owner != Some(sender)
-        && !workspace.is_admin(sender)?
+        && !sender_is_admin
     {
         bail!("Only workspace admins can manage agents.");
     }
@@ -1963,6 +1974,16 @@ async fn process_workspace_request(
     }
     if request.action == "remove_member" && owner != Some(sender) && !workspace.is_admin(sender)? {
         bail!("Only workspace owners and admins can remove members.");
+    }
+    if matches!(request.action.as_str(), "send_channel_message" | "send_direct_message")
+        && starts_agent_enabled_conversation(&request)
+        && !workspace.conversation_agent_routing_enabled(
+            request.channel_id.as_deref(),
+            request.channel_id.is_none().then_some(sender),
+            request.recipient_pubkey.as_deref(),
+        )?
+    {
+        bail!("An admin must enable agent routing for this conversation.");
     }
     let update = match request.action.as_str() {
         "system_status" => {
@@ -2613,6 +2634,55 @@ async fn process_workspace_request(
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
         }
+        "set_conversation_agent_routing" => {
+            let channel_id = request.channel_id.as_deref();
+            workspace.set_conversation_agent_routing(
+                channel_id,
+                channel_id.is_none().then_some(sender),
+                request.recipient_pubkey.as_deref(),
+                request.route_agent,
+            )?;
+            let team = if request.route_agent {
+                Some(
+                    ensure_conversation_team(
+                        workspace,
+                        codex_config,
+                        sender,
+                        channel_id,
+                        channel_id.is_none().then_some(sender),
+                        request.recipient_pubkey.as_deref(),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            let update = WorkspaceUpdate {
+                action: "conversation_preprompt_updated".to_string(),
+                revision: workspace.revision()?,
+                channels: vec![],
+                members: vec![],
+                messages: vec![],
+                agents: team
+                    .into_iter()
+                    .flat_map(|(coordinator, workers)| std::iter::once(coordinator).chain(workers))
+                    .map(agent_payload)
+                    .collect(),
+                conversation_agents: workspace
+                    .conversation_agents()?
+                    .into_iter()
+                    .map(conversation_agent_payload)
+                    .collect(),
+                conversation_preprompts: workspace
+                    .conversation_preprompts()?
+                    .into_iter()
+                    .map(conversation_preprompt_payload)
+                    .collect(),
+                typing: None,
+            };
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            return Ok(());
+        }
         "list_channel_messages" => {
             send_channel_history(
                 workspace,
@@ -2699,10 +2769,7 @@ async fn process_workspace_request(
                     .unwrap_or(false)
             });
             if request.parent_id.is_some() && parent_id.is_none() {
-                warn!(
-                    channel_id,
-                    "stale thread parent; sending channel message to main"
-                );
+                bail!("thread parent is unavailable in this channel");
             }
             let message = workspace.add_channel_message_with_main_and_id(
                 sender,
@@ -2714,15 +2781,19 @@ async fn process_workspace_request(
                 request.also_send_to_main,
                 request.message_id.as_deref(),
             )?;
-            let (coordinator, workers) = ensure_conversation_team(
-                workspace,
-                codex_config,
-                sender,
-                Some(channel_id),
-                None,
-                None,
-            )
-            .await?;
+            let team = if sender_is_admin && starts_agent_enabled_conversation(&request) {
+                Some(ensure_conversation_team(
+                    workspace,
+                    codex_config,
+                    sender,
+                    Some(channel_id),
+                    None,
+                    None,
+                )
+                .await?)
+            } else {
+                None
+            };
             let message_id = message.id.clone();
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
@@ -2730,8 +2801,9 @@ async fn process_workspace_request(
                 channels: vec![],
                 members: vec![],
                 messages: vec![message_payload(message)],
-                agents: std::iter::once(coordinator)
-                    .chain(workers)
+                agents: team
+                    .into_iter()
+                    .flat_map(|(coordinator, workers)| std::iter::once(coordinator).chain(workers))
                     .map(agent_payload)
                     .collect(),
                 conversation_agents: workspace
@@ -2785,15 +2857,19 @@ async fn process_workspace_request(
                 request.also_send_to_main,
                 request.message_id.as_deref(),
             )?;
-            let (coordinator, workers) = ensure_conversation_team(
-                workspace,
-                codex_config,
-                sender,
-                None,
-                Some(sender),
-                request.recipient_pubkey.as_deref(),
-            )
-            .await?;
+            let team = if sender_is_admin && starts_agent_enabled_conversation(&request) {
+                Some(ensure_conversation_team(
+                    workspace,
+                    codex_config,
+                    sender,
+                    None,
+                    Some(sender),
+                    request.recipient_pubkey.as_deref(),
+                )
+                .await?)
+            } else {
+                None
+            };
             let message_id = message.id.clone();
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
@@ -2801,8 +2877,9 @@ async fn process_workspace_request(
                 channels: vec![],
                 members: vec![],
                 messages: vec![message_payload(message)],
-                agents: std::iter::once(coordinator)
-                    .chain(workers)
+                agents: team
+                    .into_iter()
+                    .flat_map(|(coordinator, workers)| std::iter::once(coordinator).chain(workers))
                     .map(agent_payload)
                     .collect(),
                 conversation_agents: workspace
@@ -4404,6 +4481,15 @@ fn live_work_history(work_history: &[String], stage_started_at: Option<Instant>)
     history
 }
 
+fn interrupted_workspace_agent_result() -> CodexRunResult {
+    CodexRunResult {
+        response: "I was interrupted before I could reply. Please retry your request.".to_string(),
+        session_id: None,
+        token_usage: None,
+        work_history: vec![],
+    }
+}
+
 fn format_duration(duration: Duration) -> String {
     let seconds = duration.as_secs();
     if seconds < 60 {
@@ -4648,6 +4734,7 @@ fn conversation_preprompt_payload(
         peer_pubkey: preprompt.peer_pubkey,
         preprompt: preprompt.preprompt,
         folder_scope: preprompt.folder_scope,
+        agent_routing_enabled: preprompt.agent_routing_enabled,
     }
 }
 
@@ -4755,7 +4842,10 @@ async fn ensure_conversation_coordinator(
         "Coordinate routed main-conversation tasks privately: identify their semantic topic, select the worker that should handle each task, and keep related-thread handoffs compact. When directly mentioned as @A0, answer the user in the current conversation or thread without allocating a worker unless the user explicitly asks for delegation.",
         &[],
         None,
-        WorkspaceAgentOpenCodeProfile::default(),
+        WorkspaceAgentOpenCodeProfile {
+            restart_on_failure: true,
+            ..Default::default()
+        },
         session_id.as_deref(),
         &session_status,
         session_error.as_deref(),
@@ -4822,7 +4912,10 @@ async fn ensure_routed_worker(
         "Work on routed tasks in this conversation. Preserve thread ownership for replies and completion.",
         &[],
         None,
-        WorkspaceAgentOpenCodeProfile::default(),
+        WorkspaceAgentOpenCodeProfile {
+            restart_on_failure: true,
+            ..Default::default()
+        },
         session_id.as_deref(),
         &status,
         session_error.as_deref(),
@@ -5406,6 +5499,9 @@ async fn route_conversation_agents(
         if only_agent_id.is_some_and(|agent_id| agent.id != agent_id) {
             continue;
         }
+        if !agent.restart_on_failure {
+            agent = workspace.set_agent_restart_on_failure(&agent.id, true)?;
+        }
         if only_agent_id.is_none() && !conversation_agent_is_targeted(&agent.id, mentions) {
             continue;
         }
@@ -5481,7 +5577,11 @@ async fn route_conversation_agents(
             })
             .map(|preprompt| preprompt.preprompt.as_str())
             .unwrap_or_default();
-        let first_thread_turn = parent_id.is_some_and(|parent_id| {
+        let suppress_typing = body.trim().starts_with("[[THREAD_TOPIC_REQUEST]]");
+        // A topic request must always receive the target thread context. A0 may
+        // have replied in that thread already, but its session can since have
+        // moved on to a newer conversation and would otherwise name that item.
+        let first_thread_turn = suppress_typing || parent_id.is_some_and(|parent_id| {
             let messages = match channel_id {
                 Some(channel_id) => workspace.channel_messages(channel_id),
                 None => workspace.direct_messages(member.unwrap_or_default(), peer.unwrap_or_default()),
@@ -5500,7 +5600,6 @@ async fn route_conversation_agents(
         } else {
             String::new()
         };
-        let suppress_typing = body.trim().starts_with("[[THREAD_TOPIC_REQUEST]]");
         let prompt = match conversation_scope_prompt(folder_scope, &agent_config) {
             Ok(scope) => format!(
                 "{}\n\n{}",
@@ -5547,16 +5646,75 @@ async fn route_conversation_agents(
                 }
                 result
             }
-            Ok(_) => continue,
+            Ok(_) => interrupted_workspace_agent_result(),
             Err(err) if is_agent_cancelled_error(&err) => {
                 info!(agent = %agent.id, "workspace agent task cancelled");
-                continue;
+                interrupted_workspace_agent_result()
             }
             Err(err) if agent.restart_on_failure => {
                 warn!(agent = %agent.id, "workspace agent response failed; restarting dedicated session: {err:#}");
                 let (new_session_id, status, session_error) =
                     provision_workspace_agent_session(&agent_config).await;
-                let Some(new_session_id) = new_session_id else {
+                if let Some(new_session_id) = new_session_id {
+                    let updated = workspace.update_agent_session(
+                        &agent.id,
+                        Some(&new_session_id),
+                        &status,
+                        None,
+                    )?;
+                    active_session_id = new_session_id;
+                    broadcast_workspace_update(
+                        workspace,
+                        messenger,
+                        outbound,
+                        &WorkspaceUpdate {
+                            action: "agent_session_restarted".to_string(),
+                            revision: workspace.revision()?,
+                            channels: vec![],
+                            members: vec![],
+                            messages: vec![],
+                            agents: vec![agent_payload(updated)],
+                            conversation_agents: vec![],
+                            conversation_preprompts: vec![],
+                            typing: None,
+                        },
+                    )
+                    .await?;
+                    let restarted_prompt = format!(
+                        "{}\n\n{}",
+                        conversation_agent_initialization_prompt(&agent.traits),
+                        prompt
+                    );
+                    match run_workspace_agent_with_typing(
+                        workspace,
+                        messenger,
+                        &agent,
+                        channel_id,
+                        member,
+                        peer,
+                        parent_id,
+                        &restarted_prompt,
+                        &agent_config,
+                        &active_session_id,
+                        active_turns,
+                        suppress_typing,
+                    )
+                    .await
+                    {
+                        Ok(result) if !result.response.trim().is_empty() => {
+                            workspace.set_agent_session_context(
+                                &agent.id,
+                                WORKSPACE_AGENT_SESSION_CONTEXT,
+                            )?;
+                            result
+                        }
+                        Ok(_) => interrupted_workspace_agent_result(),
+                        Err(restart_err) => {
+                            warn!(agent = %agent.id, "workspace agent response failed after restart: {restart_err:#}");
+                            interrupted_workspace_agent_result()
+                        }
+                    }
+                } else {
                     let updated = workspace.update_agent_session(
                         &agent.id,
                         None,
@@ -5580,70 +5738,12 @@ async fn route_conversation_agents(
                         },
                     )
                     .await?;
-                    continue;
-                };
-                let updated = workspace.update_agent_session(
-                    &agent.id,
-                    Some(&new_session_id),
-                    &status,
-                    None,
-                )?;
-                active_session_id = new_session_id;
-                broadcast_workspace_update(
-                    workspace,
-                    messenger,
-                    outbound,
-                    &WorkspaceUpdate {
-                        action: "agent_session_restarted".to_string(),
-                        revision: workspace.revision()?,
-                        channels: vec![],
-                        members: vec![],
-                        messages: vec![],
-                        agents: vec![agent_payload(updated)],
-                        conversation_agents: vec![],
-                        conversation_preprompts: vec![],
-                        typing: None,
-                    },
-                )
-                .await?;
-                let restarted_prompt = format!(
-                    "{}\n\n{}",
-                    conversation_agent_initialization_prompt(&agent.traits),
-                    prompt
-                );
-                match run_workspace_agent_with_typing(
-                    workspace,
-                    messenger,
-                    &agent,
-                    channel_id,
-                    member,
-                    peer,
-                    parent_id,
-                    &restarted_prompt,
-                    &agent_config,
-                    &active_session_id,
-                    active_turns,
-                    suppress_typing,
-                )
-                .await
-                {
-                    Ok(result) if !result.response.trim().is_empty() => {
-                        workspace.set_agent_session_context(
-                            &agent.id,
-                            WORKSPACE_AGENT_SESSION_CONTEXT,
-                        )?;
-                        result
-                    }
-                    Ok(_) => continue,
-                    Err(restart_err) => {
-                        warn!(agent = %agent.id, "workspace agent response failed after restart: {restart_err:#}");
-                        continue;
-                    }
+                    interrupted_workspace_agent_result()
                 }
             }
             Err(err) => {
                 warn!(agent = %agent.id, "workspace agent response failed: {err:#}");
-                continue;
+                interrupted_workspace_agent_result()
             }
         };
         let mut history_follow_up_failed = false;
@@ -5692,7 +5792,10 @@ async fn route_conversation_agents(
         }
         // A history request is an internal control response, never a message to show in the thread.
         if history_follow_up_failed || workspace_history_request_count(&result.response).is_some() {
-            continue;
+            if suppress_typing {
+                continue;
+            }
+            result = interrupted_workspace_agent_result();
         }
         if is_workspace_agent_progress_only_response(&result.response) {
             info!(agent = %agent.id, "continuing workspace agent after plan-only response");
@@ -5714,10 +5817,10 @@ async fn route_conversation_agents(
             .await
             {
                 Ok(next) if !next.response.trim().is_empty() => result = next,
-                Ok(_) => continue,
+                Ok(_) => result = interrupted_workspace_agent_result(),
                 Err(err) => {
                     warn!(agent = %agent.id, "workspace agent continuation failed: {err:#}");
-                    continue;
+                    result = interrupted_workspace_agent_result();
                 }
             }
         }
@@ -7462,7 +7565,7 @@ fn opencode_model_list_request_id(request: &str) -> Option<String> {
 }
 
 fn build_repo_list(requested_path: Option<&str>) -> Result<RepoList> {
-    let worker_root = canonical_conversation_root_dir()?;
+    let worker_root = canonical_worker_root_dir()?;
     let requested = requested_path.unwrap_or("").trim();
     if requested.split('/').any(|part| part == "..") {
         bail!("folder path cannot contain ..");
@@ -10704,6 +10807,19 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_agent_runs_produce_a_visible_reply() {
+        let result = interrupted_workspace_agent_result();
+
+        assert_eq!(
+            result.response,
+            "I was interrupted before I could reply. Please retry your request."
+        );
+        assert!(result.session_id.is_none());
+        assert!(result.token_usage.is_none());
+        assert!(result.work_history.is_empty());
+    }
+
+    #[test]
     fn only_ready_or_restartable_thread_agents_are_reusable() {
         let mut agent = WorkspaceAgent {
             id: "agent".to_string(),
@@ -12783,6 +12899,30 @@ mod tests {
         assert!(workspace_action_requires_admin("create_conversation_agent"));
         assert!(workspace_action_requires_admin("delete_agent"));
         assert!(!workspace_action_requires_admin("send_channel_message"));
+    }
+
+    #[test]
+    fn identifies_agent_enabled_conversation_starts() {
+        let routed: WorkspaceRequest = serde_json::from_value(serde_json::json!({
+            "action": "send_channel_message",
+            "route_agent": true,
+        }))
+        .unwrap();
+        let mentioned: WorkspaceRequest = serde_json::from_value(serde_json::json!({
+            "action": "send_channel_message",
+            "mentions": [{"kind": "agent", "id": "agent-1", "label": "A1"}],
+        }))
+        .unwrap();
+        let reply: WorkspaceRequest = serde_json::from_value(serde_json::json!({
+            "action": "send_channel_message",
+            "route_agent": true,
+            "parent_id": "thread-1",
+        }))
+        .unwrap();
+
+        assert!(starts_agent_enabled_conversation(&routed));
+        assert!(starts_agent_enabled_conversation(&mentioned));
+        assert!(!starts_agent_enabled_conversation(&reply));
     }
 
     fn write_session_fixture(
