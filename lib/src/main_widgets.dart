@@ -1595,9 +1595,10 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             id: member,
             label: _memberLabel(member),
           ),
-      if (_canUseAgentRouting)
-        for (final agent in _activeAgents.where((agent) => agent.name != 'R1'))
-          WorkspaceMention(kind: 'agent', id: agent.id, label: agent.name),
+      // Shared A0 routing controls only automatic root-message routing. Thread
+      // replies must still be able to explicitly address their assigned agent.
+      for (final agent in _activeAgents.where((agent) => agent.name != 'R1'))
+        WorkspaceMention(kind: 'agent', id: agent.id, label: agent.name),
     ];
     final query = _mentionQueryFor(composer);
     if (query == null) return const [];
@@ -6741,12 +6742,14 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     }
   }
 
-  int get _unreadThreadReplyCount =>
-      widget.threadUnreadCounts.values.fold(0, (total, count) => total + count);
-
-  List<WorkspaceMessage> get _unreadThreadSources => widget.messages
+  List<WorkspaceMessage> get _unreadThreadSources => widget.searchMessages
       .where((message) => (widget.threadUnreadCounts[message.id] ?? 0) > 0)
       .toList(growable: false);
+
+  int get _unreadThreadReplyCount => _unreadThreadSources.fold(
+    0,
+    (total, message) => total + (widget.threadUnreadCounts[message.id] ?? 0),
+  );
 
   bool _showsMainLiveMessage(WorkspaceTyping status) => status.parentId == null;
 
@@ -8075,12 +8078,10 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                                         if (_unreadThreadReplyCount > 0)
                                           _UnreadRepliesButton(
                                             count: _unreadThreadReplyCount,
-                                            onPressed:
-                                                _unreadThreadSources.isEmpty
-                                                ? null
-                                                : () => widget.onOpenThread(
-                                                    _unreadThreadSources.first,
-                                                  ),
+                                            onPressed: () =>
+                                                widget.onOpenThread(
+                                                  _unreadThreadSources.first,
+                                                ),
                                           ),
                                         for (
                                           var index = 0;
