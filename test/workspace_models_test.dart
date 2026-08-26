@@ -19,6 +19,12 @@ void main() {
     expect(defaultFolder.workdir, isNull);
   });
 
+  test('always includes Self as a direct conversation', () {
+    final workspace = WorkspaceState();
+
+    expect(workspace.directPeers('owner'), ['owner']);
+  });
+
   test('decodes persisted conversation preferences and defaults routing on', () {
     final preferences = decodeWorkspaceConversationPreferences(
       '{"channel":{"pinned":true,"archived":false,"route_to_a0":false},"direct":{"archived":true}}',
@@ -639,6 +645,48 @@ void main() {
     expect(state.members, ['owner', 'member']);
     expect(state.messages['channel-1']![1].parentId, 'message-1');
   });
+
+  test(
+    'identifies replies whose thread root is missing from local history',
+    () {
+      final state = WorkspaceState();
+      final replies = state.apply({
+        'workspace_update': {
+          'action': 'message_created',
+          'messages': [
+            {
+              'id': 'reply-1',
+              'channel_id': 'channel-1',
+              'sender_pubkey': 'member',
+              'body': 'A reply that arrived first',
+              'parent_id': 'root-1',
+              'created_at': 2,
+            },
+          ],
+        },
+      });
+
+      expect(state.missingThreadRootsByConversation(replies), {
+        'channel-1': {'root-1'},
+      });
+
+      final root = state.apply({
+        'workspace_update': {
+          'action': 'message_created',
+          'messages': [
+            {
+              'id': 'root-1',
+              'channel_id': 'channel-1',
+              'sender_pubkey': 'owner',
+              'body': 'Thread root',
+              'created_at': 1,
+            },
+          ],
+        },
+      });
+      expect(state.missingThreadRootsByConversation(root), isEmpty);
+    },
+  );
 
   test(
     'workspace state retains member admin roles from updates and snapshots',
@@ -1862,4 +1910,43 @@ void main() {
       isEmpty,
     );
   });
+
+  test(
+    'persists the checkpoint only after an incremental history transfer',
+    () {
+      final state = WorkspaceState();
+      const transferId = 'catchup';
+
+      state.apply({
+        'workspace_update': {
+          'action': 'history_transfer:v1:$transferId:0:2:messages_since:42',
+          'revision': 1,
+        },
+      });
+      expect(state.historySince, isNull);
+
+      state.apply({
+        'workspace_update': {
+          'action': 'history_transfer:v1:$transferId:1:2:messages_since:42',
+          'revision': 1,
+          'messages': [
+            {
+              'id': 'reply',
+              'sender_pubkey': 'agent:worker',
+              'channel_id': 'engineering',
+              'body': 'Recovered reply',
+              'created_at': 42,
+            },
+          ],
+        },
+      });
+
+      expect(state.historySince, 42);
+      expect(state.takeCompletedHistorySince(), 42);
+      expect(state.takeCompletedHistorySince(), isNull);
+      final restored = WorkspaceState()
+        ..apply({'workspace_update': state.toSnapshotJson()});
+      expect(restored.historySince, 42);
+    },
+  );
 }

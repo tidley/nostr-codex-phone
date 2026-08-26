@@ -43,6 +43,10 @@ Agents are configured from the workspace: create, rename, restart, delete, set t
 
 Channels include a repository Files action. The Files panel loads one directory at a time to remain reliable over encrypted relay messages. It shows the current folder, provides an Up folder control, and never relies on a partial recursive directory index. It shares the right-hand workspace panel with threads, offers Thread and Files tabs when both are open, previews selectable file content in place, and can expand to fill the workspace.
 
+The desktop workspace keeps active work visible without replacing message history: typing threads sort as the most recent, thread headers show the sent and most-recent reply time, and each compact time label reveals an exact local timestamp on hover. Quick find searches messages and threads. A related thread can be linked to a thread so agents receive a compact handoff rather than a duplicate task context.
+
+Workspace traffic uses the direct FIPS route when it is available and falls back to encrypted Nostr delivery. The client diagnostics view records the active route and per-worker connection activity. Repository remotes, file previews, and live worker status refreshes are internal requests; replayed responses do not open client pages.
+
 ## Clients and Focused Sessions
 
 The focused-session view is a remote repository workspace with a composer at the bottom. Type in the query box and tap send, or leave it empty and tap `Record` for a voice request. The attachment button sends encrypted media/file references.
@@ -115,7 +119,7 @@ Common `.nostr-codex/.env.server` values:
 ```bash
 NOSTR_SECRET_KEY='nsec...optional worker key...'
 NOSTR_PEER_PUBKEY='npub...phone public key...'
-NOSTR_RELAYS='wss://relay.damus.io,wss://nos.lol,wss://nostr.mom,wss://relay.primal.net,wss://purplepag.es'
+NOSTR_RELAYS='wss://vm-1734.lnvps.cloud,wss://relay.damus.io,wss://nos.lol,wss://nostr.mom,wss://relay.primal.net,wss://purplepag.es'
 
 AGENT_BACKEND='opencode'
 OPENCODE_BIN='opencode'
@@ -148,6 +152,12 @@ cargo run --manifest-path rust/Cargo.toml --bin nostr-codex-server
 Run the real desktop-to-Pixel FIPS/Opus harness with the instructions in
 [`docs/fips-call-harness.md`](docs/fips-call-harness.md). It emits one
 pass/fail JSON result and never substitutes an Android simulator.
+
+### Transcription Benchmark
+
+Use [`docs/transcription-benchmark.md`](docs/transcription-benchmark.md) to
+measure real phone recordings through the worker, separate download,
+preprocessing, and Whisper timing, and compare CPU and GPU runs.
 
 ### In-Call Video Sources
 

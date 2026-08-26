@@ -793,6 +793,7 @@ pub async fn fips_group_call_connect(
     peer_npub: String,
 ) -> Result<BridgeFipsCallStatus> {
     let key = group_call_key(&call_id, &peer_npub)?;
+    stop_group_call_key(&key).await?;
     let mut session = build_fips_call_session(config)?;
     let peer_npub = PublicKey::parse(peer_npub.trim())?.to_bech32()?;
     session.connect(&peer_npub).await?;
@@ -814,6 +815,7 @@ pub async fn fips_group_call_accept_start(
     peer_npub: String,
 ) -> Result<BridgeFipsCallStatus> {
     let key = group_call_key(&call_id, &peer_npub)?;
+    stop_group_call_key(&key).await?;
     let mut session = build_fips_call_session(config)?;
     session.start_accept().await?;
     let status = fips_call_status(&session);
@@ -1238,14 +1240,19 @@ pub async fn fips_group_call_stop(call_id: String) -> Result<()> {
         .cloned()
         .collect::<Vec<_>>();
     for key in &keys {
-        if let Some(cancel) = GROUP_CALL_ACCEPT_CANCEL.lock().await.remove(key) {
-            let _ = cancel.send(());
-        }
-        if let Some(mut session) = GROUP_CALL_SESSIONS.lock().await.remove(key) {
-            session.stop().await?;
-        }
-        GROUP_CALL_AUDIO.lock().await.remove(key);
+        stop_group_call_key(key).await?;
     }
+    Ok(())
+}
+
+async fn stop_group_call_key(key: &str) -> Result<()> {
+    if let Some(cancel) = GROUP_CALL_ACCEPT_CANCEL.lock().await.remove(key) {
+        let _ = cancel.send(());
+    }
+    if let Some(mut session) = GROUP_CALL_SESSIONS.lock().await.remove(key) {
+        session.stop().await?;
+    }
+    GROUP_CALL_AUDIO.lock().await.remove(key);
     Ok(())
 }
 

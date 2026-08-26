@@ -155,19 +155,27 @@ class FileContentResult {
   const FileContentResult({
     required this.path,
     required this.content,
+    this.imageBase64,
+    this.mimeType,
     required this.lineCount,
     required this.truncated,
   });
 
   final String path;
   final String content;
+  final String? imageBase64;
+  final String? mimeType;
   final int lineCount;
   final bool truncated;
+
+  bool get isImage => imageBase64?.isNotEmpty == true;
 
   factory FileContentResult.fromPayload(ToolResultPayload payload) {
     return FileContentResult(
       path: payload.data['path']?.toString() ?? '',
-      content: payload.data['content']?.toString() ?? '',
+      content: payload.error ?? payload.data['content']?.toString() ?? '',
+      imageBase64: payload.data['image_base64']?.toString(),
+      mimeType: payload.data['mime_type']?.toString(),
       lineCount:
           int.tryParse(payload.data['line_count']?.toString() ?? '') ?? 0,
       truncated: payload.data['truncated'] == true,

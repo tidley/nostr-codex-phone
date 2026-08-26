@@ -102,6 +102,19 @@ pub struct WorkspaceConversationPreprompt {
     pub agent_routing_enabled: bool,
 }
 
+/// The authoritative native OpenCode session for one conversation write root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceConversationSession {
+    pub channel_id: Option<String>,
+    pub member_pubkey: Option<String>,
+    pub peer_pubkey: Option<String>,
+    pub folder_path: String,
+    pub opencode_session_id: String,
+    pub session_status: String,
+    pub session_error: Option<String>,
+    pub updated_at: i64,
+}
+
 pub struct WorkspaceStore {
     conn: Connection,
 }
@@ -148,9 +161,12 @@ impl WorkspaceStore {
                       CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
                   CREATE UNIQUE INDEX IF NOT EXISTS workspace_channel_round_robin ON workspace_conversation_round_robin(channel_id) WHERE channel_id IS NOT NULL;
                   CREATE UNIQUE INDEX IF NOT EXISTS workspace_direct_round_robin ON workspace_conversation_round_robin(member_pubkey, peer_pubkey) WHERE channel_id IS NULL;
-                  CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL, folder_scope_json TEXT NOT NULL DEFAULT '[]', agent_routing_enabled INTEGER NOT NULL DEFAULT 0,
+                   CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL, folder_scope_json TEXT NOT NULL DEFAULT '[]', agent_routing_enabled INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (channel_id, member_pubkey, peer_pubkey),
-                    CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+                       CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+                   CREATE TABLE IF NOT EXISTS workspace_conversation_sessions (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, folder_path TEXT NOT NULL, opencode_session_id TEXT NOT NULL, session_status TEXT NOT NULL DEFAULT 'ready', session_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                       PRIMARY KEY (channel_id, member_pubkey, peer_pubkey, folder_path),
+                       CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
                 CREATE INDEX IF NOT EXISTS workspace_messages_channel ON workspace_messages(channel_id, created_at);
                 CREATE INDEX IF NOT EXISTS workspace_messages_direct ON workspace_messages(recipient_pubkey, sender_pubkey, created_at);",
         )?;
@@ -162,6 +178,57 @@ impl WorkspaceStore {
         Ok(Self {
             conn: Self::open_connection(path)?,
         })
+    }
+
+    pub fn conversation_session(
+        &self,
+        channel_id: Option<&str>,
+        member_pubkey: Option<&str>,
+        peer_pubkey: Option<&str>,
+        folder_path: &str,
+    ) -> Result<Option<WorkspaceConversationSession>> {
+        let (channel_id, member_pubkey, peer_pubkey) =
+            conversation_session_key(channel_id, member_pubkey, peer_pubkey)?;
+        self.conn
+            .query_row(
+                "SELECT channel_id, member_pubkey, peer_pubkey, folder_path, opencode_session_id, session_status, session_error, updated_at FROM workspace_conversation_sessions WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3 AND folder_path = ?4",
+                params![channel_id, member_pubkey, peer_pubkey, required("session folder", folder_path)?],
+                conversation_session_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn upsert_conversation_session(
+        &self,
+        channel_id: Option<&str>,
+        member_pubkey: Option<&str>,
+        peer_pubkey: Option<&str>,
+        folder_path: &str,
+        opencode_session_id: &str,
+        session_status: &str,
+        session_error: Option<&str>,
+    ) -> Result<()> {
+        let (channel_id, member_pubkey, peer_pubkey) =
+            conversation_session_key(channel_id, member_pubkey, peer_pubkey)?;
+        let folder_path = required("session folder", folder_path)?;
+        let opencode_session_id = required("OpenCode session ID", opencode_session_id)?;
+        let session_status = required("session status", session_status)?;
+        let timestamp = now();
+        // SQLite unique constraints treat NULL values as distinct. Conversation
+        // keys intentionally contain NULL values, so update by `IS` before an
+        // insert rather than relying on the composite primary key conflict.
+        let updated = self.conn.execute(
+            "UPDATE workspace_conversation_sessions SET opencode_session_id = ?5, session_status = ?6, session_error = ?7, updated_at = ?8 WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3 AND folder_path = ?4",
+            params![channel_id, member_pubkey, peer_pubkey, folder_path, opencode_session_id, session_status, session_error, timestamp],
+        )?;
+        if updated == 0 {
+            self.conn.execute(
+                "INSERT INTO workspace_conversation_sessions (channel_id, member_pubkey, peer_pubkey, folder_path, opencode_session_id, session_status, session_error, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                params![channel_id, member_pubkey, peer_pubkey, folder_path, opencode_session_id, session_status, session_error, timestamp],
+            )?;
+        }
+        Ok(())
     }
 
     fn open_connection(path: &Path) -> Result<Connection> {
@@ -388,9 +455,11 @@ impl WorkspaceStore {
               CREATE TRIGGER IF NOT EXISTS workspace_completed_thread_agents_revision_insert AFTER INSERT ON workspace_completed_thread_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
               CREATE TRIGGER IF NOT EXISTS workspace_completed_thread_agents_revision_update AFTER UPDATE ON workspace_completed_thread_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
               CREATE TRIGGER IF NOT EXISTS workspace_completed_thread_agents_revision_delete AFTER DELETE ON workspace_completed_thread_agents BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
-             CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_insert AFTER INSERT ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
-             CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_update AFTER UPDATE ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
-             CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_delete AFTER DELETE ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;",
+              CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_insert AFTER INSERT ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_update AFTER UPDATE ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_delete AFTER DELETE ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_conversation_sessions_revision_insert AFTER INSERT ON workspace_conversation_sessions BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+              CREATE TRIGGER IF NOT EXISTS workspace_conversation_sessions_revision_update AFTER UPDATE ON workspace_conversation_sessions BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;",
         )?;
         Ok(Self { conn })
     }
@@ -1964,6 +2033,18 @@ impl WorkspaceStore {
         )
     }
 
+    pub fn snapshot_messages_since(
+        &self,
+        member: &str,
+        since: i64,
+    ) -> Result<Vec<WorkspaceMessage>> {
+        Ok(self
+            .snapshot_messages(member)?
+            .into_iter()
+            .filter(|message| message.created_at >= since)
+            .collect())
+    }
+
     pub fn toggle_reaction(
         &self,
         sender: &str,
@@ -2050,6 +2131,15 @@ impl WorkspaceStore {
                 Ok(message)
             })
             .transpose()
+    }
+
+    /// Returns a root message and its direct replies regardless of conversation.
+    /// Callers use this for explicit workspace message references only.
+    pub fn thread_messages(&self, parent_id: &str) -> Result<Vec<WorkspaceMessage>> {
+        self.messages(
+            "id = ?1 OR parent_id = ?1",
+            [required("thread parent id", parent_id)?],
+        )
     }
 
     fn message(&self, id: &str) -> Result<WorkspaceMessage> {
@@ -2215,6 +2305,37 @@ fn required(label: &str, value: &str) -> Result<String> {
 fn non_empty(value: &str) -> Option<String> {
     (!value.trim().is_empty()).then(|| value.trim().to_string())
 }
+fn conversation_session_key(
+    channel_id: Option<&str>,
+    member_pubkey: Option<&str>,
+    peer_pubkey: Option<&str>,
+) -> Result<(Option<String>, Option<String>, Option<String>)> {
+    match (channel_id, member_pubkey, peer_pubkey) {
+        (Some(channel_id), None, None) => {
+            Ok((Some(required("channel ID", channel_id)?), None, None))
+        }
+        (None, Some(member), Some(peer)) => {
+            let (member, peer) = direct_participants(member, peer)?;
+            Ok((None, Some(member), Some(peer)))
+        }
+        _ => bail!("conversation must be a channel or a direct message"),
+    }
+}
+fn conversation_session_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkspaceConversationSession> {
+    Ok(WorkspaceConversationSession {
+        channel_id: row.get(0)?,
+        member_pubkey: row.get(1)?,
+        peer_pubkey: row.get(2)?,
+        folder_path: row.get(3)?,
+        opencode_session_id: row.get(4)?,
+        session_status: row.get(5)?,
+        session_error: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3356,6 +3477,74 @@ mod tests {
         assert!(!store
             .conversation_agent_routing_enabled(Some(&channel.id), None, None)
             .unwrap());
+    }
+
+    #[test]
+    fn persists_native_sessions_per_conversation_and_folder() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        store.add_member("owner").unwrap();
+        store.add_member("member").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+
+        store
+            .upsert_conversation_session(
+                Some(&channel.id),
+                None,
+                None,
+                "/work/phone",
+                "ses_channel",
+                "ready",
+                None,
+            )
+            .unwrap();
+        store
+            .upsert_conversation_session(
+                None,
+                Some("owner"),
+                Some("member"),
+                "/work/phone",
+                "ses_direct",
+                "failed",
+                Some("offline"),
+            )
+            .unwrap();
+        drop(store);
+
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        let channel_session = store
+            .conversation_session(Some(&channel.id), None, None, "/work/phone")
+            .unwrap()
+            .unwrap();
+        assert_eq!(channel_session.opencode_session_id, "ses_channel");
+        let direct_session = store
+            .conversation_session(None, Some("member"), Some("owner"), "/work/phone")
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct_session.opencode_session_id, "ses_direct");
+        assert_eq!(direct_session.session_error.as_deref(), Some("offline"));
+        store
+            .upsert_conversation_session(
+                None,
+                Some("owner"),
+                Some("member"),
+                "/work/phone",
+                "ses_recovered",
+                "ready",
+                None,
+            )
+            .unwrap();
+        let direct_session = store
+            .conversation_session(None, Some("owner"), Some("member"), "/work/phone")
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct_session.opencode_session_id, "ses_recovered");
+        assert_eq!(direct_session.session_status, "ready");
+        assert_eq!(direct_session.session_error, None);
+        assert!(store
+            .conversation_session(Some(&channel.id), None, None, "/work/other")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

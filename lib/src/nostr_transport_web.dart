@@ -9,6 +9,7 @@ import 'nostr_transport.dart';
 import 'rust/api/nostr.dart';
 
 const _defaultRelays = [
+  'wss://vm-1734.lnvps.cloud',
   'wss://relay.damus.io',
   'wss://nos.lol',
   'wss://relay.primal.net',
@@ -255,10 +256,10 @@ class NostrTransportImpl implements NostrTransport {
     final signedRumor = Event.from(
       kind: DirectMessage.kindDirectMessage,
       content: message,
-        tags: [
-          ['p', recipientPubkey],
-          if (expiresAt != null) ['expiration', '$expiresAt'],
-        ],
+      tags: [
+        ['p', recipientPubkey],
+        if (expiresAt != null) ['expiration', '$expiresAt'],
+      ],
       secretKey: author.secret,
     );
     final rumor = signedRumor.toMap()..remove('sig');

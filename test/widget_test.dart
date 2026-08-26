@@ -14,6 +14,27 @@ import 'package:crew/src/voice_recording.dart';
 import 'package:crew/src/workspace_models.dart';
 
 void main() {
+  testWidgets('message status footer stays at the bubble right edge', (
+    tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: WorkspaceStatusHarness()));
+    await tester.pump();
+
+    final bubble = tester.getRect(
+      find.byKey(const Key('workspace-status-harness-bubble')),
+    );
+    await tester.tap(find.text('Working'));
+    await tester.pump();
+    final unreadRect = tester.getRect(find.text('2 new'));
+    expect(unreadRect.right, closeTo(bubble.right - 8, 1));
+
+    await tester.tap(find.text('Working'));
+    await tester.tap(find.text('New replies'));
+    await tester.pump();
+    final workingRect = tester.getRect(find.text('OpenCode is working...'));
+    expect(workingRect.right, closeTo(bubble.right - 8, 1));
+  });
+
   test('app widget is available', () {
     expect(const NostrCodexApp(), isA<StatefulWidget>());
   });
@@ -289,7 +310,7 @@ void main() {
     focus.dispose();
   });
 
-  testWidgets('composer toggles root-message routing to the router agent', (
+  testWidgets('composer toggles root-message routing to the agent', (
     tester,
   ) async {
     final controller = TextEditingController();
@@ -314,8 +335,8 @@ void main() {
       ),
     );
 
-    expect(find.byTooltip('Sending to router agent'), findsOneWidget);
-    await tester.tap(find.byTooltip('Sending to router agent'));
+    expect(find.byTooltip('Asking agent'), findsOneWidget);
+    await tester.tap(find.byTooltip('Asking agent'));
     await tester.pump();
     expect(routed, isFalse);
     controller.dispose();
@@ -330,17 +351,20 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: ThemeData(platform: TargetPlatform.windows),
-        home: Material(
-          child: WorkspaceComposer(
-            composer: controller,
-            composerFocus: focus,
-            hintText: 'Message',
-            mentionOptions: const [
-              WorkspaceMention(kind: 'member', id: 'ada', label: 'Ada'),
-            ],
-            onMentionSelected: (mention) => selected = mention,
-            onSend: () {},
-            onAttach: () async {},
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.bottomCenter,
+            child: WorkspaceComposer(
+              composer: controller,
+              composerFocus: focus,
+              hintText: 'Message',
+              mentionOptions: const [
+                WorkspaceMention(kind: 'member', id: 'ada', label: 'Ada'),
+              ],
+              onMentionSelected: (mention) => selected = mention,
+              onSend: () {},
+              onAttach: () async {},
+            ),
           ),
         ),
       ),
@@ -804,6 +828,35 @@ repo API JSON RS232 I2C UART CAN BLE
     );
     expect(file.path, 'README.md');
     expect(file.lineCount, 1);
+    expect(file.isImage, false);
+
+    final image = FileContentResult.fromPayload(
+      ToolResultPayload(
+        tool: 'read_file',
+        requestId: 'request-2-image',
+        workdir: '/repo',
+        data: const {
+          'path': 'assets/logo.png',
+          'content': '',
+          'image_base64': 'iVBORw0KGgo=',
+          'mime_type': 'image/png',
+          'line_count': 0,
+          'truncated': false,
+        },
+      ),
+    );
+    expect(image.isImage, true);
+    expect(image.mimeType, 'image/png');
+
+    final failedFile = FileContentResult.fromPayload(
+      ToolResultPayload(
+        tool: 'read_file',
+        requestId: 'request-2-error',
+        workdir: '/repo',
+        data: const {'error': 'Could not read file.'},
+      ),
+    );
+    expect(failedFile.content, 'Could not read file.');
 
     final browser = FileBrowserResult.fromPayload(
       ToolResultPayload(

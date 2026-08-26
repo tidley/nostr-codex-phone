@@ -506,6 +506,7 @@ fn decode_gift_wrap(
 
 pub fn default_relays() -> Vec<String> {
     vec![
+        "wss://vm-1734.lnvps.cloud".to_string(),
         "wss://relay.damus.io".to_string(),
         "wss://nos.lol".to_string(),
         "wss://nostr.mom".to_string(),

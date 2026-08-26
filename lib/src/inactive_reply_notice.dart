@@ -70,7 +70,7 @@ class _InactiveReplyNotice extends StatelessWidget {
                             child: SizedBox.square(
                               dimension: 38,
                               child: Icon(
-                                Icons.mark_unread_chat_alt_outlined,
+                                Icons.mail_outline,
                                 color: colorScheme.primary,
                                 size: 20,
                               ),

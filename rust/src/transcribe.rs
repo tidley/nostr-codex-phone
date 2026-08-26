@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
@@ -25,6 +25,7 @@ use symphonia::core::probe::Hint;
 use symphonia::default::{get_codecs, get_probe};
 use tempfile::TempDir;
 use tokio::process::Command;
+use tracing::info;
 
 use crate::audio_crypto::{decrypt_audio_payload, unwrap_encrypted_payload};
 use crate::protocol::AudioReference;
@@ -110,6 +111,7 @@ pub async fn download_blossom_attachment(
     extension: &str,
     config: &AudioConfig,
 ) -> Result<DownloadedAudio> {
+    let total_started = Instant::now();
     if attachment.size > config.max_bytes {
         return Err(anyhow!(
             "attachment blob is too large: {} bytes > {} byte limit",
@@ -120,6 +122,7 @@ pub async fn download_blossom_attachment(
 
     let initial_url = Url::parse(&attachment.url)
         .with_context(|| format!("attachment URL is invalid `{}`", attachment.url))?;
+    let download_started = Instant::now();
     let response = download_public_https_attachment(initial_url).await?;
     let status = response.status();
     if !status.is_success() {
@@ -155,10 +158,12 @@ pub async fn download_blossom_attachment(
         hasher.update(&chunk);
         bytes.extend_from_slice(&chunk);
     }
+    let download_ms = download_started.elapsed().as_millis();
 
     let actual_hash = format!("{:x}", hasher.finalize());
     verify_expected_sha256(&actual_hash, Some(&attachment.sha256))?;
 
+    let decrypt_started = Instant::now();
     let (attachment_bytes, attachment_hash) = if let Some(encryption) = &attachment.encryption {
         let ciphertext = unwrap_encrypted_payload(&bytes)?;
         let plaintext = decrypt_audio_payload(&ciphertext, encryption)?;
@@ -173,6 +178,7 @@ pub async fn download_blossom_attachment(
     } else {
         (bytes, actual_hash)
     };
+    let decrypt_ms = decrypt_started.elapsed().as_millis();
 
     let temp_dir = tempfile::tempdir().context("failed to create attachment temp directory")?;
     let extension = if extension.trim().is_empty() {
@@ -183,6 +189,7 @@ pub async fn download_blossom_attachment(
     let path = temp_dir
         .path()
         .join(format!("{attachment_hash}.{extension}"));
+    let file_write_started = Instant::now();
     tokio::fs::write(&path, &attachment_bytes)
         .await
         .with_context(|| {
@@ -191,6 +198,17 @@ pub async fn download_blossom_attachment(
                 path.display()
             )
         })?;
+    info!(
+        event = "transcription_timing",
+        stage = "download_audio",
+        bytes = attachment_bytes.len(),
+        encrypted = attachment.encryption.is_some(),
+        download_ms,
+        decrypt_ms,
+        file_write_ms = file_write_started.elapsed().as_millis(),
+        total_ms = total_started.elapsed().as_millis(),
+        "downloaded audio for transcription"
+    );
 
     Ok(DownloadedAudio {
         _temp_dir: temp_dir,
@@ -344,9 +362,16 @@ fn verify_expected_sha256(actual: &str, expected: Option<&str>) -> Result<()> {
 }
 
 pub async fn transcribe_audio(audio_path: &Path, config: &TranscribeConfig) -> Result<String> {
+    let total_started = Instant::now();
+    let preprocess_started = Instant::now();
     let prepared_audio = prepare_audio_for_transcription(audio_path, config).await?;
-    reject_short_audio(&prepared_audio.path)?;
+    let preprocess_ms = preprocess_started.elapsed().as_millis();
+    let inspect_started = Instant::now();
+    let audio_duration = reject_short_audio(&prepared_audio.path)?;
+    let inspect_ms = inspect_started.elapsed().as_millis();
+    let output_setup_started = Instant::now();
     let output_dir = tempfile::tempdir().context("failed to create transcript temp directory")?;
+    let output_setup_ms = output_setup_started.elapsed().as_millis();
     let audio_arg = prepared_audio.path.to_string_lossy().to_string();
     let output_dir_arg = output_dir.path().to_string_lossy().to_string();
     let args = config
@@ -366,7 +391,16 @@ pub async fn transcribe_audio(audio_path: &Path, config: &TranscribeConfig) -> R
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let output = tokio::time::timeout(config.timeout, command.output())
+    let spawn_started = Instant::now();
+    let child = command.spawn().with_context(|| {
+        format!(
+            "failed to run `{}`; set TRANSCRIBE_BIN/TRANSCRIBE_ARGS if Whisper is installed elsewhere",
+            config.bin
+        )
+    })?;
+    let spawn_ms = spawn_started.elapsed().as_millis();
+    let execution_started = Instant::now();
+    let output = tokio::time::timeout(config.timeout, child.wait_with_output())
         .await
         .map_err(|_| anyhow!("transcription timed out after {}s", config.timeout.as_secs()))?
         .with_context(|| {
@@ -375,9 +409,18 @@ pub async fn transcribe_audio(audio_path: &Path, config: &TranscribeConfig) -> R
                 config.bin
             )
         })?;
+    let whisper_execution_ms = execution_started.elapsed().as_millis();
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if !stderr.is_empty() {
+        info!(
+            event = "whisper_cpp_output",
+            output = %stderr,
+            "whisper.cpp stderr, including its internal timing summary"
+        );
+    }
 
     if !output.status.success() {
         if stderr.is_empty() {
@@ -393,18 +436,35 @@ pub async fn transcribe_audio(audio_path: &Path, config: &TranscribeConfig) -> R
         ));
     }
 
+    let transcript_read_started = Instant::now();
     let transcript = read_transcript_file(output_dir.path())
         .await?
         .unwrap_or(stdout);
+    let transcript_read_ms = transcript_read_started.elapsed().as_millis();
     let transcript = transcript.trim().to_string();
     if transcript.is_empty() {
         return Err(anyhow!("transcription completed but produced no text"));
     }
 
+    info!(
+        event = "transcription_timing",
+        stage = "transcribe_audio",
+        preprocess_ms,
+        inspect_ms,
+        output_setup_ms,
+        audio_duration_ms = audio_duration.as_millis(),
+        whisper_spawn_ms = spawn_ms,
+        whisper_execution_ms,
+        whisper_rtf = whisper_execution_ms as f64 / audio_duration.as_millis() as f64,
+        transcript_read_ms,
+        total_ms = total_started.elapsed().as_millis(),
+        "transcription timing breakdown"
+    );
+
     Ok(transcript)
 }
 
-fn reject_short_audio(audio_path: &Path) -> Result<()> {
+fn reject_short_audio(audio_path: &Path) -> Result<Duration> {
     let reader = WavReader::open(audio_path).with_context(|| {
         format!(
             "failed to inspect prepared audio `{}`",
@@ -423,7 +483,7 @@ fn reject_short_audio(audio_path: &Path) -> Result<()> {
             duration.as_secs_f64()
         ));
     }
-    Ok(())
+    Ok(duration)
 }
 
 struct PreparedAudio {
@@ -436,6 +496,13 @@ async fn prepare_audio_for_transcription(
     config: &TranscribeConfig,
 ) -> Result<PreparedAudio> {
     if is_wav_path(audio_path) {
+        info!(
+            event = "transcription_timing",
+            stage = "preprocess_audio",
+            method = "wav_passthrough",
+            total_ms = 0_u8,
+            "audio preprocessing timing"
+        );
         return Ok(PreparedAudio {
             _temp_dir: None,
             path: audio_path.to_path_buf(),
@@ -444,14 +511,30 @@ async fn prepare_audio_for_transcription(
 
     let temp_dir = tempfile::tempdir().context("failed to create transcode temp directory")?;
     let wav_path = temp_dir.path().join("audio.wav");
+    let rust_transcode_started = Instant::now();
     if let Err(rust_err) =
         transcode_to_wav_with_rust_blocking(audio_path.to_path_buf(), wav_path.clone()).await
     {
+        info!(
+            event = "transcription_timing",
+            stage = "preprocess_audio",
+            method = "pure_rust_failed",
+            total_ms = rust_transcode_started.elapsed().as_millis(),
+            "pure-Rust audio preprocessing failed; falling back to ffmpeg"
+        );
         transcode_to_wav_with_ffmpeg(audio_path, &wav_path, config)
             .await
             .with_context(|| {
                 format!("pure-Rust audio transcode failed: {rust_err:#}; ffmpeg fallback failed")
             })?;
+    } else {
+        info!(
+            event = "transcription_timing",
+            stage = "preprocess_audio",
+            method = "pure_rust",
+            total_ms = rust_transcode_started.elapsed().as_millis(),
+            "audio preprocessing timing"
+        );
     }
 
     Ok(PreparedAudio {
@@ -746,6 +829,7 @@ async fn transcode_to_wav_with_ffmpeg(
     output: &Path,
     config: &TranscribeConfig,
 ) -> Result<()> {
+    let total_started = Instant::now();
     let mut command = Command::new(&config.ffmpeg_bin);
     command
         .arg("-y")
@@ -798,6 +882,13 @@ async fn transcode_to_wav_with_ffmpeg(
         ));
     }
 
+    info!(
+        event = "transcription_timing",
+        stage = "preprocess_audio",
+        method = "ffmpeg",
+        total_ms = total_started.elapsed().as_millis(),
+        "audio preprocessing timing"
+    );
     Ok(())
 }
 

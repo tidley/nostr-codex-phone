@@ -12,6 +12,14 @@ Future<void> deleteLocalFile(String path) async {
 Future<void> writeLocalTextFile(String path, String contents) =>
     File(path).writeAsString(contents);
 
+Future<void> writeLocalBytesAtomically(String path, Uint8List bytes) async {
+  final file = File(path);
+  await file.parent.create(recursive: true);
+  final temporary = File('$path.part');
+  await temporary.writeAsBytes(bytes, flush: true);
+  await temporary.rename(path);
+}
+
 Future<Duration> probeWebSocketRelay(String relay) async {
   final stopwatch = Stopwatch()..start();
   final socket = await WebSocket.connect(relay);

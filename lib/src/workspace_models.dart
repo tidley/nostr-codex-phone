@@ -84,7 +84,7 @@ class _WorkspaceHistoryTransferAction {
 _WorkspaceHistoryTransferAction? _historyTransferAction(String? value) {
   if (value == null) return null;
   final parts = value.split(':');
-  if (parts.length != 6 || parts[0] != 'history_transfer' || parts[1] != 'v1') {
+  if (parts.length < 6 || parts[0] != 'history_transfer' || parts[1] != 'v1') {
     return null;
   }
   final sequence = int.tryParse(parts[3]);
@@ -98,7 +98,24 @@ _WorkspaceHistoryTransferAction? _historyTransferAction(String? value) {
       parts[5].isEmpty) {
     return null;
   }
-  return _WorkspaceHistoryTransferAction(parts[2], sequence, total, parts[5]);
+  return _WorkspaceHistoryTransferAction(
+    parts[2],
+    sequence,
+    total,
+    parts.skip(5).join(':'),
+  );
+}
+
+int? _historySince(String action) {
+  const prefix = 'messages_since:';
+  return action.startsWith(prefix)
+      ? int.tryParse(action.substring(prefix.length))
+      : null;
+}
+
+int? _historySinceValue(Object? value) {
+  if (value is int) return value;
+  return int.tryParse(value?.toString() ?? '');
 }
 
 bool isWorkspaceAgentSender(String senderPubkey) =>
@@ -799,6 +816,7 @@ class WorkspaceTyping {
     this.agentName,
     this.stage,
     this.workHistory = const [],
+    this.startedAt,
     this.channelId,
     this.recipientPubkey,
     this.memberPubkey,
@@ -812,6 +830,7 @@ class WorkspaceTyping {
   final String? agentName;
   final String? stage;
   final List<String> workHistory;
+  final int? startedAt;
   final String? channelId;
   final String? recipientPubkey;
   final String? memberPubkey;
@@ -829,6 +848,7 @@ class WorkspaceTyping {
             .map((item) => item.toString())
             .where((item) => item.isNotEmpty)
             .toList(growable: false),
+        startedAt: (json['started_at'] as num?)?.toInt(),
         channelId: json['channel_id']?.toString(),
         recipientPubkey: json['recipient_pubkey']?.toString(),
         memberPubkey: json['member_pubkey']?.toString(),
@@ -855,6 +875,8 @@ class WorkspaceState {
   List<WorkspaceConversationPreprompt> conversationPreprompts = [];
   final Map<String, WorkspaceTyping> typing = {};
   final Map<String, _WorkspaceHistoryTransfer> _historyTransfers = {};
+  int? historySince;
+  int? _completedHistorySince;
 
   void clear() {
     revision = 0;
@@ -869,11 +891,14 @@ class WorkspaceState {
     conversationPreprompts = [];
     typing.clear();
     _historyTransfers.clear();
+    historySince = null;
+    _completedHistorySince = null;
   }
 
   Map<String, Object> toSnapshotJson() => {
     'action': 'snapshot',
     'revision': revision,
+    if (historySince != null) 'history_since': historySince!,
     'channels': channels
         .map((channel) => channel.toJson())
         .toList(growable: false),
@@ -915,7 +940,8 @@ class WorkspaceState {
       // Channel and direct-message history can span many relay frames. Show
       // each received frame instead of losing the entire history if one frame
       // is delayed or missing. Snapshots still need atomic replacement.
-      if (transfer.action != 'snapshot') {
+      if (transfer.action != 'snapshot' &&
+          _historySince(transfer.action) == null) {
         data['action'] = transfer.action;
         return apply(
           {'workspace_update': data},
@@ -966,13 +992,21 @@ class WorkspaceState {
           for (final chunk in chunks) ...(chunk[field] as List? ?? const []),
         ];
       }
-      return apply(
+      final addedMessages = apply(
         {'workspace_update': header},
         localSenderIds: localSenderIds,
         preserveMessagesOnSnapshot: preserveMessagesOnSnapshot,
       );
+      final since = _historySince(action.action);
+      if (since != null) {
+        historySince = since;
+        _completedHistorySince = since;
+      }
+      return addedMessages;
     }
     if (incomingRevision > revision) revision = incomingRevision;
+    final snapshotSince = _historySinceValue(data['history_since']);
+    if (snapshotSince != null) historySince = snapshotSince;
     final addedMessages = <WorkspaceMessage>[];
     final isSnapshot = data['action'] == 'snapshot';
     final isSnapshotHeader = data['action'] == 'snapshot_header';
@@ -1050,6 +1084,7 @@ class WorkspaceState {
             agentName: status.agentName,
             stage: previous!.stage,
             workHistory: previous.workHistory,
+            startedAt: previous.startedAt,
             channelId: status.channelId,
             recipientPubkey: status.recipientPubkey,
             memberPubkey: status.memberPubkey,
@@ -1070,6 +1105,7 @@ class WorkspaceState {
           agentName: previous.agentName,
           stage: previous.stage,
           workHistory: previous.workHistory,
+          startedAt: previous.startedAt,
           channelId: previous.channelId,
           recipientPubkey: previous.recipientPubkey,
           memberPubkey: previous.memberPubkey,
@@ -1193,6 +1229,12 @@ class WorkspaceState {
     return addedMessages;
   }
 
+  int? takeCompletedHistorySince() {
+    final since = _completedHistorySince;
+    _completedHistorySince = null;
+    return since;
+  }
+
   static bool _isFinishedStep(String? stage) => RegExp(
     r'\bfinished a step\.?$',
     caseSensitive: false,
@@ -1201,6 +1243,24 @@ class WorkspaceState {
   static String directKey(String one, String? two) => _directKey(one, two);
   String conversationKeyForMessage(WorkspaceMessage message) =>
       message.channelId ?? _messageDirectKey(message);
+
+  Map<String, Set<String>> missingThreadRootsByConversation(
+    Iterable<WorkspaceMessage> incoming,
+  ) {
+    final roots = <String, Set<String>>{};
+    for (final message in incoming) {
+      final parentId = message.parentId;
+      if (parentId == null) continue;
+      final conversationKey = conversationKeyForMessage(message);
+      final hasRoot = (messages[conversationKey] ?? const <WorkspaceMessage>[])
+          .any((candidate) => candidate.id == parentId);
+      if (!hasRoot) {
+        roots.putIfAbsent(conversationKey, () => {}).add(parentId);
+      }
+    }
+    return roots;
+  }
+
   static String _typingKey(WorkspaceTyping status) => [
     status.senderPubkey,
     status.channelId ?? '',
@@ -1315,7 +1375,9 @@ class WorkspaceState {
   }
 
   List<String> directPeers(String ownPubkey) {
-    final peers = <String>{};
+    // A direct message to yourself is a durable private workspace home, even
+    // before its first message has reached the worker.
+    final peers = <String>{ownPubkey};
     for (final membership in conversationAgents) {
       if (membership.channelId == null &&
           membership.memberPubkey == ownPubkey &&

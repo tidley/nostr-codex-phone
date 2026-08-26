@@ -68,6 +68,7 @@ class SettingsStorage {
       Platform.isLinux && _secureStorage is _FlutterSecureSettingsStorage;
   bool _useLinuxFallback = false;
   Future<void> _fallbackOperations = Future.value();
+  Future<void>? _fallbackDirectorySecurity;
   Future<void> _operations = Future.value();
   final Map<String, String?> _knownValues = {};
 
@@ -160,7 +161,18 @@ class SettingsStorage {
     final supportDirectory = await _applicationSupportDirectory();
     final directory = Directory('${supportDirectory.path}/settings-fallback');
     await directory.create(recursive: true);
-    await _setPermissions(directory.path, '700');
+    final security = _fallbackDirectorySecurity ??= _setPermissions(
+      directory.path,
+      '700',
+    );
+    try {
+      await security;
+    } catch (_) {
+      if (identical(_fallbackDirectorySecurity, security)) {
+        _fallbackDirectorySecurity = null;
+      }
+      rethrow;
+    }
     return File('${directory.path}/settings.json');
   }
 
@@ -180,7 +192,8 @@ class SettingsStorage {
     final file = await _fallbackFile();
     final temporary = File('${file.path}.tmp');
     await temporary.writeAsString(jsonEncode(values), flush: true);
-    await _setPermissions(temporary.path, '600');
+    // The parent directory is mode 0700, so temporary files are private
+    // without starting a chmod process for every settings write.
     await temporary.rename(file.path);
   }
 

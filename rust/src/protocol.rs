@@ -68,6 +68,9 @@ pub enum WireMessage {
     WorkspaceUpdate {
         workspace_update: WorkspaceUpdate,
     },
+    FipsArtifact {
+        fips_artifact: FipsArtifact,
+    },
     RepoList {
         repo_list: RepoList,
     },
@@ -147,6 +150,18 @@ pub struct MediaReference {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encryption: Option<AudioEncryption>,
+}
+
+/// A one-recipient artifact sent only inside the authenticated FIPS workspace
+/// service. `data` is URL-safe base64 of the original file bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FipsArtifact {
+    pub sha256: String,
+    pub size: u64,
+    #[serde(rename = "type")]
+    pub media_type: String,
+    pub name: String,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +249,15 @@ pub struct WorkspaceRequest {
     pub request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_range: Option<String>,
+    /// Return a fresh host metrics sample instead of the latest stored sample.
+    #[serde(default)]
+    pub live_status: bool,
+    /// Store a fresh live metrics sample for the selected history chart.
+    #[serde(default)]
+    pub record_history: bool,
+    /// Inclusive Unix timestamp for incremental workspace message recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MediaReference>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -334,6 +358,8 @@ pub struct WorkspaceTypingPayload {
     pub stage: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work_history: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -735,6 +761,10 @@ impl WireMessage {
         Self::WorkspaceUpdate { workspace_update }
     }
 
+    pub fn fips_artifact(fips_artifact: FipsArtifact) -> Self {
+        Self::FipsArtifact { fips_artifact }
+    }
+
     pub fn repo_list(repo_list: RepoList) -> Self {
         Self::RepoList { repo_list }
     }
@@ -804,6 +834,7 @@ impl WireMessage {
             Self::InviteRejected { .. } => "invite_rejected",
             Self::WorkspaceRequest { .. } => "workspace_request",
             Self::WorkspaceUpdate { .. } => "workspace_update",
+            Self::FipsArtifact { .. } => "fips_artifact",
             Self::RepoList { .. } => "repo_list",
             Self::OpenCodeSessionList { .. } => "opencode_sessions",
             Self::ToolResult { .. } => "tool_result",
@@ -845,6 +876,7 @@ impl WireMessage {
             Self::InviteRejected { invite_rejected } => &invite_rejected.reason,
             Self::WorkspaceRequest { workspace_request } => &workspace_request.action,
             Self::WorkspaceUpdate { workspace_update } => &workspace_update.action,
+            Self::FipsArtifact { fips_artifact } => &fips_artifact.name,
             Self::RepoList { .. } => "repo list",
             Self::OpenCodeSessionList { .. } => "OpenCode sessions",
             Self::ToolResult { tool_result } => &tool_result.tool,
@@ -906,6 +938,7 @@ impl WireMessage {
             Self::WorkspaceUpdate { workspace_update } => {
                 json!({ "workspace_update": workspace_update })
             }
+            Self::FipsArtifact { fips_artifact } => json!({ "fips_artifact": fips_artifact }),
             Self::RepoList { repo_list } => json!({ "repo_list": repo_list }),
             Self::OpenCodeSessionList { opencode_sessions } => {
                 json!({ "opencode_sessions": opencode_sessions })
@@ -1083,6 +1116,12 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
             .map_err(|err| anyhow!("field `workspace_update` is invalid: {err}"))?;
         return Ok(WireMessage::workspace_update(update));
     }
+    if let Some(value) = object.get("fips_artifact") {
+        let artifact: FipsArtifact = serde_json::from_value(value.clone())
+            .map_err(|err| anyhow!("field `fips_artifact` is invalid: {err}"))?;
+        validate_fips_artifact(&artifact)?;
+        return Ok(WireMessage::fips_artifact(artifact));
+    }
 
     if let Some(repo_list) = object.get("repo_list") {
         let repo_list: RepoList = serde_json::from_value(repo_list.clone())
@@ -1144,6 +1183,35 @@ pub fn parse_wire_message(content: &str) -> Result<WireMessage> {
     Err(anyhow!(
         "message must contain a string `query`, `message`, `transcript`, `status`, `response`, `error`, object `audio`, object `audio_retry`, object `target_invite`, object `repo_list`, object `opencode_sessions`, object `tool_result`, object `media_bundle`, object `cancel_request`, or object `attachments` field"
     ))
+}
+
+fn validate_fips_artifact(artifact: &FipsArtifact) -> Result<()> {
+    const MAX_FIPS_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
+    if artifact.size == 0 || artifact.size > MAX_FIPS_ARTIFACT_BYTES {
+        return Err(anyhow!("FIPS artifact size is invalid"));
+    }
+    if artifact.sha256.len() != 64 || !artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(anyhow!("FIPS artifact sha256 is invalid"));
+    }
+    if artifact.media_type.trim().is_empty() || !artifact.media_type.contains('/') {
+        return Err(anyhow!("FIPS artifact type is invalid"));
+    }
+    if artifact.name.is_empty() || artifact.name.len() > 255 {
+        return Err(anyhow!("FIPS artifact name is invalid"));
+    }
+    // URL-safe base64 expands data by at most 4/3. Reject oversized input
+    // before decoding it on an authenticated but still untrusted route.
+    if artifact.data.len() > ((MAX_FIPS_ARTIFACT_BYTES as usize + 2) / 3) * 4 {
+        return Err(anyhow!("FIPS artifact data is too large"));
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(&artifact.data)
+        .map_err(|_| anyhow!("FIPS artifact data is invalid base64"))?;
+    if bytes.len() as u64 != artifact.size {
+        return Err(anyhow!("FIPS artifact size does not match data"));
+    }
+    Ok(())
 }
 
 fn parse_cancel_request_field(value: &Value) -> Result<CancelRequest> {
@@ -1385,7 +1453,8 @@ fn validate_redeem_invite(invite: &RedeemInvite) -> Result<()> {
 
 fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
     match request.action.as_str() {
-        "list" | "fips_mesh" => Ok(()),
+        "list" | "list_fallback" | "fips_mesh" => Ok(()),
+        "messages_since" if request.since.is_some() => Ok(()),
         "system_status"
             if request
                 .request_id
@@ -1395,6 +1464,22 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
                     request.history_range.as_deref().unwrap_or("24h"),
                     "1h" | "24h" | "1w" | "all"
                 ) =>
+        {
+            Ok(())
+        }
+        "repository_remote"
+            if request
+                .request_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && (request
+                    .channel_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || request
+                        .recipient_pubkey
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty())) =>
         {
             Ok(())
         }
@@ -2152,10 +2237,31 @@ mod tests {
             r#"{"workspace_request":{"action":"system_status","request_id":"status-1","history_range":"24h"}}"#
         )
         .is_ok());
+        let WireMessage::WorkspaceRequest { workspace_request } = parse_wire_message(
+            r#"{"workspace_request":{"action":"system_status","request_id":"status-1","live_status":true,"record_history":true}}"#,
+        )
+        .unwrap() else {
+            panic!("expected workspace request");
+        };
+        assert!(workspace_request.live_status);
+        assert!(workspace_request.record_history);
         assert!(parse_wire_message(
             r#"{"workspace_request":{"action":"system_status","request_id":"status-1","history_range":"forever"}}"#
         )
         .is_err());
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"repository_remote","request_id":"remote-1","channel_id":"c1"}}"#
+        )
+        .is_ok());
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"repository_remote","request_id":"remote-1"}}"#
+        )
+        .is_err());
+        assert!(parse_wire_message(r#"{"workspace_request":{"action":"list_fallback"}}"#).is_ok());
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"messages_since","since":0}}"#
+        )
+        .is_ok());
     }
 
     #[test]

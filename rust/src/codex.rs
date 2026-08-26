@@ -14,11 +14,12 @@ use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::warn;
 
 // OpenCode session IDs are `ses_` plus 1-124 ASCII alphanumeric characters.
 const OPENCODE_SESSION_ID_MAX_LEN: usize = 128;
+const OPENCODE_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 static OPENCODE_RUNS: Lazy<tokio::sync::Semaphore> = Lazy::new(|| {
     tokio::sync::Semaphore::new(
         env::var("OPENCODE_MAX_CONCURRENT_RUNS")
@@ -1003,8 +1004,8 @@ async fn run_opencode_cli_with_cancel(
         .stderr
         .take()
         .ok_or_else(|| anyhow!("failed to open OpenCode stderr"))?;
-    let stdout_task = tokio::spawn(read_stdout(stdout, event_sender));
-    let stderr_task = tokio::spawn(read_output(stderr));
+    let mut stdout_task = tokio::spawn(read_stdout(stdout, event_sender));
+    let mut stderr_task = tokio::spawn(read_output(stderr));
     let status = tokio::select! {
         status = child.wait() => status.context("failed to wait for OpenCode output"),
         _ = wait_for_cancel(cancel_token), if cancel_token.is_some() => {
@@ -1017,13 +1018,33 @@ async fn run_opencode_cli_with_cancel(
             stop_opencode_scope(scope_name.as_deref()).await;
             Err(anyhow!("OpenCode timed out after {}s", config.timeout.as_secs()))
         }
-    }?;
-    let stdout = stdout_task
-        .await
-        .context("failed to join OpenCode stdout reader")??;
-    let stderr = stderr_task
-        .await
-        .context("failed to join OpenCode stderr reader")??;
+    };
+    let status = match status {
+        Ok(status) => status,
+        Err(err) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(err);
+        }
+    };
+    let (stdout, stderr) = match timeout(OPENCODE_OUTPUT_DRAIN_TIMEOUT, async {
+        let stdout = (&mut stdout_task)
+            .await
+            .context("failed to join OpenCode stdout reader")??;
+        let stderr = (&mut stderr_task)
+            .await
+            .context("failed to join OpenCode stderr reader")??;
+        Ok::<_, anyhow::Error>((stdout, stderr))
+    })
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(anyhow!("timed out draining OpenCode output"));
+        }
+    };
     if status.success() {
         Ok(Output {
             status,
