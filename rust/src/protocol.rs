@@ -242,6 +242,12 @@ pub struct WorkspaceRequest {
     pub member_is_admin: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_routing_enabled: Option<bool>,
+    /// Whether this message should route to the conversation agent. Missing
+    /// values preserve the conversation's configured routing setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_agent: Option<bool>,
     /// Client-generated ID used to reconcile optimistic message delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
@@ -266,9 +272,6 @@ pub struct WorkspaceRequest {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub also_send_to_main: bool,
-    /// Route an unaddressed main-conversation message to the next worker.
-    #[serde(default)]
-    pub route_agent: bool,
     #[serde(default)]
     pub pinned: bool,
     /// Client supports FIPS reliable-stream workspace snapshot delivery.
@@ -316,6 +319,8 @@ pub struct WorkspaceRequest {
     /// A selected folder includes every repository below it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folder_scope: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -461,10 +466,12 @@ pub struct WorkspaceConversationPrepromptPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_pubkey: Option<String>,
     pub preprompt: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub folder_scope: Vec<String>,
     #[serde(default)]
     pub agent_routing_enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_scope: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1540,18 +1547,6 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
                         .recipient_pubkey
                         .as_deref()
                         .is_some_and(|id| !id.trim().is_empty())) =>
-        {
-            Ok(())
-        }
-        "set_conversation_agent_routing"
-            if request
-                .channel_id
-                .as_deref()
-                .is_some_and(|id| !id.trim().is_empty())
-                || request
-                    .recipient_pubkey
-                    .as_deref()
-                    .is_some_and(|id| !id.trim().is_empty()) =>
         {
             Ok(())
         }

@@ -35,6 +35,16 @@ void main() {
     expect(workingRect.right, closeTo(bubble.right - 8, 1));
   });
 
+  testWidgets('long-pressing a message opens touch actions', (tester) async {
+    await tester.pumpWidget(const MaterialApp(home: WorkspaceStatusHarness()));
+    await tester.longPress(
+      find.byKey(const Key('workspace-status-harness-bubble')),
+    );
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Copy'), findsOneWidget);
+  });
+
   test('app widget is available', () {
     expect(const NostrCodexApp(), isA<StatefulWidget>());
   });
@@ -306,39 +316,6 @@ void main() {
     await tester.tap(find.byTooltip('Mark thread incomplete'));
     await tester.pump();
     expect(completed, isFalse);
-    controller.dispose();
-    focus.dispose();
-  });
-
-  testWidgets('composer toggles root-message routing to the agent', (
-    tester,
-  ) async {
-    final controller = TextEditingController();
-    final focus = FocusNode();
-    bool? routed;
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Material(
-          child: WorkspaceComposer(
-            composer: controller,
-            composerFocus: focus,
-            hintText: 'Message',
-            mentionOptions: const [],
-            onMentionSelected: (_) {},
-            onSend: () {},
-            onAttach: () async {},
-            routeMainToAgent: true,
-            onRouteMainToAgentChanged: (value) => routed = value,
-          ),
-        ),
-      ),
-    );
-
-    expect(find.byTooltip('Asking agent'), findsOneWidget);
-    await tester.tap(find.byTooltip('Asking agent'));
-    await tester.pump();
-    expect(routed, isFalse);
     controller.dispose();
     focus.dispose();
   });

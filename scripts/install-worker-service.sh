@@ -30,6 +30,11 @@ if [[ -z "${OPENCODE_BIN:-}" && -n "${HOME:-}" && -x "$HOME/.opencode/bin/openco
   opencode_bin="$HOME/.opencode/bin/opencode"
 fi
 
+flutter_cache=""
+if [[ -d /opt/flutter/bin/cache ]]; then
+  flutter_cache=/opt/flutter/bin/cache
+fi
+
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 unit="$unit_dir/nostr-codex-server.service"
 update_script="$state_dir/bin/update-worker.sh"
@@ -59,9 +64,11 @@ Environment=AGENT_BACKEND=opencode
 Environment=AGENT_WORKDIR=$root
 Environment=OPENCODE_REAL_BIN=$opencode_bin
 Environment=OPENCODE_BIN=$root/scripts/opencode-workdir-sandbox.sh
+$(if [[ -n "$flutter_cache" ]]; then printf 'Environment=AGENT_WRITABLE_PATHS=%s\n' "$flutter_cache"; fi)
 Environment=OPENCODE_AGENT=build
 Environment=OPENCODE_SYSTEMD_SCOPE=1
 Environment=OPENCODE_MAX_CONCURRENT_RUNS=10
+Environment=AGENT_TIMEOUT_SECS=3600
 # Record the STUN server and reflexive candidate selected for FIPS traversal.
 Environment=RUST_LOG=info,nostr_codex_server=debug,fips::discovery::nostr::stun=debug,nostr_sdk=info,nostr=info
 EnvironmentFile=-$env_file

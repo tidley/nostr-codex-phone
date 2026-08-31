@@ -47,6 +47,8 @@ static RELAY_USED_OFFERS: Lazy<Mutex<HashMap<String, u64>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 const WORKSPACE_FIPS_SERVICE_PORT: u16 = 49_160;
+const MAX_WORKSPACE_FIPS_CLIENTS: usize = 8;
+const WORKSPACE_FIPS_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_RELAY_SESSIONS: usize = 128;
 
 struct RelayTunnel {
@@ -603,6 +605,14 @@ pub async fn fips_workspace_snapshot_connect(
     }
     let workspace_key = workspace_transport_key(&workspace_key)?;
     let peer_npub = PublicKey::parse(peer_npub.trim())?.to_bech32()?;
+    {
+        let clients = WORKSPACE_SNAPSHOT_CLIENTS.lock().await;
+        if !clients.contains_key(&workspace_key) && clients.len() >= MAX_WORKSPACE_FIPS_CLIENTS {
+            bail!(
+                "too many active workspace FIPS transports; close an unused workspace and retry"
+            );
+        }
+    }
     let mut client = WorkspaceFipsClient {
         client: Some(build_workspace_fips_client(config).await?),
         peer_npub,
@@ -616,19 +626,31 @@ pub async fn fips_workspace_snapshot_connect(
             .unwrap_or(u64::MAX - 1),
         assembler: FipsApplicationFrameAssembler::default(),
     };
-    // A stale capability after a worker restart can leave the underlying FIPS
-    // connection retrying forever. Return control to Dart so it can fall back
-    // to Nostr and request a fresh, member-bound capability.
-    tokio::time::timeout(
-        Duration::from_secs(20),
-        workspace_snapshot_send_frame(&mut client, capability.into_bytes()),
-    )
-    .await
-    .map_err(|_| anyhow!("FIPS workspace capability handshake timed out"))??;
-    let replaced = WORKSPACE_SNAPSHOT_CLIENTS
-        .lock()
-        .await
-        .insert(workspace_key, Arc::new(Mutex::new(client)));
+    // Let the FIPS client report the direct-route failure. An outer timeout at
+    // the same deadline masked its NAT and relay diagnostics and restarted
+    // traversal before it had enough time to establish a session.
+    if let Err(err) = workspace_snapshot_send_frame(&mut client, capability.into_bytes()).await {
+        if let Some(client) = client.client.take() {
+            let _ = client.stop().await;
+        }
+        return Err(anyhow!(
+            "FIPS workspace capability delivery to {} failed: {err:#}",
+            client.peer_npub
+        ));
+    }
+    let replaced = {
+        let mut clients = WORKSPACE_SNAPSHOT_CLIENTS.lock().await;
+        if !clients.contains_key(&workspace_key) && clients.len() >= MAX_WORKSPACE_FIPS_CLIENTS {
+            drop(clients);
+            if let Some(client) = client.client.take() {
+                client.stop().await?;
+            }
+            bail!(
+                "too many active workspace FIPS transports; close an unused workspace and retry"
+            );
+        }
+        clients.insert(workspace_key, Arc::new(Mutex::new(client)))
+    };
     if let Some(replaced) = replaced {
         // A repeated offer must close its superseded node instead of retaining
         // sockets and tasks until the process exits.
@@ -776,9 +798,9 @@ async fn workspace_snapshot_send_frame(
                 WORKSPACE_FIPS_SERVICE_PORT,
                 packet,
                 // Nostr has already provided the visible workspace snapshot.
-                // Give STUN discovery enough time to establish the optional
-                // direct FIPS route before declaring this bootstrap failed.
-                Duration::from_secs(20),
+                // Keep one deadline for STUN discovery and route negotiation;
+                // a second outer timeout would hide the transport diagnostic.
+                WORKSPACE_FIPS_CONNECT_TIMEOUT,
             )
             .await?;
     }

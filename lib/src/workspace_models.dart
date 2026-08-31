@@ -23,19 +23,18 @@ class WorkspaceConversationPreference {
     this.pinned = false,
     this.archived = false,
     this.muted = false,
-    this.routeToA0 = true,
+    this.autoSpeak = false,
   });
 
   final bool pinned;
   final bool archived;
   final bool muted;
-  final bool routeToA0;
-
+  final bool autoSpeak;
   Map<String, bool> toJson() => {
     'pinned': pinned,
     'archived': archived,
     'muted': muted,
-    'route_to_a0': routeToA0,
+    'auto_speak': autoSpeak,
   };
 }
 
@@ -52,7 +51,7 @@ decodeWorkspaceConversationPreferences(String? raw) {
             pinned: entry.value['pinned'] == true,
             archived: entry.value['archived'] == true,
             muted: entry.value['muted'] == true,
-            routeToA0: entry.value['route_to_a0'] != false,
+            autoSpeak: entry.value['auto_speak'] == true,
           ),
     };
   } catch (_) {
@@ -120,6 +119,11 @@ int? _historySinceValue(Object? value) {
 
 bool isWorkspaceAgentSender(String senderPubkey) =>
     senderPubkey.trim().toLowerCase().startsWith('agent:');
+
+bool isNativeWorkspaceAgentSender(String senderPubkey) =>
+    senderPubkey.trim().toLowerCase() == 'agent:native-opencode';
+
+String workspaceFallbackAgentName(String _) => 'Agent';
 
 String? workspaceThreadTopic(Iterable<WorkspaceMessage> replies) {
   final messages = replies.toList();
@@ -228,6 +232,12 @@ bool isWorkspaceRelatedThreadControlMessage(WorkspaceMessage message) =>
 bool isWorkspaceThreadCompletionControlMessage(WorkspaceMessage message) =>
     message.body.trim() == '[[THREAD_COMPLETED]]' ||
     message.body.trim() == '[[THREAD_REOPENED]]';
+
+bool isWorkspaceHiddenMessage(WorkspaceMessage message) =>
+    isWorkspaceEmptyAgentMessage(message) ||
+    isWorkspaceThreadTopicControlMessage(message) ||
+    isWorkspaceRelatedThreadControlMessage(message) ||
+    isWorkspaceThreadCompletionControlMessage(message);
 
 bool isWorkspaceThreadCompleted(Iterable<WorkspaceMessage> replies) {
   final controls =
@@ -775,6 +785,7 @@ class WorkspaceConversationPreprompt {
     required this.preprompt,
     this.folderScope = const [],
     this.agentRoutingEnabled = false,
+    this.model,
     this.channelId,
     this.memberPubkey,
     this.peerPubkey,
@@ -782,6 +793,7 @@ class WorkspaceConversationPreprompt {
   final String preprompt;
   final List<String> folderScope;
   final bool agentRoutingEnabled;
+  final String? model;
   final String? channelId;
   final String? memberPubkey;
   final String? peerPubkey;
@@ -794,6 +806,7 @@ class WorkspaceConversationPreprompt {
             .where((path) => path.isNotEmpty)
             .toList(growable: false),
         agentRoutingEnabled: json['agent_routing_enabled'] == true,
+        model: json['model']?.toString(),
         channelId: json['channel_id']?.toString(),
         memberPubkey: json['member_pubkey']?.toString(),
         peerPubkey: json['peer_pubkey']?.toString(),
@@ -803,6 +816,7 @@ class WorkspaceConversationPreprompt {
     'preprompt': preprompt,
     'folder_scope': folderScope,
     'agent_routing_enabled': agentRoutingEnabled,
+    if (model != null) 'model': model,
     if (channelId != null) 'channel_id': channelId,
     if (memberPubkey != null) 'member_pubkey': memberPubkey,
     if (peerPubkey != null) 'peer_pubkey': peerPubkey,
@@ -1138,9 +1152,11 @@ class WorkspaceState {
     final incomingPreprompts = _conversationPreprompts(
       data['conversation_preprompts'],
     );
-    if ((isSnapshot && !isPartialSnapshot && hasPrepromptSnapshot) ||
+    if ((isSnapshot && hasPrepromptSnapshot) ||
         (isSnapshotHeader && incomingPreprompts.isNotEmpty) ||
-        data['action'] == 'conversation_preprompt_updated') {
+        data['action'] == 'conversation_preprompt_updated' ||
+        data['action'] == 'workspace_default_agent_prompt_updated' ||
+        data['action'] == 'workspace_default_model_updated') {
       conversationPreprompts = incomingPreprompts;
     }
     final incomingAgents = _agents(data['agents']);
@@ -1338,6 +1354,37 @@ class WorkspaceState {
     return '';
   }
 
+  String get defaultAgentPrompt {
+    for (final prompt in conversationPreprompts) {
+      if (prompt.channelId == '') return prompt.preprompt;
+    }
+    return '';
+  }
+
+  String? get defaultModel {
+    for (final prompt in conversationPreprompts) {
+      if (prompt.channelId == '') return prompt.model;
+    }
+    return null;
+  }
+
+  String? conversationModel({
+    required String? channelId,
+    required String ownPubkey,
+    required String? peerPubkey,
+  }) {
+    for (final prompt in conversationPreprompts) {
+      if (channelId != null && prompt.channelId == channelId)
+        return prompt.model;
+      if (channelId == null &&
+          {prompt.memberPubkey, prompt.peerPubkey}.contains(ownPubkey) &&
+          {prompt.memberPubkey, prompt.peerPubkey}.contains(peerPubkey)) {
+        return prompt.model;
+      }
+    }
+    return null;
+  }
+
   List<String> conversationFolderScope({
     required String? channelId,
     required String ownPubkey,
@@ -1387,7 +1434,9 @@ class WorkspaceState {
     }
     for (final conversation in messages.values) {
       for (final message in conversation) {
-        if (message.channelId != null) continue;
+        if (message.channelId != null || isWorkspaceHiddenMessage(message)) {
+          continue;
+        }
         if (message.senderPubkey == ownPubkey &&
             message.recipientPubkey != null) {
           peers.add(message.recipientPubkey!);
@@ -1395,7 +1444,8 @@ class WorkspaceState {
             !isWorkspaceAgentSender(message.senderPubkey)) {
           peers.add(message.senderPubkey);
         } else if (message.recipientPubkey == ownPubkey &&
-            isWorkspaceAgentSender(message.senderPubkey)) {
+            isWorkspaceAgentSender(message.senderPubkey) &&
+            !isNativeWorkspaceAgentSender(message.senderPubkey)) {
           peers.add(message.senderPubkey);
         }
       }
@@ -1417,6 +1467,10 @@ class WorkspaceState {
   static String _directKey(String one, String? two) =>
       ([one, two ?? '']..sort()).join(':');
   String _messageDirectKey(WorkspaceMessage message) {
+    if (isNativeWorkspaceAgentSender(message.senderPubkey) &&
+        message.recipientPubkey != null) {
+      return _directKey(message.recipientPubkey!, message.recipientPubkey);
+    }
     if (!message.senderPubkey.startsWith('agent:')) {
       return _directKey(message.senderPubkey, message.recipientPubkey);
     }

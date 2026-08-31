@@ -51,6 +51,9 @@ part 'src/live_recording_waveform.dart';
 part 'src/inactive_reply_notice.dart';
 
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
+const _attachmentDownloadChannel = MethodChannel(
+  'nostr_codex_phone/attachment_download',
+);
 const _blossomUploadTimeout = Duration(minutes: 2);
 const _nostrSendTimeout = Duration(seconds: 15);
 const _largePasteThresholdBytes = 10 * 1024;
@@ -97,6 +100,24 @@ bool get _isLinux => !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
 bool get _supportsTts => !_isLinux;
 bool get _supportsCameraQrScan => _isAndroid || _isIOS;
 bool get _supportsLiveCalls => _isAndroid || _isLinux;
+
+bool _isHtmlAttachment(String mediaType) {
+  final normalized = mediaType.toLowerCase().split(';').first.trim();
+  return normalized == 'text/html' || normalized == 'application/xhtml+xml';
+}
+
+Future<String?> _saveHtmlAttachmentToDownloads({
+  required String path,
+  required String name,
+  required String mediaType,
+}) {
+  if (!_isAndroid || !_isHtmlAttachment(mediaType)) return Future.value(null);
+  return _attachmentDownloadChannel.invokeMethod<String>('saveToDownloads', {
+    'path': path,
+    'name': name,
+    'mediaType': mediaType,
+  });
+}
 
 enum _PendingMessageCompletion { transcript, response }
 
@@ -628,7 +649,11 @@ ThemeData _appTheme(AppTheme theme) {
         borderRadius: BorderRadius.circular(6),
         border: Border.all(color: menuBorder),
         boxShadow: [
-          BoxShadow(color: Colors.black.withValues(alpha: 0.32), blurRadius: 10, offset: const Offset(0, 3)),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.32),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
         ],
       ),
       textStyle: TextStyle(color: scheme.onSurface, fontSize: 12),
@@ -1804,7 +1829,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     bool? pinned,
     bool? archived,
     bool? muted,
-    bool? routeToA0,
+    bool? autoSpeak,
   }) {
     final key = _workspacePreferenceKey(conversationKey);
     final current =
@@ -1814,10 +1839,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       pinned: pinned ?? current.pinned,
       archived: archived ?? current.archived,
       muted: muted ?? current.muted,
-      routeToA0: routeToA0 ?? current.routeToA0,
+      autoSpeak: autoSpeak ?? current.autoSpeak,
     );
     setState(() {
-      if (!next.pinned && !next.archived && !next.muted && next.routeToA0) {
+      if (!next.pinned && !next.archived && !next.muted && !next.autoSpeak) {
         _workspaceConversationPreferences.remove(key);
       } else {
         _workspaceConversationPreferences[key] = next;
@@ -3763,6 +3788,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     var settingsConnected = _connected;
     var settingsConnecting = _connecting;
     var settingsOwnPubkey = _ownPubkey;
+    var settingsRevealSecret = false;
     var settingsRate = _ttsRate;
     var settingsPitch = _ttsPitch;
     var settingsVolume = _ttsVolume;
@@ -3788,6 +3814,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             blossomServerController: _blossomServerController,
             blossomPresets: blossomPresets,
             ownPubkey: settingsOwnPubkey,
+            revealSecret: settingsRevealSecret,
             connected: settingsConnected,
             connecting: settingsConnecting,
             speaking: _speaking,
@@ -3848,6 +3875,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             onSecretChanged: (_) {
               _refreshOwnPubkey();
               refreshSettings(() => settingsOwnPubkey = _ownPubkey);
+            },
+            onRevealSecretChanged: (value) {
+              refreshSettings(() => settingsRevealSecret = value);
             },
             onConnect: () {
               refreshSettings(() => settingsConnecting = true);
@@ -5460,6 +5490,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             : const <String>[];
         String? inactiveAgentConversationKey;
         Map<String, Set<String>> missingThreadRoots = const {};
+        List<WorkspaceMessage> openThreadRepliesToSpeak = const [];
         var shouldSaveWorkspaceUnreadCounts = false;
         setState(() {
           final addedMessages = worker.workspace.apply(
@@ -5476,8 +5507,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                     _ownPubkey ?? '',
                     _ownPubkeyHex ?? '',
                   }) ||
-                  isWorkspaceEmptyAgentMessage(workspaceMessage) ||
-                  isWorkspaceThreadTopicControlMessage(workspaceMessage)) {
+                  isWorkspaceHiddenMessage(workspaceMessage)) {
                 continue;
               }
               final conversationKey = worker.workspace
@@ -5515,6 +5545,30 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                 }
               }
             }
+            if ((_isAndroid || _isIOS) &&
+                _showTeamWorkspace &&
+                workerKey.trim().toLowerCase() ==
+                    _workspaceWorkerKey.trim().toLowerCase()) {
+              final openThreadKey = worker.openThreadKey;
+              if (openThreadKey != null) {
+                openThreadRepliesToSpeak = addedMessages
+                    .where((message) {
+                      final parentId = message.parentId;
+                      return parentId != null &&
+                          openThreadKey ==
+                              '${worker.workspace.conversationKeyForMessage(message)}:$parentId' &&
+                          !isWorkspaceLocalSender(message.senderPubkey, {
+                            _ownPubkey ?? '',
+                            _ownPubkeyHex ?? '',
+                          }) &&
+                          message.body.trim().isNotEmpty &&
+                          !isWorkspaceThreadTopicControlMessage(message) &&
+                          !isWorkspaceRelatedThreadControlMessage(message) &&
+                          !isWorkspaceThreadCompletionControlMessage(message);
+                    })
+                    .toList(growable: false);
+              }
+            }
           }
           worker.revision.value++;
         });
@@ -5533,6 +5587,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                 workerKey,
                 entry.key,
                 parentId,
+                fullConversation: true,
               ),
             );
           }
@@ -5546,6 +5601,29 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         }
         if (inactiveAgentConversationKey != null) {
           _playInactiveSessionReplyAlert();
+        }
+        if (_autoSpeak &&
+            !_autoSpeakSuppressed &&
+            !_recording &&
+            !_sending &&
+            !_sendingAudio &&
+            !_sendingMedia &&
+            openThreadRepliesToSpeak.isNotEmpty) {
+          final threadKey = worker.openThreadKey!;
+          if (_workspaceThreadAutoSpeakEnabled(threadKey)) {
+            unawaited(
+              _speak(
+                openThreadRepliesToSpeak
+                    .map((message) => message.body)
+                    .join('\n\n'),
+                remember: true,
+                manual: false,
+                messageEventId: openThreadRepliesToSpeak.last.id,
+                shouldSpeak: () =>
+                    _isOpenMobileWorkspaceThread(workerKey, threadKey),
+              ),
+            );
+          }
         }
       } catch (_) {
         _showError('Received malformed workspace update');
@@ -6173,9 +6251,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     bool manual = true,
     String? messageEventId,
     String? conversationKey,
+    bool Function()? shouldSpeak,
   }) async {
     if (!_supportsTts) return;
     if (!manual && _autoSpeakSuppressed) return;
+    if (shouldSpeak != null && !shouldSpeak()) return;
     if (!manual &&
         conversationKey != null &&
         conversationKey != _activeConversationKey) {
@@ -6190,6 +6270,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     try {
       await _tts.stop();
       if (generation != _speechGeneration) return;
+      if (shouldSpeak != null && !shouldSpeak()) return;
       if (!manual &&
           conversationKey != null &&
           conversationKey != _activeConversationKey) {
@@ -6204,7 +6285,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       }
       await _tts.awaitSpeakCompletion(true);
       for (final chunk in splitTextForSpeech(spoken)) {
-        if (generation != _speechGeneration) return;
+        if (generation != _speechGeneration ||
+            (shouldSpeak != null && !shouldSpeak())) {
+          return;
+        }
         await _tts.speak(chunk);
       }
     } catch (error) {
@@ -6216,6 +6300,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       });
     }
   }
+
+  bool _isOpenMobileWorkspaceThread(String workerKey, String threadKey) =>
+      (_isAndroid || _isIOS) &&
+      _showTeamWorkspace &&
+      workerKey.trim().toLowerCase() ==
+          _workspaceWorkerKey.trim().toLowerCase() &&
+      _activeWorkspaceWorker.openThreadKey == threadKey;
+
+  bool _workspaceThreadAutoSpeakEnabled(String threadKey) =>
+      _workspaceConversationPreferences[_workspacePreferenceKey(threadKey)]
+          ?.autoSpeak ==
+      true;
 
   Future<void> _stopSpeaking() async {
     final generation = ++_speechGeneration;
@@ -8736,13 +8832,18 @@ Return a concise catch-up summary of what happened after that point: completed w
   Future<void> _refreshWorkspaceHistoryForMissingThreadRoot(
     String workerKey,
     String conversationKey,
-    String parentId,
-  ) async {
+    String parentId, {
+    bool fullConversation = false,
+  }) async {
     // Requests use the active worker transport. Other workspaces reconcile when
     // the user returns to them and their normal history request runs.
     if (workerKey != _workspaceWorkerKey) return;
     final worker = _workspaceWorkerForKey(workerKey);
-    final refreshKey = '$conversationKey:$parentId';
+    // A history transfer can contain many replies before their roots. Recover
+    // that batch once, rather than sending one request per missing root.
+    final refreshKey = fullConversation
+        ? conversationKey
+        : '$conversationKey:$parentId';
     if (!worker.historyRefreshesInFlight.add(refreshKey)) return;
     try {
       final channel = worker.workspace.channels
@@ -8752,7 +8853,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         await _sendWorkspaceRequest({
           'action': 'list_channel_messages',
           'channel_id': channel.id,
-          'parent_id': parentId,
+          if (!fullConversation) 'parent_id': parentId,
         });
         return;
       }
@@ -8769,7 +8870,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         await _sendWorkspaceRequest({
           'action': 'list_direct_messages',
           'recipient_pubkey': peer,
-          'parent_id': parentId,
+          if (!fullConversation) 'parent_id': parentId,
         });
       }
     } finally {
@@ -9370,6 +9471,7 @@ Return a concise catch-up summary of what happened after that point: completed w
                     workerKey,
                     entry.key,
                     parentId,
+                    fullConversation: true,
                   ),
                 );
               }
@@ -11043,6 +11145,15 @@ Return a concise catch-up summary of what happened after that point: completed w
         if (fipsArtifact == null) {
           throw StateError('FIPS artifact is not available on this device');
         }
+        final savedName = await _saveHtmlAttachmentToDownloads(
+          path: fipsArtifact,
+          name: attachment.name ?? 'attachment.html',
+          mediaType: attachment.mediaType,
+        );
+        if (savedName != null) {
+          if (mounted) setState(() => _status = 'Downloaded $savedName');
+          return;
+        }
         final result = await OpenFilex.open(
           fipsArtifact,
           type: attachment.mediaType,
@@ -11057,6 +11168,15 @@ Return a concise catch-up summary of what happened after that point: completed w
         attachment: attachment,
         destinationDir: '${directory.path}/attachments',
       );
+      final savedName = await _saveHtmlAttachmentToDownloads(
+        path: downloaded.path,
+        name: downloaded.name,
+        mediaType: downloaded.mediaType,
+      );
+      if (savedName != null) {
+        if (mounted) setState(() => _status = 'Downloaded $savedName');
+        return;
+      }
       final result = await OpenFilex.open(
         downloaded.path,
         type: downloaded.mediaType,

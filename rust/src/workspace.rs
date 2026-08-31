@@ -98,11 +98,12 @@ pub struct WorkspaceConversationPreprompt {
     pub member_pubkey: Option<String>,
     pub peer_pubkey: Option<String>,
     pub preprompt: String,
-    pub folder_scope: Vec<String>,
     pub agent_routing_enabled: bool,
+    pub folder_scope: Vec<String>,
+    pub model: Option<String>,
 }
 
-/// The authoritative native OpenCode session for one conversation write root.
+/// The authoritative native OpenCode session for one conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceConversationSession {
     pub channel_id: Option<String>,
@@ -112,6 +113,7 @@ pub struct WorkspaceConversationSession {
     pub opencode_session_id: String,
     pub session_status: String,
     pub session_error: Option<String>,
+    pub session_context: Option<String>,
     pub updated_at: i64,
 }
 
@@ -161,12 +163,14 @@ impl WorkspaceStore {
                       CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
                   CREATE UNIQUE INDEX IF NOT EXISTS workspace_channel_round_robin ON workspace_conversation_round_robin(channel_id) WHERE channel_id IS NOT NULL;
                   CREATE UNIQUE INDEX IF NOT EXISTS workspace_direct_round_robin ON workspace_conversation_round_robin(member_pubkey, peer_pubkey) WHERE channel_id IS NULL;
-                   CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL, folder_scope_json TEXT NOT NULL DEFAULT '[]', agent_routing_enabled INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (channel_id, member_pubkey, peer_pubkey),
-                       CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
-                   CREATE TABLE IF NOT EXISTS workspace_conversation_sessions (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, folder_path TEXT NOT NULL, opencode_session_id TEXT NOT NULL, session_status TEXT NOT NULL DEFAULT 'ready', session_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-                       PRIMARY KEY (channel_id, member_pubkey, peer_pubkey, folder_path),
-                       CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+                   CREATE TABLE IF NOT EXISTS workspace_conversation_preprompts (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, preprompt TEXT NOT NULL, folder_scope_json TEXT NOT NULL DEFAULT '[]', agent_routing_enabled INTEGER NOT NULL DEFAULT 0, model TEXT,
+                     PRIMARY KEY (channel_id, member_pubkey, peer_pubkey),
+                        CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+                   CREATE TABLE IF NOT EXISTS workspace_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                   CREATE TABLE IF NOT EXISTS workspace_conversation_sessions (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, folder_path TEXT NOT NULL, opencode_session_id TEXT NOT NULL, session_status TEXT NOT NULL DEFAULT 'ready', session_error TEXT, session_context TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                          PRIMARY KEY (channel_id, member_pubkey, peer_pubkey),
+                        CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+                   CREATE TABLE IF NOT EXISTS workspace_native_turns (message_id TEXT PRIMARY KEY REFERENCES workspace_messages(id) ON DELETE CASCADE, created_at INTEGER NOT NULL);
                 CREATE INDEX IF NOT EXISTS workspace_messages_channel ON workspace_messages(channel_id, created_at);
                 CREATE INDEX IF NOT EXISTS workspace_messages_direct ON workspace_messages(recipient_pubkey, sender_pubkey, created_at);",
         )?;
@@ -185,14 +189,13 @@ impl WorkspaceStore {
         channel_id: Option<&str>,
         member_pubkey: Option<&str>,
         peer_pubkey: Option<&str>,
-        folder_path: &str,
     ) -> Result<Option<WorkspaceConversationSession>> {
         let (channel_id, member_pubkey, peer_pubkey) =
             conversation_session_key(channel_id, member_pubkey, peer_pubkey)?;
         self.conn
             .query_row(
-                "SELECT channel_id, member_pubkey, peer_pubkey, folder_path, opencode_session_id, session_status, session_error, updated_at FROM workspace_conversation_sessions WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3 AND folder_path = ?4",
-                params![channel_id, member_pubkey, peer_pubkey, required("session folder", folder_path)?],
+                "SELECT channel_id, member_pubkey, peer_pubkey, folder_path, opencode_session_id, session_status, session_error, session_context, updated_at FROM workspace_conversation_sessions WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3",
+                params![channel_id, member_pubkey, peer_pubkey],
                 conversation_session_from_row,
             )
             .optional()
@@ -215,12 +218,11 @@ impl WorkspaceStore {
         let opencode_session_id = required("OpenCode session ID", opencode_session_id)?;
         let session_status = required("session status", session_status)?;
         let timestamp = now();
-        // SQLite unique constraints treat NULL values as distinct. Conversation
-        // keys intentionally contain NULL values, so update by `IS` before an
-        // insert rather than relying on the composite primary key conflict.
+        // `folder_path` remains metadata. A folder-policy edit must not create
+        // a new session for the same conversation.
         let updated = self.conn.execute(
-            "UPDATE workspace_conversation_sessions SET opencode_session_id = ?5, session_status = ?6, session_error = ?7, updated_at = ?8 WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3 AND folder_path = ?4",
-            params![channel_id, member_pubkey, peer_pubkey, folder_path, opencode_session_id, session_status, session_error, timestamp],
+            "UPDATE workspace_conversation_sessions SET opencode_session_id = ?4, session_status = ?5, session_error = ?6, updated_at = ?7 WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3",
+            params![channel_id, member_pubkey, peer_pubkey, opencode_session_id, session_status, session_error, timestamp],
         )?;
         if updated == 0 {
             self.conn.execute(
@@ -229,6 +231,49 @@ impl WorkspaceStore {
             )?;
         }
         Ok(())
+    }
+
+    pub fn set_conversation_session_context(
+        &self,
+        channel_id: Option<&str>,
+        member_pubkey: Option<&str>,
+        peer_pubkey: Option<&str>,
+        session_context: &str,
+    ) -> Result<()> {
+        let (channel_id, member_pubkey, peer_pubkey) =
+            conversation_session_key(channel_id, member_pubkey, peer_pubkey)?;
+        self.conn.execute(
+            "UPDATE workspace_conversation_sessions SET session_context = ?4, updated_at = ?5 WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3",
+            params![channel_id, member_pubkey, peer_pubkey, required("session context", session_context)?, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn queue_native_turn(&self, message_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO workspace_native_turns (message_id, created_at) VALUES (?1, ?2)",
+            params![required("native turn message id", message_id)?, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn complete_native_turn(&self, message_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM workspace_native_turns WHERE message_id = ?1",
+            [required("native turn message id", message_id)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn pending_native_turns(&self) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT message_id FROM workspace_native_turns ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let pending = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(Into::into);
+        pending
     }
 
     fn open_connection(path: &Path) -> Result<Connection> {
@@ -408,6 +453,12 @@ impl WorkspaceStore {
                 [],
             )?;
         }
+        if !conversation_preprompt_columns.iter().any(|column| column == "model") {
+            conn.execute(
+                "ALTER TABLE workspace_conversation_preprompts ADD COLUMN model TEXT",
+                [],
+            )?;
+        }
         if !conversation_preprompt_columns
             .iter()
             .any(|column| column == "agent_routing_enabled")
@@ -417,10 +468,66 @@ impl WorkspaceStore {
                 [],
             )?;
         }
+        let conversation_session_columns = conn
+            .prepare("PRAGMA table_info(workspace_conversation_sessions)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_thread_root_session_key = conversation_session_columns
+            .iter()
+            .any(|column| column == "thread_root_id");
+        if has_thread_root_session_key {
+            // Older versions created a session for every thread. Retain only
+            // the most recently used session per conversation so all future
+            // turns are serialized through one OpenCode instance.
+            conn.execute_batch(
+                "ALTER TABLE workspace_conversation_sessions RENAME TO workspace_conversation_sessions_legacy;
+                 CREATE TABLE workspace_conversation_sessions (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, folder_path TEXT NOT NULL, opencode_session_id TEXT NOT NULL, session_status TEXT NOT NULL DEFAULT 'ready', session_error TEXT, session_context TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (channel_id, member_pubkey, peer_pubkey), CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
+                 INSERT INTO workspace_conversation_sessions (channel_id, member_pubkey, peer_pubkey, folder_path, opencode_session_id, session_status, session_error, session_context, created_at, updated_at)
+                 SELECT channel_id, member_pubkey, peer_pubkey, folder_path, opencode_session_id, session_status, session_error, session_context, created_at, updated_at
+                 FROM workspace_conversation_sessions_legacy AS session
+                 WHERE rowid = (SELECT candidate.rowid FROM workspace_conversation_sessions_legacy AS candidate WHERE candidate.channel_id IS session.channel_id AND candidate.member_pubkey IS session.member_pubkey AND candidate.peer_pubkey IS session.peer_pubkey ORDER BY candidate.updated_at DESC, candidate.rowid DESC LIMIT 1);
+                 DROP TABLE workspace_conversation_sessions_legacy;",
+            )?;
+        }
+        if !has_thread_root_session_key
+            && !conversation_session_columns
+            .iter()
+            .any(|column| column == "session_context")
+        {
+            conn.execute(
+                "ALTER TABLE workspace_conversation_sessions ADD COLUMN session_context TEXT",
+                [],
+            )?;
+        }
         // Channels created before per-channel membership were visible to every
         // workspace member. Preserve that access when upgrading existing stores.
         conn.execute_batch("CREATE TABLE IF NOT EXISTS workspace_channel_members (channel_id TEXT NOT NULL REFERENCES workspace_channels(id), pubkey TEXT NOT NULL REFERENCES workspace_members(pubkey), is_admin INTEGER NOT NULL DEFAULT 0, joined_at INTEGER NOT NULL, PRIMARY KEY (channel_id, pubkey));")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS workspace_conversation_coordinators (agent_id TEXT PRIMARY KEY REFERENCES workspace_agents(id) ON DELETE CASCADE, channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL))); CREATE UNIQUE INDEX IF NOT EXISTS workspace_channel_coordinator ON workspace_conversation_coordinators(channel_id) WHERE channel_id IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS workspace_direct_coordinator ON workspace_conversation_coordinators(member_pubkey, peer_pubkey) WHERE channel_id IS NULL; CREATE TABLE IF NOT EXISTS workspace_completed_thread_agents (parent_id TEXT PRIMARY KEY REFERENCES workspace_messages(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE); CREATE TABLE IF NOT EXISTS workspace_conversation_round_robin (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, next_worker INTEGER NOT NULL DEFAULT 0, CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL))); CREATE UNIQUE INDEX IF NOT EXISTS workspace_channel_round_robin ON workspace_conversation_round_robin(channel_id) WHERE channel_id IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS workspace_direct_round_robin ON workspace_conversation_round_robin(member_pubkey, peer_pubkey) WHERE channel_id IS NULL;")?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS workspace_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
+        // Native conversation sessions replaced the coordinator/worker model.
+        // Drop its assignments on startup so an upgraded workspace cannot
+        // resume an old per-agent queue after reconnecting.
+        conn.execute_batch(
+            "DELETE FROM workspace_thread_agents;
+             DELETE FROM workspace_completed_thread_agents;
+             DELETE FROM workspace_conversation_round_robin;
+             DELETE FROM workspace_conversation_coordinators;
+             DELETE FROM workspace_conversation_agents
+               WHERE agent_id IN (
+                 SELECT id FROM workspace_agents
+                 WHERE name = 'A0'
+                    OR role IN ('Task coordinator', 'Conversation worker', 'Round-robin worker')
+               );
+             DELETE FROM workspace_agent_instances
+               WHERE agent_id IN (
+                 SELECT id FROM workspace_agents
+                 WHERE name = 'A0'
+                    OR role IN ('Task coordinator', 'Conversation worker', 'Round-robin worker')
+               );
+             DELETE FROM workspace_agents
+               WHERE name = 'A0'
+                  OR role IN ('Task coordinator', 'Conversation worker', 'Round-robin worker');",
+        )?;
         if !has_channel_members {
             conn.execute_batch("INSERT OR IGNORE INTO workspace_channel_members (channel_id, pubkey, joined_at) SELECT c.id, m.pubkey, c.created_at FROM workspace_channels c CROSS JOIN workspace_members m; UPDATE workspace_channel_members SET is_admin = 1 WHERE (channel_id, pubkey) IN (SELECT id, created_by FROM workspace_channels);")?;
         }
@@ -458,8 +565,11 @@ impl WorkspaceStore {
               CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_insert AFTER INSERT ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
               CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_update AFTER UPDATE ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
               CREATE TRIGGER IF NOT EXISTS workspace_conversation_preprompts_revision_delete AFTER DELETE ON workspace_conversation_preprompts BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
-              CREATE TRIGGER IF NOT EXISTS workspace_conversation_sessions_revision_insert AFTER INSERT ON workspace_conversation_sessions BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
-              CREATE TRIGGER IF NOT EXISTS workspace_conversation_sessions_revision_update AFTER UPDATE ON workspace_conversation_sessions BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;",
+               CREATE TRIGGER IF NOT EXISTS workspace_conversation_sessions_revision_insert AFTER INSERT ON workspace_conversation_sessions BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+               CREATE TRIGGER IF NOT EXISTS workspace_conversation_sessions_revision_update AFTER UPDATE ON workspace_conversation_sessions BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+               CREATE TRIGGER IF NOT EXISTS workspace_settings_revision_insert AFTER INSERT ON workspace_settings BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+               CREATE TRIGGER IF NOT EXISTS workspace_settings_revision_update AFTER UPDATE ON workspace_settings BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+               CREATE TRIGGER IF NOT EXISTS workspace_settings_revision_delete AFTER DELETE ON workspace_settings BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;",
         )?;
         Ok(Self { conn })
     }
@@ -1177,11 +1287,75 @@ impl WorkspaceStore {
     }
 
     pub fn conversation_preprompts(&self) -> Result<Vec<WorkspaceConversationPreprompt>> {
-        let mut statement = self.conn.prepare("SELECT channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json, agent_routing_enabled FROM workspace_conversation_preprompts ORDER BY channel_id, member_pubkey, peer_pubkey")?;
-        let preprompts = statement
+        let mut statement = self.conn.prepare("SELECT channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json, agent_routing_enabled, model FROM workspace_conversation_preprompts ORDER BY channel_id, member_pubkey, peer_pubkey")?;
+        let preprompts: Vec<_> = statement
             .query_map([], conversation_preprompt_from_row)?
             .collect::<rusqlite::Result<_>>()?;
+        let mut preprompts = preprompts;
+        let default_prompt = self.default_agent_prompt()?;
+        let default_model = self.default_model()?;
+        if default_prompt.is_some() || default_model.is_some() {
+            preprompts.push(WorkspaceConversationPreprompt {
+                // An empty channel ID identifies workspace-level settings in
+                // the existing snapshot payload without matching a channel.
+                channel_id: Some(String::new()),
+                member_pubkey: None,
+                peer_pubkey: None,
+                preprompt: default_prompt.unwrap_or_default(),
+                folder_scope: vec![],
+                agent_routing_enabled: false,
+                model: default_model,
+            });
+        }
         Ok(preprompts)
+    }
+
+    pub fn default_agent_prompt(&self) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM workspace_settings WHERE key = 'default_agent_prompt'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn set_default_agent_prompt(&self, preprompt: &str) -> Result<()> {
+        if preprompt.chars().count() > 4_000 {
+            bail!("workspace default agent prompt may not exceed 4000 characters");
+        }
+        let preprompt = preprompt.trim();
+        if preprompt.is_empty() {
+            self.conn.execute(
+                "DELETE FROM workspace_settings WHERE key = 'default_agent_prompt'",
+                [],
+            )?;
+        } else {
+            self.conn.execute(
+                "INSERT INTO workspace_settings (key, value) VALUES ('default_agent_prompt', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [preprompt],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn default_model(&self) -> Result<Option<String>> {
+        self.conn
+            .query_row("SELECT value FROM workspace_settings WHERE key = 'default_model'", [], |row| row.get(0))
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn set_default_model(&self, model: Option<&str>) -> Result<()> {
+        match model {
+            Some(model) => self.conn.execute(
+                "INSERT INTO workspace_settings (key, value) VALUES ('default_model', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [model],
+            )?,
+            None => self.conn.execute("DELETE FROM workspace_settings WHERE key = 'default_model'", [])?,
+        };
+        Ok(())
     }
 
     pub fn set_conversation_preprompt(
@@ -1191,6 +1365,8 @@ impl WorkspaceStore {
         peer: Option<&str>,
         preprompt: &str,
         folder_scope: &[String],
+        agent_routing_enabled: Option<bool>,
+        model: Option<&str>,
     ) -> Result<()> {
         if preprompt.chars().count() > 4_000 {
             bail!("conversation pre-prompt may not exceed 4000 characters");
@@ -1210,71 +1386,17 @@ impl WorkspaceStore {
             _ => bail!("conversation must be a channel or a direct message"),
         };
         let preprompt = preprompt.trim();
-        self.conn.execute("DELETE FROM workspace_conversation_preprompts WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3", params![channel_id, member, peer])?;
-        if !preprompt.is_empty() || !folder_scope.is_empty() {
-            self.conn.execute("INSERT INTO workspace_conversation_preprompts (channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json) VALUES (?1, ?2, ?3, ?4, ?5)", params![channel_id, member, peer, preprompt, serde_json::to_string(folder_scope)?])?;
-        }
-        Ok(())
-    }
-
-    pub fn set_conversation_agent_routing(
-        &self,
-        channel_id: Option<&str>,
-        member: Option<&str>,
-        peer: Option<&str>,
-        enabled: bool,
-    ) -> Result<()> {
-        let (channel_id, member, peer) = match (channel_id, member, peer) {
-            (Some(channel_id), None, None) => {
-                self.require_channel(channel_id)?;
-                (Some(channel_id.to_string()), None, None)
-            }
-            (None, Some(member), Some(peer)) => {
-                let (member, peer) = direct_participants(member, peer)?;
-                if !self.is_member(&member)? || !self.is_member(&peer)? {
-                    bail!("direct conversation participant is not a workspace member");
-                }
-                (None, Some(member), Some(peer))
-            }
-            _ => bail!("conversation must be a channel or a direct message"),
-        };
-        let existing = self.conn.query_row(
-            "SELECT preprompt, folder_scope_json FROM workspace_conversation_preprompts WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3",
+        let existing_routing_enabled = self.conn.query_row(
+            "SELECT agent_routing_enabled FROM workspace_conversation_preprompts WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3",
             params![channel_id, member, peer],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ).optional()?;
+            |row| row.get::<_, bool>(0),
+        ).optional()?.unwrap_or(false);
+        let agent_routing_enabled = agent_routing_enabled.unwrap_or(existing_routing_enabled);
         self.conn.execute("DELETE FROM workspace_conversation_preprompts WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3", params![channel_id, member, peer])?;
-        if enabled || existing.is_some() {
-            let (preprompt, folder_scope) =
-                existing.unwrap_or_else(|| (String::new(), "[]".to_string()));
-            self.conn.execute("INSERT INTO workspace_conversation_preprompts (channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json, agent_routing_enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![channel_id, member, peer, preprompt, folder_scope, enabled])?;
+        if !preprompt.is_empty() || !folder_scope.is_empty() || agent_routing_enabled || model.is_some() {
+            self.conn.execute("INSERT INTO workspace_conversation_preprompts (channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json, agent_routing_enabled, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![channel_id, member, peer, preprompt, serde_json::to_string(folder_scope)?, agent_routing_enabled, model])?;
         }
         Ok(())
-    }
-
-    pub fn conversation_agent_routing_enabled(
-        &self,
-        channel_id: Option<&str>,
-        member: Option<&str>,
-        peer: Option<&str>,
-    ) -> Result<bool> {
-        let enabled = match (channel_id, member, peer) {
-            (Some(channel_id), None, None) => self.conn.query_row(
-                "SELECT agent_routing_enabled FROM workspace_conversation_preprompts WHERE channel_id = ?1 AND member_pubkey IS NULL AND peer_pubkey IS NULL",
-                [channel_id],
-                |row| row.get::<_, bool>(0),
-            ).optional()?,
-            (None, Some(member), Some(peer)) => {
-                let (member, peer) = direct_participants(member, peer)?;
-                self.conn.query_row(
-                    "SELECT agent_routing_enabled FROM workspace_conversation_preprompts WHERE channel_id IS NULL AND member_pubkey = ?1 AND peer_pubkey = ?2",
-                    params![member, peer],
-                    |row| row.get::<_, bool>(0),
-                ).optional()?
-            }
-            _ => bail!("conversation must be a channel or a direct message"),
-        };
-        Ok(enabled.unwrap_or(false))
     }
 
     pub fn conversation_folder_scope(
@@ -1303,6 +1425,39 @@ impl WorkspaceStore {
             .as_deref()
             .and_then(|scope| serde_json::from_str(scope).ok())
             .unwrap_or_default())
+    }
+
+    pub fn conversation_agent_routing_enabled(
+        &self,
+        channel_id: Option<&str>,
+        member: Option<&str>,
+        peer: Option<&str>,
+    ) -> Result<bool> {
+        match (channel_id, member, peer) {
+            (Some(channel_id), None, None) => self
+                .conn
+                .query_row(
+                    "SELECT agent_routing_enabled FROM workspace_conversation_preprompts WHERE channel_id = ?1 AND member_pubkey IS NULL AND peer_pubkey IS NULL",
+                    [channel_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map(|enabled| enabled.unwrap_or(false))
+                .map_err(Into::into),
+            (None, Some(member), Some(peer)) => {
+                let (member, peer) = direct_participants(member, peer)?;
+                self.conn
+                    .query_row(
+                        "SELECT agent_routing_enabled FROM workspace_conversation_preprompts WHERE channel_id IS NULL AND member_pubkey = ?1 AND peer_pubkey = ?2",
+                        params![member, peer],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map(|enabled| enabled.unwrap_or(false))
+                    .map_err(Into::into)
+            }
+            _ => bail!("conversation must be a channel or a direct message"),
+        }
     }
 
     pub fn add_conversation_agent(
@@ -2175,11 +2330,14 @@ impl WorkspaceStore {
         for mention in mentions {
             let exists = match mention.kind.as_str() {
                 "member" => self.is_member(&mention.id)?,
-                "agent" => self.conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM workspace_agents WHERE id = ?1)",
-                    [&mention.id],
-                    |row| row.get::<_, bool>(0),
-                )?,
+                "agent" => {
+                    mention.id == "native-opencode"
+                        || self.conn.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM workspace_agents WHERE id = ?1)",
+                            [&mention.id],
+                            |row| row.get::<_, bool>(0),
+                        )?
+                }
                 _ => false,
             };
             if !exists {
@@ -2281,6 +2439,7 @@ fn conversation_preprompt_from_row(
         preprompt: row.get(3)?,
         folder_scope: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
         agent_routing_enabled: row.get(5)?,
+        model: row.get(6)?,
     })
 }
 fn direct_participants(member: &str, peer: &str) -> Result<(String, String)> {
@@ -2332,7 +2491,8 @@ fn conversation_session_from_row(
         opencode_session_id: row.get(4)?,
         session_status: row.get(5)?,
         session_error: row.get(6)?,
-        updated_at: row.get(7)?,
+        session_context: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
@@ -2762,6 +2922,22 @@ mod tests {
             reopened.channel_messages(&channel.id).unwrap()[0].mentions,
             mentions
         );
+    }
+
+    #[test]
+    fn accepts_native_opencode_agent_mentions() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let mentions = vec![WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: "native-opencode".to_string(),
+            label: "Agent".to_string(),
+        }];
+
+        store
+            .add_channel_message("owner", &channel.id, "Please help", &[], &mentions, None)
+            .unwrap();
     }
 
     #[test]
@@ -3419,10 +3595,10 @@ mod tests {
         store.add_member("member").unwrap();
         let channel = store.create_channel("engineering", "owner").unwrap();
         store
-            .set_conversation_preprompt(Some(&channel.id), None, None, "Review carefully.", &[])
+            .set_conversation_preprompt(Some(&channel.id), None, None, "Review carefully.", &[], Some(true), None)
             .unwrap();
         store
-            .set_conversation_preprompt(None, Some("member"), Some("owner"), "Be concise.", &[])
+            .set_conversation_preprompt(None, Some("member"), Some("owner"), "Be concise.", &[], None, None)
             .unwrap();
         drop(store);
 
@@ -3439,72 +3615,66 @@ mod tests {
             preprompts[1].channel_id.as_deref(),
             Some(channel.id.as_str())
         );
+        assert!(preprompts[1].agent_routing_enabled);
 
         let store = WorkspaceStore::open(path.path()).unwrap();
         store
-            .set_conversation_preprompt(Some(&channel.id), None, None, "", &[])
+            .set_conversation_preprompt(Some(&channel.id), None, None, "", &[], Some(false), None)
             .unwrap();
         assert_eq!(store.conversation_preprompts().unwrap().len(), 1);
     }
 
     #[test]
-    fn persists_conversation_agent_routing_for_channels_and_direct_messages() {
+    fn persists_workspace_default_agent_prompt_separately() {
         let path = tempfile::NamedTempFile::new().unwrap();
         let store = WorkspaceStore::open(path.path()).unwrap();
-        store.add_member("owner").unwrap();
-        store.add_member("member").unwrap();
-        let channel = store.create_channel("engineering", "owner").unwrap();
-
         store
-            .set_conversation_agent_routing(Some(&channel.id), None, None, true)
-            .unwrap();
-        store
-            .set_conversation_agent_routing(None, Some("owner"), Some("member"), true)
+            .set_default_agent_prompt("Use concise updates.")
             .unwrap();
         drop(store);
 
         let store = WorkspaceStore::open(path.path()).unwrap();
-        assert!(store
-            .conversation_agent_routing_enabled(Some(&channel.id), None, None)
-            .unwrap());
-        assert!(store
-            .conversation_agent_routing_enabled(None, Some("member"), Some("owner"))
-            .unwrap());
-
-        store
-            .set_conversation_agent_routing(Some(&channel.id), None, None, false)
+        assert_eq!(
+            store.default_agent_prompt().unwrap().as_deref(),
+            Some("Use concise updates.")
+        );
+        let default = store
+            .conversation_preprompts()
+            .unwrap()
+            .into_iter()
+            .find(|prompt| prompt.channel_id.as_deref() == Some(""))
             .unwrap();
-        assert!(!store
-            .conversation_agent_routing_enabled(Some(&channel.id), None, None)
-            .unwrap());
+        assert_eq!(default.preprompt, "Use concise updates.");
+
+        store.set_default_agent_prompt("").unwrap();
+        assert_eq!(store.default_agent_prompt().unwrap(), None);
     }
 
     #[test]
-    fn persists_native_sessions_per_conversation_and_folder() {
+    fn persists_one_native_session_per_conversation() {
         let path = tempfile::NamedTempFile::new().unwrap();
         let store = WorkspaceStore::open(path.path()).unwrap();
         store.add_member("owner").unwrap();
         store.add_member("member").unwrap();
         let channel = store.create_channel("engineering", "owner").unwrap();
-
         store
             .upsert_conversation_session(
                 Some(&channel.id),
                 None,
                 None,
                 "/work/phone",
-                "ses_channel",
+                "ses_first",
                 "ready",
                 None,
             )
             .unwrap();
         store
             .upsert_conversation_session(
+                Some(&channel.id),
                 None,
-                Some("owner"),
-                Some("member"),
+                None,
                 "/work/phone",
-                "ses_direct",
+                "ses_second",
                 "failed",
                 Some("offline"),
             )
@@ -3513,38 +3683,44 @@ mod tests {
 
         let store = WorkspaceStore::open(path.path()).unwrap();
         let channel_session = store
-            .conversation_session(Some(&channel.id), None, None, "/work/phone")
+            .conversation_session(Some(&channel.id), None, None)
             .unwrap()
             .unwrap();
-        assert_eq!(channel_session.opencode_session_id, "ses_channel");
-        let direct_session = store
-            .conversation_session(None, Some("member"), Some("owner"), "/work/phone")
-            .unwrap()
+        assert_eq!(channel_session.opencode_session_id, "ses_second");
+        assert_eq!(channel_session.session_error.as_deref(), Some("offline"));
+        assert_eq!(channel_session.session_context, None);
+        store
+            .set_conversation_session_context(
+                Some(&channel.id),
+                None,
+                None,
+                "scope-17-abcdef",
+            )
             .unwrap();
-        assert_eq!(direct_session.opencode_session_id, "ses_direct");
-        assert_eq!(direct_session.session_error.as_deref(), Some("offline"));
+        assert_eq!(
+            store
+                .conversation_session(Some(&channel.id), None, None)
+                .unwrap()
+                .unwrap()
+                .session_context
+                .as_deref(),
+            Some("scope-17-abcdef")
+        );
         store
             .upsert_conversation_session(
+                Some(&channel.id),
                 None,
-                Some("owner"),
-                Some("member"),
-                "/work/phone",
-                "ses_recovered",
+                None,
+                "/work/other",
+                "ses_first_reused",
                 "ready",
                 None,
             )
             .unwrap();
-        let direct_session = store
-            .conversation_session(None, Some("owner"), Some("member"), "/work/phone")
-            .unwrap()
-            .unwrap();
-        assert_eq!(direct_session.opencode_session_id, "ses_recovered");
-        assert_eq!(direct_session.session_status, "ready");
-        assert_eq!(direct_session.session_error, None);
         assert!(store
-            .conversation_session(Some(&channel.id), None, None, "/work/other")
+            .conversation_session(Some(&channel.id), None, None)
             .unwrap()
-            .is_none());
+            .is_some_and(|session| session.opencode_session_id == "ses_first_reused"));
     }
 
     #[test]

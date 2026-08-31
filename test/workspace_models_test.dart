@@ -25,16 +25,14 @@ void main() {
     expect(workspace.directPeers('owner'), ['owner']);
   });
 
-  test('decodes persisted conversation preferences and defaults routing on', () {
+  test('decodes persisted conversation preferences', () {
     final preferences = decodeWorkspaceConversationPreferences(
-      '{"channel":{"pinned":true,"archived":false,"route_to_a0":false},"direct":{"archived":true}}',
+      '{"channel":{"pinned":true,"archived":false},"direct":{"archived":true}}',
     );
 
     expect(preferences['channel']!.pinned, isTrue);
     expect(preferences['channel']!.archived, isFalse);
-    expect(preferences['channel']!.routeToA0, isFalse);
     expect(preferences['direct']!.archived, isTrue);
-    expect(preferences['direct']!.routeToA0, isTrue);
   });
 
   test(
@@ -53,6 +51,11 @@ void main() {
       );
     },
   );
+
+  test('uses a neutral fallback name for unlisted agents', () {
+    expect(workspaceFallbackAgentName('agent:native-opencode'), 'Agent');
+    expect(workspaceFallbackAgentName('agent:build_reviewer'), 'Agent');
+  });
 
   test('avatar colors are stable by identity and use names as a fallback', () {
     expect(
@@ -120,6 +123,38 @@ void main() {
     expect(isWorkspaceEmptyAgentMessage(empty), isTrue);
     expect(isWorkspaceEmptyAgentMessage(topicOnly), isTrue);
     expect(isWorkspaceEmptyAgentMessage(member), isFalse);
+  });
+
+  test('hidden agent control messages do not create direct conversations', () {
+    const control = WorkspaceMessage(
+      id: 'control',
+      senderPubkey: 'agent:native-opencode',
+      recipientPubkey: 'owner',
+      body: '[[RELATED_THREAD:root]]',
+      createdAt: 1,
+    );
+    const visible = WorkspaceMessage(
+      id: 'visible',
+      senderPubkey: 'agent:reviewer',
+      recipientPubkey: 'owner',
+      body: 'Review complete.',
+      createdAt: 2,
+    );
+    const nativeReply = WorkspaceMessage(
+      id: 'native-reply',
+      senderPubkey: 'agent:native-opencode',
+      recipientPubkey: 'owner',
+      body: 'Native reply.',
+      createdAt: 3,
+    );
+    final workspace = WorkspaceState()
+      ..messages['controls'] = [control]
+      ..messages['visible'] = [visible]
+      ..messages['native'] = [nativeReply];
+
+    expect(isWorkspaceHiddenMessage(control), isTrue);
+    expect(workspace.directPeers('owner'), ['agent:reviewer', 'owner']);
+    expect(workspace.conversationKeyForMessage(nativeReply), 'owner:owner');
   });
 
   test('uses a saved thread topic marker with no more than three words', () {
@@ -882,6 +917,32 @@ void main() {
       ['/work/phone'],
     );
   });
+
+  test(
+    'workspace default agent prompt is distinct from conversation prompts',
+    () {
+      final state = WorkspaceState()
+        ..apply({
+          'workspace_update': {
+            'action': 'snapshot',
+            'conversation_preprompts': [
+              {'channel_id': '', 'preprompt': 'Use concise updates.'},
+              {'channel_id': 'channel-1', 'preprompt': 'Review carefully.'},
+            ],
+          },
+        });
+
+      expect(state.defaultAgentPrompt, 'Use concise updates.');
+      expect(
+        state.conversationPreprompt(
+          channelId: 'channel-1',
+          ownPubkey: 'owner',
+          peerPubkey: null,
+        ),
+        'Review carefully.',
+      );
+    },
+  );
 
   test('group call metadata accepts only a unique two-to-four member mesh', () {
     final call = WorkspaceGroupCall.fromJson({

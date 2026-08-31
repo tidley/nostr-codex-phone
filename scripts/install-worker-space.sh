@@ -84,6 +84,23 @@ if [[ "$opencode_bin" == /* ]]; then
   opencode_bin="$(realpath -e -- "$opencode_bin")"
   opencode_bind="$opencode_bin"
 fi
+flutter_cache=""
+if [[ -d /opt/flutter/bin/cache ]]; then
+  flutter_cache=/opt/flutter/bin/cache
+fi
+shared_pictures=""
+if [[ -d /tmp/pics ]]; then
+  shared_pictures=/tmp/pics
+fi
+node_bin="$(command -v node 2>/dev/null || true)"
+node_runtime=""
+if [[ -n "$node_bin" && "$node_bin" == /* && -x "$node_bin" ]]; then
+  node_runtime="$(dirname "$(dirname "$(realpath "$node_bin")")")"
+fi
+skill_bind_paths=()
+for path in "$HOME/.opencode/skills" "$HOME/.agents/skills"; do
+  [[ -d "$path" ]] && skill_bind_paths+=("$path")
+done
 space_home="$state_dir/home"
 mkdir -p -- "$space_home/.config" "$space_home/.cache" "$space_home/.local/share/opencode"
 mkdir -p -- "$space_home/.config/opencode"
@@ -155,7 +172,9 @@ Environment=OPENCODE_AGENT=build
 # Child processes must inherit this unit's mount namespace.
 Environment=OPENCODE_SYSTEMD_SCOPE=0
 Environment=OPENCODE_MAX_CONCURRENT_RUNS=10
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=AGENT_TIMEOUT_SECS=3600
+Environment=PATH=$(if [[ -n "$node_runtime" ]]; then printf '%s/bin:' "$(systemd_escape "$node_runtime")"; fi)/usr/local/bin:/usr/bin:/bin
+$(if [[ -n "$flutter_cache" ]]; then printf 'Environment=AGENT_WRITABLE_PATHS=%s\n' "$(systemd_escape "$flutter_cache")"; fi)
 ExecStart=$(systemd_escape "$worker")
 Restart=always
 RestartSec=5
@@ -168,6 +187,10 @@ ProtectSystem=strict
 ProtectHome=tmpfs
 BindPaths=$(systemd_escape "$root")
 ReadWritePaths=$(systemd_escape "$root")
+$(if [[ -n "$flutter_cache" ]]; then printf 'ReadWritePaths=%s\n' "$(systemd_escape "$flutter_cache")"; fi)
+$(if [[ -n "$shared_pictures" ]]; then printf 'BindReadOnlyPaths=%s\n' "$(systemd_escape "$shared_pictures")"; fi)
+$(if [[ -n "$node_runtime" ]]; then printf 'BindReadOnlyPaths=%s\n' "$(systemd_escape "$node_runtime")"; fi)
+$(for path in "${skill_bind_paths[@]}"; do printf 'BindReadOnlyPaths=%s\n' "$(systemd_escape "$path")"; done)
 $(if [[ -n "$opencode_bind" ]]; then printf 'BindReadOnlyPaths=%s\n' "$(systemd_escape "$opencode_bind")"; fi)
 
 [Install]

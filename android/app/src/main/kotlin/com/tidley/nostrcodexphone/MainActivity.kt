@@ -1,23 +1,28 @@
 package com.tidley.nostrcodexphone
 
 import android.content.Context
+import android.content.ContentValues
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Environment
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.MediaStore
 import android.speech.tts.TextToSpeech
 import android.view.HapticFeedbackConstants
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 class MainActivity : FlutterActivity() {
     private val channelName = "nostr_codex_phone/tts_control"
+    private val attachmentDownloadChannelName = "nostr_codex_phone/attachment_download"
     private val callAudioChannelName = "nostr_codex_phone/call_audio"
     private var hardStopTts: TextToSpeech? = null
     private var pendingHardStop = false
@@ -62,6 +67,29 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, attachmentDownloadChannelName).setMethodCallHandler { call, result ->
+            if (call.method != "saveToDownloads") {
+                result.notImplemented()
+                return@setMethodCallHandler
+            }
+            val path = call.argument<String>("path")
+            val name = call.argument<String>("name")
+            val mediaType = call.argument<String>("mediaType")
+            if (path.isNullOrBlank() || name.isNullOrBlank() || mediaType.isNullOrBlank()) {
+                result.error("invalid_arguments", "Attachment download details are missing", null)
+                return@setMethodCallHandler
+            }
+            Thread {
+                try {
+                    val savedName = saveToDownloads(path, name, mediaType)
+                    runOnUiThread { result.success(savedName) }
+                } catch (error: Exception) {
+                    runOnUiThread {
+                        result.error("download_failed", error.message ?: "Could not save attachment", null)
+                    }
+                }
+            }.start()
+        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, callAudioChannelName).setMethodCallHandler { call, result ->
             when (call.method) {
                 "start" -> {
@@ -82,6 +110,36 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    private fun saveToDownloads(path: String, name: String, mediaType: String): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            throw IllegalStateException("Saving attachments requires Android 10 or later")
+        }
+        val source = File(path)
+        if (!source.isFile) throw IllegalArgumentException("Downloaded attachment is unavailable")
+        val displayName = File(name).name.ifBlank { "attachment.html" }
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+            put(MediaStore.MediaColumns.MIME_TYPE, mediaType)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: throw IllegalStateException("Could not create download")
+        try {
+            source.inputStream().use { input ->
+                contentResolver.openOutputStream(uri)?.use { output -> input.copyTo(output) }
+                    ?: throw IllegalStateException("Could not write download")
+            }
+            values.clear()
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            contentResolver.update(uri, values, null, null)
+        } catch (error: Exception) {
+            contentResolver.delete(uri, null, null)
+            throw error
+        }
+        return displayName
     }
 
     private fun ensureHardStopTts() {
