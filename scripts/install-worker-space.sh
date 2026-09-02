@@ -172,6 +172,10 @@ Environment=OPENCODE_AGENT=build
 # Child processes must inherit this unit's mount namespace.
 Environment=OPENCODE_SYSTEMD_SCOPE=0
 Environment=OPENCODE_MAX_CONCURRENT_RUNS=10
+Environment="GIT_AUTHOR_NAME=Nostr Codex"
+Environment=GIT_AUTHOR_EMAIL=noreply@github.com
+Environment="GIT_COMMITTER_NAME=Nostr Codex"
+Environment=GIT_COMMITTER_EMAIL=noreply@github.com
 Environment=AGENT_TIMEOUT_SECS=3600
 Environment=PATH=$(if [[ -n "$node_runtime" ]]; then printf '%s/bin:' "$(systemd_escape "$node_runtime")"; fi)/usr/local/bin:/usr/bin:/bin
 $(if [[ -n "$flutter_cache" ]]; then printf 'Environment=AGENT_WRITABLE_PATHS=%s\n' "$(systemd_escape "$flutter_cache")"; fi)

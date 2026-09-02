@@ -4,6 +4,13 @@
 *.pyc
 *.swp
 .env*
+/zapstore.yaml
+.build-home/
+.flutter-sdk/
+/android/.android-sdk/
+/android/.android-user-home/
+/android/.gradle-user-home/
+/android/build/
 .nostr-codex-memory*.sqlite*
 .nostr-codex-target.svg
 .nostr-codex-worker.lock
