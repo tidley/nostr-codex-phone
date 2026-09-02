@@ -19,10 +19,25 @@ void main() {
     expect(defaultFolder.workdir, isNull);
   });
 
-  test('always includes Self as a direct conversation', () {
+  test('does not create a self direct conversation', () {
     final workspace = WorkspaceState();
 
-    expect(workspace.directPeers('owner'), ['owner']);
+    expect(workspace.directPeers('owner'), isEmpty);
+  });
+
+  test('removes saved self direct messages', () {
+    const message = WorkspaceMessage(
+      id: 'self-message',
+      senderPubkey: 'owner',
+      recipientPubkey: 'owner',
+      body: 'Remove this',
+      createdAt: 1,
+    );
+    final workspace = WorkspaceState()
+      ..messages[WorkspaceState.directKey('owner', 'owner')] = [message];
+
+    expect(workspace.removeSelfConversation('owner'), {'self-message'});
+    expect(workspace.messages, isEmpty);
   });
 
   test('decodes persisted conversation preferences', () {
@@ -153,8 +168,11 @@ void main() {
       ..messages['native'] = [nativeReply];
 
     expect(isWorkspaceHiddenMessage(control), isTrue);
-    expect(workspace.directPeers('owner'), ['agent:reviewer', 'owner']);
-    expect(workspace.conversationKeyForMessage(nativeReply), 'owner:owner');
+    expect(workspace.directPeers('owner'), ['agent:reviewer']);
+    expect(
+      workspace.conversationKeyForMessage(nativeReply),
+      'agent:native-opencode:owner',
+    );
   });
 
   test('uses a saved thread topic marker with no more than three words', () {

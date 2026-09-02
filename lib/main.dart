@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -48,7 +49,6 @@ import 'package:url_launcher/url_launcher.dart';
 
 part 'src/main_widgets.dart';
 part 'src/live_recording_waveform.dart';
-part 'src/inactive_reply_notice.dart';
 
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _attachmentDownloadChannel = MethodChannel(
@@ -97,6 +97,11 @@ bool get _isAndroid =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 bool get _isIOS => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
 bool get _isLinux => !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+bool get _isDesktop =>
+    !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.linux ||
+        defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.windows);
 bool get _supportsTts => !_isLinux;
 bool get _supportsCameraQrScan => _isAndroid || _isIOS;
 bool get _supportsLiveCalls => _isAndroid || _isLinux;
@@ -200,6 +205,7 @@ class _WorkspaceWorkerState {
   final Map<String, int> threadUnreadCounts = {};
   final Set<String> historyRefreshesInFlight = {};
   int attentionVersion = 0;
+  final Set<String> focusLostMessageIds = {};
   String? openThreadKey;
   String focusedConversationKey = '';
   final Map<String, _WorkspacePanelState> panelStates = {};
@@ -210,18 +216,6 @@ class _WorkspaceWorkerState {
     revision.dispose();
     diagnostics.dispose();
   }
-}
-
-class _InactiveReplyNoticeState {
-  const _InactiveReplyNoticeState({
-    required this.entry,
-    required this.controller,
-    required this.timer,
-  });
-
-  final OverlayEntry entry;
-  final AnimationController controller;
-  final Timer timer;
 }
 
 class _GroupCallState {
@@ -295,7 +289,7 @@ class IncomingCallPrompt extends StatelessWidget {
 
 enum _RelayProbeStrength { strong, fair, weak, offline }
 
-enum AppTheme { mint, ember }
+enum AppTheme { mint, ember, charcoal }
 
 enum WorkspaceDateFormat {
   uk('uk', 'British (31/7/2026)'),
@@ -313,16 +307,19 @@ extension on AppTheme {
   String get label => switch (this) {
     AppTheme.mint => 'Mint',
     AppTheme.ember => 'Ember',
+    AppTheme.charcoal => 'Charcoal',
   };
 
   String get description => switch (this) {
     AppTheme.mint => 'Deep green workspace with mint actions',
     AppTheme.ember => 'Graphite workspace with amber actions and cyan labels',
+    AppTheme.charcoal => 'Neutral charcoal workspace with steel accents',
   };
 }
 
 AppTheme _appThemeFromStorage(String? value) => switch (value) {
   'ember' => AppTheme.ember,
+  'charcoal' => AppTheme.charcoal,
   _ => AppTheme.mint,
 };
 
@@ -336,6 +333,7 @@ class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
     required this.label,
     required this.brand,
     required this.brandForeground,
+    required this.monochrome,
   });
 
   final Color background;
@@ -346,6 +344,7 @@ class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
   final Color label;
   final Color brand;
   final Color brandForeground;
+  final bool monochrome;
 
   @override
   _WorkspacePalette copyWith({
@@ -357,6 +356,7 @@ class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
     Color? label,
     Color? brand,
     Color? brandForeground,
+    bool? monochrome,
   }) => _WorkspacePalette(
     background: background ?? this.background,
     sidebar: sidebar ?? this.sidebar,
@@ -366,6 +366,7 @@ class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
     label: label ?? this.label,
     brand: brand ?? this.brand,
     brandForeground: brandForeground ?? this.brandForeground,
+    monochrome: monochrome ?? this.monochrome,
   );
 
   @override
@@ -380,6 +381,7 @@ class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
       label: Color.lerp(label, other.label, t)!,
       brand: Color.lerp(brand, other.brand, t)!,
       brandForeground: Color.lerp(brandForeground, other.brandForeground, t)!,
+      monochrome: t < 0.5 ? monochrome : other.monochrome,
     );
   }
 }
@@ -470,6 +472,7 @@ class _PendingToolView {
     required this.conversationKey,
     this.workspacePanel = false,
     this.workspaceConversationKey,
+    this.workspacePath,
     this.onResult,
   });
 
@@ -477,6 +480,7 @@ class _PendingToolView {
   final String conversationKey;
   final bool workspacePanel;
   final String? workspaceConversationKey;
+  final String? workspacePath;
   final void Function(ToolResultPayload result)? onResult;
 }
 
@@ -573,23 +577,68 @@ class _NostrCodexAppState extends State<NostrCodexApp> {
 
 ThemeData _appTheme(AppTheme theme) {
   final ember = theme == AppTheme.ember;
+  final charcoal = theme == AppTheme.charcoal;
   final scheme =
       ColorScheme.fromSeed(
-        seedColor: ember ? const Color(0xffffb74d) : const Color(0xff42d3a6),
+        seedColor: switch (theme) {
+          AppTheme.mint => const Color(0xff42d3a6),
+          AppTheme.ember => const Color(0xffffb74d),
+          AppTheme.charcoal => const Color(0xff70aee5),
+        },
         brightness: Brightness.dark,
       ).copyWith(
-        primary: ember ? const Color(0xffffb74d) : const Color(0xff42d3a6),
-        onPrimary: ember ? const Color(0xff281900) : const Color(0xff06251b),
-        secondary: ember ? const Color(0xff56d8d2) : const Color(0xff73e0bd),
-        onSecondary: const Color(0xff071c1c),
-        surface: ember ? const Color(0xff171717) : const Color(0xff151b1a),
-        onSurface: ember ? const Color(0xffeee8df) : const Color(0xffe8f3ef),
-        surfaceContainerHighest: ember
-            ? const Color(0xff242321)
-            : const Color(0xff24302d),
-        outline: ember ? const Color(0xff73552c) : const Color(0xff37574e),
+        primary: switch (theme) {
+          AppTheme.mint => const Color(0xff42d3a6),
+          AppTheme.ember => const Color(0xffffb74d),
+          AppTheme.charcoal => const Color(0xff7db9ef),
+        },
+        onPrimary: switch (theme) {
+          AppTheme.mint => const Color(0xff06251b),
+          AppTheme.ember => const Color(0xff281900),
+          AppTheme.charcoal => const Color(0xff081d2e),
+        },
+        secondary: switch (theme) {
+          AppTheme.mint => const Color(0xff73e0bd),
+          AppTheme.ember => const Color(0xff56d8d2),
+          AppTheme.charcoal => const Color(0xffa9c9e6),
+        },
+        onSecondary: charcoal
+            ? const Color(0xff10263a)
+            : const Color(0xff071c1c),
+        surface: switch (theme) {
+          AppTheme.mint => const Color(0xff151b1a),
+          AppTheme.ember => const Color(0xff171717),
+          AppTheme.charcoal => const Color(0xff1a1b1e),
+        },
+        onSurface: charcoal
+            ? const Color(0xffeceef2)
+            : ember
+            ? const Color(0xffeee8df)
+            : const Color(0xffe8f3ef),
+        surfaceContainerHighest: switch (theme) {
+          AppTheme.mint => const Color(0xff24302d),
+          AppTheme.ember => const Color(0xff242321),
+          AppTheme.charcoal => const Color(0xff2a2c31),
+        },
+        outline: switch (theme) {
+          AppTheme.mint => const Color(0xff37574e),
+          AppTheme.ember => const Color(0xff73552c),
+          AppTheme.charcoal => const Color(0xff5b6068),
+        },
       );
-  final workspace = ember
+  final workspace = charcoal
+      ? const _WorkspacePalette(
+          background: Color(0xff101113),
+          sidebar: Color(0xff191a1d),
+          content: Color(0xff121316),
+          composer: Color(0xff222429),
+          selected: Color(0xff273947),
+          label: Color(0xffc9c9cc),
+          brand: Color(0xff7db9ef),
+          brandForeground: Color(0xff081d2e),
+          monochrome: true,
+        )
+      : ember
       ? const _WorkspacePalette(
           background: Color(0xff0c1a1e),
           sidebar: Color(0xff161615),
@@ -599,6 +648,7 @@ ThemeData _appTheme(AppTheme theme) {
           label: Color(0xff71ded9),
           brand: Color(0xffffb74d),
           brandForeground: Color(0xff281900),
+          monochrome: false,
         )
       : const _WorkspacePalette(
           background: Color(0xff0c1a1e),
@@ -609,9 +659,18 @@ ThemeData _appTheme(AppTheme theme) {
           label: Color(0xffb6e2d4),
           brand: Color(0xff65d8b1),
           brandForeground: Color(0xff082019),
+          monochrome: false,
         );
-  final menuSurface = ember ? const Color(0xff1c1b19) : const Color(0xff182421);
-  final menuBorder = ember ? const Color(0xff453b2b) : const Color(0xff345047);
+  final menuSurface = charcoal
+      ? const Color(0xff202126)
+      : ember
+      ? const Color(0xff1c1b19)
+      : const Color(0xff182421);
+  final menuBorder = charcoal
+      ? const Color(0xff454a52)
+      : ember
+      ? const Color(0xff453b2b)
+      : const Color(0xff345047);
   final menuItemBackground = WidgetStateProperty.resolveWith<Color?>((states) {
     if (states.contains(WidgetState.selected)) return workspace.selected;
     if (states.contains(WidgetState.hovered) ||
@@ -623,7 +682,9 @@ ThemeData _appTheme(AppTheme theme) {
   return ThemeData(
     fontFamily: 'Roboto',
     colorScheme: scheme,
-    scaffoldBackgroundColor: ember
+    scaffoldBackgroundColor: charcoal
+        ? const Color(0xff111214)
+        : ember
         ? const Color(0xff101010)
         : const Color(0xff0c1110),
     cardTheme: CardThemeData(
@@ -707,7 +768,9 @@ ThemeData _appTheme(AppTheme theme) {
       ),
     ),
     appBarTheme: AppBarTheme(
-      backgroundColor: ember
+      backgroundColor: charcoal
+          ? const Color(0xff111214)
+          : ember
           ? const Color(0xff101010)
           : const Color(0xff0c1110),
       foregroundColor: scheme.onSurface,
@@ -769,8 +832,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       'recording_waveform_rms_smoothing';
   static const _hapticFeedbackStorageKey = 'haptic_feedback_enabled';
   static const _receiveVibrationStorageKey = 'receive_vibration_enabled';
-  static const _inactiveReplyPopupStorageKey = 'inactive_reply_popup_enabled';
   static const _inactiveReplyAudioStorageKey = 'inactive_reply_audio_enabled';
+  static const _inactiveReplySoundStorageKey = 'inactive_reply_sound';
   static const _backgroundDeliveryStorageKey = 'background_delivery_enabled';
   static const _dateFormatStorageKey = 'date_format';
   static const _conversationHistoryStorageKey = 'conversation_history_v1';
@@ -815,8 +878,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     _recordingWaveformRmsSmoothingStorageKey,
     _hapticFeedbackStorageKey,
     _receiveVibrationStorageKey,
-    _inactiveReplyPopupStorageKey,
     _inactiveReplyAudioStorageKey,
+    _inactiveReplySoundStorageKey,
     _backgroundDeliveryStorageKey,
     _dateFormatStorageKey,
     _conversationHistoryStorageKey,
@@ -851,6 +914,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _realtimeAudio = RealtimeAudio.instance;
   final _realtimeVideo = RealtimeVideo.instance;
   final _tts = FlutterTts();
+  final _inactiveReplyPlayer = AudioPlayer();
   final _nostr = NostrTransport();
   final _messagesByTarget = <String, List<ConversationMessage>>{};
   final _seenIncomingEventIds = <String>{};
@@ -865,7 +929,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   Timer? _conversationHistorySaveTimer;
   Timer? _seenIncomingEventIdsSaveTimer;
   late final AnimationController _menuNotificationPulseController;
-  final _inactiveReplyNotices = <String, _InactiveReplyNoticeState>{};
 
   bool _loadingSettings = true;
   bool _connecting = false;
@@ -890,6 +953,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   final _recordingDurationLabel = ValueNotifier<String>('00:00');
   final _pendingProcessingMessages = <_PendingProcessingMessage>[];
   final _pendingToolViews = <String, _PendingToolView>{};
+  final _latestWorkspaceFileRequestIds = <String, String>{};
   final _workerConsoleHistoryCache = <String, Map<String, dynamic>>{};
   final _workspaceFileBrowser = ValueNotifier<FileBrowserResult?>(null);
   final _workspaceFilePreview = ValueNotifier<FileContentResult?>(null);
@@ -922,8 +986,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   double _recordingWaveformRmsSmoothing = 0.12;
   bool _hapticFeedbackEnabled = true;
   bool _receiveVibrationEnabled = true;
-  bool _inactiveReplyPopupEnabled = true;
   bool _inactiveReplyAudioEnabled = true;
+  String _inactiveReplySound = 'alert';
+  bool _desktopWindowFocused = true;
   bool _backgroundDeliveryEnabled = false;
   String _ttsLanguage = 'en-US';
   String? _ttsEngine;
@@ -1329,14 +1394,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       unawaited(_saveWorkspaceCache(workerKey: workerKey));
     }
     unawaited(_saveLastWorkspaceLocation());
-    for (final notice in _inactiveReplyNotices.values) {
-      notice.timer.cancel();
-      notice.entry.remove();
-      notice.controller.dispose();
-    }
-    _inactiveReplyNotices.clear();
     _incomingCallOverlay?.remove();
     unawaited(_stopTtsEngines());
+    unawaited(_inactiveReplyPlayer.dispose());
     _chatScrollController.removeListener(_updateChatScrollPosition);
     _chatScrollController.dispose();
     _secretKeyController.dispose();
@@ -1369,6 +1429,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_isDesktop) {
+      _desktopWindowFocused = state == AppLifecycleState.resumed;
+    }
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
@@ -1435,11 +1498,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     final receiveVibration = await _storage.read(
       key: _receiveVibrationStorageKey,
     );
-    final inactiveReplyPopup = await _storage.read(
-      key: _inactiveReplyPopupStorageKey,
-    );
     final inactiveReplyAudio = await _storage.read(
       key: _inactiveReplyAudioStorageKey,
+    );
+    final inactiveReplySound = await _storage.read(
+      key: _inactiveReplySoundStorageKey,
     );
     final backgroundDelivery = await _storage.read(
       key: _backgroundDeliveryStorageKey,
@@ -1579,8 +1642,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       );
       _hapticFeedbackEnabled = _storedBool(hapticFeedback, true);
       _receiveVibrationEnabled = _storedBool(receiveVibration, true);
-      _inactiveReplyPopupEnabled = _storedBool(inactiveReplyPopup, true);
       _inactiveReplyAudioEnabled = _storedBool(inactiveReplyAudio, true);
+      _inactiveReplySound = switch (inactiveReplySound) {
+        'boink' || 'click' => inactiveReplySound!,
+        _ => 'alert',
+      };
       _backgroundDeliveryEnabled = _storedBool(backgroundDelivery, false);
       _seenIncomingEventIds
         ..clear()
@@ -1712,8 +1778,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await _saveRecordingWaveformSettings();
     await _saveHapticFeedbackEnabled();
     await _saveReceiveVibrationEnabled();
-    await _saveInactiveReplyPopupEnabled();
     await _saveInactiveReplyAudioEnabled();
+    await _saveInactiveReplySound();
     await _saveWorkspaceIdentity();
   }
 
@@ -1830,6 +1896,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     bool? archived,
     bool? muted,
     bool? autoSpeak,
+    bool? sortByRecentReply,
   }) {
     final key = _workspacePreferenceKey(conversationKey);
     final current =
@@ -1840,9 +1907,14 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       archived: archived ?? current.archived,
       muted: muted ?? current.muted,
       autoSpeak: autoSpeak ?? current.autoSpeak,
+      sortByRecentReply: sortByRecentReply ?? current.sortByRecentReply,
     );
     setState(() {
-      if (!next.pinned && !next.archived && !next.muted && !next.autoSpeak) {
+      if (!next.pinned &&
+          !next.archived &&
+          !next.muted &&
+          !next.autoSpeak &&
+          next.sortByRecentReply) {
         _workspaceConversationPreferences.remove(key);
       } else {
         _workspaceConversationPreferences[key] = next;
@@ -2205,6 +2277,48 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _connectedPeerPubkey == target.pubkey) {
       _startWorkspaceFipsSupervisor(target.pubkey);
     }
+  }
+
+  Future<void> _renameComputerServiceTarget(RepoTarget target) async {
+    final controller = TextEditingController(text: target.displayName);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename workspace'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 100,
+          textInputAction: TextInputAction.done,
+          onSubmitted: (value) => Navigator.pop(context, value),
+          decoration: const InputDecoration(labelText: 'Workspace name'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    final cleaned = name?.trim();
+    if (!mounted || cleaned == null || cleaned.isEmpty) return;
+    setState(() {
+      final renamed = target.copyWith(name: cleaned);
+      _computerServiceTargets = [
+        for (final current in _computerServiceTargets)
+          current.id == target.id ? renamed : current,
+      ];
+      if (_computerServiceTarget?.id == target.id) {
+        _computerServiceTarget = renamed;
+      }
+    });
+    await _saveComputerServiceTarget();
   }
 
   Future<void> _deleteComputerServiceTarget(RepoTarget target) async {
@@ -3831,8 +3945,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             recordingWaveformRmsSmoothing: _recordingWaveformRmsSmoothing,
             hapticFeedbackEnabled: _hapticFeedbackEnabled,
             receiveVibrationEnabled: _receiveVibrationEnabled,
-            inactiveReplyPopupEnabled: _inactiveReplyPopupEnabled,
             inactiveReplyAudioEnabled: _inactiveReplyAudioEnabled,
+            inactiveReplySound: _inactiveReplySound,
             backgroundDeliveryEnabled: _backgroundDeliveryEnabled,
             language: _ttsLanguage,
             languages: _ttsLanguages,
@@ -3962,8 +4076,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                 _setRecordingWaveformRmsSmoothing,
             onHapticFeedbackChanged: _setHapticFeedbackEnabled,
             onReceiveVibrationChanged: _setReceiveVibrationEnabled,
-            onInactiveReplyPopupChanged: _setInactiveReplyPopupEnabled,
             onInactiveReplyAudioChanged: _setInactiveReplyAudioEnabled,
+            onInactiveReplySoundChanged: _setInactiveReplySound,
             onBackgroundDeliveryChanged: _setBackgroundDeliveryEnabled,
             onLanguageChanged: _setTtsLanguage,
             onEngineChanged: _setTtsEngine,
@@ -4211,18 +4325,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     }
   }
 
-  Future<void> _saveInactiveReplyPopupEnabled([bool? enabled]) async {
-    await _storage.write(
-      key: _inactiveReplyPopupStorageKey,
-      value: (enabled ?? _inactiveReplyPopupEnabled).toString(),
-    );
-  }
-
-  void _setInactiveReplyPopupEnabled(bool enabled) {
-    setState(() => _inactiveReplyPopupEnabled = enabled);
-    unawaited(_saveInactiveReplyPopupEnabled(enabled));
-  }
-
   Future<void> _saveInactiveReplyAudioEnabled([bool? enabled]) async {
     await _storage.write(
       key: _inactiveReplyAudioStorageKey,
@@ -4233,7 +4335,30 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   void _setInactiveReplyAudioEnabled(bool enabled) {
     setState(() => _inactiveReplyAudioEnabled = enabled);
     unawaited(_saveInactiveReplyAudioEnabled(enabled));
-    if (enabled) unawaited(SystemSound.play(SystemSoundType.alert));
+    if (enabled) unawaited(_playInactiveReplySound());
+  }
+
+  Future<void> _saveInactiveReplySound([String? sound]) => _storage.write(
+    key: _inactiveReplySoundStorageKey,
+    value: sound ?? _inactiveReplySound,
+  );
+
+  void _setInactiveReplySound(String sound) {
+    if (sound != 'alert' && sound != 'boink' && sound != 'click') return;
+    setState(() => _inactiveReplySound = sound);
+    unawaited(_saveInactiveReplySound(sound));
+    unawaited(_playInactiveReplySound());
+  }
+
+  Future<void> _playInactiveReplySound() async {
+    try {
+      await _inactiveReplyPlayer.stop();
+      await _inactiveReplyPlayer.play(
+        AssetSource('sounds/inactive_reply_$_inactiveReplySound.ogg'),
+      );
+    } catch (error) {
+      debugPrint('Could not play inactive reply sound: $error');
+    }
   }
 
   Future<void> _syncBackgroundDelivery() async {
@@ -4448,12 +4573,61 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _ownPubkey = pair.publicKey;
         _ownPubkeyHex = pair.publicKeyHex;
       });
+      _purgeSelfWorkspaceConversation();
     } catch (_) {
       setState(() {
         _ownPubkey = null;
         _ownPubkeyHex = null;
       });
     }
+  }
+
+  Set<String> _purgeSelfWorkspaceConversation() {
+    final ownPubkey = _ownPubkeyHex?.trim();
+    if (ownPubkey == null || ownPubkey.isEmpty) return const {};
+    final conversationKey = WorkspaceState.directKey(ownPubkey, ownPubkey);
+    final removedMessageIds = <String>{};
+    final changedWorkers = <String>{};
+    for (final entry in _workspaceWorkers.entries) {
+      final worker = entry.value;
+      final removed = worker.workspace.removeSelfConversation(ownPubkey);
+      if (removed.isNotEmpty) {
+        removedMessageIds.addAll(removed);
+        changedWorkers.add(entry.key);
+      }
+      if (worker.unreadCounts.remove(conversationKey) != null) {
+        changedWorkers.add(entry.key);
+      }
+      if (worker.threadUnreadCounts.keys
+          .where((key) => key.startsWith('$conversationKey:'))
+          .isNotEmpty) {
+        worker.threadUnreadCounts.removeWhere(
+          (key, _) => key.startsWith('$conversationKey:'),
+        );
+        changedWorkers.add(entry.key);
+      }
+      if (worker.focusedConversationKey == conversationKey) {
+        worker.focusedConversationKey = '';
+        changedWorkers.add(entry.key);
+      }
+      if (worker.openThreadKey?.startsWith('$conversationKey:') == true) {
+        worker.openThreadKey = null;
+        changedWorkers.add(entry.key);
+      }
+    }
+    final preferencesRemoved =
+        _workspaceConversationPreferences.remove(conversationKey) != null;
+    if (removedMessageIds.isNotEmpty) {
+      _workspaceLocalMessagePins.removeAll(removedMessageIds);
+    }
+    if (changedWorkers.isEmpty && !preferencesRemoved) return removedMessageIds;
+    for (final workerKey in changedWorkers) {
+      _scheduleWorkspaceCacheSave(workerKey: workerKey);
+    }
+    unawaited(_saveWorkspaceUnreadCounts());
+    unawaited(_saveWorkspaceIdentity());
+    unawaited(_saveLastWorkspaceLocation());
+    return removedMessageIds;
   }
 
   String? get _workspaceCacheServicePubkey {
@@ -4495,15 +4669,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _activeWorkspaceWorker.unreadCounts;
   Map<String, int> get _workspaceThreadUnreadCounts =>
       _activeWorkspaceWorker.threadUnreadCounts;
-  bool get _hasUnreadOtherWorkspaces => _computerServiceTargets.any(
-    (target) =>
-        target.id != _computerServiceTarget?.id &&
-        (() {
-          final worker = _workspaceWorkerForKey(target.pubkey);
-          return worker.unreadCounts.values.any((count) => count > 0) ||
-              worker.threadUnreadCounts.values.any((count) => count > 0);
-        })(),
-  );
+  bool get _hasUnreadOtherWorkspaces => _unreadOtherWorkspaceIds.isNotEmpty;
   int get _otherWorkspaceAttentionVersion => _computerServiceTargets
       .where((target) => target.id != _computerServiceTarget?.id)
       .fold(
@@ -4511,6 +4677,21 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         (total, target) =>
             total + _workspaceWorkerForKey(target.pubkey).attentionVersion,
       );
+  Set<String> get _unreadOtherWorkspaceIds => {
+    for (final target in _computerServiceTargets)
+      if (target.id != _computerServiceTarget?.id &&
+          (() {
+            final worker = _workspaceWorkerForKey(target.pubkey);
+            return worker.unreadCounts.values.any((count) => count > 0) ||
+                worker.threadUnreadCounts.values.any((count) => count > 0);
+          })())
+        target.id,
+  };
+  Map<String, int> get _otherWorkspaceAttentionVersions => {
+    for (final target in _computerServiceTargets)
+      if (target.id != _computerServiceTarget?.id)
+        target.id: _workspaceWorkerForKey(target.pubkey).attentionVersion,
+  };
   String get _workspaceFocusedConversationKey =>
       _activeWorkspaceWorker.focusedConversationKey;
   set _workspaceFocusedConversationKey(String value) =>
@@ -4551,6 +4732,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     if (!mounted || cached == null) return;
     setState(() {
       worker.workspace.apply({'workspace_update': cached.toSnapshotJson()});
+      _purgeSelfWorkspaceConversation();
       worker.cacheRestoredKey = _workspaceCacheKeyFor(servicePubkey);
       worker.revision.value++;
     });
@@ -5430,26 +5612,47 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       final workerKey = _workspaceWorkerKeyForIncoming(message);
       if (workerKey == null) return false;
       final worker = _workspaceWorkerForKey(workerKey);
+      String? workspaceAction;
       try {
-        final decoded = jsonDecode(message.rawJson) as Map<String, dynamic>;
+        final payload = jsonDecode(message.rawJson);
+        if (payload is! Map) {
+          _recordDiagnostic(
+            'Ignored workspace update with a non-object payload',
+            coalesce: true,
+            workerKey: workerKey,
+          );
+          return true;
+        }
+        final decoded = Map<String, dynamic>.from(payload);
         final update = decoded['workspace_update'];
-        final action = update is Map ? update['action']?.toString() : null;
-        if (action == 'fips_mesh') {
+        if (update is! Map) {
+          _recordDiagnostic(
+            'Ignored workspace update without an update object',
+            coalesce: true,
+            workerKey: workerKey,
+          );
+          return true;
+        }
+        decoded['workspace_update'] = Map<String, dynamic>.from(update);
+        workspaceAction = update['action']?.toString();
+        if (workspaceAction == 'fips_mesh') {
           _updateFipsMesh(workerKey, update['members']);
           return true;
         }
-        if (action == 'fips_presence_offer' ||
-            action == 'fips_presence_ready') {
-          unawaited(_handleFipsPresenceUpdate(workerKey, action!, update));
+        if (workspaceAction == 'fips_presence_offer' ||
+            workspaceAction == 'fips_presence_ready') {
+          unawaited(
+            _handleFipsPresenceUpdate(workerKey, workspaceAction!, update),
+          );
           return true;
         }
-        if (action == 'list_fallback') {
+        if (workspaceAction == 'list_fallback') {
           // This is transport control, never a visible workspace update.
           return true;
         }
-        final capability = action == null
+        final capability = workspaceAction == null
             ? null
-            : _workspaceFipsCapabilityFromOffer(action);
+            : _workspaceFipsCapabilityFromOffer(workspaceAction);
         if (capability != null) {
           worker.fips.offerTimer?.cancel();
           worker.fips.offerTimer = null;
@@ -5479,9 +5682,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           unawaited(_receiveWorkspaceSnapshotOverFips(capability, workerKey));
           return true;
         }
-        final isMessageCreated =
-            update is Map && update['action'] == 'message_created';
-        final confirmedMessageIds = update is Map && update['messages'] is List
+        final isMessageCreated = update['action'] == 'message_created';
+        final confirmedMessageIds = update['messages'] is List
             ? (update['messages'] as List)
                   .whereType<Map>()
                   .map((message) => message['id']?.toString())
@@ -5491,6 +5693,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         String? inactiveAgentConversationKey;
         Map<String, Set<String>> missingThreadRoots = const {};
         List<WorkspaceMessage> openThreadRepliesToSpeak = const [];
+        final focusLostMessageIds = <String>{};
+        var desktopFocusLostReply = false;
         var shouldSaveWorkspaceUnreadCounts = false;
         setState(() {
           final addedMessages = worker.workspace.apply(
@@ -5498,6 +5702,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             localSenderIds: {_ownPubkey ?? '', _ownPubkeyHex ?? ''},
             preserveMessagesOnSnapshot:
                 worker.cacheRestoredKey == _workspaceCacheKeyFor(workerKey),
+          );
+          final removedSelfMessageIds = _purgeSelfWorkspaceConversation();
+          addedMessages.removeWhere(
+            (message) => removedSelfMessageIds.contains(message.id),
           );
           if (isMessageCreated) {
             missingThreadRoots = worker.workspace
@@ -5509,6 +5717,10 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
                   }) ||
                   isWorkspaceHiddenMessage(workspaceMessage)) {
                 continue;
+              }
+              if (_isDesktop && !_desktopWindowFocused) {
+                focusLostMessageIds.add(workspaceMessage.id);
+                desktopFocusLostReply = true;
               }
               final conversationKey = worker.workspace
                   .conversationKeyForMessage(workspaceMessage);
@@ -5570,6 +5782,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
               }
             }
           }
+          worker.focusLostMessageIds.addAll(focusLostMessageIds);
           worker.revision.value++;
         });
         if (shouldSaveWorkspaceUnreadCounts) {
@@ -5599,11 +5812,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         if (_isFinalWorkspaceSnapshotFrame(decoded)) {
           unawaited(_catchUpWorkspaceMessages(workerKey));
         }
-        if (inactiveAgentConversationKey != null) {
+        if (inactiveAgentConversationKey != null || desktopFocusLostReply) {
           _playInactiveSessionReplyAlert();
         }
-        if (_autoSpeak &&
-            !_autoSpeakSuppressed &&
+        if (focusLostMessageIds.isNotEmpty) {
+          Future<void>.delayed(const Duration(milliseconds: 1800), () {
+            if (!mounted) return;
+            setState(() {
+              worker.focusLostMessageIds.removeAll(focusLostMessageIds);
+              worker.revision.value++;
+            });
+          });
+        }
+        if (!_autoSpeakSuppressed &&
             !_recording &&
             !_sending &&
             !_sendingAudio &&
@@ -5625,8 +5846,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
             );
           }
         }
-      } catch (_) {
-        _showError('Received malformed workspace update');
+      } catch (error) {
+        _recordDiagnostic(
+          'Ignored malformed workspace update${workspaceAction == null ? '' : ' ($workspaceAction)'}: $error',
+          coalesce: true,
+          workerKey: workerKey,
+        );
       }
       return true;
     }
@@ -5784,6 +6009,19 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         return true;
       }
       final pending = _pendingToolViews.remove(result.requestId);
+      final workspaceFileRequestKey =
+          pending?.workspaceConversationKey != null &&
+              (result.tool == 'file_browser' || result.tool == 'read_file')
+          ? '${result.tool}:${pending!.workspaceConversationKey}'
+          : null;
+      if (workspaceFileRequestKey != null &&
+          _latestWorkspaceFileRequestIds[workspaceFileRequestKey] !=
+              result.requestId) {
+        return true;
+      }
+      if (workspaceFileRequestKey != null) {
+        _latestWorkspaceFileRequestIds.remove(workspaceFileRequestKey);
+      }
       final pendingRepositoryRemote =
           _pendingWorkspaceRepositoryRemoteCompleters.remove(result.requestId);
       if (result.tool == 'repository_remote' &&
@@ -6010,131 +6248,17 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         ),
       );
     }
-    if (!isActiveConversation && !fromCatchUp) {
-      _showInactiveSessionReplyPopup(conversationKey);
+    if ((!isActiveConversation || (_isDesktop && !_desktopWindowFocused)) &&
+        !fromCatchUp) {
       _playInactiveSessionReplyAlert();
     }
     _vibrateForLiveIncomingMessage(message, fromCatchUp: fromCatchUp);
     return true;
   }
 
-  void _showInactiveSessionReplyPopup(String conversationKey) {
-    final target = _targetById(_repoTargets, conversationKey);
-    final workspaceWorker = _computerServiceTargets
-        .cast<RepoTarget?>()
-        .firstWhere(
-          (worker) =>
-              worker != null &&
-              (worker.pubkey.trim().toLowerCase() ==
-                      conversationKey.trim().toLowerCase() ||
-                  worker.parentPubkey?.trim().toLowerCase() ==
-                      conversationKey.trim().toLowerCase()),
-          orElse: () => null,
-        );
-    if (workspaceWorker != null) {
-      final worker = _workspaceWorkerForKey(workspaceWorker.pubkey);
-      _showInactiveReplyPopup(
-        noticeKey: 'worker:${workspaceWorker.pubkey}',
-        sessionName: workspaceWorker.displayName,
-        onTap: () => unawaited(
-          _openInactiveWorkspaceConversation(
-            workspaceWorker.pubkey,
-            worker.focusedConversationKey,
-          ),
-        ),
-      );
-      return;
-    }
-    _showInactiveReplyPopup(
-      noticeKey: 'session:$conversationKey',
-      sessionName: target?.displayName ?? 'another session',
-      onTap: () => unawaited(_selectRepoTarget(conversationKey)),
-    );
-  }
-
-  void _showInactiveReplyPopup({
-    required String noticeKey,
-    required String sessionName,
-    required VoidCallback onTap,
-  }) {
-    if (!_inactiveReplyPopupEnabled || !mounted) return;
-    _dismissInactiveReplyNotice(noticeKey, immediately: true);
-
-    final overlay = Overlay.of(context, rootOverlay: true);
-    late final OverlayEntry notice;
-    final controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 360),
-      reverseDuration: const Duration(milliseconds: 180),
-    );
-    notice = OverlayEntry(
-      builder: (context) => _InactiveReplyNotice(
-        animation: controller,
-        sessionName: sessionName,
-        bottomOffset: 92 + (_inactiveReplyNotices.length * 76),
-        onTap: () {
-          _dismissInactiveReplyNotice(noticeKey);
-          onTap();
-        },
-      ),
-    );
-    overlay.insert(notice);
-    controller.forward();
-    final timer = Timer(
-      const Duration(seconds: 4),
-      () => _dismissInactiveReplyNotice(noticeKey),
-    );
-    _inactiveReplyNotices[noticeKey] = _InactiveReplyNoticeState(
-      entry: notice,
-      controller: controller,
-      timer: timer,
-    );
-  }
-
-  Future<void> _openInactiveWorkspaceConversation(
-    String workerKey,
-    String conversationKey, {
-    String? parentId,
-  }) async {
-    for (final target in _computerServiceTargets) {
-      if (target.pubkey.trim().toLowerCase() == workerKey.toLowerCase()) {
-        await _selectComputerServiceTarget(target);
-        break;
-      }
-    }
-    if (!mounted) return;
-    setState(() {
-      final worker = _workspaceWorkerForKey(workerKey);
-      _showTeamWorkspace = true;
-      worker.focusedConversationKey = conversationKey;
-      worker.openThreadKey = parentId == null
-          ? null
-          : '$conversationKey:$parentId';
-      worker.unreadCounts.remove(conversationKey);
-    });
-  }
-
-  void _dismissInactiveReplyNotice(
-    String noticeKey, {
-    bool immediately = false,
-  }) {
-    final notice = _inactiveReplyNotices.remove(noticeKey);
-    if (notice == null) return;
-    notice.timer.cancel();
-    if (immediately) {
-      notice.entry.remove();
-      notice.controller.dispose();
-      return;
-    }
-    notice.controller.reverse().whenComplete(() {
-      notice.entry.remove();
-      notice.controller.dispose();
-    });
-  }
-
   void _playInactiveSessionReplyAlert() {
     if (!_inactiveReplyAudioEnabled) return;
-    unawaited(SystemSound.play(SystemSoundType.alert));
+    unawaited(_playInactiveReplySound());
   }
 
   void _vibrateForLiveIncomingMessage(
@@ -6520,8 +6644,21 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       conversationKey: conversationKey,
       workspacePanel: workspacePanel,
       workspaceConversationKey: workspaceConversationKey,
+      workspacePath: extra['path']?.toString(),
       onResult: onResult,
     );
+    final workspaceFileRequestKey =
+        workspaceConversationKey != null &&
+            (tool == 'file_browser' || tool == 'read_file')
+        ? '$tool:$workspaceConversationKey'
+        : null;
+    if (workspaceFileRequestKey != null) {
+      _latestWorkspaceFileRequestIds[workspaceFileRequestKey] = requestId;
+      if (tool == 'file_browser') _workspaceFilePreview.value = null;
+      unawaited(
+        _expireWorkspaceFileRequest(requestId, workspaceFileRequestKey),
+      );
+    }
     setState(() {
       _sending = true;
       _sendingConversationKey = conversationKey;
@@ -6545,8 +6682,33 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _status = 'Waiting for $label...';
       });
     } catch (error) {
-      _pendingToolViews.remove(requestId);
-      _showError('Tool request failed: $error');
+      final pending = _pendingToolViews.remove(requestId);
+      final failure = 'Tool request failed: $error';
+      if (workspaceFileRequestKey != null &&
+          _latestWorkspaceFileRequestIds[workspaceFileRequestKey] ==
+              requestId) {
+        _latestWorkspaceFileRequestIds.remove(workspaceFileRequestKey);
+        if (pending?.workspaceConversationKey ==
+            _workspaceFocusedConversationKey) {
+          if (tool == 'file_browser') {
+            _workspaceFileBrowser.value = FileBrowserResult(
+              directory: pending?.workspacePath ?? '',
+              entries: const [],
+              truncated: false,
+              error: failure,
+            );
+          } else {
+            _workspaceFilePreview.value = FileContentResult(
+              path: pending?.workspacePath ?? '',
+              content: '',
+              lineCount: 0,
+              truncated: false,
+              error: failure,
+            );
+          }
+        }
+      }
+      _showError(failure);
     } finally {
       if (mounted) {
         setState(() {
@@ -6555,6 +6717,42 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         });
       }
     }
+  }
+
+  Future<void> _expireWorkspaceFileRequest(
+    String requestId,
+    String requestKey,
+  ) async {
+    await Future<void>.delayed(const Duration(seconds: 30));
+    if (!mounted || _latestWorkspaceFileRequestIds[requestKey] != requestId) {
+      return;
+    }
+    final pending = _pendingToolViews.remove(requestId);
+    if (pending == null) return;
+    _latestWorkspaceFileRequestIds.remove(requestKey);
+    final error = 'The file request timed out. Try again.';
+    if (pending.workspaceConversationKey != _workspaceFocusedConversationKey) {
+      return;
+    }
+    setState(() {
+      _status = error;
+      if (pending.tool == 'file_browser') {
+        _workspaceFileBrowser.value = FileBrowserResult(
+          directory: pending.workspacePath ?? '',
+          entries: const [],
+          truncated: false,
+          error: error,
+        );
+      } else {
+        _workspaceFilePreview.value = FileContentResult(
+          path: pending.workspacePath ?? '',
+          content: '',
+          lineCount: 0,
+          truncated: false,
+          error: error,
+        );
+      }
+    });
   }
 
   Future<void> _openWorkerConsole() => Navigator.of(context).push<void>(
@@ -8250,13 +8448,8 @@ Return a concise catch-up summary of what happened after that point: completed w
     bool compact = false,
   }) {
     final theme = Theme.of(context);
-    final dark = theme.brightness == Brightness.dark;
-    final activeColor = dark
-        ? const Color(0xff81c784)
-        : const Color(0xff2e7d32);
-    final loadedColor = dark
-        ? const Color(0xff90caf9)
-        : const Color(0xff1565c0);
+    final activeColor = theme.colorScheme.primary;
+    final loadedColor = theme.colorScheme.secondary;
     final selected = target.id == _selectedRepoTargetId;
     final connected = _connectedPeerPubkey == target.pubkey;
     final loaded = _messagesByTarget.containsKey(target.id);
@@ -8268,7 +8461,7 @@ Return a concise catch-up summary of what happened after that point: completed w
     final statusColor = selected
         ? activeColor
         : fipsAttached
-        ? const Color(0xff35d6a0)
+        ? theme.colorScheme.primary
         : connected || loaded
         ? loadedColor
         : theme.colorScheme.onSurfaceVariant;
@@ -8303,7 +8496,6 @@ Return a concise catch-up summary of what happened after that point: completed w
             label: target.displayName,
             unread: hasUnread,
             style: textStyle,
-            attentionColor: const Color(0xffff9f1c),
           ),
         ),
         if (hasUnread) ...[
@@ -8355,11 +8547,15 @@ Return a concise catch-up summary of what happened after that point: completed w
         }),
         hasUnreadOtherSpaces: _hasUnreadOtherWorkspaces,
         otherWorkspaceAttentionVersion: _otherWorkspaceAttentionVersion,
+        unreadOtherWorkspaceIds: _unreadOtherWorkspaceIds,
+        otherWorkspaceAttentionVersions: _otherWorkspaceAttentionVersions,
         canManageAgents: _canManageWorkspaceAgents,
         canManageMembers: _workspace.memberAdmins.contains(_ownPubkeyHex),
         canRemoveMembers: _canManageWorkspaceAgents,
         onSwitchSpace: (target) =>
             unawaited(_selectComputerServiceTarget(target)),
+        onRenameSpace: (target) =>
+            unawaited(_renameComputerServiceTarget(target)),
         onLeaveSpace: (target) =>
             unawaited(_leaveComputerServiceTarget(target)),
         onOpenSessions: () {
@@ -8453,6 +8649,7 @@ Return a concise catch-up summary of what happened after that point: completed w
         panelStates: _activeWorkspaceWorker.panelStates,
         unreadCounts: _workspaceUnreadCounts,
         threadUnreadCounts: _workspaceThreadUnreadCounts,
+        focusLostMessageIds: _activeWorkspaceWorker.focusLostMessageIds,
         ownPubkey: _ownPubkeyHex ?? '',
         localSenderIds: {_ownPubkey ?? '', _ownPubkeyHex ?? ''},
         displayName: _workspaceDisplayName,
@@ -8497,6 +8694,15 @@ Return a concise catch-up summary of what happened after that point: completed w
           });
           unawaited(_saveWorkspaceUnreadCounts());
           unawaited(_saveLastWorkspaceLocation());
+        },
+        onClearConversationUnread: (conversationKey) {
+          setState(() {
+            _workspaceUnreadCounts.remove(conversationKey);
+            _workspaceThreadUnreadCounts.removeWhere(
+              (threadKey, _) => threadKey.startsWith('$conversationKey:'),
+            );
+          });
+          unawaited(_saveWorkspaceUnreadCounts());
         },
         onMarkConversationUnread: (conversationKey) {
           setState(() => _workspaceUnreadCounts[conversationKey] = 1);

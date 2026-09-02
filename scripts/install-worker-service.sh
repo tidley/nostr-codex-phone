@@ -34,6 +34,14 @@ flutter_cache=""
 if [[ -d /opt/flutter/bin/cache ]]; then
   flutter_cache=/opt/flutter/bin/cache
 fi
+github_config="${GH_CONFIG_DIR:-$HOME/.nostr-codex/gh/phone}"
+if [[ ! -f "$github_config/hosts.yml" || ! -f "$github_config/gitconfig" ]]; then
+  if [[ -n "${GH_CONFIG_DIR:-}" ]]; then
+    echo "GitHub worker configuration is incomplete: $github_config" >&2
+    exit 1
+  fi
+  github_config=""
+fi
 
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 unit="$unit_dir/nostr-codex-server.service"
@@ -64,6 +72,7 @@ Environment=AGENT_BACKEND=opencode
 Environment=AGENT_WORKDIR=$root
 Environment=OPENCODE_REAL_BIN=$opencode_bin
 Environment=OPENCODE_BIN=$root/scripts/opencode-workdir-sandbox.sh
+$(if [[ -n "$github_config" ]]; then printf 'Environment=GH_CONFIG_DIR=%s\nEnvironment=GIT_CONFIG_GLOBAL=%s/gitconfig\n' "$github_config" "$github_config"; fi)
 $(if [[ -n "$flutter_cache" ]]; then printf 'Environment=AGENT_WRITABLE_PATHS=%s\n' "$flutter_cache"; fi)
 Environment=OPENCODE_AGENT=build
 Environment=OPENCODE_SYSTEMD_SCOPE=1

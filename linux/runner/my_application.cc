@@ -48,6 +48,17 @@ static void my_application_activate(GApplication* application) {
 #endif
   if (use_header_bar) {
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
+    g_autoptr(GtkCssProvider) header_bar_css = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(
+        header_bar_css,
+        "headerbar { min-height: 36px; padding-top: 0; padding-bottom: 0; }"
+        "headerbar button.titlebutton { min-height: 28px; min-width: 28px; "
+        "padding: 0; }",
+        -1, nullptr);
+    gtk_style_context_add_provider(
+        gtk_widget_get_style_context(GTK_WIDGET(header_bar)),
+        GTK_STYLE_PROVIDER(header_bar_css),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     gtk_widget_show(GTK_WIDGET(header_bar));
     gtk_header_bar_set_title(header_bar, "Ribbit");
     gtk_header_bar_set_show_close_button(header_bar, TRUE);

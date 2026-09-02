@@ -157,9 +157,10 @@ impl WorkspaceStore {
                       CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
                   CREATE UNIQUE INDEX IF NOT EXISTS workspace_channel_coordinator ON workspace_conversation_coordinators(channel_id) WHERE channel_id IS NOT NULL;
                   CREATE UNIQUE INDEX IF NOT EXISTS workspace_direct_coordinator ON workspace_conversation_coordinators(member_pubkey, peer_pubkey) WHERE channel_id IS NULL;
-                   CREATE TABLE IF NOT EXISTS workspace_thread_agents (parent_id TEXT PRIMARY KEY REFERENCES workspace_messages(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE);
-                   CREATE TABLE IF NOT EXISTS workspace_completed_thread_agents (parent_id TEXT PRIMARY KEY REFERENCES workspace_messages(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE);
-                   CREATE TABLE IF NOT EXISTS workspace_conversation_round_robin (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, next_worker INTEGER NOT NULL DEFAULT 0,
+                    CREATE TABLE IF NOT EXISTS workspace_thread_agents (parent_id TEXT PRIMARY KEY REFERENCES workspace_messages(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE);
+                    CREATE TABLE IF NOT EXISTS workspace_completed_thread_agents (parent_id TEXT PRIMARY KEY REFERENCES workspace_messages(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE);
+                   CREATE TABLE IF NOT EXISTS workspace_thread_agent_routing (parent_id TEXT PRIMARY KEY REFERENCES workspace_messages(id) ON DELETE CASCADE, route_agent INTEGER NOT NULL);
+                    CREATE TABLE IF NOT EXISTS workspace_conversation_round_robin (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, next_worker INTEGER NOT NULL DEFAULT 0,
                       CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL)));
                   CREATE UNIQUE INDEX IF NOT EXISTS workspace_channel_round_robin ON workspace_conversation_round_robin(channel_id) WHERE channel_id IS NOT NULL;
                   CREATE UNIQUE INDEX IF NOT EXISTS workspace_direct_round_robin ON workspace_conversation_round_robin(member_pubkey, peer_pubkey) WHERE channel_id IS NULL;
@@ -1600,6 +1601,29 @@ impl WorkspaceStore {
             .find(|agent| agent.id == agent_id))
     }
 
+    pub fn set_thread_agent_routing(&self, parent_id: &str, route_agent: bool) -> Result<()> {
+        let parent_id = required("thread parent id", parent_id)?;
+        if self.message(&parent_id)?.parent_id.is_some() {
+            bail!("thread routing requires the root parent message");
+        }
+        self.conn.execute(
+            "INSERT INTO workspace_thread_agent_routing (parent_id, route_agent) VALUES (?1, ?2) ON CONFLICT(parent_id) DO UPDATE SET route_agent = excluded.route_agent",
+            params![parent_id, route_agent],
+        )?;
+        Ok(())
+    }
+
+    pub fn thread_agent_routing_enabled(&self, parent_id: &str) -> Result<Option<bool>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT route_agent FROM workspace_thread_agent_routing WHERE parent_id = ?1",
+                [required("thread parent id", parent_id)?],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Assigns an existing conversation agent to the root message of one thread.
     pub fn assign_thread_agent(
         &self,
@@ -2533,6 +2557,28 @@ mod tests {
             .unwrap()
             .iter()
             .any(|message| message.parent_id.as_deref() == Some(parent.id.as_str())));
+    }
+
+    #[test]
+    fn persists_thread_agent_routing_on_the_root_message() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "hello", &[], &[], None)
+            .unwrap();
+
+        assert_eq!(store.thread_agent_routing_enabled(&root.id).unwrap(), None);
+        store.set_thread_agent_routing(&root.id, false).unwrap();
+        assert_eq!(
+            store.thread_agent_routing_enabled(&root.id).unwrap(),
+            Some(false),
+        );
+        store.set_thread_agent_routing(&root.id, true).unwrap();
+        assert_eq!(
+            store.thread_agent_routing_enabled(&root.id).unwrap(),
+            Some(true),
+        );
     }
 
     #[test]

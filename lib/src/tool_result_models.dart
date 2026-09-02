@@ -157,6 +157,7 @@ class FileContentResult {
     required this.content,
     this.imageBase64,
     this.mimeType,
+    this.error,
     required this.lineCount,
     required this.truncated,
   });
@@ -165,6 +166,7 @@ class FileContentResult {
   final String content;
   final String? imageBase64;
   final String? mimeType;
+  final String? error;
   final int lineCount;
   final bool truncated;
 
@@ -173,9 +175,10 @@ class FileContentResult {
   factory FileContentResult.fromPayload(ToolResultPayload payload) {
     return FileContentResult(
       path: payload.data['path']?.toString() ?? '',
-      content: payload.error ?? payload.data['content']?.toString() ?? '',
+      content: payload.data['content']?.toString() ?? '',
       imageBase64: payload.data['image_base64']?.toString(),
       mimeType: payload.data['mime_type']?.toString(),
+      error: payload.error,
       lineCount:
           int.tryParse(payload.data['line_count']?.toString() ?? '') ?? 0,
       truncated: payload.data['truncated'] == true,
@@ -204,11 +207,13 @@ class FileBrowserResult {
     required this.directory,
     required this.entries,
     required this.truncated,
+    this.error,
   });
 
   final String directory;
   final List<FileBrowserEntry> entries;
   final bool truncated;
+  final String? error;
 
   factory FileBrowserResult.fromPayload(ToolResultPayload payload) {
     final rawEntries = payload.data['entries'];
@@ -221,6 +226,7 @@ class FileBrowserResult {
                 .toList()
           : const [],
       truncated: payload.data['truncated'] == true,
+      error: payload.error,
     );
   }
 }

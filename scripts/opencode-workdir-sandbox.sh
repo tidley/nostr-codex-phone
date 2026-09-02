@@ -14,6 +14,11 @@ node_runtime=""
 if [[ -n "$node_bin" && "$node_bin" == /* && -x "$node_bin" ]]; then
   node_runtime="$(dirname "$(dirname "$(realpath "$node_bin")")")"
 fi
+flutter_bin="$(command -v flutter 2>/dev/null || true)"
+flutter_root=""
+if [[ -n "$flutter_bin" && "$flutter_bin" == /* && -x "$flutter_bin" ]]; then
+  flutter_root="$(dirname "$(dirname "$(realpath "$flutter_bin")")")"
+fi
 
 case "$workdir/" in
   "$read_root/"*) ;;
@@ -50,6 +55,7 @@ add_destination_path() {
   case "$path/" in
     "$HOME/"*) base="$HOME" ;;
     /tmp/*) base=/tmp ;;
+    /opt/*) base=/opt ;;
     *) return ;;
   esac
 
@@ -75,6 +81,10 @@ if [[ -n "$node_runtime" ]]; then
   add_destination_path "$node_runtime"
   args+=(--ro-bind "$node_runtime" "$node_runtime")
 fi
+if [[ -n "$flutter_root" ]]; then
+  add_destination_path "$flutter_root"
+  args+=(--ro-bind "$flutter_root" "$flutter_root")
+fi
 
 # Photos shared through the phone are available to every conversation without
 # granting access to the rest of the host's temporary directory.
@@ -86,10 +96,26 @@ fi
 # Installed skills are executable guidance, not workspace content. Expose only
 # their directories so a scoped conversation cannot inspect the rest of $HOME.
 for path in "$HOME/.opencode/skills" "$HOME/.agents/skills"; do
-  [[ -d "$path" ]] || continue
-  add_destination_path "$path"
-  args+=(--ro-bind "$path" "$path")
+    [[ -d "$path" ]] || continue
+    add_destination_path "$path"
+    args+=(--ro-bind "$path" "$path")
 done
+
+# GitHub authentication is provisioned outside the sandbox for one worker
+# identity. It is read-only here and must stay below HOME like other mounted
+# worker state.
+if [[ -n "${GH_CONFIG_DIR:-}" ]]; then
+    github_config="$(realpath "$GH_CONFIG_DIR")"
+    case "$github_config/" in
+        "$HOME/"*) ;;
+        *)
+            printf 'GitHub configuration must be inside HOME: %s\n' "$github_config" >&2
+            exit 1
+            ;;
+    esac
+    add_destination_path "$github_config"
+    args+=(--ro-bind "$github_config" "$github_config")
+fi
 
 # OpenCode keeps its configuration, credentials, cache, and session database
 # outside the code tree. Mount only those application directories read-write.

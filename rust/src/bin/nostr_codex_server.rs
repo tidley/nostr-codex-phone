@@ -539,6 +539,7 @@ impl WorkspaceAgentQueues {
         tokio::task::spawn_local(native_workspace_session_worker(
             receiver,
             conversation.clone(),
+            Arc::clone(&self.active_turns),
             self.workspace_path.clone(),
             Arc::clone(&self.messenger),
             self.outbound.clone(),
@@ -1584,6 +1585,9 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
 
         if config.owner_peer_hex.as_deref() == Some(&message.sender_pubkey_hex) {
             config.workspace.add_member(&message.sender_pubkey_hex)?;
+            config
+                .workspace
+                .set_member_admin(&message.sender_pubkey_hex, true)?;
         }
 
         // Authorization for workspace traffic is the persisted membership list,
@@ -2205,8 +2209,11 @@ async fn process_workspace_request(
             bail!("You are not a member of this channel.");
         }
     }
-    if request.action == "set_member_admin" && owner != Some(sender) {
-        bail!("Only the workspace owner can manage member roles.");
+    if request.action == "set_member_admin"
+        && owner != Some(sender)
+        && !workspace.is_admin(sender)?
+    {
+        bail!("Only workspace owners and admins can manage member roles.");
     }
     if request.action == "remove_member" && owner != Some(sender) && !workspace.is_admin(sender)? {
         bail!("Only workspace owners and admins can remove members.");
@@ -2217,7 +2224,6 @@ async fn process_workspace_request(
             | "create_conversation_agent"
             | "rename_agent"
             | "restart_agent_session"
-            | "abort_agent_task"
             | "update_agent_profile"
             | "delete_agent"
             | "add_conversation_agent"
@@ -3087,7 +3093,9 @@ async fn process_workspace_request(
                 request.message_id.as_deref(),
             )?;
             let message_id = message.id.clone();
-            let agent_turn_is_routed = agent_turn_is_routed(
+            let agent_turn_is_routed = native_turn_is_routed(
+                workspace,
+                &message,
                 workspace
                     .conversation_agent_routing_enabled(Some(channel_id), None, None)?,
                 &request,
@@ -3125,7 +3133,7 @@ async fn process_workspace_request(
                 channel_id,
                 message_id, "flushed workspace channel message receipt update"
             );
-            if agent_turn_is_routed {
+            if agent_turn_is_routed? {
                 workspace.queue_native_turn(&message_id)?;
                 enqueue_native_conversation(
                     agent_queues,
@@ -3156,7 +3164,9 @@ async fn process_workspace_request(
             )?;
             let message_id = message.id.clone();
             let recipient = request.recipient_pubkey.as_deref().unwrap_or_default();
-            let agent_turn_is_routed = agent_turn_is_routed(
+            let agent_turn_is_routed = native_turn_is_routed(
+                workspace,
+                &message,
                 workspace.conversation_agent_routing_enabled(
                     None,
                     Some(sender),
@@ -3202,7 +3212,7 @@ async fn process_workspace_request(
                 message_id,
                 "flushed workspace direct message receipt update"
             );
-            if agent_turn_is_routed {
+            if agent_turn_is_routed? {
                 workspace.queue_native_turn(&message_id)?;
                 enqueue_native_conversation(
                     agent_queues,
@@ -3594,11 +3604,11 @@ async fn process_workspace_request(
         }
         "abort_agent_task" => {
             let agent_id = request.agent_id.as_deref().unwrap_or_default();
-            let _agent = workspace
-                .agents()?
-                .into_iter()
-                .find(|agent| agent.id == agent_id)
-                .ok_or_else(|| anyhow::anyhow!("agent does not exist"))?;
+            if agent_id != "native-opencode"
+                && !workspace.agents()?.into_iter().any(|agent| agent.id == agent_id)
+            {
+                bail!("agent does not exist");
+            }
             if let Some(cancel_token) = agent_queues
                 .active_turns
                 .lock()
@@ -5733,13 +5743,13 @@ fn should_auto_allocate_main_message(route_agent: bool, message: &WorkspaceMessa
 async fn native_workspace_session_worker(
     mut receiver: mpsc::UnboundedReceiver<String>,
     conversation: WorkspaceConversation,
+    active_turns: Arc<Mutex<HashMap<String, CodexCancelToken>>>,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
     outbound: WorkspaceOutbound,
     codex_config: CodexConfig,
     audio_config: AudioConfig,
 ) {
-    let active_turns = Arc::new(Mutex::new(HashMap::new()));
     while let Some(trigger_message_id) = receiver.recv().await {
         let trigger_message_ids = vec![trigger_message_id];
         let trigger_message_id = trigger_message_ids
@@ -6061,6 +6071,10 @@ async fn process_native_workspace_session_message(
         Ok(_) => {
             warn!(trigger = %trigger_message_id, "native workspace session returned an empty response");
             interrupted_workspace_agent_result(WorkspaceAgentFallback::EmptyResponse)
+        }
+        Err(err) if is_agent_cancelled_error(&err) => {
+            info!(trigger = %trigger_message_id, "native workspace session turn cancelled");
+            interrupted_workspace_agent_result(WorkspaceAgentFallback::Cancelled)
         }
         Err(err) => {
             let error = format!("OpenCode session failed: {err:#}");
@@ -7702,6 +7716,31 @@ fn agent_turn_is_routed(agent_routing_enabled: bool, request: &WorkspaceRequest)
             .mentions
             .iter()
             .any(|mention| mention.kind == "agent")
+}
+
+fn native_turn_is_routed(
+    workspace: &WorkspaceStore,
+    message: &WorkspaceMessage,
+    agent_routing_enabled: bool,
+    request: &WorkspaceRequest,
+) -> Result<bool> {
+    let requested = agent_turn_is_routed(agent_routing_enabled, request);
+    let Some(parent_id) = message.parent_id.as_deref() else {
+        workspace.set_thread_agent_routing(&message.id, requested)?;
+        return Ok(requested);
+    };
+    // A thread inherits its root's Ask agent choice. An explicit @agent mention
+    // remains an intentional exception for a later reply.
+    if request
+        .mentions
+        .iter()
+        .any(|mention| mention.kind == "agent")
+    {
+        return Ok(true);
+    }
+    Ok(workspace
+        .thread_agent_routing_enabled(parent_id)?
+        .unwrap_or(requested))
 }
 
 fn session_worker_key(message: &IncomingMessage) -> String {
@@ -13215,6 +13254,40 @@ mod tests {
 
         assert!(request_routes_agent(&request));
         assert!(agent_turn_is_routed(false, &request));
+    }
+
+    #[test]
+    fn unasked_thread_does_not_route_unmentioned_human_replies() {
+        let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        workspace.add_member("owner").unwrap();
+        workspace.add_member("member").unwrap();
+        let channel = workspace.create_channel("engineering", "owner").unwrap();
+        workspace.add_channel_member(&channel.id, "member").unwrap();
+        let root = workspace
+            .add_channel_message("owner", &channel.id, "Discuss this", &[], &[], None)
+            .unwrap();
+        let unasked: WorkspaceRequest = serde_json::from_value(serde_json::json!({
+            "action": "send_channel_message",
+            "route_agent": false,
+        }))
+        .unwrap();
+        assert!(!native_turn_is_routed(&workspace, &root, true, &unasked).unwrap());
+
+        let reply = workspace
+            .add_channel_message("member", &channel.id, "I agree", &[], &[], Some(&root.id))
+            .unwrap();
+        let inherited: WorkspaceRequest = serde_json::from_value(serde_json::json!({
+            "action": "send_channel_message",
+        }))
+        .unwrap();
+        assert!(!native_turn_is_routed(&workspace, &reply, true, &inherited).unwrap());
+
+        let mentioned: WorkspaceRequest = serde_json::from_value(serde_json::json!({
+            "action": "send_channel_message",
+            "mentions": [{"kind": "agent", "id": "native-opencode", "label": "Agent"}],
+        }))
+        .unwrap();
+        assert!(native_turn_is_routed(&workspace, &reply, false, &mentioned).unwrap());
     }
 
     #[test]

@@ -24,17 +24,20 @@ class WorkspaceConversationPreference {
     this.archived = false,
     this.muted = false,
     this.autoSpeak = false,
+    this.sortByRecentReply = true,
   });
 
   final bool pinned;
   final bool archived;
   final bool muted;
   final bool autoSpeak;
+  final bool sortByRecentReply;
   Map<String, bool> toJson() => {
     'pinned': pinned,
     'archived': archived,
     'muted': muted,
     'auto_speak': autoSpeak,
+    'sort_by_recent_reply': sortByRecentReply,
   };
 }
 
@@ -52,6 +55,7 @@ decodeWorkspaceConversationPreferences(String? raw) {
             archived: entry.value['archived'] == true,
             muted: entry.value['muted'] == true,
             autoSpeak: entry.value['auto_speak'] == true,
+            sortByRecentReply: entry.value['sort_by_recent_reply'] != false,
           ),
     };
   } catch (_) {
@@ -1422,9 +1426,7 @@ class WorkspaceState {
   }
 
   List<String> directPeers(String ownPubkey) {
-    // A direct message to yourself is a durable private workspace home, even
-    // before its first message has reached the worker.
-    final peers = <String>{ownPubkey};
+    final peers = <String>{};
     for (final membership in conversationAgents) {
       if (membership.channelId == null &&
           membership.memberPubkey == ownPubkey &&
@@ -1438,9 +1440,11 @@ class WorkspaceState {
           continue;
         }
         if (message.senderPubkey == ownPubkey &&
-            message.recipientPubkey != null) {
+            message.recipientPubkey != null &&
+            message.recipientPubkey != ownPubkey) {
           peers.add(message.recipientPubkey!);
         } else if (message.recipientPubkey == ownPubkey &&
+            message.senderPubkey != ownPubkey &&
             !isWorkspaceAgentSender(message.senderPubkey)) {
           peers.add(message.senderPubkey);
         } else if (message.recipientPubkey == ownPubkey &&
@@ -1451,6 +1455,22 @@ class WorkspaceState {
       }
     }
     return peers.toList()..sort();
+  }
+
+  Set<String> removeSelfConversation(String ownPubkey) {
+    final conversationKey = _directKey(ownPubkey, ownPubkey);
+    final messageIds = (messages.remove(conversationKey) ?? const [])
+        .map((message) => message.id)
+        .toSet();
+    typing.removeWhere(
+      (_, status) =>
+          status.channelId == null &&
+          ((status.senderPubkey == ownPubkey &&
+                  status.recipientPubkey == ownPubkey) ||
+              (status.memberPubkey == ownPubkey &&
+                  status.peerPubkey == ownPubkey)),
+    );
+    return messageIds;
   }
 
   int channelHumanMemberCount(String channelId) {
@@ -1467,10 +1487,6 @@ class WorkspaceState {
   static String _directKey(String one, String? two) =>
       ([one, two ?? '']..sort()).join(':');
   String _messageDirectKey(WorkspaceMessage message) {
-    if (isNativeWorkspaceAgentSender(message.senderPubkey) &&
-        message.recipientPubkey != null) {
-      return _directKey(message.recipientPubkey!, message.recipientPubkey);
-    }
     if (!message.senderPubkey.startsWith('agent:')) {
       return _directKey(message.senderPubkey, message.recipientPubkey);
     }
