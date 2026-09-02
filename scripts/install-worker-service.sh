@@ -77,6 +77,10 @@ $(if [[ -n "$flutter_cache" ]]; then printf 'Environment=AGENT_WRITABLE_PATHS=%s
 Environment=OPENCODE_AGENT=build
 Environment=OPENCODE_SYSTEMD_SCOPE=1
 Environment=OPENCODE_MAX_CONCURRENT_RUNS=10
+Environment="GIT_AUTHOR_NAME=Nostr Codex"
+Environment=GIT_AUTHOR_EMAIL=noreply@github.com
+Environment="GIT_COMMITTER_NAME=Nostr Codex"
+Environment=GIT_COMMITTER_EMAIL=noreply@github.com
 Environment=AGENT_TIMEOUT_SECS=3600
 # Record the STUN server and reflexive candidate selected for FIPS traversal.
 Environment=RUST_LOG=info,nostr_codex_server=debug,fips::discovery::nostr::stun=debug,nostr_sdk=info,nostr=info
