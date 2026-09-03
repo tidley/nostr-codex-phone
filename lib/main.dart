@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
@@ -49,6 +50,34 @@ import 'package:url_launcher/url_launcher.dart';
 
 part 'src/main_widgets.dart';
 part 'src/live_recording_waveform.dart';
+
+String fileBrowserPath(String directory, String path) {
+  final rawPath = path.trim();
+  if (rawPath.startsWith('/')) return rawPath;
+  final base = directory.trim().replaceFirst(RegExp(r'/+$'), '');
+  final child = rawPath.replaceFirst(RegExp(r'^/+'), '');
+  if (base.isEmpty) return child;
+  return '$base/$child';
+}
+
+bool isMissingFileError(String? error) =>
+    error?.contains('No such file or directory') == true;
+
+String? workspaceActionWorkdir(RepoChoice? repository, String? fallback) =>
+    repository?.path ?? fallback;
+
+String? repoListRequestId(String raw) {
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) return null;
+    final repoList = decoded['repo_list'];
+    if (repoList is! Map) return null;
+    final requestId = repoList['request_id']?.toString().trim() ?? '';
+    return requestId.isEmpty ? null : requestId;
+  } catch (_) {
+    return null;
+  }
+}
 
 const _ttsControlChannel = MethodChannel('nostr_codex_phone/tts_control');
 const _attachmentDownloadChannel = MethodChannel(
@@ -852,6 +881,8 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       'workspace_local_message_pins';
   static const _workspaceFipsEnabledStorageKey = 'workspace_fips_enabled';
   static const _lastWorkspaceLocationStorageKey = 'last_workspace_location_v1';
+  static const _workspaceViewSnapshotsStorageKey =
+      'workspace_view_snapshots_v1';
   static const _profileStorageKeys = <String>[
     _secretKeyStorageKey,
     _peerPubkeyStorageKey,
@@ -1030,6 +1061,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
   OverlayEntry? _incomingCallOverlay;
   Future<void> _callSendChain = Future.value();
   final _workspaceWorkers = <String, _WorkspaceWorkerState>{};
+  final _workspaceViewSnapshots = <String, WorkspaceViewSnapshot>{};
   final _workspaceDiagnostics = ValueNotifier<List<String>>(const []);
   final _workspaceCache = WorkspaceCache();
   final _workspaceFipsEnabled = ValueNotifier(true);
@@ -1394,6 +1426,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       unawaited(_saveWorkspaceCache(workerKey: workerKey));
     }
     unawaited(_saveLastWorkspaceLocation());
+    unawaited(_saveWorkspaceViewSnapshots());
     _incomingCallOverlay?.remove();
     unawaited(_stopTtsEngines());
     unawaited(_inactiveReplyPlayer.dispose());
@@ -1437,6 +1470,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         state == AppLifecycleState.detached) {
       unawaited(_saveWorkspaceCache());
       unawaited(_saveLastWorkspaceLocation());
+      unawaited(_saveWorkspaceViewSnapshots());
       _seenIncomingEventIdsSaveTimer?.cancel();
       unawaited(_saveSeenIncomingEventIds());
     }
@@ -1539,6 +1573,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     );
     final lastWorkspaceLocation = await _storage.read(
       key: _lastWorkspaceLocationStorageKey,
+    );
+    final workspaceViewSnapshots = await _storage.read(
+      key: _workspaceViewSnapshotsStorageKey,
     );
 
     final migratedRelays = relays?.replaceAll(',', '\n') ?? defaultRelays;
@@ -1671,6 +1708,9 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
       _workspaceLocalMessagePins = _decodeStringList(
         workspaceLocalMessagePins,
       ).toSet();
+      _workspaceViewSnapshots
+        ..clear()
+        ..addAll(_decodeWorkspaceViewSnapshots(workspaceViewSnapshots));
       // Workspace FIPS depends on the native QUIC bridge. Browser sessions use
       // the already authenticated Nostr route until a web transport exists.
       _workspaceFipsEnabled.value =
@@ -1843,6 +1883,50 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     } catch (_) {
       return {};
     }
+  }
+
+  Map<String, WorkspaceViewSnapshot> _decodeWorkspaceViewSnapshots(
+    String? raw,
+  ) {
+    if (raw == null || raw.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      final workers = decoded is Map ? decoded['workers'] : null;
+      if (workers is! Map) return {};
+      return {
+        for (final entry in workers.entries)
+          if (entry.key.toString().trim().isNotEmpty && entry.value is Map)
+            entry.key.toString().trim().toLowerCase():
+                WorkspaceViewSnapshot.decode(jsonEncode(entry.value)),
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<void> _saveWorkspaceViewSnapshots() {
+    for (final entry in _workspaceWorkers.entries) {
+      final panels = <String, WorkspaceViewPanelSnapshot>{
+        ...?_workspaceViewSnapshots[entry.key]?.conversations,
+      };
+      for (final panel in entry.value.panelStates.entries) {
+        panels[panel.key] = WorkspaceViewPanelSnapshot(
+          openThreadIds: panel.value.openThreadIds,
+          activeThreadId: panel.value.threadId,
+          filesSelected: panel.value.filesSelected,
+        );
+      }
+      _workspaceViewSnapshots[entry.key] = WorkspaceViewSnapshot(panels);
+    }
+    return _storage.write(
+      key: _workspaceViewSnapshotsStorageKey,
+      value: jsonEncode({
+        'workers': {
+          for (final entry in _workspaceViewSnapshots.entries)
+            entry.key: entry.value.toJson(),
+        },
+      }),
+    );
   }
 
   Future<void> _saveLastWorkspaceLocation() {
@@ -5993,10 +6077,18 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         _showError('Received malformed repo list');
         return true;
       }
-      for (final pending in _pendingRepoListCompleters.values) {
-        if (!pending.isCompleted) pending.complete(choices);
-      }
-      _pendingRepoListCompleters.clear();
+      final requestId = repoListRequestId(message.rawJson);
+      final pending = requestId == null
+          // Older workers do not echo a request ID. Only accept that protocol
+          // when there is no ambiguity between concurrent requests.
+          ? (_pendingRepoListCompleters.length == 1
+                ? _pendingRepoListCompleters.remove(
+                    _pendingRepoListCompleters.keys.single,
+                  )
+                : null)
+          : _pendingRepoListCompleters.remove(requestId);
+      if (pending == null) return true;
+      if (!pending.isCompleted) pending.complete(choices);
       _cacheRepoChoices(choices);
       setState(() => _status = 'Loaded ${choices.length} repo folders');
       return true;
@@ -6812,10 +6904,11 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
         page = _GitStatusPage(
           result: GitStatusResult.fromPayload(payload),
           workdir: payload.workdir,
-          onViewDiff: () => _sendToolRequest('diff'),
+          onViewDiff: () =>
+              _sendToolRequest('diff', extra: {'workdir': payload.workdir}),
           onReadFile: (path) => _sendToolRequest(
             'read_file',
-            extra: {'path': path},
+            extra: {'workdir': payload.workdir, 'path': path},
             visibleText: 'read $path',
           ),
         );
@@ -6826,7 +6919,7 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           workdir: payload.workdir,
           onReadFile: (path) => _sendToolRequest(
             'read_file',
-            extra: {'path': path},
+            extra: {'workdir': payload.workdir, 'path': path},
             visibleText: 'read $path',
           ),
         );
@@ -6844,12 +6937,12 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
           workdir: payload.workdir,
           onReadFile: (path) => _sendToolRequest(
             'read_file',
-            extra: {'path': _fileBrowserPath(result.directory, path)},
+            extra: {'path': fileBrowserPath(result.directory, path)},
             visibleText: 'read $path',
           ),
           onBrowseDirectory: (path) => _sendToolRequest(
             'file_browser',
-            extra: {'path': _fileBrowserPath(result.directory, path)},
+            extra: {'path': fileBrowserPath(result.directory, path)},
             visibleText: 'browse $path',
           ),
         );
@@ -6899,14 +6992,6 @@ class _NostrCodexHomeState extends State<NostrCodexHome>
     await Navigator.of(
       context,
     ).push<void>(MaterialPageRoute(builder: (_) => page));
-  }
-
-  String _fileBrowserPath(String directory, String path) {
-    final rawPath = path.trim();
-    if (rawPath.startsWith('/')) return rawPath;
-    final base = directory.trim().replaceAll(RegExp(r'^/+|/+$'), '');
-    final child = rawPath.replaceAll(RegExp(r'^/+'), '');
-    return base.isEmpty ? child : '$base/$child';
   }
 
   Future<void> _openToolsSheet() async {
@@ -7189,15 +7274,15 @@ Return a concise catch-up summary of what happened after that point: completed w
       throw StateError('Connect to the workspace worker first');
     }
     final requestPath = path?.trim() ?? '';
-    final existing = _pendingRepoListCompleters[requestPath];
-    if (existing != null && !existing.isCompleted) {
-      return existing.future;
-    }
+    final requestId = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
     final completer = Completer<List<RepoChoice>>();
-    _pendingRepoListCompleters[requestPath] = completer;
+    _pendingRepoListCompleters[requestId] = completer;
 
     final payload = jsonEncode({
-      'repo_list_request': {if (requestPath.isNotEmpty) 'path': requestPath},
+      'repo_list_request': {
+        'request_id': requestId,
+        if (requestPath.isNotEmpty) 'path': requestPath,
+      },
     });
 
     try {
@@ -7216,8 +7301,8 @@ Return a concise catch-up summary of what happened after that point: completed w
         onTimeout: () => throw TimeoutException('Repo list request timed out'),
       );
     } finally {
-      if (identical(_pendingRepoListCompleters[requestPath], completer)) {
-        _pendingRepoListCompleters.remove(requestPath);
+      if (identical(_pendingRepoListCompleters[requestId], completer)) {
+        _pendingRepoListCompleters.remove(requestId);
       }
       if (mounted) {
         setState(() {
@@ -8603,27 +8688,41 @@ Return a concise catch-up summary of what happened after that point: completed w
         },
         fipsConnectedPeers: _workspaceFips.directPeers,
         onOpenWorkerConsole: () => unawaited(_openWorkerConsole()),
-        onOpenFiles: (conversationKey, path) => _sendToolRequest(
+        onOpenFiles: (conversationKey, workdir) => _sendToolRequest(
           'file_browser',
-          extra: path?.trim().isNotEmpty == true ? {'path': path} : const {},
+          extra: workdir?.trim().isNotEmpty == true
+              ? {'workdir': workdir}
+              : const {},
           workspaceConversationKey: conversationKey,
         ),
         fileBrowser: _workspaceFileBrowser,
         filePreview: _workspaceFilePreview,
-        onBrowseFiles: (conversationKey, directory, path) => _sendToolRequest(
-          'file_browser',
-          extra: {'path': _fileBrowserPath(directory, path)},
-          visibleText: 'browse $path',
-          workspaceConversationKey: conversationKey,
-        ),
-        onReadWorkspaceFile: (conversationKey, directory, path) =>
+        onBrowseFiles: (conversationKey, workdir, directory, path) =>
             _sendToolRequest(
-              'read_file',
-              extra: {'path': _fileBrowserPath(directory, path)},
-              visibleText: 'read $path',
-              workspacePanel: true,
+              'file_browser',
+              extra: {
+                if (workdir.trim().isNotEmpty) 'workdir': workdir,
+                'path': fileBrowserPath(directory, path),
+              },
+              visibleText: 'browse $path',
               workspaceConversationKey: conversationKey,
             ),
+        onReadWorkspaceFile:
+            (conversationKey, workdir, directory, path, {onResult}) =>
+                _sendToolRequest(
+                  'read_file',
+                  extra: {
+                    if (workdir.trim().isNotEmpty) 'workdir': workdir,
+                    'path': fileBrowserPath(directory, path),
+                  },
+                  visibleText: 'read $path',
+                  workspacePanel: true,
+                  workspaceConversationKey: conversationKey,
+                  onResult: onResult == null
+                      ? null
+                      : (result) =>
+                            onResult(FileContentResult.fromPayload(result)),
+                ),
         onLoadRepositoryRemote: _loadWorkspaceRepositoryRemote,
         workspaceRevision: _workspaceRevision,
         onLoadOpenCodeModels: _loadOpenCodeModels,
@@ -8647,6 +8746,9 @@ Return a concise catch-up summary of what happened after that point: completed w
         focusedConversationKey: _workspaceFocusedConversationKey,
         openThreadKey: _activeWorkspaceWorker.openThreadKey,
         panelStates: _activeWorkspaceWorker.panelStates,
+        workspaceViewSnapshot:
+            _workspaceViewSnapshots[_workspaceWorkerKey.toLowerCase()],
+        onPanelStateChanged: () => unawaited(_saveWorkspaceViewSnapshots()),
         unreadCounts: _workspaceUnreadCounts,
         threadUnreadCounts: _workspaceThreadUnreadCounts,
         focusLostMessageIds: _activeWorkspaceWorker.focusLostMessageIds,

@@ -2,6 +2,71 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:crew/src/workspace_models.dart';
 
 void main() {
+  test('decodes versioned workspace-view snapshots', () {
+    final snapshot = WorkspaceViewSnapshot.decode(
+      '{"version":1,"conversations":{"channel":{"open_thread_ids":["first","second"],"active_thread_id":"second","files_selected":true}}}',
+    );
+
+    expect(snapshot.conversations['channel']!.openThreadIds, [
+      'first',
+      'second',
+    ]);
+    expect(snapshot.conversations['channel']!.activeThreadId, 'second');
+    expect(snapshot.conversations['channel']!.filesSelected, isTrue);
+  });
+
+  test('rejects malformed or unsupported workspace-view snapshots', () {
+    expect(WorkspaceViewSnapshot.decode(null).conversations, isEmpty);
+    expect(
+      WorkspaceViewSnapshot.decode(
+        '{"version":2,"conversations":{}}',
+      ).conversations,
+      isEmpty,
+    );
+    expect(
+      WorkspaceViewSnapshot.decode(
+        '{"version":1,"conversations":{"channel":{"open_thread_ids":"no"}}}',
+      ).conversations,
+      isEmpty,
+    );
+  });
+
+  test(
+    'keeps only workspace-view conversations and threads that still exist',
+    () {
+      const first = WorkspaceMessage(
+        id: 'first',
+        senderPubkey: 'owner',
+        body: 'First',
+        createdAt: 1,
+        channelId: 'channel',
+      );
+      const second = WorkspaceMessage(
+        id: 'second',
+        senderPubkey: 'owner',
+        body: 'Second',
+        createdAt: 2,
+        channelId: 'channel',
+      );
+      final workspace = WorkspaceState()
+        ..channels = const [WorkspaceChannel(id: 'channel', name: 'Channel')]
+        ..messages['channel'] = [first, second];
+      final snapshot = WorkspaceViewSnapshot.decode(
+        '{"version":1,"conversations":{"channel":{"open_thread_ids":["first","gone","second"],"active_thread_id":"gone","files_selected":true},"gone":{"open_thread_ids":["first"],"active_thread_id":"first","files_selected":false}}}',
+      );
+
+      final valid = snapshot.validFor(workspace, 'owner');
+
+      expect(valid.conversations.keys, ['channel']);
+      expect(valid.conversations['channel']!.openThreadIds, [
+        'first',
+        'second',
+      ]);
+      expect(valid.conversations['channel']!.activeThreadId, isNull);
+      expect(valid.conversations['channel']!.filesSelected, isTrue);
+    },
+  );
+
   test('agent profiles retain an optional saved working folder', () {
     final scoped = WorkspaceAgent.fromJson({
       'id': 'builder',

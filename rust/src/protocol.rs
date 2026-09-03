@@ -579,6 +579,8 @@ pub struct TargetParent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoList {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     #[serde(default)]
     pub roots: Vec<RepoListRoot>,
 }
@@ -1879,6 +1881,13 @@ fn validate_group_call_participants(participants: &[String]) -> Result<()> {
 }
 
 fn validate_repo_list(repo_list: &RepoList) -> Result<()> {
+    if repo_list
+        .request_id
+        .as_deref()
+        .is_some_and(|request_id| request_id.trim().is_empty())
+    {
+        return Err(anyhow!("field `repo_list.request_id` must be non-empty when provided"));
+    }
     for root in &repo_list.roots {
         if root.root.trim().is_empty() {
             return Err(anyhow!("field `repo_list.roots[].root` must be non-empty"));
@@ -2512,6 +2521,7 @@ mod tests {
         let parsed = parse_wire_message(
             r#"{
                 "repo_list": {
+                    "request_id": "repo-list-1",
                     "roots": [
                         {
                             "root": "/home/tom/code",
@@ -2534,7 +2544,7 @@ mod tests {
         assert_eq!(parsed.text(), "repo list");
         assert_eq!(
             parsed.to_json().unwrap(),
-            r#"{"repo_list":{"roots":[{"repos":[{"is_git_repo":true,"name":"phone","path":"/home/tom/code/phone","relative_path":"phone"}],"root":"/home/tom/code"}]}}"#
+            r#"{"repo_list":{"request_id":"repo-list-1","roots":[{"repos":[{"is_git_repo":true,"name":"phone","path":"/home/tom/code/phone","relative_path":"phone"}],"root":"/home/tom/code"}]}}"#
         );
     }
 

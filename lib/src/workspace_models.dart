@@ -63,6 +63,119 @@ decodeWorkspaceConversationPreferences(String? raw) {
   }
 }
 
+class WorkspaceViewPanelSnapshot {
+  const WorkspaceViewPanelSnapshot({
+    required this.openThreadIds,
+    required this.activeThreadId,
+    required this.filesSelected,
+  });
+
+  final List<String> openThreadIds;
+  final String? activeThreadId;
+  final bool filesSelected;
+
+  Map<String, Object?> toJson() => {
+    'open_thread_ids': openThreadIds,
+    if (activeThreadId != null) 'active_thread_id': activeThreadId,
+    'files_selected': filesSelected,
+  };
+}
+
+class WorkspaceViewSnapshot {
+  const WorkspaceViewSnapshot(this.conversations);
+
+  static const version = 1;
+
+  final Map<String, WorkspaceViewPanelSnapshot> conversations;
+
+  factory WorkspaceViewSnapshot.decode(String? raw) {
+    if (raw == null || raw.isEmpty) return const WorkspaceViewSnapshot({});
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map || decoded['version'] != version) {
+        return const WorkspaceViewSnapshot({});
+      }
+      final rawConversations = decoded['conversations'];
+      if (rawConversations is! Map) return const WorkspaceViewSnapshot({});
+      final conversations = <String, WorkspaceViewPanelSnapshot>{};
+      for (final entry in rawConversations.entries) {
+        final key = entry.key.toString().trim();
+        final panel = entry.value;
+        if (key.isEmpty || panel is! Map || panel['open_thread_ids'] is! List) {
+          continue;
+        }
+        final threadIds = <String>[];
+        var valid = true;
+        for (final id in panel['open_thread_ids'] as List) {
+          if (id is! String || id.trim().isEmpty) {
+            valid = false;
+            break;
+          }
+          if (!threadIds.contains(id.trim())) threadIds.add(id.trim());
+        }
+        final activeThreadId = panel['active_thread_id'];
+        if (!valid ||
+            (activeThreadId != null &&
+                (activeThreadId is! String || activeThreadId.trim().isEmpty)) ||
+            panel['files_selected'] is! bool) {
+          continue;
+        }
+        conversations[key] = WorkspaceViewPanelSnapshot(
+          openThreadIds: threadIds,
+          activeThreadId: activeThreadId == null
+              ? null
+              : (activeThreadId as String).trim(),
+          filesSelected: panel['files_selected'] as bool,
+        );
+      }
+      return WorkspaceViewSnapshot(conversations);
+    } catch (_) {
+      return const WorkspaceViewSnapshot({});
+    }
+  }
+
+  Map<String, Object> toJson() => {
+    'version': version,
+    'conversations': {
+      for (final entry in conversations.entries)
+        entry.key: entry.value.toJson(),
+    },
+  };
+
+  WorkspaceViewSnapshot validFor(WorkspaceState workspace, String ownPubkey) {
+    final directKeys = workspace
+        .directPeers(ownPubkey)
+        .map((peer) => WorkspaceState.directKey(ownPubkey, peer))
+        .toSet();
+    final validConversationKeys = {
+      ...workspace.channels.map((channel) => channel.id),
+      ...directKeys,
+    };
+    final valid = <String, WorkspaceViewPanelSnapshot>{};
+    for (final entry in conversations.entries) {
+      if (!validConversationKeys.contains(entry.key) ||
+          !workspace.messages.containsKey(entry.key)) {
+        continue;
+      }
+      final threadIds = workspace.messages[entry.key]!
+          .map((message) => message.id)
+          .toSet();
+      final openThreadIds = entry.value.openThreadIds
+          .where(threadIds.contains)
+          .toList(growable: false);
+      final activeThreadId = threadIds.contains(entry.value.activeThreadId)
+          ? entry.value.activeThreadId
+          : null;
+      valid[entry.key] = WorkspaceViewPanelSnapshot(
+        openThreadIds: openThreadIds,
+        activeThreadId: activeThreadId,
+        filesSelected: entry.value.filesSelected,
+      );
+    }
+    return WorkspaceViewSnapshot(valid);
+  }
+}
+
 class _WorkspaceHistoryTransfer {
   _WorkspaceHistoryTransfer(this.total);
 

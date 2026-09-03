@@ -98,6 +98,14 @@ https://github.com/tidley/nostr-codex-phone/releases
 
 Install the Android APK, or install the Debian package with `sudo apt install ./nostr-codex-phone_<version>_amd64.deb`, then scan the worker QR code or paste the worker target details in Settings. Build a local Debian package with `bash scripts/build-linux-deb.sh <version>` after `flutter build linux --release`. Windows clients can be built with `flutter build windows --release`; pushes to `main` publish the web client to GitHub Pages, while Windows releases remain a manual workflow. The release workflow also builds an Apple Silicon macOS worker. A macOS client release needs Apple signing and notarization before it can be distributed outside a development environment. Keep each client and its worker on the same release version so structured tool views use the same wire contract.
 
+## v0.3.47
+
+- Workspace side panels restore open threads and the Files or Thread view after a client restart. Removed threads and conversations are ignored during restore.
+- Repository discovery finds nested repositories, safely correlates concurrent requests, and accepts replies from older workers that do not include request IDs.
+- Workspace messages render Markdown tables, blockquotes, code blocks, and accidental shared indentation more reliably. Search highlights apply inside links and other formatted text.
+- The workspace UI improves thread and file-panel navigation, title sizing, resizable-pane dividers, repository selection, and Notes state indicators.
+- The worker checks the public OpenAI status endpoint after 60 seconds without Codex output and reports a confirmed Codex service incident without interrupting the request.
+
 ## Start A Worker
 
 From the directory you want to use as the worker root:

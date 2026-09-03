@@ -88,6 +88,21 @@ flutter_cache=""
 if [[ -d /opt/flutter/bin/cache ]]; then
   flutter_cache=/opt/flutter/bin/cache
 fi
+flutter_bin="$(command -v flutter 2>/dev/null || true)"
+if [[ -z "$flutter_bin" && -x /opt/flutter/bin/flutter ]]; then
+  flutter_bin=/opt/flutter/bin/flutter
+fi
+flutter_root=""
+if [[ -n "$flutter_bin" && -x "$flutter_bin" ]]; then
+  flutter_root="$(dirname "$(dirname "$(realpath "$flutter_bin")")")"
+fi
+rustup_bin="$(command -v rustup 2>/dev/null || true)"
+rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
+rust_tool_bin=""
+if [[ -n "$rustup_bin" && -x "$rustup_bin" && -d "$rustup_home" ]]; then
+  rust_tool_bin="$(dirname "$(realpath "$rustup_bin")")"
+  rustup_home="$(realpath "$rustup_home")"
+fi
 shared_pictures=""
 if [[ -d /tmp/pics ]]; then
   shared_pictures=/tmp/pics
@@ -104,6 +119,13 @@ done
 space_home="$state_dir/home"
 mkdir -p -- "$space_home/.config" "$space_home/.cache" "$space_home/.local/share/opencode"
 mkdir -p -- "$space_home/.config/opencode"
+mkdir -p -- "$space_home/.cargo"
+cat >"$space_home/.gitconfig" <<'GITCONFIG'
+[user]
+	name = Thomas Anderson
+	email = noreply@github.com
+GITCONFIG
+chmod 600 "$space_home/.gitconfig"
 for config_file in opencode.json opencode.jsonc tui.json; do
   if [[ -f "$HOME/.config/opencode/$config_file" ]]; then
     install -m 600 "$HOME/.config/opencode/$config_file" "$space_home/.config/opencode/$config_file"
@@ -154,6 +176,11 @@ umask 077
   printf 'XDG_CONFIG_HOME=%s\n' "$(env_value "$space_home/.config")"
   printf 'XDG_CACHE_HOME=%s\n' "$(env_value "$space_home/.cache")"
   printf 'XDG_DATA_HOME=%s\n' "$(env_value "$space_home/.local/share")"
+  printf 'CARGO_HOME=%s\n' "$(env_value "$space_home/.cargo")"
+  if [[ -n "$rustup_home" && -n "$rust_tool_bin" ]]; then
+    printf 'RUSTUP_HOME=%s\n' "$(env_value "$rustup_home")"
+    printf 'RUST_TOOL_BIN=%s\n' "$(env_value "$rust_tool_bin")"
+  fi
 } >"$space_env"
 
 cat >"$unit" <<UNIT
@@ -172,12 +199,12 @@ Environment=OPENCODE_AGENT=build
 # Child processes must inherit this unit's mount namespace.
 Environment=OPENCODE_SYSTEMD_SCOPE=0
 Environment=OPENCODE_MAX_CONCURRENT_RUNS=10
-Environment="GIT_AUTHOR_NAME=Nostr Codex"
+Environment="GIT_AUTHOR_NAME=Thomas Anderson"
 Environment=GIT_AUTHOR_EMAIL=noreply@github.com
-Environment="GIT_COMMITTER_NAME=Nostr Codex"
+Environment="GIT_COMMITTER_NAME=Thomas Anderson"
 Environment=GIT_COMMITTER_EMAIL=noreply@github.com
 Environment=AGENT_TIMEOUT_SECS=3600
-Environment=PATH=$(if [[ -n "$node_runtime" ]]; then printf '%s/bin:' "$(systemd_escape "$node_runtime")"; fi)/usr/local/bin:/usr/bin:/bin
+Environment=PATH=$(if [[ -n "$node_runtime" ]]; then printf '%s/bin:' "$(systemd_escape "$node_runtime")"; fi)$(if [[ -n "$flutter_root" ]]; then printf '%s/bin:' "$(systemd_escape "$flutter_root")"; fi)$(if [[ -n "$rust_tool_bin" ]]; then printf '%s:' "$(systemd_escape "$rust_tool_bin")"; fi)/usr/local/bin:/usr/bin:/bin
 $(if [[ -n "$flutter_cache" ]]; then printf 'Environment=AGENT_WRITABLE_PATHS=%s\n' "$(systemd_escape "$flutter_cache")"; fi)
 ExecStart=$(systemd_escape "$worker")
 Restart=always
@@ -194,6 +221,9 @@ ReadWritePaths=$(systemd_escape "$root")
 $(if [[ -n "$flutter_cache" ]]; then printf 'ReadWritePaths=%s\n' "$(systemd_escape "$flutter_cache")"; fi)
 $(if [[ -n "$shared_pictures" ]]; then printf 'BindReadOnlyPaths=%s\n' "$(systemd_escape "$shared_pictures")"; fi)
 $(if [[ -n "$node_runtime" ]]; then printf 'BindReadOnlyPaths=%s\n' "$(systemd_escape "$node_runtime")"; fi)
+$(if [[ -n "$flutter_root" ]]; then printf 'BindReadOnlyPaths=%s\n' "$(systemd_escape "$flutter_root")"; fi)
+$(if [[ -n "$rust_tool_bin" ]]; then printf 'BindReadOnlyPaths=%s\n' "$(systemd_escape "$rust_tool_bin")"; fi)
+$(if [[ -n "$rustup_home" && -n "$rust_tool_bin" ]]; then printf 'BindReadOnlyPaths=%s\n' "$(systemd_escape "$rustup_home")"; fi)
 $(for path in "${skill_bind_paths[@]}"; do printf 'BindReadOnlyPaths=%s\n' "$(systemd_escape "$path")"; done)
 $(if [[ -n "$opencode_bind" ]]; then printf 'BindReadOnlyPaths=%s\n' "$(systemd_escape "$opencode_bind")"; fi)
 

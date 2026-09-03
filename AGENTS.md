@@ -12,3 +12,9 @@ write the question normally and put this marker on its own final line:
 The client renders the marker as reply buttons and sends the selected label as
 the user's normal conversation reply. Keep each option concise and do not use
 the marker for free-form answers.
+
+## Repository Workflow
+
+Carry out work directly in the assigned local repository checkout and its
+existing branches. Do not create, use, or refer to Git worktrees or worktree
+links.

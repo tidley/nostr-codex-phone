@@ -80,6 +80,11 @@ const WORKER_STATE_DIR: &str = ".nostr-codex";
 const WORKER_REGISTRY_FILE: &str = "workers.json";
 const WORKER_LOCK_FILE: &str = "worker.lock";
 const CODEX_RESUME_TIMEOUT: Duration = Duration::from_secs(45);
+const CODEX_SERVICE_STATUS_INACTIVITY_AFTER: Duration = Duration::from_secs(60);
+const CODEX_SERVICE_STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const CODEX_SERVICE_STATUS_URL: &str = "https://status.openai.com/api/v2/summary.json";
+const CODEX_SERVICE_ISSUE_MESSAGE: &str =
+    "Codex appears to have a reported service issue. Your request is still pending; try again shortly.";
 // Workspace agent queues are serial, so a stalled turn must not block later
 // mentions for longer than the normal interactive agent deadline.
 const WORKSPACE_AGENT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -147,9 +152,15 @@ struct CancelRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct RepoListRequest {
+    path: Option<String>,
+    request_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum NonblockingControlRequest {
     Spawn(SpawnWorkerRequest),
-    RepoList(Option<String>),
+    RepoList(RepoListRequest),
     OpenCodeSessions,
 }
 
@@ -7945,7 +7956,7 @@ async fn process_nonblocking_control_message(
             .await;
             true
         }
-        Some(NonblockingControlRequest::RepoList(path)) => {
+        Some(NonblockingControlRequest::RepoList(request)) => {
             info!(
                 "processing repo list request event {} while codex task is active",
                 message.event_id
@@ -7953,7 +7964,7 @@ async fn process_nonblocking_control_message(
             process_repo_list_request(
                 messenger.as_ref(),
                 &message.sender_pubkey_hex,
-                path.as_deref(),
+                &request,
             )
             .await;
             true
@@ -7998,10 +8009,8 @@ fn nonblocking_control_request(kind: &str, text: &str) -> Option<NonblockingCont
     if let Some(spawn_request) = parse_spawn_worker_request(text) {
         return Some(NonblockingControlRequest::Spawn(spawn_request));
     }
-    if is_repo_list_request(text) {
-        return Some(NonblockingControlRequest::RepoList(repo_list_request_path(
-            text,
-        )));
+    if let Some(request) = repo_list_request(text) {
+        return Some(NonblockingControlRequest::RepoList(request));
     }
     if is_opencode_session_list_request(text) {
         return Some(NonblockingControlRequest::OpenCodeSessions);
@@ -8124,9 +8133,8 @@ async fn process_message(
                 return;
             }
 
-            if is_repo_list_request(&message.text) {
-                let path = repo_list_request_path(&message.text);
-                process_repo_list_request(messenger, &message.sender_pubkey_hex, path.as_deref())
+            if let Some(request) = repo_list_request(&message.text) {
+                process_repo_list_request(messenger, &message.sender_pubkey_hex, &request)
                     .await;
                 return;
             }
@@ -8732,9 +8740,9 @@ async fn process_spawn_worker_request(
 async fn process_repo_list_request(
     messenger: &NostrMessenger,
     owner_pubkey_hex: &str,
-    path: Option<&str>,
+    request: &RepoListRequest,
 ) {
-    match build_repo_list(path) {
+    match build_repo_list(request.path.as_deref(), &request.request_id) {
         Ok(repo_list) => {
             if let Err(err) = send_application_wire(
                 messenger,
@@ -9052,29 +9060,26 @@ fn worker_lock_process_matches(_path: &Path, _pid: u32) -> bool {
 }
 
 fn is_repo_list_request(request: &str) -> bool {
-    let trimmed = request.trim();
-    if matches!(trimmed, "/repos" | "/repositories" | "/folders") {
-        return true;
-    }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-        return false;
-    };
-    value
-        .as_object()
-        .is_some_and(|object| object.contains_key("repo_list_request"))
+    repo_list_request(request).is_some()
 }
 
-fn repo_list_request_path(request: &str) -> Option<String> {
+fn repo_list_request(request: &str) -> Option<RepoListRequest> {
     let value: serde_json::Value = serde_json::from_str(request.trim()).ok()?;
-    value
-        .as_object()?
-        .get("repo_list_request")?
-        .as_object()?
-        .get("path")?
-        .as_str()
+    let request = value.as_object()?.get("repo_list_request")?.as_object()?;
+    let request_id = request.get("request_id")?.as_str()?.trim();
+    if request_id.is_empty() {
+        return None;
+    }
+    let path = request
+        .get("path")
+        .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|path| !path.is_empty())
-        .map(ToOwned::to_owned)
+        .map(ToOwned::to_owned);
+    Some(RepoListRequest {
+        path,
+        request_id: request_id.to_owned(),
+    })
 }
 
 fn is_opencode_session_list_request(request: &str) -> bool {
@@ -9107,7 +9112,7 @@ fn opencode_model_list_request_id(request: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn build_repo_list(requested_path: Option<&str>) -> Result<RepoList> {
+fn build_repo_list(requested_path: Option<&str>, request_id: &str) -> Result<RepoList> {
     let worker_root = canonical_worker_root_dir()?;
     let requested = requested_path.unwrap_or("").trim();
     if requested.split('/').any(|part| part == "..") {
@@ -9125,25 +9130,33 @@ fn build_repo_list(requested_path: Option<&str>) -> Result<RepoList> {
         bail!("folder is outside the worker root");
     }
     Ok(RepoList {
+        request_id: Some(request_id.to_string()),
         roots: vec![list_repo_root(&worker_root, &directory)?],
     })
 }
 
 fn list_repo_root(worker_root: &Path, root: &Path) -> Result<RepoListRoot> {
     let mut repos = Vec::new();
+    let root_is_git_repo = root.join(".git").is_dir();
     if root == worker_root {
         repos.push(RepoListEntry {
             name: "Workspace root".to_string(),
             path: worker_root.to_string_lossy().to_string(),
             relative_path: ".".to_string(),
-            is_git_repo: worker_root.join(".git").is_dir(),
+            is_git_repo: root_is_git_repo,
         });
     }
-    for entry in fs::read_dir(root)
+    if root_is_git_repo {
+        return Ok(RepoListRoot {
+            root: root.to_string_lossy().to_string(),
+            repos,
+        });
+    }
+    let mut directories = fs::read_dir(root)
         .with_context(|| format!("failed to read repo root `{}`", root.display()))?
-    {
-        let entry =
-            entry.with_context(|| format!("failed to read entry in `{}`", root.display()))?;
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    directories.sort_by_key(|entry| entry.file_name());
+    for entry in directories {
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -9159,12 +9172,16 @@ fn list_repo_root(worker_root: &Path, root: &Path) -> Result<RepoListRoot> {
             .unwrap_or(&path)
             .to_string_lossy()
             .to_string();
+        let is_git_repo = path.join(".git").is_dir();
         repos.push(RepoListEntry {
             name: name.to_string(),
             path: path.to_string_lossy().to_string(),
             relative_path,
-            is_git_repo: path.join(".git").is_dir(),
+            is_git_repo,
         });
+        if !is_git_repo {
+            repos.extend(list_repo_root(worker_root, &path)?.repos);
+        }
     }
     repos.sort_by(|left, right| {
         left.relative_path
@@ -9205,6 +9222,9 @@ fn resolve_spawn_workdir(request: &SpawnWorkerRequest, current_workdir: &Path) -
 }
 
 fn ensure_spawn_existing_allowed(path: &Path, allowed_roots: &[PathBuf]) -> Result<()> {
+    if is_git_worktree_path(path) {
+        anyhow::bail!("`{}` is a Git worktree; use the repository directory instead", path.display());
+    }
     if allowed_roots
         .iter()
         .any(|root| path == root || path.starts_with(root))
@@ -9219,6 +9239,9 @@ fn ensure_spawn_existing_allowed(path: &Path, allowed_roots: &[PathBuf]) -> Resu
 }
 
 fn ensure_spawn_create_allowed(path: &Path, allowed_roots: &[PathBuf]) -> Result<()> {
+    if is_git_worktree_path(path) {
+        anyhow::bail!("new folders may not be created inside a Git worktree path");
+    }
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("new folder path must have a parent"))?
@@ -9234,6 +9257,10 @@ fn ensure_spawn_create_allowed(path: &Path, allowed_roots: &[PathBuf]) -> Result
         "new folders may only be created inside the allowed folders ({})",
         allowed_roots_text(allowed_roots)
     )
+}
+
+fn is_git_worktree_path(path: &Path) -> bool {
+    path.components().any(|component| component.as_os_str() == ".worktrees")
 }
 
 fn canonical_worker_root_dir() -> Result<PathBuf> {
@@ -11982,19 +12009,97 @@ async fn run_codex_session_with_status(
     tokio::pin!(run);
 
     let mut events_open = true;
+    let mut status_check = Box::pin(sleep(CODEX_SERVICE_STATUS_INACTIVITY_AFTER));
+    let mut status_checked = codex_config.backend != AgentBackend::Codex;
     loop {
         tokio::select! {
             result = &mut run => return result,
             event = rx.recv(), if events_open => {
                 match event {
                     Some(event) => {
+                        if !status_checked {
+                            status_check.as_mut().reset(
+                                tokio::time::Instant::now() + CODEX_SERVICE_STATUS_INACTIVITY_AFTER,
+                            );
+                        }
                         reporter.handle(messenger, receiver_pubkey, &event).await;
                     }
                     None => events_open = false,
                 }
             }
+            _ = &mut status_check, if !status_checked => {
+                status_checked = true;
+                if codex_service_issue_reported().await {
+                    send_status(messenger, receiver_pubkey, CODEX_SERVICE_ISSUE_MESSAGE).await;
+                }
+            }
         }
     }
+}
+
+async fn codex_service_issue_reported() -> bool {
+    let response = match reqwest::Client::new()
+        .get(CODEX_SERVICE_STATUS_URL)
+        .timeout(CODEX_SERVICE_STATUS_REQUEST_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response,
+        _ => return false,
+    };
+    let summary = match response.json::<serde_json::Value>().await {
+        Ok(summary) => summary,
+        Err(_) => return false,
+    };
+    codex_service_issue_reported_in_summary(&summary)
+}
+
+fn codex_service_issue_reported_in_summary(summary: &serde_json::Value) -> bool {
+    summary
+        .get("components")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|components| {
+            components.iter().any(|component| {
+                component
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(contains_codex)
+                    && component
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|status| status != "operational")
+            })
+        })
+        || summary
+            .get("incidents")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|incidents| {
+                incidents.iter().any(|incident| {
+                    incident
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|status| status != "resolved")
+                        && (incident
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(contains_codex)
+                            || incident
+                                .get("incident_updates")
+                                .and_then(serde_json::Value::as_array)
+                                .is_some_and(|updates| {
+                                    updates.iter().any(|update| {
+                                        update
+                                            .get("body")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(contains_codex)
+                                    })
+                                }))
+                })
+            })
+}
+
+fn contains_codex(value: &str) -> bool {
+    value.to_ascii_lowercase().contains("codex")
 }
 
 fn agent_start_status(backend: AgentBackend, resume: bool) -> &'static str {
@@ -12505,6 +12610,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn git_worktree_paths_are_rejected() {
+        assert!(is_git_worktree_path(Path::new("/repo/.worktrees/issue-58")));
+        assert!(!is_git_worktree_path(Path::new("/repo/src")));
+    }
+
+    #[test]
+    fn detects_a_non_operational_codex_component() {
+        let summary = serde_json::json!({
+            "components": [{ "name": "Codex API", "status": "degraded_performance" }],
+            "incidents": []
+        });
+
+        assert!(codex_service_issue_reported_in_summary(&summary));
+    }
+
+    #[test]
+    fn detects_an_unresolved_incident_with_a_codex_update() {
+        let summary = serde_json::json!({
+            "components": [{ "name": "ChatGPT", "status": "operational" }],
+            "incidents": [{
+                "name": "Service disruption",
+                "status": "investigating",
+                "incident_updates": [{ "body": "We are investigating Codex errors." }]
+            }]
+        });
+
+        assert!(codex_service_issue_reported_in_summary(&summary));
+    }
+
+    #[test]
+    fn detects_codex_regardless_of_ascii_case_in_status_summaries() {
+        for summary in [
+            serde_json::json!({
+                "components": [{ "name": "codex API", "status": "degraded_performance" }],
+                "incidents": []
+            }),
+            serde_json::json!({
+                "components": [],
+                "incidents": [{
+                    "name": "CoDeX disruption",
+                    "status": "investigating",
+                    "incident_updates": []
+                }]
+            }),
+            serde_json::json!({
+                "components": [],
+                "incidents": [{
+                    "name": "Service disruption",
+                    "status": "investigating",
+                    "incident_updates": [{ "body": "We are investigating cOdEx errors." }]
+                }]
+            }),
+        ] {
+            assert!(codex_service_issue_reported_in_summary(&summary));
+        }
+    }
+
+    #[test]
+    fn ignores_resolved_and_unrelated_status_entries() {
+        let summary = serde_json::json!({
+            "components": [{ "name": "Codex API", "status": "operational" }],
+            "incidents": [{
+                "name": "Codex outage",
+                "status": "resolved",
+                "incident_updates": [{ "body": "Codex was unavailable." }]
+            }]
+        });
+
+        assert!(!codex_service_issue_reported_in_summary(&summary));
+    }
+
     #[tokio::test]
     async fn queued_fips_responses_preserve_delivery_order() {
         let (fips_outgoing, _fips_outbound_messages) = mpsc::channel(1);
@@ -12832,15 +13009,27 @@ mod tests {
     }
 
     #[test]
-    fn repository_list_includes_its_root_and_directories() {
+    fn repository_list_recursively_finds_repositories_without_hidden_or_nested_repo_contents() {
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("phone")).unwrap();
+        fs::create_dir_all(root.path().join("apps").join("phone").join(".git")).unwrap();
+        fs::create_dir_all(root.path().join("apps").join("phone").join("nested").join(".git"))
+            .unwrap();
+        fs::create_dir_all(root.path().join("tools").join("script")).unwrap();
+        fs::create_dir_all(root.path().join(".hidden").join("secret").join(".git")).unwrap();
 
         let entries = list_repo_root(root.path(), root.path()).unwrap().repos;
 
-        assert_eq!(entries[0].relative_path, ".");
-        assert_eq!(entries[0].path, root.path().to_string_lossy().to_string());
-        assert_eq!(entries[1].relative_path, "phone");
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![".", "apps", "apps/phone", "tools", "tools/script"],
+        );
+        assert!(entries
+            .iter()
+            .find(|entry| entry.relative_path == "apps/phone")
+            .is_some_and(|entry| entry.is_git_repo));
     }
 
     #[test]
@@ -13896,14 +14085,24 @@ mod tests {
     #[test]
     fn detects_nonblocking_control_requests() {
         assert_eq!(
-            nonblocking_control_request("query", r#"{"repo_list_request":{}}"#),
-            Some(NonblockingControlRequest::RepoList(None))
+            nonblocking_control_request(
+                "query",
+                r#"{"repo_list_request":{"request_id":"repo-1"}}"#,
+            ),
+            Some(NonblockingControlRequest::RepoList(RepoListRequest {
+                path: None,
+                request_id: "repo-1".to_string(),
+            }))
         );
         assert_eq!(
-            nonblocking_control_request("query", r#"{"repo_list_request":{"path":"buzz/buzz"}}"#,),
-            Some(NonblockingControlRequest::RepoList(Some(
-                "buzz/buzz".to_string(),
-            )))
+            nonblocking_control_request(
+                "query",
+                r#"{"repo_list_request":{"path":"buzz/buzz","request_id":"repo-2"}}"#,
+            ),
+            Some(NonblockingControlRequest::RepoList(RepoListRequest {
+                path: Some("buzz/buzz".to_string()),
+                request_id: "repo-2".to_string(),
+            }))
         );
         assert_eq!(
             nonblocking_control_request("query", r#"{"opencode_session_list_request":{}}"#),
@@ -13922,7 +14121,10 @@ mod tests {
             }))
         );
         assert_eq!(
-            nonblocking_control_request("audio", r#"{"repo_list_request":{}}"#),
+            nonblocking_control_request(
+                "audio",
+                r#"{"repo_list_request":{"request_id":"repo-1"}}"#,
+            ),
             None
         );
         assert_eq!(
@@ -14061,11 +14263,11 @@ mod tests {
 
     #[test]
     fn detects_repo_list_requests() {
-        assert!(is_repo_list_request("/repos"));
         assert!(is_repo_list_request(
-            r#"{"repo_list_request":{"roots":["/home/tom/code"]}}"#
+            r#"{"repo_list_request":{"request_id":"repo-1"}}"#
         ));
-        assert!(!is_repo_list_request("/repo"));
+        assert!(!is_repo_list_request("/repos"));
+        assert!(!is_repo_list_request(r#"{"repo_list_request":{}}"#));
         assert!(!is_repo_list_request("list repos"));
     }
 

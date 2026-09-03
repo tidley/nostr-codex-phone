@@ -1,5 +1,10 @@
 part of '../main.dart';
 
+bool hasVisuallyMeaningfulScratchpadContent(String value) => value
+    .replaceAll(RegExp('[\\u200B\\u200C\\u200D\\u2060\\uFEFF]'), '')
+    .trim()
+    .isNotEmpty;
+
 class _WorkspaceEntryPage extends StatefulWidget {
   const _WorkspaceEntryPage({
     required this.initialName,
@@ -1008,6 +1013,8 @@ class _TeamWorkspace extends StatefulWidget {
     required this.focusedConversationKey,
     required this.openThreadKey,
     required this.panelStates,
+    required this.workspaceViewSnapshot,
+    required this.onPanelStateChanged,
     required this.ownPubkey,
     required this.localSenderIds,
     required this.fipsConnectedPeers,
@@ -1085,15 +1092,18 @@ class _TeamWorkspace extends StatefulWidget {
   final ValueNotifier<FileContentResult?> filePreview;
   final Future<void> Function(
     String conversationKey,
+    String workdir,
     String directory,
     String path,
   )
   onBrowseFiles;
   final Future<void> Function(
     String conversationKey,
+    String workdir,
     String directory,
-    String path,
-  )
+    String path, {
+    ValueChanged<FileContentResult>? onResult,
+  })
   onReadWorkspaceFile;
   final Future<String?> Function(
     String? workdir,
@@ -1113,6 +1123,8 @@ class _TeamWorkspace extends StatefulWidget {
   final String focusedConversationKey;
   final String? openThreadKey;
   final Map<String, _WorkspacePanelState> panelStates;
+  final WorkspaceViewSnapshot? workspaceViewSnapshot;
+  final VoidCallback onPanelStateChanged;
   final String ownPubkey;
   final Set<String> localSenderIds;
   final Set<String> fipsConnectedPeers;
@@ -1240,6 +1252,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   double _threadPaneWidthFraction = 0.5;
   final _expandedMessageIds = <String>{};
   final _collapsedThreadMessageIds = <String>{};
+  final _restoredWorkspaceViewConversationKeys = <String>{};
   int? _cachedMessageRevision;
   String? _cachedMessageConversationKey;
   List<WorkspaceMessage> _cachedVisibleMessages = const [];
@@ -1278,6 +1291,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         peerPubkey: _section == _WorkspaceSection.direct ? _active : null,
       )
       .firstOrNull;
+
+  String? get _actionWorkdir => _workingDirectory;
 
   String? _conversationKeyFor(_WorkspaceSection section, String id) =>
       switch (section) {
@@ -1389,6 +1404,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     _restoreFocusedConversation();
     _restorePanelState();
     _restoreOpenThread();
+    _restoreWorkspaceViewSnapshot();
     unawaited(_restoreLocalThreadCompletions());
     unawaited(_restoreOnboarding());
     _composer.addListener(_onComposerChanged);
@@ -1475,6 +1491,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       _restoreFocusedConversation();
       _restorePanelState();
       _restoreOpenThread();
+      _restoreWorkspaceViewSnapshot();
       _onWorkspaceRevision();
       return;
     }
@@ -1485,6 +1502,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     if (oldWidget.openThreadKey != widget.openThreadKey || _thread == null) {
       _restoreOpenThread();
     }
+    _restoreWorkspaceViewSnapshot();
   }
 
   void _restoreFocusedConversation() {
@@ -1583,6 +1601,55 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     widget.filePreview.value = panel.filePreview;
   }
 
+  void _restoreWorkspaceViewSnapshot() {
+    final snapshot = widget.workspaceViewSnapshot;
+    if (snapshot == null) return;
+    final restored = snapshot.validFor(widget.workspace, widget.ownPubkey);
+    var restoredAny = false;
+    var restoredActiveConversation = false;
+    for (final entry in restored.conversations.entries) {
+      if (!_restoredWorkspaceViewConversationKeys.add(entry.key)) continue;
+      final previous = _panelStates[entry.key];
+      if (previous?.threadId != null ||
+          (previous?.openThreadIds.isNotEmpty ?? false) ||
+          previous?.filesSelected == true) {
+        continue;
+      }
+      restoredAny = true;
+      final panel = entry.value;
+      _panelStates[entry.key] = _WorkspacePanelState(
+        threadId: panel.activeThreadId,
+        openThreadIds: panel.openThreadIds,
+        expandedMessageIds: previous?.expandedMessageIds ?? const {},
+        collapsedThreadMessageIds:
+            previous?.collapsedThreadMessageIds ?? const {},
+        widthFraction: previous?.widthFraction ?? 0.5,
+        sidebarCollapsed: previous?.sidebarCollapsed ?? false,
+        alsoSendToMain: previous?.alsoSendToMain ?? false,
+        filesSelected: panel.filesSelected,
+        threadFullWindow: false,
+      );
+      if (entry.key == _conversationKey) restoredActiveConversation = true;
+    }
+    if (restoredAny) widget.onPanelStateChanged();
+    final conversationKey = _conversationKey;
+    if (conversationKey == null || !restoredActiveConversation) {
+      return;
+    }
+    _restorePanelState();
+    _thread = _threadWithId(_panelStates[conversationKey]?.threadId);
+    _restoreThreadDraft();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _conversationKey != conversationKey) return;
+      final thread = _thread;
+      if (thread == null) {
+        widget.onCloseThread();
+      } else {
+        widget.onOpenThread(conversationKey, thread.id);
+      }
+    });
+  }
+
   void _savePanelState({
     Map<String, _WorkspacePanelState>? panelStates,
     String? conversationKey,
@@ -1604,6 +1671,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       fileBrowser: fileBrowser ?? widget.fileBrowser.value,
       filePreview: filePreview ?? widget.filePreview.value,
     );
+    widget.onPanelStateChanged();
   }
 
   @override
@@ -1690,9 +1758,82 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   }
 
   void _onFileBrowserChanged() {
-    if (!mounted) return;
-    setState(() => _filesSelected = widget.fileBrowser.value != null);
+    if (mounted) setState(() {});
   }
+
+  Future<RepoChoice?> _chooseRepository(BuildContext context) =>
+      showModalBottomSheet<RepoChoice>(
+        context: context,
+        useRootNavigator: true,
+        showDragHandle: true,
+        builder: (context) => FutureBuilder<List<RepoChoice>>(
+          future: widget.onLoadFolders(null),
+          initialData: widget.initialFolderChoices,
+          builder: (context, snapshot) {
+            final choices = (snapshot.data ?? const <RepoChoice>[])
+                .where((choice) => choice.isGitRepo)
+                .toList();
+            if (snapshot.connectionState != ConnectionState.done &&
+                choices.isEmpty) {
+              return const SizedBox(
+                height: 180,
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+            if (snapshot.hasError) {
+              return SizedBox(
+                height: 180,
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(
+                      'Could not load repositories: ${snapshot.error}',
+                    ),
+                  ),
+                ),
+              );
+            }
+            return SafeArea(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const ListTile(
+                    leading: Icon(Icons.account_tree_outlined),
+                    title: Text('Choose repository'),
+                    subtitle: Text('Open this file only'),
+                  ),
+                  if (choices.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Text('No repositories found'),
+                    )
+                  else
+                    Flexible(
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: choices.length,
+                        separatorBuilder: (_, _) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final choice = choices[index];
+                          return ListTile(
+                            leading: const Icon(Icons.account_tree_outlined),
+                            title: Text(choice.displayName),
+                            subtitle: Text(
+                              choice.path,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            onTap: () => Navigator.pop(context, choice),
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        ),
+      );
 
   void _insertVoiceTranscript(
     TextEditingController composer,
@@ -3083,7 +3224,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                 onCancelVoiceRecording: () =>
                     unawaited(_cancelVoiceRecording()),
                 onOpenAttachment: widget.onOpenAttachment,
-                repositoryPath: _workingDirectory,
+                repositoryPath: _actionWorkdir,
                 onLoadRepositoryRemote: widget.onLoadRepositoryRemote,
                 onMarkConversationUnread: () {
                   final conversationKey = _conversationKey;
@@ -3119,7 +3260,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                   final conversationKey = _conversationKey;
                   return conversationKey == null
                       ? Future<void>.value()
-                      : widget.onOpenFiles(conversationKey, _workingDirectory);
+                      : widget.onOpenFiles(conversationKey, _actionWorkdir);
                 },
                 onRenameConversation: (name) async {
                   if (_section == _WorkspaceSection.channel) {
@@ -3392,27 +3533,54 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
               _filesSelected = true;
               _threadFullWindow = false;
             });
+            _savePanelState();
             if (conversationKey != null) {
-              await widget.onOpenFiles(conversationKey, _workingDirectory);
+              await widget.onOpenFiles(conversationKey, _actionWorkdir);
             }
           },
           onOpenRepositoryFile: (path) async {
             final conversationKey = _conversationKey;
             if (conversationKey == null) return;
-            setState(() {
-              _filesSelected = true;
-              _threadFullWindow = false;
-            });
-            widget.filePreview.value = FileContentResult(
-              path: path,
-              content: 'Loading preview...',
-              lineCount: 0,
-              truncated: false,
-            );
             if (widget.fileBrowser.value == null) {
-              unawaited(widget.onOpenFiles(conversationKey, _workingDirectory));
+              unawaited(widget.onOpenFiles(conversationKey, _actionWorkdir));
             }
-            await widget.onReadWorkspaceFile(conversationKey, '', path);
+            await widget.onReadWorkspaceFile(
+              conversationKey,
+              _actionWorkdir ?? '',
+              '',
+              path,
+              onResult: (result) async {
+                if (!mounted || _conversationKey != conversationKey) return;
+                if (isMissingFileError(result.error)) {
+                  final repository = await _chooseRepository(context);
+                  if (!mounted || repository == null) return;
+                  await widget.onReadWorkspaceFile(
+                    conversationKey,
+                    repository.path,
+                    '',
+                    path,
+                    onResult: (result) {
+                      if (!mounted || _conversationKey != conversationKey) {
+                        return;
+                      }
+                      setState(() {
+                        _filesSelected = true;
+                        _threadFullWindow = false;
+                      });
+                      _savePanelState();
+                      widget.filePreview.value = result;
+                    },
+                  );
+                  return;
+                }
+                setState(() {
+                  _filesSelected = true;
+                  _threadFullWindow = false;
+                });
+                _savePanelState();
+                widget.filePreview.value = result;
+              },
+            );
           },
           compactHeader: !medium,
           fullWindow: _threadFullWindow,
@@ -3429,46 +3597,68 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     );
     final filesPane = fileBrowser == null
         ? null
-        : _WorkspaceFilesPanel(
-            result: fileBrowser,
-            preview: widget.filePreview.value,
-            onBrowse: (path) => conversationKey == null
-                ? Future<void>.value()
-                : widget.onBrowseFiles(
-                    conversationKey,
-                    fileBrowser.directory,
-                    path,
-                  ),
-            onUp: () {
-              final parts = fileBrowser.directory.split('/')..removeLast();
-              return conversationKey == null
-                  ? Future<void>.value()
-                  : widget.onBrowseFiles(conversationKey, '', parts.join('/'));
-            },
-            onReadFile: (path) => conversationKey == null
-                ? Future<void>.value()
-                : widget.onReadWorkspaceFile(
-                    conversationKey,
-                    fileBrowser.directory,
-                    path,
-                  ),
-            onFullWindow: () => setState(() {
-              _threadFullWindow = false;
-              _filesFullWindow = true;
-            }),
-            onCloseFullWindow: () => setState(() => _filesFullWindow = false),
-            onClose: () => setState(() {
-              _filesSelected = false;
-              _filesFullWindow = false;
-              _savePanelState();
-            }),
-            hasThread: _thread != null,
-            onShowThread: () => setState(() {
-              _filesSelected = false;
-              _filesFullWindow = false;
-            }),
-            onClosePreview: () => widget.filePreview.value = null,
-            fullWindow: _filesFullWindow,
+        : Column(
+            children: [
+              Expanded(
+                child: _WorkspaceFilesPanel(
+                  result: fileBrowser,
+                  preview: widget.filePreview.value,
+                  onBrowse: (path) => conversationKey == null
+                      ? Future<void>.value()
+                      : widget.onBrowseFiles(
+                          conversationKey,
+                          _actionWorkdir ?? '',
+                          fileBrowser.directory,
+                          path,
+                        ),
+                  onUp: () {
+                    final parts = fileBrowser.directory.split('/')
+                      ..removeLast();
+                    return conversationKey == null
+                        ? Future<void>.value()
+                        : widget.onBrowseFiles(
+                            conversationKey,
+                            _actionWorkdir ?? '',
+                            '',
+                            parts.join('/'),
+                          );
+                  },
+                  onReadFile: (path) => conversationKey == null
+                      ? Future<void>.value()
+                      : widget.onReadWorkspaceFile(
+                          conversationKey,
+                          _actionWorkdir ?? '',
+                          fileBrowser.directory,
+                          path,
+                        ),
+                  onFullWindow: () => setState(() {
+                    _threadFullWindow = false;
+                    _filesFullWindow = true;
+                  }),
+                  onCloseFullWindow: () =>
+                      setState(() => _filesFullWindow = false),
+                  onClose: () {
+                    setState(() {
+                      _filesSelected = false;
+                      _filesFullWindow = false;
+                    });
+                    widget.fileBrowser.value = null;
+                    widget.filePreview.value = null;
+                    _savePanelState();
+                  },
+                  hasThread: _thread != null,
+                  onShowThread: () {
+                    setState(() {
+                      _filesSelected = false;
+                      _filesFullWindow = false;
+                    });
+                    _savePanelState();
+                  },
+                  onClosePreview: () => widget.filePreview.value = null,
+                  fullWindow: _filesFullWindow,
+                ),
+              ),
+            ],
           );
     final showSidePane =
         _thread != null || (_filesSelected && filesPane != null);
@@ -3615,6 +3805,25 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                             onSelected: _openThread,
                           ),
                     actions: [
+                      IconButton(
+                        tooltip: _filesSelected
+                            ? 'Show repository files'
+                            : 'Browse repository files',
+                        onPressed: () async {
+                          setState(() {
+                            _filesSelected = true;
+                            _threadFullWindow = false;
+                          });
+                          _savePanelState();
+                          if (conversationKey != null) {
+                            await widget.onOpenFiles(
+                              conversationKey,
+                              _actionWorkdir,
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.folder_open_outlined),
+                      ),
                       IconButton(
                         tooltip: 'Search this thread',
                         onPressed: () => _threadSearch.open(_thread!.id),
@@ -4620,7 +4829,7 @@ class SidebarPaneResizeHandle extends StatelessWidget {
             child: Container(
               width: 1,
               height: double.infinity,
-              color: Theme.of(context).colorScheme.outlineVariant,
+              color: const Color(0xff30363d),
             ),
           ),
         ),
@@ -4645,7 +4854,8 @@ class ThreadPaneResizeHandle extends StatelessWidget {
         child: SizedBox(
           width: 10,
           height: double.infinity,
-          child: Center(
+          child: Align(
+            alignment: Alignment.centerRight,
             child: Container(
               width: 2,
               height: double.infinity,
@@ -7333,6 +7543,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
   bool _searchOpen = false;
   String _searchQuery = '';
   String? _repositoryUrl;
+  bool _scratchpadHasContent = false;
+  int _scratchpadContentRevision = 0;
   final _messageKeys = <String, GlobalKey>{};
   String? _stickyHistoryDate;
   Timer? _historyDateRefreshTimer;
@@ -7357,11 +7569,27 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     _ => null,
   };
 
+  Future<void> _loadScratchpadContent() async {
+    final revision = ++_scratchpadContentRevision;
+    final key = _scratchpadStorageKey;
+    final hasContent =
+        key != null &&
+        hasVisuallyMeaningfulScratchpadContent(
+          await _scratchpadStorage.read(key: key) ?? '',
+        );
+    if (!mounted ||
+        revision != _scratchpadContentRevision ||
+        key != _scratchpadStorageKey) {
+      return;
+    }
+    setState(() => _scratchpadHasContent = hasContent);
+  }
+
   Future<void> _openScratchpad() async {
     final key = _scratchpadStorageKey;
     if (key == null) return;
     final saved = await _scratchpadStorage.read(key: key) ?? '';
-    if (!mounted) return;
+    if (!mounted || key != _scratchpadStorageKey) return;
     final controller = TextEditingController(text: saved);
     await showDialog<void>(
       context: context,
@@ -7379,13 +7607,28 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
               hintText: 'Private notes for this conversation',
               border: OutlineInputBorder(),
             ),
-            onChanged: (value) =>
-                unawaited(_scratchpadStorage.write(key: key, value: value)),
+            onChanged: (value) {
+              if (mounted && key == _scratchpadStorageKey) {
+                _scratchpadContentRevision++;
+                setState(
+                  () => _scratchpadHasContent =
+                      hasVisuallyMeaningfulScratchpadContent(value),
+                );
+              }
+              unawaited(_scratchpadStorage.write(key: key, value: value));
+            },
           ),
         ),
         actions: [
           FilledButton(
             onPressed: () {
+              if (mounted && key == _scratchpadStorageKey) {
+                _scratchpadContentRevision++;
+                setState(
+                  () => _scratchpadHasContent =
+                      hasVisuallyMeaningfulScratchpadContent(controller.text),
+                );
+              }
               unawaited(
                 _scratchpadStorage.write(key: key, value: controller.text),
               );
@@ -7604,6 +7847,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
   void initState() {
     super.initState();
     unawaited(_loadRepositoryRemote());
+    unawaited(_loadScratchpadContent());
     _lastMessageId = _latestMessageId;
     _lastMainLiveMessageIds = _mainLiveMessageIds;
     _scrollController.addListener(_updateStickyHistoryDate);
@@ -7630,6 +7874,8 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
       unawaited(_loadRepositoryRemote());
     }
     if (conversationChanged) {
+      _scratchpadHasContent = false;
+      unawaited(_loadScratchpadContent());
       for (final timer in _cancelledAgentTimers.values) {
         timer.cancel();
       }
@@ -9040,6 +9286,11 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                             ),
                           TextButton.icon(
                             onPressed: () => unawaited(_openScratchpad()),
+                            style: _scratchpadHasContent
+                                ? null
+                                : TextButton.styleFrom(
+                                    foregroundColor: Colors.white,
+                                  ),
                             icon: const Icon(Icons.edit_note_outlined),
                             label: const Text('Notes'),
                           ),
@@ -10418,8 +10669,10 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
   }
 
   String get _messageText => isWorkspaceAgentSender(widget.message.senderPubkey)
-      ? trimTrailingLineWhitespace(
-          workspaceDisplayMessageText(widget.message.body),
+      ? normalizeAgentMarkdownIndentation(
+          trimTrailingLineWhitespace(
+            workspaceDisplayMessageText(widget.message.body),
+          ),
         )
       : widget.message.body;
 
@@ -10863,39 +11116,34 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                                     ),
                               ),
                               const SizedBox(width: 8),
-                              Flexible(
-                                child: Semantics(
-                                  label:
-                                      'Replying agents: ${widget.threadReplyAgentNames.join(', ')}',
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      for (final name
-                                          in widget.threadReplyAgentNames.take(
-                                            3,
-                                          ))
-                                        Padding(
-                                          padding: EdgeInsets.zero,
-                                          child: Tooltip(
-                                            message: name,
-                                            child: _WorkspaceFrogAvatar(
-                                              identity: 'agent:$name',
-                                              label: name,
-                                              radius: 10,
-                                              bot: true,
-                                            ),
+                              Semantics(
+                                label:
+                                    'Replying agents: ${widget.threadReplyAgentNames.join(', ')}',
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    for (final name
+                                        in widget.threadReplyAgentNames.take(3))
+                                      Padding(
+                                        padding: EdgeInsets.zero,
+                                        child: Tooltip(
+                                          message: name,
+                                          child: _WorkspaceFrogAvatar(
+                                            identity: 'agent:$name',
+                                            label: name,
+                                            radius: 10,
+                                            bot: true,
                                           ),
                                         ),
-                                      if (widget.threadReplyAgentNames.length >
-                                          3)
-                                        Text(
-                                          '+${widget.threadReplyAgentNames.length - 3}',
-                                          style: Theme.of(
-                                            context,
-                                          ).textTheme.labelSmall,
-                                        ),
-                                    ],
-                                  ),
+                                      ),
+                                    if (widget.threadReplyAgentNames.length > 3)
+                                      Text(
+                                        '+${widget.threadReplyAgentNames.length - 3}',
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.labelSmall,
+                                      ),
+                                  ],
                                 ),
                               ),
                             ],
@@ -11980,7 +12228,7 @@ class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
   static const _maxLineCharacters = 4000;
 
   String _renderableText() {
-    var lines = widget.text.split('\n');
+    var lines = normalizeAgentMarkdownIndentation(widget.text).split('\n');
     // Replies embedded in nested workspace contexts can acquire multiple
     // Markdown code-indent levels. Remove all shared levels before parsing.
     while (lines.where((line) => line.trim().isNotEmpty).isNotEmpty &&
@@ -12031,7 +12279,8 @@ class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
       // raw Markdown line count can claim a fully visible message is truncated.
       final hasStructuredBlock =
           RegExp(r'```[\s\S]*?```').hasMatch(text) ||
-          _WorkspaceMarkdownTable.parseAll(text).isNotEmpty;
+          _WorkspaceMarkdownTable.parseAll(text).isNotEmpty ||
+          _WorkspaceMessageText._blockquoteLine.hasMatch(text);
       final style = DefaultTextStyle.of(context).style;
       final painter = TextPainter(
         text: TextSpan(text: text, style: style),
@@ -12092,6 +12341,17 @@ class _WorkspaceMessageBodyState extends State<_WorkspaceMessageBody> {
   );
 }
 
+@visibleForTesting
+Widget workspaceMessageTextForTest({
+  required String text,
+  required String searchQuery,
+}) => _WorkspaceMessageText(
+  text: text,
+  mentions: const [],
+  onOpenMessageReference: (_) {},
+  searchQuery: searchQuery,
+);
+
 class _WorkspaceMessageText extends StatelessWidget {
   const _WorkspaceMessageText({
     required this.text,
@@ -12116,6 +12376,10 @@ class _WorkspaceMessageText extends StatelessWidget {
 
   static final _compilerDiagnosticGutter = RegExp(
     r'^\s*(?:\d+\s+\||\|\s*[-^])',
+    multiLine: true,
+  );
+  static final _blockquoteLine = RegExp(
+    r'^ {0,3}>(?: (.*)|)$',
     multiLine: true,
   );
 
@@ -12163,14 +12427,16 @@ class _WorkspaceMessageText extends StatelessWidget {
     int? maxLines,
   ) {
     final tables = _WorkspaceMarkdownTable.parseAll(value);
-    if (tables.isEmpty) return _buildPlainText(context, value, maxLines);
+    if (tables.isEmpty) {
+      return _buildTextWithBlockQuotes(context, value, maxLines);
+    }
 
     final children = <Widget>[];
     var offset = 0;
     for (final table in tables) {
       final before = value.substring(offset, table.start).trim();
       if (before.isNotEmpty) {
-        children.add(_buildPlainText(context, before, null));
+        children.add(_buildTextWithBlockQuotes(context, before, null));
         children.add(const SizedBox(height: 8));
       }
       children.add(
@@ -12189,8 +12455,71 @@ class _WorkspaceMessageText extends StatelessWidget {
     final after = value.substring(offset).trim();
     if (after.isNotEmpty) {
       children.add(const SizedBox(height: 8));
-      children.add(_buildPlainText(context, after, null));
+      children.add(_buildTextWithBlockQuotes(context, after, null));
     }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: children,
+    );
+  }
+
+  Widget _buildTextWithBlockQuotes(
+    BuildContext context,
+    String value,
+    int? maxLines,
+  ) {
+    if (!_blockquoteLine.hasMatch(value)) {
+      return _buildPlainText(context, value, maxLines);
+    }
+
+    final children = <Widget>[];
+    final plainLines = <String>[];
+    final quoteLines = <String>[];
+    void addChild(Widget child) {
+      if (children.isNotEmpty) children.add(const SizedBox(height: 8));
+      children.add(child);
+    }
+
+    void flushPlain() {
+      if (plainLines.isEmpty) return;
+      addChild(_buildPlainText(context, plainLines.join('\n'), null));
+      plainLines.clear();
+    }
+
+    void flushQuote() {
+      if (quoteLines.isEmpty) return;
+      addChild(
+        DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border(
+              left: BorderSide(
+                color: Theme.of(context).colorScheme.outlineVariant,
+                width: 2,
+              ),
+            ),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.only(left: 12),
+            child: _buildPlainText(context, quoteLines.join('\n'), null),
+          ),
+        ),
+      );
+      quoteLines.clear();
+    }
+
+    for (final line in value.split('\n')) {
+      final match = _blockquoteLine.firstMatch(line);
+      if (match == null) {
+        flushQuote();
+        plainLines.add(line);
+      } else {
+        flushPlain();
+        quoteLines.add(match.group(1) ?? '');
+      }
+    }
+    flushPlain();
+    flushQuote();
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -12223,7 +12552,10 @@ class _WorkspaceMessageText extends StatelessWidget {
         children: _highlightedTextSpans(context, value),
       );
       return maxLines == null
-          ? SelectableText.rich(span)
+          ? SelectableText.rich(
+              span,
+              selectionWidthStyle: ui.BoxWidthStyle.tight,
+            )
           : RichText(text: span, maxLines: maxLines, overflow: overflow);
     }
     final style = DefaultTextStyle.of(context).style;
@@ -12245,12 +12577,12 @@ class _WorkspaceMessageText extends StatelessWidget {
         final conversationId = conversationMatch.group(1)!;
         spans.add(
           TextSpan(
-            text: token,
             style: style.copyWith(
               color: Theme.of(context).colorScheme.primary,
               fontWeight: FontWeight.w600,
               decoration: TextDecoration.underline,
             ),
+            children: _highlightedTextSpans(context, token),
             recognizer: TapGestureRecognizer()
               ..onTap = () => onOpenMessageReference(conversationId),
           ),
@@ -12263,18 +12595,18 @@ class _WorkspaceMessageText extends StatelessWidget {
             .substring('[[message:'.length, token.length - 2)
             .trim();
         if (messageId.isEmpty) {
-          spans.add(TextSpan(text: token));
+          spans.add(TextSpan(children: _highlightedTextSpans(context, token)));
           offset = match.end;
           continue;
         }
         spans.add(
           TextSpan(
-            text: 'message reference',
             style: style.copyWith(
               color: Theme.of(context).colorScheme.primary,
               fontWeight: FontWeight.w600,
               decoration: TextDecoration.underline,
             ),
+            children: _highlightedTextSpans(context, 'message reference'),
             recognizer: TapGestureRecognizer()
               ..onTap = () => onOpenMessageReference(messageId),
           ),
@@ -12290,11 +12622,14 @@ class _WorkspaceMessageText extends StatelessWidget {
       if (recognizedMention != null) {
         spans.add(
           TextSpan(
-            text: '@${recognizedMention.label}',
             style: style.copyWith(
               color: Theme.of(context).colorScheme.primary,
               fontWeight: FontWeight.bold,
               decoration: TextDecoration.underline,
+            ),
+            children: _highlightedTextSpans(
+              context,
+              '@${recognizedMention.label}',
             ),
             recognizer: TapGestureRecognizer()
               ..onTap = onOpenMention == null
@@ -12306,11 +12641,11 @@ class _WorkspaceMessageText extends StatelessWidget {
         if (token.startsWith('http://') || token.startsWith('https://')) {
           spans.add(
             TextSpan(
-              text: token,
               style: style.copyWith(
                 color: Theme.of(context).colorScheme.primary,
                 decoration: TextDecoration.underline,
               ),
+              children: _highlightedTextSpans(context, token),
               recognizer: TapGestureRecognizer()
                 ..onTap = () => unawaited(_openWorkspaceLink(context, token)),
             ),
@@ -12321,8 +12656,11 @@ class _WorkspaceMessageText extends StatelessWidget {
         if (token.startsWith('**')) {
           spans.add(
             TextSpan(
-              text: token.substring(2, token.length - 2),
               style: style.copyWith(fontWeight: FontWeight.bold),
+              children: _highlightedTextSpans(
+                context,
+                token.substring(2, token.length - 2),
+              ),
             ),
           );
           offset = match.end;
@@ -12331,7 +12669,6 @@ class _WorkspaceMessageText extends StatelessWidget {
         if (token.startsWith('#')) {
           spans.add(
             TextSpan(
-              text: token,
               semanticsLabel: 'Topic $token',
               style: style.copyWith(
                 color: Theme.of(context).colorScheme.primary,
@@ -12340,6 +12677,7 @@ class _WorkspaceMessageText extends StatelessWidget {
                     ? null
                     : TextDecoration.underline,
               ),
+              children: _highlightedTextSpans(context, token),
               recognizer: onOpenTopic == null
                   ? null
                   : (TapGestureRecognizer()..onTap = () => onOpenTopic!(token)),
@@ -12356,7 +12694,6 @@ class _WorkspaceMessageText extends StatelessWidget {
             : _repositoryRelativeFilePath(path);
         spans.add(
           TextSpan(
-            text: path,
             style: style.copyWith(
               fontSize: (style.fontSize ?? 14) - 1,
               color: repositoryPath == null
@@ -12369,6 +12706,7 @@ class _WorkspaceMessageText extends StatelessWidget {
                   ? null
                   : TextDecoration.underline,
             ),
+            children: _highlightedTextSpans(context, path),
             recognizer: repositoryPath == null || onOpenRepositoryFile == null
                 ? null
                 : (TapGestureRecognizer()
@@ -12384,7 +12722,7 @@ class _WorkspaceMessageText extends StatelessWidget {
     }
     final span = TextSpan(style: style, children: spans);
     return maxLines == null
-        ? SelectableText.rich(span)
+        ? SelectableText.rich(span, selectionWidthStyle: ui.BoxWidthStyle.tight)
         : RichText(text: span, maxLines: maxLines, overflow: overflow);
   }
 
@@ -12415,36 +12753,43 @@ class _WorkspaceMessageText extends StatelessWidget {
     return path;
   }
 
-  List<InlineSpan> _highlightedTextSpans(BuildContext context, String value) {
-    final query = searchQuery.trim();
-    if (query.isEmpty) return [TextSpan(text: value)];
-    final matches = RegExp(
-      RegExp.escape(query),
-      caseSensitive: false,
-    ).allMatches(value).toList();
-    if (matches.isEmpty) return [TextSpan(text: value)];
-    const highlight = Color(0xffffca28);
-    final spans = <InlineSpan>[];
-    var offset = 0;
-    for (final match in matches) {
-      if (match.start > offset) {
-        spans.add(TextSpan(text: value.substring(offset, match.start)));
-      }
-      spans.add(
-        TextSpan(
-          text: value.substring(match.start, match.end),
-          style: const TextStyle(
-            backgroundColor: highlight,
-            color: Color(0xff1c1600),
-          ),
-        ),
-      );
-      offset = match.end;
+  List<InlineSpan> _highlightedTextSpans(BuildContext context, String value) =>
+      _highlightedWorkspaceTextSpans(value, searchQuery);
+}
+
+List<InlineSpan> _highlightedWorkspaceTextSpans(
+  String value,
+  String searchQuery,
+) {
+  final query = searchQuery.trim();
+  if (query.isEmpty) return [TextSpan(text: value)];
+  final matches = RegExp(
+    RegExp.escape(query),
+    caseSensitive: false,
+  ).allMatches(value).toList();
+  if (matches.isEmpty) return [TextSpan(text: value)];
+  const highlight = Color(0xffffca28);
+  final spans = <InlineSpan>[];
+  var offset = 0;
+  for (final match in matches) {
+    if (match.start > offset) {
+      spans.add(TextSpan(text: value.substring(offset, match.start)));
     }
-    if (offset < value.length)
-      spans.add(TextSpan(text: value.substring(offset)));
-    return spans;
+    spans.add(
+      TextSpan(
+        text: value.substring(match.start, match.end),
+        style: const TextStyle(
+          backgroundColor: highlight,
+          color: Color(0xff1c1600),
+        ),
+      ),
+    );
+    offset = match.end;
   }
+  if (offset < value.length) {
+    spans.add(TextSpan(text: value.substring(offset)));
+  }
+  return spans;
 }
 
 class _WorkspaceMarkdownTable {
@@ -12567,10 +12912,15 @@ class _WorkspaceMarkdownTableView extends StatelessWidget {
               table.headers.length,
               (index) => DataColumn(
                 numeric: table.alignments[index],
-                label: Text(
-                  table.headers[index],
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
+                label: Text.rich(
+                  TextSpan(
+                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                    children: _highlightedWorkspaceTextSpans(
+                      table.headers[index],
+                      searchQuery,
+                    ),
                   ),
                 ),
               ),
@@ -12676,6 +13026,7 @@ class _WorkspaceCodeBlockState extends State<_WorkspaceCodeBlock> {
             padding: const EdgeInsets.fromLTRB(12, 10, 44, 10),
             child: SelectableText.rich(
               TextSpan(style: style, children: _highlightedCodeSpans(context)),
+              selectionWidthStyle: ui.BoxWidthStyle.tight,
             ),
           ),
           Positioned(
@@ -13242,6 +13593,9 @@ class _WorkspaceContext extends StatelessWidget {
             respondingThreadIds: respondingThreadIds,
             threadTitle: (thread) => _threadTitleFor(thread),
             onSelected: onSelectThread,
+            titleStyle: Theme.of(
+              context,
+            ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
           );
     return titleControl;
   }
@@ -13464,7 +13818,12 @@ class _WorkspaceContext extends StatelessWidget {
   Widget build(BuildContext context) => ColoredBox(
     color: const Color(0xff0c0c0c),
     child: Padding(
-      padding: EdgeInsets.fromLTRB(4, message == null ? 20 : 4, 8, 18),
+      padding: EdgeInsets.fromLTRB(
+        8,
+        message == null ? 20 : 4,
+        compactHeader ? 8 : 16,
+        18,
+      ),
       child: message == null
           ? Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -13588,7 +13947,15 @@ class _WorkspaceContext extends StatelessWidget {
                       ),
                     ],
                   ),
-                  const _WorkspaceHeaderDivider(),
+                  LayoutBuilder(
+                    builder: (context, constraints) => Transform.translate(
+                      offset: const Offset(-8, 0),
+                      child: SizedBox(
+                        width: constraints.maxWidth + 24,
+                        child: const _WorkspaceHeaderDivider(),
+                      ),
+                    ),
+                  ),
                 ],
                 if (!compactHeader && _referencedThread != null)
                   Padding(
@@ -13887,6 +14254,7 @@ class _ThreadTitleDropdown extends StatefulWidget {
     required this.respondingThreadIds,
     required this.threadTitle,
     required this.onSelected,
+    this.titleStyle,
   });
 
   final String title;
@@ -13897,6 +14265,7 @@ class _ThreadTitleDropdown extends StatefulWidget {
   final Set<String> respondingThreadIds;
   final String Function(WorkspaceMessage thread) threadTitle;
   final ValueChanged<WorkspaceMessage> onSelected;
+  final TextStyle? titleStyle;
 
   @override
   State<_ThreadTitleDropdown> createState() => _ThreadTitleDropdownState();
@@ -14046,12 +14415,15 @@ class _ThreadTitleDropdownState extends State<_ThreadTitleDropdown>
                     widget.title,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      color: widget.hasUnreadOtherThread
-                          ? unreadColor()
-                          : foreground,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    style:
+                        (widget.titleStyle ??
+                                Theme.of(context).textTheme.titleLarge)
+                            ?.copyWith(
+                              color: widget.hasUnreadOtherThread
+                                  ? unreadColor()
+                                  : foreground,
+                              fontWeight: FontWeight.bold,
+                            ),
                   ),
                 ),
                 const SizedBox(width: 4),
@@ -14639,14 +15011,9 @@ class _WorkspaceFilesPanel extends StatelessWidget {
               )
             : preview!.isImage
             ? _WorkspaceImagePreview(preview: preview!)
-            : SelectionArea(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(16),
-                  child: Text(
-                    preview!.content,
-                    style: const TextStyle(height: 1.45),
-                  ),
-                ),
+            : SingleChildScrollView(
+                padding: const EdgeInsets.all(16),
+                child: MarkdownBody(data: preview!.content),
               ),
       ),
     ],
@@ -23087,6 +23454,62 @@ List<Offset> _recordingWaveformPoints(
   });
 }
 
+String normalizeAgentMarkdownIndentation(String markdown) {
+  final lines = markdown.split('\n');
+  final mutableLines = <int>[];
+  final fencedLines = <int>{};
+  String? fenceCharacter;
+  var fenceLength = 0;
+
+  for (var index = 0; index < lines.length; index++) {
+    final line = lines[index];
+    if (fenceCharacter != null) {
+      fencedLines.add(index);
+      final closingFence = RegExp(
+        '^[ \\t]{0,3}${RegExp.escape(fenceCharacter)}{$fenceLength,}[ \\t]*\\r?\$',
+      );
+      if (closingFence.hasMatch(line)) {
+        fenceCharacter = null;
+        fenceLength = 0;
+      }
+      continue;
+    }
+
+    final openingFence = RegExp(r'^[ \t]{0,3}(`{3,}|~{3,})').firstMatch(line);
+    if (openingFence != null) {
+      fencedLines.add(index);
+      final fence = openingFence.group(1)!;
+      fenceCharacter = fence[0];
+      fenceLength = fence.length;
+      continue;
+    }
+    if (line.trim().isNotEmpty) mutableLines.add(index);
+  }
+
+  if (mutableLines.isEmpty) return markdown;
+  String prefix =
+      RegExp(r'^[ \t]+').firstMatch(lines[mutableLines.first])?.group(0) ?? '';
+  if (prefix.isEmpty) return markdown;
+
+  for (final index in mutableLines.skip(1)) {
+    final whitespace =
+        RegExp(r'^[ \t]+').firstMatch(lines[index])?.group(0) ?? '';
+    if (whitespace.isEmpty) return markdown;
+    while (!whitespace.startsWith(prefix)) {
+      prefix = prefix.substring(0, prefix.length - 1);
+      if (prefix.isEmpty) return markdown;
+    }
+  }
+
+  if (!prefix.contains('\t') && prefix.length < 4) return markdown;
+  return [
+    for (var index = 0; index < lines.length; index++)
+      !fencedLines.contains(index) && lines[index].startsWith(prefix)
+          ? lines[index].substring(prefix.length)
+          : lines[index],
+  ].join('\n');
+}
+
 class _MessageTile extends StatefulWidget {
   const _MessageTile({
     super.key,
@@ -23280,6 +23703,9 @@ class _MessageTileState extends State<_MessageTile>
         widget.message.kind == 'recording';
     final processing = widget.message.kind == 'processing';
     final userSide = !incoming || transcript;
+    final markdownText = !userSide
+        ? normalizeAgentMarkdownIndentation(widget.message.text)
+        : widget.message.text;
     final canFlashOnTap = widget.stopSpeakingOnTap;
     final colorScheme = Theme.of(context).colorScheme;
     final outgoingBubbleColor = colorScheme.primaryContainer;
@@ -23510,7 +23936,7 @@ class _MessageTileState extends State<_MessageTile>
                           style: Theme.of(context).textTheme.bodyMedium,
                         )
                       : MarkdownBody(
-                          data: widget.message.text,
+                          data: markdownText,
                           styleSheet: _markdownStyleSheet(context, userSide),
                           builders: _markdownBuilders(context, userSide),
                           imageBuilder: (uri, title, alt) =>
@@ -23524,7 +23950,7 @@ class _MessageTileState extends State<_MessageTile>
             )
           else
             MarkdownBody(
-              data: widget.message.text,
+              data: markdownText,
               styleSheet: _markdownStyleSheet(context, userSide),
               builders: _markdownBuilders(context, userSide),
               imageBuilder: (uri, title, alt) =>

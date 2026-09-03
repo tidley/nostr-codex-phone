@@ -49,6 +49,68 @@ void main() {
     expect(const NostrCodexApp(), isA<StatefulWidget>());
   });
 
+  testWidgets('highlights a case-insensitive match inside a styled URL', (
+    tester,
+  ) async {
+    const url = 'https://EXAMPLE.com';
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: workspaceMessageTextForTest(text: url, searchQuery: 'example'),
+        ),
+      ),
+    );
+
+    final richText = tester.widget<RichText>(
+      find.byWidgetPredicate(
+        (widget) => widget is RichText && widget.text.toPlainText() == url,
+      ),
+    );
+    final urlSpan = (richText.text as TextSpan).children!.single as TextSpan;
+    expect(urlSpan.recognizer, isA<TapGestureRecognizer>());
+    final highlightedSpan =
+        urlSpan.children!.singleWhere(
+              (span) => span is TextSpan && span.text == 'EXAMPLE',
+            )
+            as TextSpan;
+    expect(highlightedSpan.style?.backgroundColor, const Color(0xffffca28));
+  });
+
+  testWidgets('renders consecutive block quote lines without their markers', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: workspaceMessageTextForTest(
+            text: '> quoted detail\n>\n  > another detail',
+            searchQuery: '',
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('quoted detail\n\nanother detail'), findsOneWidget);
+    expect(find.text('> quoted detail\n>\n  > another detail'), findsNothing);
+  });
+
+  test('detects visually meaningful scratchpad content', () {
+    final invisible = String.fromCharCodes([
+      0x20,
+      0x200B,
+      0x200C,
+      0x200D,
+      0x2060,
+      0xFEFF,
+      0x20,
+    ]);
+    expect(hasVisuallyMeaningfulScratchpadContent(invisible), isFalse);
+    expect(
+      hasVisuallyMeaningfulScratchpadContent('$invisible note $invisible'),
+      isTrue,
+    );
+  });
+
   test(
     'trims trailing whitespace without changing indentation or line endings',
     () {

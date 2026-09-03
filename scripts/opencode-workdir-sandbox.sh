@@ -54,6 +54,7 @@ add_destination_path() {
   local base=""
   case "$path/" in
     "$HOME/"*) base="$HOME" ;;
+    /home/*) base=/home ;;
     /tmp/*) base=/tmp ;;
     /opt/*) base=/opt ;;
     *) return ;;
@@ -85,6 +86,12 @@ if [[ -n "$flutter_root" ]]; then
   add_destination_path "$flutter_root"
   args+=(--ro-bind "$flutter_root" "$flutter_root")
 fi
+for path in "${RUST_TOOL_BIN:-}" "${RUSTUP_HOME:-}"; do
+  [[ -n "$path" && "$path" == /* && -d "$path" ]] || continue
+  path="$(realpath "$path")"
+  add_destination_path "$path"
+  args+=(--ro-bind "$path" "$path")
+done
 
 # Photos shared through the phone are available to every conversation without
 # granting access to the rest of the host's temporary directory.

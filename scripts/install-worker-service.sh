@@ -43,6 +43,15 @@ if [[ ! -f "$github_config/hosts.yml" || ! -f "$github_config/gitconfig" ]]; the
   github_config=""
 fi
 
+git_config="$state_dir/gitconfig"
+{
+  if [[ -n "$github_config" ]]; then
+    printf '[include]\n\tpath = %s\n' "$github_config/gitconfig"
+  fi
+  printf '[user]\n\tname = Thomas Anderson\n\temail = noreply@github.com\n'
+} >"$git_config"
+chmod 600 "$git_config"
+
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 unit="$unit_dir/nostr-codex-server.service"
 update_script="$state_dir/bin/update-worker.sh"
@@ -72,14 +81,15 @@ Environment=AGENT_BACKEND=opencode
 Environment=AGENT_WORKDIR=$root
 Environment=OPENCODE_REAL_BIN=$opencode_bin
 Environment=OPENCODE_BIN=$root/scripts/opencode-workdir-sandbox.sh
-$(if [[ -n "$github_config" ]]; then printf 'Environment=GH_CONFIG_DIR=%s\nEnvironment=GIT_CONFIG_GLOBAL=%s/gitconfig\n' "$github_config" "$github_config"; fi)
+$(if [[ -n "$github_config" ]]; then printf 'Environment=GH_CONFIG_DIR=%s\n' "$github_config"; fi)
+Environment=GIT_CONFIG_GLOBAL=$git_config
 $(if [[ -n "$flutter_cache" ]]; then printf 'Environment=AGENT_WRITABLE_PATHS=%s\n' "$flutter_cache"; fi)
 Environment=OPENCODE_AGENT=build
 Environment=OPENCODE_SYSTEMD_SCOPE=1
 Environment=OPENCODE_MAX_CONCURRENT_RUNS=10
-Environment="GIT_AUTHOR_NAME=Nostr Codex"
+Environment="GIT_AUTHOR_NAME=Thomas Anderson"
 Environment=GIT_AUTHOR_EMAIL=noreply@github.com
-Environment="GIT_COMMITTER_NAME=Nostr Codex"
+Environment="GIT_COMMITTER_NAME=Thomas Anderson"
 Environment=GIT_COMMITTER_EMAIL=noreply@github.com
 Environment=AGENT_TIMEOUT_SECS=3600
 # Record the STUN server and reflexive candidate selected for FIPS traversal.
