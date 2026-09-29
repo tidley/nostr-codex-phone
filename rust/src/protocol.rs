@@ -321,6 +321,8 @@ pub struct WorkspaceRequest {
     pub folder_scope: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_task: Option<WorkspaceBoardTaskRequestPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,6 +330,26 @@ pub struct WorkspaceMentionPayload {
     pub kind: String,
     pub id: String,
     pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceBoardTaskRequestPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folder_scope: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_column: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,8 +370,48 @@ pub struct WorkspaceUpdate {
     pub conversation_agents: Vec<WorkspaceConversationAgentPayload>,
     #[serde(default)]
     pub conversation_preprompts: Vec<WorkspaceConversationPrepromptPayload>,
+    #[serde(default)]
+    pub board_tasks: Vec<WorkspaceBoardTaskPayload>,
+    #[serde(default)]
+    pub board_columns: Vec<crate::workspace::WorkspaceBoardColumn>,
+    #[serde(default)]
+    pub board_cards: Vec<crate::workspace::WorkspaceBoardCard>,
+    #[serde(default)]
+    pub board_timeline_entries: Vec<WorkspaceBoardTimelinePayload>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typing: Option<WorkspaceTypingPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceBoardTaskPayload {
+    pub id: String,
+    pub title: String,
+    pub conversation_key: String,
+    pub instruction: String,
+    #[serde(default)]
+    pub folder_scope: Vec<String>,
+    pub schedule: String,
+    pub state: String,
+    #[serde(default)]
+    pub board_column: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<i64>,
+    pub created_by: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceBoardTimelinePayload {
+    pub id: String,
+    pub task_id: String,
+    pub state: String,
+    pub detail: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,6 +508,8 @@ pub struct WorkspaceAgentPayload {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceConversationAgentPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     pub agent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
@@ -556,6 +620,10 @@ pub struct WorkspaceMessagePayload {
     pub reactions: Vec<WorkspaceReactionPayload>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work_history: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -1508,6 +1576,44 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
             Ok(())
         }
         "set_profile" => Ok(()),
+        "create_board_task" if valid_board_task_create_request(request.board_task.as_ref()) => {
+            Ok(())
+        }
+        "update_board_task" if valid_board_task_update_request(request.board_task.as_ref()) => {
+            Ok(())
+        }
+        "cancel_board_task"
+            if request
+                .board_task
+                .as_ref()
+                .and_then(|task| task.task_id.as_deref())
+                .is_some_and(|id| !id.trim().is_empty()) =>
+        {
+            Ok(())
+        }
+        "retry_board_task"
+            if request.board_task.as_ref().is_some_and(|task| {
+                task.task_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    && task.next_run_at.is_some()
+            }) =>
+        {
+            Ok(())
+        }
+        "move_board_task"
+            if request.board_task.as_ref().is_some_and(|task| {
+                task.task_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    && task
+                        .board_column
+                        .as_deref()
+                        .is_some_and(valid_board_task_column)
+            }) =>
+        {
+            Ok(())
+        }
         "rename_channel"
             if request
                 .channel_id
@@ -1553,7 +1659,7 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
             Ok(())
         }
         "list_agents" => Ok(()),
-        "reactivate_thread_agent"
+        "pick_up_thread_with_head" | "reactivate_thread_agent"
         | "clear_related_thread"
         | "complete_thread"
         | "reopen_thread"
@@ -1853,6 +1959,45 @@ fn validate_workspace_request(request: &WorkspaceRequest) -> Result<()> {
         return Err(anyhow!("workspace mentions are invalid"));
     }
     Ok(())
+}
+
+fn valid_board_task_create_request(task: Option<&WorkspaceBoardTaskRequestPayload>) -> bool {
+    valid_board_task_fields(task)
+}
+
+fn valid_board_task_update_request(task: Option<&WorkspaceBoardTaskRequestPayload>) -> bool {
+    task.and_then(|task| task.task_id.as_deref())
+        .is_some_and(|id| !id.trim().is_empty())
+        && valid_board_task_fields(task)
+}
+
+fn valid_board_task_fields(task: Option<&WorkspaceBoardTaskRequestPayload>) -> bool {
+    task.is_some_and(|task| {
+        task.title
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            && task
+                .conversation_key
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && task
+                .instruction
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            && task.schedule.as_deref().is_some_and(|schedule| {
+                matches!(
+                    schedule,
+                    "once" | "daily" | "weekdays" | "weekly" | "monthly"
+                )
+            })
+    })
+}
+
+fn valid_board_task_column(column: &str) -> bool {
+    matches!(
+        column,
+        "scheduled" | "queued" | "running" | "integrating" | "blocked" | "done"
+    )
 }
 
 fn validate_group_call_control(control: &GroupCallControl) -> Result<()> {
@@ -2269,6 +2414,38 @@ mod tests {
     }
 
     #[test]
+    fn parses_create_board_task_workspace_request() {
+        let request = parse_wire_message(
+            r#"{"workspace_request":{"action":"create_board_task","board_task":{"title":"Review open issues","conversation_key":"channel:engineering","instruction":"Review the open issues and report blockers.","folder_scope":["/work/phone"],"schedule":"daily"}}}"#,
+        )
+        .unwrap();
+
+        let WireMessage::WorkspaceRequest { workspace_request } = request else {
+            panic!("expected workspace request");
+        };
+        let task = workspace_request.board_task.unwrap();
+        assert_eq!(task.title.as_deref(), Some("Review open issues"));
+        assert_eq!(
+            task.conversation_key.as_deref(),
+            Some("channel:engineering")
+        );
+        assert_eq!(task.folder_scope, ["/work/phone"]);
+        assert_eq!(task.schedule.as_deref(), Some("daily"));
+    }
+
+    #[test]
+    fn parses_board_task_move_request() {
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"move_board_task","board_task":{"task_id":"task-1","board_column":"done"}}}"#,
+        )
+        .is_ok());
+        assert!(parse_wire_message(
+            r#"{"workspace_request":{"action":"move_board_task","board_task":{"task_id":"task-1","board_column":"unknown"}}}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn parses_direct_call_control_workspace_requests() {
         let parsed = parse_wire_message(
             r#"{"workspace_request":{"action":"call_invite","recipient_pubkey":"peer","call_id":"call_123"}}"#,
@@ -2408,6 +2585,24 @@ mod tests {
 
         assert_eq!(parsed.kind(), "workspace_update");
         assert_eq!(parsed.text(), "channel_created");
+        let WireMessage::WorkspaceUpdate { workspace_update } = parsed else {
+            panic!("expected workspace update");
+        };
+        assert!(workspace_update.board_tasks.is_empty());
+        assert!(workspace_update.board_timeline_entries.is_empty());
+    }
+
+    #[test]
+    fn serializes_workspace_update_board_snapshot() {
+        let update = parse_wire_message(
+            r#"{"workspace_update":{"action":"snapshot","board_tasks":[{"id":"task-1","title":"Review open issues","conversation_key":"channel:engineering","instruction":"Review the open issues and report blockers.","folder_scope":["/work/phone"],"schedule":"daily","state":"running","next_run_at":100,"created_by":"owner","created_at":10,"updated_at":20}],"board_timeline_entries":[{"id":"entry-1","task_id":"task-1","state":"running","detail":"Task started","created_at":20}]}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            update.to_json().unwrap(),
+            r#"{"workspace_update":{"action":"snapshot","agents":[],"board_cards":[],"board_columns":[],"board_tasks":[{"board_column":"","conversation_key":"channel:engineering","created_at":10,"created_by":"owner","folder_scope":["/work/phone"],"id":"task-1","instruction":"Review the open issues and report blockers.","next_run_at":100,"schedule":"daily","state":"running","title":"Review open issues","updated_at":20}],"board_timeline_entries":[{"created_at":20,"detail":"Task started","id":"entry-1","state":"running","task_id":"task-1"}],"channels":[],"conversation_agents":[],"conversation_preprompts":[],"members":[],"messages":[],"revision":0}}"#,
+        );
     }
 
     #[test]
@@ -2475,6 +2670,7 @@ mod tests {
 
     #[test]
     fn validates_thread_agent_reactivation_requests() {
+        assert!(parse_wire_message(r#"{"workspace_request":{"action":"pick_up_thread_with_head","channel_id":"channel-1","parent_id":"root-1"}}"#).is_ok());
         assert!(parse_wire_message(r#"{"workspace_request":{"action":"reactivate_thread_agent","channel_id":"channel-1","parent_id":"root-1"}}"#).is_ok());
         assert!(parse_wire_message(r#"{"workspace_request":{"action":"reactivate_thread_agent","channel_id":"channel-1","agent_id":"untrusted","parent_id":"root-1"}}"#).is_ok());
         assert!(parse_wire_message(

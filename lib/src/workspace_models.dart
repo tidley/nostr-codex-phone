@@ -544,6 +544,8 @@ class WorkspaceMessage {
     this.mentions = const [],
     this.reactions = const [],
     this.workHistory = const [],
+    this.editedAt,
+    this.deletedAt,
   });
   final String id;
   final String? channelId;
@@ -557,6 +559,8 @@ class WorkspaceMessage {
   final List<WorkspaceMention> mentions;
   final List<WorkspaceReaction> reactions;
   final List<String> workHistory;
+  final int? editedAt;
+  final int? deletedAt;
   final int createdAt;
 
   factory WorkspaceMessage.fromJson(Map<String, dynamic> json) =>
@@ -576,6 +580,8 @@ class WorkspaceMessage {
             .map((item) => item.toString())
             .where((item) => item.isNotEmpty)
             .toList(growable: false),
+        editedAt: (json['edited_at'] as num?)?.toInt(),
+        deletedAt: (json['deleted_at'] as num?)?.toInt(),
         createdAt: (json['created_at'] as num?)?.toInt() ?? 0,
       );
 
@@ -620,6 +626,8 @@ class WorkspaceMessage {
         )
         .toList(growable: false),
     'work_history': workHistory,
+    if (editedAt != null) 'edited_at': editedAt,
+    if (deletedAt != null) 'deleted_at': deletedAt,
     'created_at': createdAt,
   };
 }
@@ -793,6 +801,12 @@ class WorkspaceAgent {
   final int? scopeTaskCount;
   final int? scopeStartedAt;
 
+  String get displayLabel => switch (role) {
+    'Conversation worker' || 'Round-robin worker' => 'Agent',
+    'Task coordinator' || 'Round-robin coordinator' => 'Coordinator',
+    _ => name,
+  };
+
   factory WorkspaceAgent.fromJson(Map<String, dynamic> json) => WorkspaceAgent(
     id: json['id']?.toString() ?? '',
     name: json['name']?.toString() ?? '',
@@ -855,6 +869,161 @@ class WorkspaceAgent {
     if (scopeCpuUsageNsec != null) 'scope_cpu_usage_nsec': scopeCpuUsageNsec,
     if (scopeTaskCount != null) 'scope_task_count': scopeTaskCount,
     if (scopeStartedAt != null) 'scope_started_at': scopeStartedAt,
+  };
+}
+
+class WorkspaceBoardColumn {
+  WorkspaceBoardColumn.fromJson(Map<String, dynamic> json)
+    : id = json['id'] as String,
+      name = json['name'] as String,
+      rank = json['rank'] as int? ?? 0,
+      wipLimit = json['wip_limit'] as int?,
+      archivedAt = json['archived_at'] as int?;
+
+  final String id;
+  final String name;
+  final int rank;
+  final int? wipLimit;
+  final int? archivedAt;
+
+  Map<String, dynamic> toJson() => {
+    'id': id, 'name': name, 'rank': rank,
+    'wip_limit': wipLimit, 'archived_at': archivedAt,
+  };
+}
+
+class WorkspaceBoardCard {
+  WorkspaceBoardCard.fromJson(Map<String, dynamic> json)
+    : id = json['id'] as String,
+      title = json['title'] as String,
+      description = json['description'] as String? ?? '',
+      columnId = json['column_id'] as String,
+      rank = json['rank'] as int? ?? 0,
+      priority = json['priority'] as String? ?? 'none',
+      estimate = json['estimate'] as int?,
+      dueAt = json['due_at'] as int?,
+      createdBy = json['created_by'] as String? ?? '',
+      createdAt = json['created_at'] as int? ?? 0,
+      updatedAt = json['updated_at'] as int? ?? 0,
+      archivedAt = json['archived_at'] as int?,
+      sourceThreadId = json['source_thread_id'] as String?;
+
+  final String id, title, description, columnId, priority, createdBy;
+  final int rank, createdAt, updatedAt;
+  final int? estimate, dueAt, archivedAt;
+  final String? sourceThreadId;
+
+  Map<String, dynamic> toJson() => {
+    'id': id, 'title': title, 'description': description,
+    'column_id': columnId, 'rank': rank, 'priority': priority,
+    'estimate': estimate, 'due_at': dueAt, 'created_by': createdBy,
+    'created_at': createdAt, 'updated_at': updatedAt,
+    'archived_at': archivedAt, 'source_thread_id': sourceThreadId,
+  };
+}
+
+class WorkspaceBoardTask {
+  WorkspaceBoardTask({
+    required this.id,
+    required this.title,
+    required this.conversationKey,
+    required this.instruction,
+    required Iterable<String> folderScope,
+    required this.schedule,
+    required this.state,
+    String? boardColumn,
+    this.nextRunAt,
+    required this.createdBy,
+    required this.createdAt,
+    required this.updatedAt,
+    this.rootMessageId,
+    this.agentId,
+  }) : folderScope = List.unmodifiable(folderScope),
+       boardColumn = boardColumn ?? state;
+
+  final String id;
+  final String title;
+  final String conversationKey;
+  final String instruction;
+  final List<String> folderScope;
+  final String schedule;
+  final String state;
+  final String boardColumn;
+  final int? nextRunAt;
+  final String createdBy;
+  final int createdAt;
+  final int updatedAt;
+  final String? rootMessageId;
+  final String? agentId;
+
+  factory WorkspaceBoardTask.fromJson(Map<String, dynamic> json) =>
+      WorkspaceBoardTask(
+        id: json['id']?.toString().trim() ?? '',
+        title: json['title']?.toString().trim() ?? '',
+        conversationKey: json['conversation_key']?.toString().trim() ?? '',
+        instruction: json['instruction']?.toString() ?? '',
+        folderScope: (json['folder_scope'] as List? ?? const [])
+            .map((path) => path.toString().trim())
+            .where((path) => path.isNotEmpty),
+        schedule: json['schedule']?.toString().trim() ?? '',
+        state: json['state']?.toString().trim() ?? '',
+        boardColumn: json['board_column']?.toString().trim(),
+        nextRunAt: (json['next_run_at'] as num?)?.toInt(),
+        createdBy: json['created_by']?.toString().trim() ?? '',
+        createdAt: (json['created_at'] as num?)?.toInt() ?? 0,
+        updatedAt: (json['updated_at'] as num?)?.toInt() ?? 0,
+        rootMessageId: json['root_message_id']?.toString().trim(),
+        agentId: json['agent_id']?.toString().trim(),
+      );
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'title': title,
+    'conversation_key': conversationKey,
+    'instruction': instruction,
+    'folder_scope': folderScope,
+    'schedule': schedule,
+    'state': state,
+    'board_column': boardColumn,
+    if (nextRunAt != null) 'next_run_at': nextRunAt,
+    'created_by': createdBy,
+    'created_at': createdAt,
+    'updated_at': updatedAt,
+    if (rootMessageId != null) 'root_message_id': rootMessageId,
+    if (agentId != null) 'agent_id': agentId,
+  };
+}
+
+class WorkspaceBoardTimelineEntry {
+  const WorkspaceBoardTimelineEntry({
+    required this.id,
+    required this.taskId,
+    required this.state,
+    required this.detail,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String taskId;
+  final String state;
+  final String detail;
+  final int createdAt;
+
+  factory WorkspaceBoardTimelineEntry.fromJson(Map<String, dynamic> json) =>
+      WorkspaceBoardTimelineEntry(
+        id: json['id']?.toString().trim() ?? '',
+        taskId: json['task_id']?.toString().trim() ?? '',
+        state: json['state']?.toString().trim() ?? '',
+        detail: json['detail']?.toString() ?? '',
+        createdAt: (json['created_at'] as num?)?.toInt() ?? 0,
+      );
+
+  Map<String, Object> toJson() => {
+    'id': id,
+    'task_id': taskId,
+    'state': state,
+    'detail': detail,
+    'created_at': createdAt,
   };
 }
 
@@ -989,6 +1158,81 @@ class WorkspaceTyping {
       );
 }
 
+List<WorkspaceMention> workspaceAgentMentions(Iterable<WorkspaceAgent> agents) {
+  final entries = agents.toList(growable: false);
+  final counts = <String, int>{};
+  for (final agent in entries) {
+    counts.update(agent.displayLabel, (count) => count + 1, ifAbsent: () => 1);
+  }
+  final indexes = <String, int>{};
+  return entries
+      .map((agent) {
+        final label = agent.displayLabel;
+        final index = indexes.update(
+          label,
+          (value) => value + 1,
+          ifAbsent: () => 1,
+        );
+        return WorkspaceMention(
+          kind: 'agent',
+          id: agent.id,
+          label: counts[label] == 1 ? label : '$label $index',
+        );
+      })
+      .toList(growable: false);
+}
+
+List<WorkspaceMention> workspaceConversationMentions(
+  WorkspaceState workspace, {
+  String? channelId,
+  String? memberPubkey,
+  String? peerPubkey,
+  String? parentId,
+}) {
+  final memberships = workspace.conversationAgents.where((membership) {
+    if (channelId != null) return membership.channelId == channelId;
+    if (memberPubkey == null || peerPubkey == null) return false;
+    return membership.channelId == null &&
+        ((membership.memberPubkey == memberPubkey &&
+                membership.peerPubkey == peerPubkey) ||
+            (membership.memberPubkey == peerPubkey &&
+                membership.peerPubkey == memberPubkey));
+  }).toList();
+  final assignedAgentIds = memberships
+      .map((membership) => membership.agentId)
+      .toSet();
+  final agents = workspace.agents.where(
+    (agent) => assignedAgentIds.contains(agent.id),
+  );
+  return [
+    ...workspaceCoordinatorMentions(agents),
+    if (parentId != null)
+      for (final agent in agents)
+        if (agent.role != 'Task coordinator' &&
+            agent.role != 'Round-robin coordinator' &&
+            memberships.any(
+              (membership) =>
+                  membership.agentId == agent.id &&
+                  membership.parentId == parentId,
+            ))
+          WorkspaceMention(kind: 'agent', id: agent.id, label: 'ThreadAgent'),
+  ];
+}
+
+List<WorkspaceMention> workspaceCoordinatorMentions(
+  Iterable<WorkspaceAgent> agents,
+) => agents
+    .where(
+      (agent) =>
+          agent.role == 'Task coordinator' ||
+          agent.role == 'Round-robin coordinator',
+    )
+    .map(
+      (agent) =>
+          WorkspaceMention(kind: 'agent', id: agent.id, label: 'Coordinator'),
+    )
+    .toList(growable: false);
+
 class WorkspaceState {
   static const _maxMessagesPerConversation = 500;
   static const _typingStopGrace = Duration(seconds: 30);
@@ -1004,6 +1248,10 @@ class WorkspaceState {
   List<WorkspaceAgent> agents = [];
   List<WorkspaceConversationAgent> conversationAgents = [];
   List<WorkspaceConversationPreprompt> conversationPreprompts = [];
+  List<WorkspaceBoardTask> boardTasks = [];
+  List<WorkspaceBoardColumn> boardColumns = [];
+  List<WorkspaceBoardCard> boardCards = [];
+  List<WorkspaceBoardTimelineEntry> boardTimelineEntries = [];
   final Map<String, WorkspaceTyping> typing = {};
   final Map<String, _WorkspaceHistoryTransfer> _historyTransfers = {};
   int? historySince;
@@ -1020,6 +1268,10 @@ class WorkspaceState {
     agents = [];
     conversationAgents = [];
     conversationPreprompts = [];
+    boardTasks = [];
+    boardColumns = [];
+    boardCards = [];
+    boardTimelineEntries = [];
     typing.clear();
     _historyTransfers.clear();
     historySince = null;
@@ -1053,6 +1305,14 @@ class WorkspaceState {
         .toList(growable: false),
     'conversation_preprompts': conversationPreprompts
         .map((preprompt) => preprompt.toJson())
+        .toList(growable: false),
+    'board_tasks': boardTasks
+        .map((task) => task.toJson())
+        .toList(growable: false),
+    'board_columns': boardColumns.map((column) => column.toJson()).toList(),
+    'board_cards': boardCards.map((card) => card.toJson()).toList(),
+    'board_timeline_entries': boardTimelineEntries
+        .map((entry) => entry.toJson())
         .toList(growable: false),
   };
 
@@ -1118,6 +1378,10 @@ class WorkspaceState {
         'agents',
         'conversation_agents',
         'conversation_preprompts',
+        'board_tasks',
+        'board_columns',
+        'board_cards',
+        'board_timeline_entries',
       ]) {
         header[field] = [
           for (final chunk in chunks) ...(chunk[field] as List? ?? const []),
@@ -1141,6 +1405,7 @@ class WorkspaceState {
     final addedMessages = <WorkspaceMessage>[];
     final isSnapshot = data['action'] == 'snapshot';
     final isSnapshotHeader = data['action'] == 'snapshot_header';
+    final replacesBoard = isSnapshot || data['action'] == 'board_updated';
     final isPartialSnapshot =
         isSnapshot &&
         ((data['messages'] as List?)?.isEmpty ?? true) &&
@@ -1148,6 +1413,8 @@ class WorkspaceState {
     final hasAgentSnapshot = data['agents'] is List;
     final hasConversationAgentSnapshot = data['conversation_agents'] is List;
     final hasPrepromptSnapshot = data['conversation_preprompts'] is List;
+    final hasBoardTaskSnapshot = data['board_tasks'] is List;
+    final hasBoardTimelineSnapshot = data['board_timeline_entries'] is List;
     if (isSnapshot) {
       // Large snapshots arrive as an empty header followed by message chunks.
       // Keep visible rows until those chunks arrive, including local rows that
@@ -1194,6 +1461,10 @@ class WorkspaceState {
       }
       if (!isPartialSnapshot && hasPrepromptSnapshot) {
         conversationPreprompts = [];
+      }
+      if (!isPartialSnapshot && hasBoardTaskSnapshot) boardTasks = [];
+      if (!isPartialSnapshot && hasBoardTimelineSnapshot) {
+        boardTimelineEntries = [];
       }
       typing.clear();
     }
@@ -1276,6 +1547,24 @@ class WorkspaceState {
         data['action'] == 'workspace_default_model_updated') {
       conversationPreprompts = incomingPreprompts;
     }
+    if (replacesBoard && hasBoardTaskSnapshot && !isSnapshotHeader) {
+      boardTasks = _boardTasks(data['board_tasks']);
+    }
+    if (replacesBoard) {
+      if (data['board_columns'] case final List columns) {
+        boardColumns = columns.whereType<Map>().map((json) => WorkspaceBoardColumn.fromJson(Map<String, dynamic>.from(json))).toList()
+          ..sort((a, b) => a.rank.compareTo(b.rank));
+      }
+      if (data['board_cards'] case final List cards) {
+        boardCards = cards.whereType<Map>().map((json) => WorkspaceBoardCard.fromJson(Map<String, dynamic>.from(json))).toList()
+          ..sort((a, b) => a.rank.compareTo(b.rank));
+      }
+    }
+    if (replacesBoard && hasBoardTimelineSnapshot && !isSnapshotHeader) {
+      boardTimelineEntries = _boardTimelineEntries(
+        data['board_timeline_entries'],
+      );
+    }
     final incomingAgents = _agents(data['agents']);
     final replacesAgentDirectory =
         isSnapshot &&
@@ -1331,6 +1620,7 @@ class WorkspaceState {
       }
     }
     final incomingMessages = _messages(data['messages']);
+    final linkedBoardRoots = boardCards.map((card) => card.sourceThreadId).nonNulls.toSet();
     if (data['action'] == 'message_created') {
       for (final message in incomingMessages) {
         for (final entry in typing.entries.toList()) {
@@ -1352,9 +1642,11 @@ class WorkspaceState {
       final ordered = current.values.cast<WorkspaceMessage>().toList()
         ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
       if (ordered.length > _maxMessagesPerConversation) {
-        messages[key] = ordered.sublist(
-          ordered.length - _maxMessagesPerConversation,
-        );
+        final cutoff = ordered.length - _maxMessagesPerConversation;
+        messages[key] = [
+          ...ordered.take(cutoff).where((message) => linkedBoardRoots.contains(message.id)),
+          ...ordered.skip(cutoff),
+        ];
       } else {
         messages[key] = ordered;
       }
@@ -1693,6 +1985,28 @@ class WorkspaceState {
                 Map<String, dynamic>.from(item),
               ),
             )
+            .toList(growable: false)
+      : [];
+  static List<WorkspaceBoardTask> _boardTasks(Object? raw) => raw is List
+      ? raw
+            .whereType<Map>()
+            .map(
+              (item) =>
+                  WorkspaceBoardTask.fromJson(Map<String, dynamic>.from(item)),
+            )
+            .where((item) => item.id.isNotEmpty)
+            .toList(growable: false)
+      : [];
+  static List<WorkspaceBoardTimelineEntry> _boardTimelineEntries(Object? raw) =>
+      raw is List
+      ? raw
+            .whereType<Map>()
+            .map(
+              (item) => WorkspaceBoardTimelineEntry.fromJson(
+                Map<String, dynamic>.from(item),
+              ),
+            )
+            .where((item) => item.id.isNotEmpty && item.taskId.isNotEmpty)
             .toList(growable: false)
       : [];
 }

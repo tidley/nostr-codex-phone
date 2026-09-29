@@ -353,6 +353,21 @@ AppTheme _appThemeFromStorage(String? value) => switch (value) {
 };
 
 class _WorkspacePalette extends ThemeExtension<_WorkspacePalette> {
+  static const fallback = _WorkspacePalette(
+    background: Color(0xff0c1a1e),
+    sidebar: Color(0xff142321),
+    content: Color(0xff0c1a1e),
+    composer: Color(0xff1e2d29),
+    selected: Color(0xff1d6c5a),
+    label: Color(0xffb6e2d4),
+    brand: Color(0xff65d8b1),
+    brandForeground: Color(0xff082019),
+    monochrome: false,
+  );
+
+  static _WorkspacePalette of(BuildContext context) =>
+      Theme.of(context).extension<_WorkspacePalette>() ?? fallback;
+
   const _WorkspacePalette({
     required this.background,
     required this.sidebar,

@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -34,7 +34,7 @@ use rust_lib_nostr_codex_phone::codex::{
     ensure_opencode_session, is_codex_usage_limit_error, list_opencode_models,
     list_opencode_sessions, new_opencode_session, run_codex,
     run_codex_session_with_cancel_and_events, AgentBackend, CodexCancelToken, CodexConfig,
-    CodexRunResult, OpenCodeModel, OpenCodeSessionInfo,
+    CodexRunResult, CodexTokenUsage, OpenCodeModel, OpenCodeSessionInfo, OpenCodeWorkspaceAccess,
 };
 use rust_lib_nostr_codex_phone::invite::InviteStore;
 use rust_lib_nostr_codex_phone::nostr_client::{
@@ -54,7 +54,7 @@ use rust_lib_nostr_codex_phone::transcribe::{
     DownloadedAudio, TranscribeConfig,
 };
 use rust_lib_nostr_codex_phone::workspace::{
-    WorkspaceAgent, WorkspaceAgentOpenCodeProfile, WorkspaceConversationAgent,
+    WorkspaceAgent, WorkspaceAgentOpenCodeProfile, WorkspaceBoardTaskWorkstream, WorkspaceConversationAgent,
     WorkspaceConversationPreprompt, WorkspaceMessage, WorkspaceStore,
 };
 use serde::{Deserialize, Serialize};
@@ -126,6 +126,7 @@ const SYSTEM_STATUS_HISTORY_MAX_BYTES: usize = 10 * 1024 * 1024;
 const SYSTEM_STATUS_SAMPLE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const AGENT_SCOPE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const AGENT_SCOPE_STUCK_AFTER: Duration = Duration::from_secs(15 * 60);
+const BOARD_SCHEDULER_INTERVAL: Duration = Duration::from_secs(30);
 // SHA-256 input is the UTF-8 bytes of this domain, a zero byte, then the pairing secret.
 const PAIRING_CONFIRMATION_DOMAIN: &str = "nostr-codex/first-owner-confirmation/v1";
 
@@ -423,7 +424,164 @@ enum WorkspaceConversation {
     Direct(String, String),
 }
 
+type ActiveTurnKey = (String, WorkspaceConversation);
+#[derive(Clone)]
+struct ActiveTurn {
+    cancel_token: CodexCancelToken,
+    parent_id: Option<String>,
+    // Retain verified tool evidence across continuations until reply persistence.
+    verified_git_commit: bool,
+}
+
+impl ActiveTurn {
+    fn new() -> Self {
+        Self {
+            cancel_token: CodexCancelToken::new(),
+            parent_id: None,
+            verified_git_commit: false,
+        }
+    }
+}
+
+type ActiveTurns = Arc<Mutex<HashMap<ActiveTurnKey, ActiveTurn>>>;
+type NativeTurnKey = (WorkspaceConversation, String);
+
+fn workspace_conversation(
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+) -> Option<WorkspaceConversation> {
+    if let Some(channel_id) = channel_id.filter(|channel_id| !channel_id.trim().is_empty()) {
+        return Some(WorkspaceConversation::Channel(channel_id.to_string()));
+    }
+    let mut participants = [member?.trim().to_string(), peer?.trim().to_string()];
+    if participants.iter().any(String::is_empty) {
+        return None;
+    }
+    participants.sort();
+    Some(WorkspaceConversation::Direct(
+        participants[0].clone(),
+        participants[1].clone(),
+    ))
+}
+
+fn active_turn_key(agent_id: &str, conversation: &WorkspaceConversation) -> ActiveTurnKey {
+    (agent_id.to_string(), conversation.clone())
+}
+
+fn native_turn_key(conversation: &WorkspaceConversation, root_id: &str) -> NativeTurnKey {
+    (conversation.clone(), root_id.to_string())
+}
+
+fn native_turn_agent_id(root_id: &str) -> String {
+    format!("native-opencode:{root_id}")
+}
+
+fn native_turn_root_id(agent_id: &str) -> Option<&str> {
+    agent_id.strip_prefix("native-opencode:")
+}
+
+fn native_typing_agent(id: String) -> WorkspaceAgent {
+    WorkspaceAgent {
+        id,
+        name: "Agent".to_string(),
+        role: "Conversation session".to_string(),
+        traits: String::new(),
+        skills: vec![],
+        preset: None,
+        opencode_provider_id: None,
+        opencode_provider_name: None,
+        opencode_model_id: None,
+        opencode_model_name: None,
+        opencode_agent: None,
+        workdir: None,
+        restart_on_failure: true,
+        opencode_session_id: None,
+        session_status: "ready".to_string(),
+        session_error: None,
+        session_context: None,
+        instance_id: String::new(),
+        created_by: String::new(),
+        created_at: 0,
+        initialized_at: None,
+        input_tokens: None,
+        output_tokens: None,
+    }
+}
+
+fn active_turn_key_for_abort(
+    agent_id: &str,
+    conversation: Option<WorkspaceConversation>,
+    active_turns: &HashMap<ActiveTurnKey, ActiveTurn>,
+) -> Result<Option<ActiveTurnKey>> {
+    let mut matching = active_turns
+        .keys()
+        .filter(|(active_agent_id, active_conversation)| {
+            (active_agent_id == agent_id
+                || (agent_id == "native-opencode"
+                    && active_agent_id.starts_with("native-opencode:")))
+                && conversation
+                    .as_ref()
+                    .is_none_or(|conversation| conversation == active_conversation)
+        });
+    let Some(active_turn_key) = matching.next() else {
+        return Ok(None);
+    };
+    if matching.next().is_some() {
+        bail!("abort request must identify a conversation when multiple tasks are active");
+    }
+    Ok(Some(active_turn_key.clone()))
+}
+
+fn cancel_active_turn_for_abort(
+    agent_id: &str,
+    conversation: Option<WorkspaceConversation>,
+    active_turns: &mut HashMap<ActiveTurnKey, ActiveTurn>,
+) -> Result<Option<(ActiveTurnKey, ActiveTurn)>> {
+    let Some(key) = active_turn_key_for_abort(agent_id, conversation, active_turns)? else {
+        return Ok(None);
+    };
+    let active_turn = active_turns
+        .get(&key)
+        .cloned()
+        .expect("selected active turn is present");
+    active_turn.cancel_token.cancel();
+    Ok(Some((key, active_turn)))
+}
+
+fn active_turn_token(
+    active_turns: &mut HashMap<ActiveTurnKey, ActiveTurn>,
+    key: ActiveTurnKey,
+    parent_id: Option<&str>,
+) -> CodexCancelToken {
+    let active_turn = active_turns.entry(key).or_insert_with(ActiveTurn::new);
+    if parent_id.is_some() {
+        active_turn.parent_id = parent_id.map(str::to_string);
+    }
+    active_turn.cancel_token.clone()
+}
+
+fn ensure_active_turn_not_cancelled(
+    active_turns: &HashMap<ActiveTurnKey, ActiveTurn>,
+    key: &ActiveTurnKey,
+) -> Result<()> {
+    if active_turns
+        .get(key)
+        .is_some_and(|active_turn| active_turn.cancel_token.is_cancelled())
+    {
+        bail!("workspace task cancelled");
+    }
+    Ok(())
+}
+
 impl WorkspaceConversation {
+    fn opencode_server_scope(&self) -> String {
+        match self {
+            Self::Channel(channel_id) => format!("channel:{channel_id}"),
+            Self::Direct(member, peer) => format!("direct:{member}:{peer}"),
+        }
+    }
+
     fn from_message(message: &WorkspaceMessage) -> Option<Self> {
         match (&message.channel_id, &message.recipient_pubkey) {
             (Some(channel_id), None) => Some(Self::Channel(channel_id.clone())),
@@ -448,12 +606,59 @@ fn workspace_agent_job_matches_trigger(
         && WorkspaceConversation::from_message(message).as_ref() == Some(conversation)
 }
 
+fn workspace_agent_job_matches_queued_agent_trigger(
+    message: &WorkspaceMessage,
+    conversation: &WorkspaceConversation,
+    agent_id: &str,
+) -> bool {
+    (WorkspaceConversation::from_message(message).as_ref() == Some(conversation)
+        || matches!(
+            (conversation, message.recipient_pubkey.as_deref()),
+            (WorkspaceConversation::Direct(member, peer), Some(recipient))
+                if message.sender_pubkey.starts_with("agent:")
+                    && (recipient == member || recipient == peer)
+        ))
+        && (!message.sender_pubkey.starts_with("agent:")
+            || conversation_agent_is_targeted(agent_id, &message.mentions))
+}
+
+fn workspace_thread_root_is_deleted(
+    workspace: &WorkspaceStore,
+    message: &WorkspaceMessage,
+) -> Result<bool> {
+    Ok(message
+        .parent_id
+        .as_deref()
+        .map(|root_id| {
+            workspace
+                .message_by_id(root_id)
+                .map(|root| root.is_some_and(|root| root.deleted_at.is_some()))
+        })
+        .transpose()?
+        .unwrap_or(false))
+}
+
 struct WorkspaceAgentJob {
     conversation: WorkspaceConversation,
     trigger_message_id: String,
     ephemeral_body: Option<String>,
     mentions: Vec<WorkspaceMentionPayload>,
     reply_parent_id: Option<String>,
+    handoff_outbox: Option<(String, String)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct WorkspaceAgentHandoff {
+    conversation: WorkspaceConversation,
+    persisted_reply_id: String,
+    agent_id: String,
+}
+
+struct BoardIntegrationOutcome {
+    integration_id: String,
+    workstream: WorkspaceBoardTaskWorkstream,
+    conversation: WorkspaceConversation,
+    result: Result<String, String>,
 }
 
 #[derive(Clone)]
@@ -466,12 +671,42 @@ struct WorkspaceAgentThreadCheckpoint {
 struct WorkspaceAgentQueues {
     senders: HashMap<String, mpsc::UnboundedSender<WorkspaceAgentJob>>,
     native_senders: HashMap<WorkspaceConversation, mpsc::UnboundedSender<String>>,
-    active_turns: Arc<Mutex<HashMap<String, CodexCancelToken>>>,
+    board_integration_results: mpsc::UnboundedReceiver<BoardIntegrationOutcome>,
+    board_integration_sender: mpsc::UnboundedSender<BoardIntegrationOutcome>,
+    handoffs: mpsc::UnboundedReceiver<WorkspaceAgentHandoff>,
+    handoff_sender: mpsc::UnboundedSender<WorkspaceAgentHandoff>,
+    handoff_claims: Arc<std::sync::Mutex<HashSet<(String, String)>>>,
+    writable_turn_locks: WritableTurnLocks,
+    active_turns: ActiveTurns,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
     outbound: WorkspaceOutbound,
     codex_config: CodexConfig,
     audio_config: AudioConfig,
+}
+
+type WritableTurnLocks = Arc<Mutex<HashMap<WorkspaceConversation, Arc<Mutex<()>>>>>;
+
+async fn writable_turn_lock(
+    locks: &WritableTurnLocks,
+    conversation: &WorkspaceConversation,
+) -> Arc<Mutex<()>> {
+    locks
+        .lock()
+        .await
+        .entry(conversation.clone())
+        .or_default()
+        .clone()
+}
+
+async fn writable_turn_guard(
+    locks: &WritableTurnLocks,
+    conversation: &WorkspaceConversation,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    writable_turn_lock(locks, conversation)
+        .await
+        .lock_owned()
+        .await
 }
 
 impl WorkspaceAgentQueues {
@@ -482,6 +717,8 @@ impl WorkspaceAgentQueues {
         codex_config: CodexConfig,
         audio_config: AudioConfig,
     ) -> Self {
+        let (board_integration_sender, board_integration_results) = mpsc::unbounded_channel();
+        let (handoff_sender, handoffs) = mpsc::unbounded_channel();
         Self {
             senders: HashMap::new(),
             native_senders: HashMap::new(),
@@ -491,6 +728,12 @@ impl WorkspaceAgentQueues {
             outbound,
             codex_config,
             audio_config,
+            board_integration_results,
+            board_integration_sender,
+            handoffs,
+            handoff_sender,
+            handoff_claims: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            writable_turn_locks: Arc::default(),
         }
     }
 
@@ -499,7 +742,7 @@ impl WorkspaceAgentQueues {
         agent_id: String,
         conversation: WorkspaceConversation,
         trigger_message_id: String,
-    ) {
+    ) -> bool {
         self.enqueue_job(
             agent_id,
             WorkspaceAgentJob {
@@ -508,11 +751,12 @@ impl WorkspaceAgentQueues {
                 ephemeral_body: None,
                 mentions: vec![],
                 reply_parent_id: None,
+                handoff_outbox: None,
             },
-        );
+        )
     }
 
-    fn enqueue_job(&mut self, agent_id: String, job: WorkspaceAgentJob) {
+    fn enqueue_job(&mut self, agent_id: String, job: WorkspaceAgentJob) -> bool {
         let sender = self.senders.entry(agent_id.clone()).or_insert_with(|| {
             // A mentioned message is durable in the workspace store. Do not lose its
             // turn merely because an agent is still working through earlier messages.
@@ -526,11 +770,44 @@ impl WorkspaceAgentQueues {
                 self.outbound.clone(),
                 self.codex_config.clone(),
                 self.audio_config.clone(),
+                self.handoff_sender.clone(),
+                Arc::clone(&self.writable_turn_locks),
+                Arc::clone(&self.handoff_claims),
             ));
             sender
         });
         if let Err(err) = sender.send(job) {
             warn!(agent = %agent_id, trigger = %err.0.trigger_message_id, "workspace agent queue stopped; dropping turn");
+            return false;
+        }
+        true
+    }
+
+    fn enqueue_handoff(&mut self, handoff: WorkspaceAgentHandoff) -> bool {
+        let WorkspaceAgentHandoff {
+            conversation,
+            persisted_reply_id,
+            agent_id,
+        } = handoff;
+        let claim = (persisted_reply_id.clone(), agent_id.clone());
+        if !claim_workspace_agent_handoff(&mut self.handoff_claims.lock().unwrap(), &claim) {
+            return false;
+        }
+        if self.enqueue_job(
+            agent_id.clone(),
+            WorkspaceAgentJob {
+                conversation,
+                trigger_message_id: persisted_reply_id.clone(),
+                ephemeral_body: None,
+                mentions: vec![],
+                reply_parent_id: None,
+                handoff_outbox: Some((persisted_reply_id, agent_id)),
+            },
+        ) {
+            true
+        } else {
+            release_workspace_agent_handoff(&mut self.handoff_claims.lock().unwrap(), &claim);
+            false
         }
     }
 
@@ -556,6 +833,7 @@ impl WorkspaceAgentQueues {
             self.outbound.clone(),
             self.codex_config.clone(),
             self.audio_config.clone(),
+            Arc::clone(&self.writable_turn_locks),
         ));
         self.native_senders.insert(conversation.clone(), sender.clone());
 
@@ -1447,8 +1725,96 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         start_agent_scope_metrics_collector(config.control.clone());
     }
 
+    for turn in config.workspace.pending_thread_agent_turns()? {
+        let Some(message) = config.workspace.message_by_id(&turn.parent_id)? else {
+            continue;
+        };
+        let Some(conversation) = WorkspaceConversation::from_message(&message) else {
+            continue;
+        };
+        workspace_agent_queues.enqueue(turn.agent_id, conversation, turn.parent_id);
+    }
+    for handoff in workspace_agent_handoffs_for_recovery(&config.workspace)? {
+        submit_workspace_agent_handoff(&config.workspace, &mut workspace_agent_queues, handoff)?;
+    }
+    let mut handoff_ticks = interval(Duration::from_secs(5));
+    handoff_ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    handoff_ticks.tick().await;
+    let mut board_ticks = interval(BOARD_SCHEDULER_INTERVAL);
+    board_ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    config.workspace.recover_board_integrations()?;
+    config.workspace.recover_board_task_workstreams()?;
+    requeue_board_task_workstreams(&config.workspace, &mut workspace_agent_queues)?;
+    schedule_due_board_tasks(
+        &config.workspace,
+        config.messenger.as_ref(),
+        &workspace_outbound,
+        &mut workspace_agent_queues,
+    )
+    .await?;
+    consume_board_integrations(
+        &config.workspace,
+        config.messenger.as_ref(),
+        &workspace_outbound,
+        &mut workspace_agent_queues,
+    )
+    .await?;
+
     loop {
         let message = tokio::select! {
+            _ = handoff_ticks.tick() => {
+                for handoff in workspace_agent_handoffs_for_retry(&config.workspace)? {
+                    submit_workspace_agent_handoff(&config.workspace, &mut workspace_agent_queues, handoff)?;
+                }
+                continue;
+            }
+            handoff = workspace_agent_queues.handoffs.recv() => {
+                if let Some(handoff) = handoff {
+                    if let Err(err) = submit_workspace_agent_handoff(
+                        &config.workspace,
+                        &mut workspace_agent_queues,
+                        handoff,
+                    ) {
+                        warn!("workspace agent handoff submission failed: {err:#}");
+                    }
+                }
+                continue;
+            }
+
+            _ = board_ticks.tick() => {
+                if let Err(err) = schedule_due_board_tasks(
+                    &config.workspace,
+                    config.messenger.as_ref(),
+                    &workspace_outbound,
+                    &mut workspace_agent_queues,
+                ).await {
+                    warn!("board scheduler failed: {err:#}");
+                }
+                if let Err(err) = consume_board_integrations(
+                    &config.workspace,
+                    config.messenger.as_ref(),
+                    &workspace_outbound,
+                    &mut workspace_agent_queues,
+                ).await {
+                    warn!("board integration consumer failed: {err:#}");
+                }
+                continue;
+            }
+            outcome = workspace_agent_queues.board_integration_results.recv() => {
+                if let Some(outcome) = outcome {
+                    if let Err(err) = finish_board_integration_outcome(
+                        &config.workspace,
+                        config.messenger.as_ref(),
+                        &workspace_outbound,
+                        &mut workspace_agent_queues,
+                        outcome,
+                    ).await {
+                        warn!("board integration completion failed: {err:#}");
+                    }
+                }
+                continue;
+            }
+
             message = config.messenger.next_message(Duration::from_secs(3600)) => match message {
                 Ok(message) => message,
                 Err(err) => {
@@ -1518,6 +1884,10 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                         agents: vec![],
                         conversation_agents: vec![],
                         conversation_preprompts: vec![],
+                        board_tasks: vec![],
+                        board_timeline_entries: vec![],
+                        board_columns: vec![],
+                        board_cards: vec![],
                         typing: None,
                     };
                     if let Err(err) = broadcast_workspace_update(
@@ -1798,6 +2168,34 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     }
 }
 
+fn requeue_board_task_workstreams(
+    workspace: &WorkspaceStore,
+    queues: &mut WorkspaceAgentQueues,
+) -> Result<()> {
+    for task in workspace
+        .board_tasks()?
+        .into_iter()
+        .filter(|task| task.state == "queued")
+    {
+        let Some(workstream) = workspace.board_task_workstream(&task.id)? else {
+            continue;
+        };
+        let (channel, direct) =
+            board_task_target(workspace, &task.conversation_key, &task.folder_scope)?;
+        let conversation = match (channel, direct) {
+            (Some(channel), None) => WorkspaceConversation::Channel(channel),
+            (None, Some((member, peer))) => WorkspaceConversation::Direct(member, peer),
+            _ => unreachable!(),
+        };
+        queues.enqueue(
+            workstream.agent_id,
+            conversation,
+            workstream.root_message_id,
+        );
+    }
+    Ok(())
+}
+
 fn start_system_status_collector(
     history_path: PathBuf,
     workdir: PathBuf,
@@ -1961,9 +2359,31 @@ async fn queue_workspace_update(
     recipients: impl IntoIterator<Item = String>,
     update: &WorkspaceUpdate,
 ) -> Result<()> {
-    let payload = WireMessage::workspace_update(update.clone()).to_json()?;
+    let mut update = update.clone();
+    let mut board_changed = false;
+    if update.action == "message_created" {
+        for payload in &update.messages {
+            if let Some(message) = workspace.message_by_id(&payload.id)? {
+                board_changed |= sync_thread_card_after_message(workspace, &message)?;
+            }
+        }
+        update.revision = workspace.revision()?;
+    }
     for recipient in recipients {
+        let payload = WireMessage::workspace_update(board_update_for_member(workspace, &update, &recipient)?).to_json()?;
         workspace.queue_notification(&recipient, &payload)?;
+    }
+    if board_changed {
+        queue_board_update(workspace)?;
+    }
+    Ok(())
+}
+
+fn queue_board_update(workspace: &WorkspaceStore) -> Result<()> {
+    let update = board_workspace_update(workspace)?;
+    for member in workspace.members()? {
+        let update = board_update_for_member(workspace, &update, &member.pubkey)?;
+        workspace.queue_notification(&member.pubkey, &WireMessage::workspace_update(update).to_json()?)?;
     }
     Ok(())
 }
@@ -1974,7 +2394,7 @@ async fn flush_workspace_notification_outbox(
     outbound: &WorkspaceOutbound,
 ) {
     for notification in workspace.pending_notifications().unwrap_or_default() {
-        let Ok(wire) = parse_wire_message(&notification.payload) else {
+        let Ok(mut wire) = parse_wire_message(&notification.payload) else {
             warn!(
                 id = notification.id,
                 "discarding malformed workspace notification outbox entry"
@@ -1982,6 +2402,15 @@ async fn flush_workspace_notification_outbox(
             let _ = workspace.delivered_notification(notification.id);
             continue;
         };
+        if let WireMessage::WorkspaceUpdate { workspace_update } = &mut wire {
+            match board_update_for_member(workspace, workspace_update, &notification.recipient) {
+                Ok(filtered) => *workspace_update = filtered,
+                Err(error) => {
+                    warn!("cannot authorize queued board update: {error:#}");
+                    continue;
+                }
+            }
+        }
         let mut delivered = false;
         for attempt in 0..3 {
             match outbound
@@ -2177,10 +2606,431 @@ fn workspace_action_requires_admin(action: &str) -> bool {
             | "add_conversation_agent"
             | "remove_conversation_agent"
             | "reactivate_thread_agent"
-             | "set_default_agent_prompt"
-             | "set_default_model"
+            | "set_default_agent_prompt"
+            | "set_default_model"
             | "system_status"
+            | "create_board_task"
+            | "update_board_task"
+            | "cancel_board_task"
+            | "retry_board_task"
+            | "set_conversation_preprompt"
     )
+}
+
+fn board_action_is_mutation(action: &str) -> bool {
+    matches!(
+        action,
+        "create_board_task"
+            | "update_board_task"
+            | "cancel_board_task"
+            | "retry_board_task"
+            | "move_board_task"
+    )
+}
+
+#[cfg(test)]
+fn board_task_can_start(busy_conversations: &HashSet<String>, conversation_key: &str) -> bool {
+    !busy_conversations.contains(conversation_key)
+}
+
+fn board_workspace_update(workspace: &WorkspaceStore) -> Result<WorkspaceUpdate> {
+    Ok(WorkspaceUpdate {
+        action: "board_updated".to_string(),
+        revision: workspace.revision()?,
+        channels: vec![],
+        members: vec![],
+        messages: vec![],
+        agents: vec![],
+        conversation_agents: vec![],
+        conversation_preprompts: vec![],
+        board_tasks: workspace
+            .board_tasks()?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        board_timeline_entries: workspace
+            .board_timeline_entries()?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        board_columns: workspace.board_columns()?,
+        board_cards: workspace.board_cards()?,
+        typing: None,
+    })
+}
+
+fn board_update_for_member(
+    workspace: &WorkspaceStore,
+    update: &WorkspaceUpdate,
+    member: &str,
+) -> Result<WorkspaceUpdate> {
+    let mut update = update.clone();
+    let mut cards = Vec::new();
+    for card in update.board_cards {
+        if workspace.can_read_board_card(member, &card)? {
+            cards.push(card);
+        }
+    }
+    update.board_cards = cards;
+    if update.action == "board_updated" {
+        // Restore accessible roots that may have left the client's cache.
+        update.messages.clear();
+        for card in &update.board_cards {
+            if let Some(root_id) = card.source_thread_id.as_deref() {
+                if let Some(root) = workspace.message_by_id(root_id)? {
+                    update.messages.push(message_payload(root));
+                }
+            }
+        }
+    }
+    Ok(update)
+}
+
+fn board_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn finish_board_turn(workspace: &WorkspaceStore, task_id: &str, outcome: Result<()>) -> Result<()> {
+    match outcome {
+        Ok(()) => workspace.complete_board_task(task_id, board_now()),
+        Err(error) => workspace.block_board_task(task_id, &format!("Task failed: {error:#}")),
+    }
+}
+
+fn board_proposal_is_ready(response: &str) -> bool {
+    response
+        .lines()
+        .any(|line| line.trim() == "[[PROPOSAL_READY]]")
+}
+
+fn board_task_target(
+    workspace: &WorkspaceStore,
+    conversation_key: &str,
+    folder_scope: &[String],
+) -> Result<(Option<String>, Option<(String, String)>)> {
+    let (channel, direct, allowed_scope) =
+        if let Some(channel_id) = conversation_key.strip_prefix("channel:") {
+            if !workspace
+                .channels()?
+                .iter()
+                .any(|channel| channel.id == channel_id)
+            {
+                bail!("board task target channel does not exist");
+            }
+            (
+                Some(channel_id.to_string()),
+                None,
+                workspace.conversation_folder_scope(Some(channel_id), None, None)?,
+            )
+        } else if let Some(direct) = conversation_key.strip_prefix("direct:") {
+            let (one, two) = direct
+                .split_once(':')
+                .context("board task direct conversation is invalid")?;
+            if one.is_empty()
+                || two.is_empty()
+                || !workspace.is_member(one)?
+                || !workspace.is_member(two)?
+            {
+                bail!("board task direct conversation is invalid");
+            }
+            let mut participants = [one.to_string(), two.to_string()];
+            participants.sort();
+            (
+                None,
+                Some((participants[0].clone(), participants[1].clone())),
+                workspace.conversation_folder_scope(
+                    None,
+                    Some(&participants[0]),
+                    Some(&participants[1]),
+                )?,
+            )
+        } else {
+            bail!("board task conversation must be `channel:<id>` or `direct:<member>:<peer>`");
+        };
+    if folder_scope.is_empty() || allowed_scope.is_empty() {
+        bail!("board task scope is empty or its conversation has no allowed scope");
+    }
+    for folder in folder_scope {
+        let canonical = PathBuf::from(folder)
+            .canonicalize()
+            .with_context(|| format!("board task scope `{folder}` is not accessible"))?;
+        if !canonical.is_dir()
+            || !allowed_scope
+                .iter()
+                .any(|allowed| canonical.starts_with(allowed))
+        {
+            bail!("board task scope is outside the conversation scope");
+        }
+    }
+    Ok((channel, direct))
+}
+
+fn head_integration_config(config: &CodexConfig, folder_scope: &[String]) -> Result<CodexConfig> {
+    let mut config = config.clone();
+    config.workspace_access = OpenCodeWorkspaceAccess::ReadWrite;
+    config.working_dir = PathBuf::from(
+        folder_scope
+            .first()
+            .context("board task has no validated folder scope")?,
+    );
+    Ok(config)
+}
+
+fn conversation_execution_config(config: &CodexConfig, folder_scope: &[String]) -> CodexConfig {
+    let mut config = config.clone();
+    config.workspace_access = OpenCodeWorkspaceAccess::ReadWrite;
+    if let Some(folder) = folder_scope.first() {
+        config.working_dir = PathBuf::from(folder);
+    }
+    config
+}
+
+fn conversation_agent_execution_config(
+    config: &CodexConfig,
+    folder_scope: &[String],
+    is_coordinator: bool,
+) -> CodexConfig {
+    let mut config = conversation_execution_config(config, folder_scope);
+    if !is_coordinator {
+        config.workspace_access = OpenCodeWorkspaceAccess::ReadOnly;
+    }
+    config
+}
+
+async fn create_board_task_workstream(
+    workspace: &WorkspaceStore,
+    codex_config: &CodexConfig,
+    created_by: &str,
+    task: &rust_lib_nostr_codex_phone::workspace::WorkspaceBoardTask,
+    conversation_key: &str,
+    folder_scope: &[String],
+) -> Result<()> {
+    if workspace.board_task_workstream(&task.id)?.is_some() {
+        return Ok(());
+    }
+    let (channel, direct) = board_task_target(workspace, conversation_key, folder_scope)?;
+    let mut config = codex_config.clone();
+    config.workspace_access = OpenCodeWorkspaceAccess::ReadOnly;
+    if let Some(folder) = folder_scope.first() {
+        config.working_dir = PathBuf::from(folder);
+    }
+    // Provision before publishing a root. The remaining synchronous database
+    // steps compensate their own partial records on error.
+    let (session_id, status, session_error) = provision_workspace_agent_session(&config).await;
+    let root = match (&channel, &direct) {
+        (Some(channel_id), None) => workspace.add_channel_message_with_main(
+            created_by,
+            channel_id,
+            &task.instruction,
+            &[],
+            &[],
+            None,
+            false,
+        )?,
+        (None, Some((member, peer))) => {
+            let recipient = direct_task_root_recipient(created_by, member, peer)?;
+            workspace.add_direct_message_with_main(
+                created_by,
+                recipient,
+                &task.instruction,
+                &[],
+                &[],
+                None,
+                false,
+            )?
+        }
+        _ => unreachable!(),
+    };
+    let agent = match workspace.create_agent_with_profile(
+        &format!("Task {}", task.id),
+        "Board task worker",
+        "Research and propose work in this task thread. You have read-only repository access. Do not apply changes.",
+        &[], None,
+        WorkspaceAgentOpenCodeProfile { workdir: Some(config.working_dir.to_string_lossy().to_string()), restart_on_failure: true, ..Default::default() },
+        session_id.as_deref(), &status, session_error.as_deref(), created_by,
+    ) {
+        Ok(agent) => agent,
+        Err(error) => {
+            let _ = workspace.delete_message(created_by, &root.id);
+            return Err(error);
+        }
+    };
+    if let Err(error) = workspace.add_conversation_agent(
+        &agent.id,
+        channel.as_deref(),
+        direct.as_ref().map(|(member, _)| member.as_str()),
+        direct.as_ref().map(|(_, peer)| peer.as_str()),
+        folder_scope,
+    ) {
+        let _ = workspace.delete_agent(&agent.id);
+        let _ = workspace.delete_message(created_by, &root.id);
+        return Err(error);
+    }
+    if let Err(error) = workspace.link_board_task_workstream(&task.id, &root.id, &agent.id) {
+        let _ = workspace.delete_agent(&agent.id);
+        let _ = workspace.delete_message(created_by, &root.id);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn direct_task_root_recipient<'a>(
+    created_by: &str,
+    member: &'a str,
+    peer: &'a str,
+) -> Result<&'a str> {
+    if created_by == member {
+        Ok(peer)
+    } else if created_by == peer {
+        Ok(member)
+    } else {
+        bail!("board task creator must belong to its direct conversation")
+    }
+}
+
+async fn schedule_due_board_tasks(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
+    queues: &mut WorkspaceAgentQueues,
+) -> Result<()> {
+    let now = board_now();
+    // Upgrade pre-workstream board records lazily at scheduler startup. This
+    // preserves their configured conversation and scope without replaying a
+    // native chat turn.
+    for task in workspace.board_tasks()? {
+        if workspace.board_task_workstream(&task.id)?.is_none() {
+            if let Err(error) = create_board_task_workstream(
+                workspace,
+                &queues.codex_config,
+                &task.created_by,
+                &task,
+                &task.conversation_key,
+                &task.folder_scope,
+            )
+            .await
+            {
+                workspace.block_scheduled_board_task(
+                    &task.id,
+                    &format!("Task blocked: unable to create task thread: {error:#}"),
+                )?;
+                broadcast_workspace_update(
+                    workspace,
+                    messenger,
+                    outbound,
+                    &board_workspace_update(workspace)?,
+                )
+                .await?;
+            }
+        }
+    }
+    let due = workspace
+        .board_tasks()?
+        .into_iter()
+        .filter(|task| {
+            task.state == "scheduled" && task.next_run_at.is_some_and(|run_at| run_at <= now)
+        })
+        .collect::<Vec<_>>();
+    for task in due {
+        let Some(task) = workspace.claim_due_board_task(&task.id, now)? else {
+            continue;
+        };
+        let (channel, direct) =
+            match board_task_target(workspace, &task.conversation_key, &task.folder_scope) {
+                Ok(target) => target,
+                Err(error) => {
+                    workspace.block_board_task(&task.id, &format!("Task blocked: {error:#}"))?;
+                    broadcast_workspace_update(
+                        workspace,
+                        messenger,
+                        outbound,
+                        &board_workspace_update(workspace)?,
+                    )
+                    .await?;
+                    continue;
+                }
+            };
+        let workstream = workspace
+            .board_task_workstream(&task.id)?
+            .context("board task has no task thread")?;
+        let conversation = match (&channel, &direct) {
+            (Some(channel_id), None) => WorkspaceConversation::Channel(channel_id.clone()),
+            (None, Some((member, peer))) => {
+                WorkspaceConversation::Direct(member.clone(), peer.clone())
+            }
+            _ => unreachable!(),
+        };
+        queues.enqueue(
+            workstream.agent_id,
+            conversation,
+            workstream.root_message_id,
+        );
+        broadcast_workspace_update(
+            workspace,
+            messenger,
+            outbound,
+            &board_workspace_update(workspace)?,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Board proposals need an explicit coordinator mention before integration.
+/// Automatic board-to-coordinator dispatch would bypass the visible paper trail.
+async fn consume_board_integrations(
+    _workspace: &WorkspaceStore,
+    _messenger: &NostrMessenger,
+    _outbound: &WorkspaceOutbound,
+    _queues: &mut WorkspaceAgentQueues,
+) -> Result<()> {
+    Ok(())
+}
+
+async fn finish_board_integration_outcome(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+    outbound: &WorkspaceOutbound,
+    queues: &mut WorkspaceAgentQueues,
+    outcome: BoardIntegrationOutcome,
+) -> Result<()> {
+    let head_turn_key = active_turn_key(
+        &format!("board-head:{}", outcome.workstream.task_id),
+        &outcome.conversation,
+    );
+    queues.active_turns.lock().await.remove(&head_turn_key);
+    let detail = match &outcome.result {
+        Ok(detail) => detail.clone(),
+        Err(error) => format!("Integration failed: {error}"),
+    };
+    let finished = match &outcome.result {
+        Ok(result) => workspace.finish_board_integration(&outcome.integration_id, Ok(result))?,
+        Err(error) => workspace
+            .finish_board_integration(&outcome.integration_id, Err(anyhow!(error.clone())))?,
+    };
+    if finished {
+        queues.enqueue_job(
+            outcome.workstream.agent_id,
+            WorkspaceAgentJob {
+                conversation: outcome.conversation,
+                trigger_message_id: outcome.integration_id,
+                ephemeral_body: Some(format!("Private head integration result:\n{detail}")),
+                mentions: vec![],
+                reply_parent_id: Some(outcome.workstream.root_message_id),
+                handoff_outbox: None,
+            },
+        );
+    }
+    broadcast_workspace_update(
+        workspace,
+        messenger,
+        outbound,
+        &board_workspace_update(workspace)?,
+    )
+    .await
 }
 
 async fn process_workspace_request(
@@ -2198,6 +3048,9 @@ async fn process_workspace_request(
     fips_capabilities: &Arc<Mutex<HashMap<String, (String, Instant)>>>,
 ) -> Result<()> {
     let sender_is_admin = workspace.is_admin(sender)?;
+    if board_action_is_mutation(&request.action) && !sender_is_admin {
+        bail!("Only workspace admins can manage board tasks.");
+    }
     if workspace_action_requires_admin(&request.action) && owner != Some(sender) && !sender_is_admin
     {
         bail!("Only workspace admins can manage agents.");
@@ -2241,11 +3094,159 @@ async fn process_workspace_request(
             | "remove_conversation_agent"
             | "reactivate_thread_agent"
     ) {
-        bail!(
-            "Workspace agents are unavailable: conversations use their native OpenCode session."
-        );
+        bail!("Workspace agents are unavailable: conversations use their native OpenCode session.");
     }
     let update = match request.action.as_str() {
+        "create_board_task" => {
+            let task = request
+                .board_task
+                .as_ref()
+                .context("board task is missing")?;
+            let title = task
+                .title
+                .as_deref()
+                .context("board task title is missing")?;
+            let conversation_key = task
+                .conversation_key
+                .as_deref()
+                .context("board task conversation is missing")?;
+            let instruction = task
+                .instruction
+                .as_deref()
+                .context("board task instruction is missing")?;
+            let schedule = task
+                .schedule
+                .as_deref()
+                .context("board task schedule is missing")?;
+            let next_run_at = task.next_run_at.unwrap_or_else(board_now);
+            board_task_target(workspace, conversation_key, &task.folder_scope)?;
+            let created_task = workspace.create_board_task(
+                sender,
+                title,
+                conversation_key,
+                instruction,
+                &task.folder_scope,
+                schedule,
+                next_run_at,
+            )?;
+            if let Err(error) = create_board_task_workstream(
+                workspace,
+                codex_config,
+                sender,
+                &created_task,
+                conversation_key,
+                &task.folder_scope,
+            )
+            .await
+            {
+                workspace.discard_board_task(&created_task.id)?;
+                return Err(error);
+            }
+            let update = board_workspace_update(workspace)?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            schedule_due_board_tasks(workspace, messenger, outbound, agent_queues).await?;
+            return Ok(());
+        }
+        "update_board_task" => {
+            let task = request
+                .board_task
+                .as_ref()
+                .context("board task is missing")?;
+            let task_id = task
+                .task_id
+                .as_deref()
+                .context("board task ID is missing")?;
+            let title = task
+                .title
+                .as_deref()
+                .context("board task title is missing")?;
+            let conversation_key = task
+                .conversation_key
+                .as_deref()
+                .context("board task conversation is missing")?;
+            let instruction = task
+                .instruction
+                .as_deref()
+                .context("board task instruction is missing")?;
+            let schedule = task
+                .schedule
+                .as_deref()
+                .context("board task schedule is missing")?;
+            let next_run_at = task.next_run_at.unwrap_or_else(board_now);
+            board_task_target(workspace, conversation_key, &task.folder_scope)?;
+            workspace.update_board_task(
+                task_id,
+                title,
+                conversation_key,
+                instruction,
+                &task.folder_scope,
+                schedule,
+                next_run_at,
+            )?;
+            let update = board_workspace_update(workspace)?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            schedule_due_board_tasks(workspace, messenger, outbound, agent_queues).await?;
+            return Ok(());
+        }
+        "cancel_board_task" => {
+            let task_id = request
+                .board_task
+                .as_ref()
+                .and_then(|task| task.task_id.as_deref())
+                .context("board task ID is missing")?;
+            workspace.cancel_board_task(task_id)?;
+            if let Some(workstream) = workspace.board_task_workstream(task_id)? {
+                let active_turns = agent_queues.active_turns.lock().await;
+                for ((agent_id, _), active_turn) in active_turns.iter() {
+                    if agent_id == &workstream.agent_id
+                        || agent_id == &format!("board-head:{task_id}")
+                    {
+                        active_turn.cancel_token.cancel();
+                    }
+                }
+            }
+            broadcast_workspace_update(
+                workspace,
+                messenger,
+                outbound,
+                &board_workspace_update(workspace)?,
+            )
+            .await?;
+            return Ok(());
+        }
+        "retry_board_task" => {
+            let task = request
+                .board_task
+                .as_ref()
+                .context("board task is missing")?;
+            workspace.retry_board_task(
+                task.task_id
+                    .as_deref()
+                    .context("board task ID is missing")?,
+                task.next_run_at.context("board task run time is missing")?,
+            )?;
+            let update = board_workspace_update(workspace)?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            schedule_due_board_tasks(workspace, messenger, outbound, agent_queues).await?;
+            return Ok(());
+        }
+        "move_board_task" => {
+            let task = request
+                .board_task
+                .as_ref()
+                .context("board task is missing")?;
+            workspace.move_board_task(
+                task.task_id
+                    .as_deref()
+                    .context("board task ID is missing")?,
+                task.board_column
+                    .as_deref()
+                    .context("board task board column is missing")?,
+            )?;
+            let update = board_workspace_update(workspace)?;
+            broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            return Ok(());
+        }
         "system_status" => {
             let mut status = worker_system_status_data(
                 &codex_config.working_dir,
@@ -2384,9 +3385,45 @@ async fn process_workspace_request(
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
+            return Ok(());
+        }
+        "pick_up_thread_with_head" => {
+            let channel_id = request.channel_id.as_deref();
+            let recipient = request.recipient_pubkey.as_deref();
+            let parent_id = request.parent_id.as_deref().unwrap_or_default();
+            let member = channel_id.is_none().then_some(sender);
+            workspace.validate_thread_root(parent_id, channel_id, member, recipient)?;
+            let worker = ensure_routed_worker(
+                workspace,
+                codex_config,
+                sender,
+                channel_id,
+                member,
+                recipient,
+                parent_id,
+                false,
+            )
+            .await?;
+            let trigger_message_id = workspace.latest_thread_message_id(parent_id)?;
+            let conversation = match channel_id {
+                Some(channel_id) => WorkspaceConversation::Channel(channel_id.to_string()),
+                None => {
+                    let mut participants = [
+                        sender.to_string(),
+                        recipient.unwrap_or_default().to_string(),
+                    ];
+                    participants.sort();
+                    WorkspaceConversation::Direct(participants[0].clone(), participants[1].clone())
+                }
+            };
+            agent_queues.enqueue(worker.id, conversation, trigger_message_id);
             return Ok(());
         }
         "reactivate_thread_agent" => {
@@ -2496,6 +3533,10 @@ async fn process_workspace_request(
                             .map(conversation_agent_payload)
                             .collect(),
                         conversation_preprompts: vec![],
+                        board_tasks: vec![],
+                        board_timeline_entries: vec![],
+                        board_columns: vec![],
+                        board_cards: vec![],
                         typing: None,
                     };
                     broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -2539,6 +3580,10 @@ async fn process_workspace_request(
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -2565,6 +3610,10 @@ async fn process_workspace_request(
                     false,
                 )?,
             };
+            let board_changed = sync_thread_topic_card(workspace, &message, request.parent_id.as_deref())?;
+            if board_changed {
+                broadcast_workspace_update(workspace, messenger, outbound, &board_workspace_update(workspace)?).await?;
+            }
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
                 revision: workspace.revision()?,
@@ -2574,6 +3623,10 @@ async fn process_workspace_request(
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             let recipients = if let Some(channel_id) = request.channel_id.as_deref() {
@@ -2612,6 +3665,10 @@ async fn process_workspace_request(
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: Some(WorkspaceTypingPayload {
                     sender_pubkey: sender.to_string(),
                     agent_id: None,
@@ -2693,6 +3750,10 @@ async fn process_workspace_request(
                         agents: vec![],
                         conversation_agents: vec![],
                         conversation_preprompts: vec![],
+                        board_tasks: vec![],
+                        board_timeline_entries: vec![],
+                        board_columns: vec![],
+                        board_cards: vec![],
                         typing: None,
                     }),
                 )
@@ -2764,6 +3825,10 @@ async fn process_workspace_request(
                         agents: vec![],
                         conversation_agents: vec![],
                         conversation_preprompts: vec![],
+                        board_tasks: vec![],
+                        board_timeline_entries: vec![],
+                        board_columns: vec![],
+                        board_cards: vec![],
                         typing: None,
                     }),
                 )
@@ -2798,6 +3863,10 @@ async fn process_workspace_request(
                         agents: vec![],
                         conversation_agents: vec![],
                         conversation_preprompts: vec![],
+                        board_tasks: vec![],
+                        board_timeline_entries: vec![],
+                        board_columns: vec![],
+                        board_cards: vec![],
                         typing: None,
                     }),
                 )
@@ -2845,6 +3914,10 @@ async fn process_workspace_request(
                     .into_iter()
                     .map(conversation_preprompt_payload)
                     .collect(),
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             outbound
@@ -2867,6 +3940,10 @@ async fn process_workspace_request(
                     .into_iter()
                     .map(conversation_preprompt_payload)
                     .collect(),
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -2875,8 +3952,23 @@ async fn process_workspace_request(
         "set_default_model" => {
             workspace.set_default_model(workspace_model(request.model.as_deref())?.as_deref())?;
             let update = WorkspaceUpdate {
-                action: "workspace_default_model_updated".to_string(), revision: workspace.revision()?, channels: vec![], members: vec![], messages: vec![], agents: vec![], conversation_agents: vec![],
-                conversation_preprompts: workspace.conversation_preprompts()?.into_iter().map(conversation_preprompt_payload).collect(), typing: None,
+                action: "workspace_default_model_updated".to_string(),
+                revision: workspace.revision()?,
+                channels: vec![],
+                members: vec![],
+                messages: vec![],
+                agents: vec![],
+                conversation_agents: vec![],
+                conversation_preprompts: workspace
+                    .conversation_preprompts()?
+                    .into_iter()
+                    .map(conversation_preprompt_payload)
+                    .collect(),
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
+                typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
             return Ok(());
@@ -2899,6 +3991,10 @@ async fn process_workspace_request(
                     agents: vec![],
                     conversation_agents: vec![],
                     conversation_preprompts: vec![],
+                    board_tasks: vec![],
+                    board_timeline_entries: vec![],
+                    board_columns: vec![],
+                    board_cards: vec![],
                     typing: None,
                 },
             )
@@ -2956,6 +4052,10 @@ async fn process_workspace_request(
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -2986,6 +4086,10 @@ async fn process_workspace_request(
                     .into_iter()
                     .map(conversation_preprompt_payload)
                     .collect(),
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -3046,6 +4150,10 @@ async fn process_workspace_request(
                 })
                 .map(conversation_preprompt_payload)
                 .collect(),
+            board_tasks: vec![],
+            board_timeline_entries: vec![],
+            board_columns: vec![],
+            board_cards: vec![],
             typing: None,
         },
         "transcribe_workspace_voice" => {
@@ -3107,10 +4215,15 @@ async fn process_workspace_request(
             let agent_turn_is_routed = native_turn_is_routed(
                 workspace,
                 &message,
-                workspace
-                    .conversation_agent_routing_enabled(Some(channel_id), None, None)?,
+                workspace.conversation_agent_routing_enabled(Some(channel_id), None, None)?,
                 &request,
             );
+            let task_agent = message
+                .parent_id
+                .as_deref()
+                .map(|root_id| workspace.board_task_workstream_for_root(root_id))
+                .transpose()?
+                .flatten();
             info!(
                 channel_id,
                 message_id, "persisted workspace channel message; queuing receipt update"
@@ -3128,6 +4241,10 @@ async fn process_workspace_request(
                     .map(conversation_agent_payload)
                     .collect(),
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             queue_workspace_update(
@@ -3144,15 +4261,28 @@ async fn process_workspace_request(
                 channel_id,
                 message_id, "flushed workspace channel message receipt update"
             );
-            if agent_turn_is_routed? {
-                workspace.queue_native_turn(&message_id)?;
-                enqueue_native_conversation(
+            if let Some(workstream) = task_agent {
+                agent_queues.enqueue(
+                    workstream.agent_id,
+                    WorkspaceConversation::Channel(channel_id.to_string()),
+                    message_id,
+                );
+            } else if agent_turn_is_routed? {
+                enqueue_conversation_agents(
+                    workspace,
                     agent_queues,
+                    messenger,
+                    outbound,
+                    codex_config,
+                    sender,
                     Some(channel_id),
                     None,
                     None,
+                    &request.mentions,
+                    true,
                     &message_id,
-                )?;
+                )
+                .await?;
             }
             return Ok(());
         }
@@ -3185,6 +4315,12 @@ async fn process_workspace_request(
                 )?,
                 &request,
             );
+            let task_agent = message
+                .parent_id
+                .as_deref()
+                .map(|root_id| workspace.board_task_workstream_for_root(root_id))
+                .transpose()?
+                .flatten();
             info!(
                 message_id,
                 "persisted workspace direct message; queuing receipt update"
@@ -3202,6 +4338,10 @@ async fn process_workspace_request(
                     .map(conversation_agent_payload)
                     .collect(),
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             // A direct message is only delivered to its two participants.
@@ -3223,15 +4363,30 @@ async fn process_workspace_request(
                 message_id,
                 "flushed workspace direct message receipt update"
             );
-            if agent_turn_is_routed? {
-                workspace.queue_native_turn(&message_id)?;
-                enqueue_native_conversation(
+            if let Some(workstream) = task_agent {
+                let mut participants = [sender.to_string(), recipient.to_string()];
+                participants.sort();
+                agent_queues.enqueue(
+                    workstream.agent_id,
+                    WorkspaceConversation::Direct(participants[0].clone(), participants[1].clone()),
+                    message_id,
+                );
+            } else if agent_turn_is_routed? {
+                enqueue_conversation_agents(
+                    workspace,
                     agent_queues,
+                    messenger,
+                    outbound,
+                    codex_config,
+                    sender,
                     None,
                     Some(sender),
                     Some(recipient),
+                    &request.mentions,
+                    true,
                     &message_id,
-                )?;
+                )
+                .await?;
             }
             return Ok(());
         }
@@ -3306,6 +4461,10 @@ async fn process_workspace_request(
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             if update.messages[0].channel_id.is_some() {
@@ -3351,6 +4510,10 @@ async fn process_workspace_request(
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             if update.messages[0].channel_id.is_some() {
@@ -3411,6 +4574,10 @@ async fn process_workspace_request(
                     .into_iter()
                     .map(conversation_preprompt_payload)
                     .collect(),
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             }
         }
@@ -3446,6 +4613,10 @@ async fn process_workspace_request(
                     .map(conversation_agent_payload)
                     .collect(),
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             }
         }
@@ -3511,6 +4682,10 @@ async fn process_workspace_request(
                     vec![]
                 },
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -3530,6 +4705,10 @@ async fn process_workspace_request(
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -3559,6 +4738,10 @@ async fn process_workspace_request(
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -3578,6 +4761,10 @@ async fn process_workspace_request(
                 agents: vec![agent_payload(agent)],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -3608,6 +4795,10 @@ async fn process_workspace_request(
                 agents: vec![agent_payload(agent)],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -3615,19 +4806,58 @@ async fn process_workspace_request(
         }
         "abort_agent_task" => {
             let agent_id = request.agent_id.as_deref().unwrap_or_default();
-            if agent_id != "native-opencode"
-                && !workspace.agents()?.into_iter().any(|agent| agent.id == agent_id)
+            if !agent_id.starts_with("native-opencode:")
+                && agent_id != "native-opencode"
+                && !workspace
+                    .agents()?
+                    .into_iter()
+                    .any(|agent| agent.id == agent_id)
             {
                 bail!("agent does not exist");
             }
-            if let Some(cancel_token) = agent_queues
-                .active_turns
-                .lock()
-                .await
-                .get(agent_id)
-                .cloned()
-            {
-                cancel_token.cancel();
+            let conversation = workspace_conversation(
+                request.channel_id.as_deref(),
+                Some(sender),
+                request.recipient_pubkey.as_deref(),
+            );
+            let active_turn = {
+                let mut active_turns = agent_queues.active_turns.lock().await;
+                cancel_active_turn_for_abort(agent_id, conversation, &mut active_turns)?
+            };
+            if let Some(((active_agent_id, conversation), active_turn)) = active_turn {
+                let active_turn_key = (active_agent_id.clone(), conversation.clone());
+                let parent_id = active_turn
+                    .parent_id
+                    .as_deref()
+                    .or_else(|| native_turn_root_id(&active_agent_id));
+                let agent = if parent_id.is_some() {
+                    Ok(native_typing_agent(active_agent_id.clone()))
+                } else {
+                    workspace.agents().and_then(|agents| {
+                        agents
+                            .into_iter()
+                            .find(|agent| agent.id == active_agent_id)
+                            .ok_or_else(|| anyhow!("active agent does not exist"))
+                    })
+                };
+                match agent {
+                    Ok(agent) => {
+                        let clear = send_workspace_typing_payload(
+                            workspace,
+                            messenger,
+                            cancelled_agent_typing_payload(&agent, &active_turn_key, &active_turn),
+                            false,
+                            Duration::from_secs(1),
+                        )
+                        .await;
+                        if let Err(err) = clear {
+                            warn!(agent = %agent.id, "failed to clear cancelled agent typing state: {err:#}");
+                        }
+                    }
+                    Err(err) => {
+                        warn!(agent = %active_agent_id, "failed to resolve cancelled agent for typing clear: {err:#}");
+                    }
+                }
             }
             return Ok(());
         }
@@ -3653,6 +4883,10 @@ async fn process_workspace_request(
                 agents: vec![agent_payload(agent)],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -3677,6 +4911,10 @@ async fn process_workspace_request(
                     .into_iter()
                     .map(conversation_preprompt_payload)
                     .collect(),
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -3718,6 +4956,10 @@ async fn process_workspace_request(
                     .into_iter()
                     .map(conversation_preprompt_payload)
                     .collect(),
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
@@ -4191,6 +5433,8 @@ fn workspace_snapshot_frames(
         .enumerate()
     {
         frames.push(WorkspaceUpdate {
+            board_columns: vec![],
+            board_cards: vec![],
             action: history_transfer_action(
                 &transfer_id,
                 index + 1,
@@ -4204,6 +5448,8 @@ fn workspace_snapshot_frames(
             agents: vec![],
             conversation_agents: vec![],
             conversation_preprompts: vec![],
+            board_tasks: vec![],
+            board_timeline_entries: vec![],
             typing: None,
         });
     }
@@ -4248,6 +5494,8 @@ async fn send_channel_history(
         "sending channel history"
     );
     let header = WorkspaceUpdate {
+        board_columns: vec![],
+        board_cards: vec![],
         action: history_transfer_action(&transfer_id, 0, total_chunks, "channel_messages"),
         revision,
         channels: vec![],
@@ -4269,6 +5517,8 @@ async fn send_channel_history(
             .filter(|preprompt| preprompt.channel_id.as_deref() == Some(channel_id))
             .map(conversation_preprompt_payload)
             .collect(),
+        board_tasks: vec![],
+        board_timeline_entries: vec![],
         typing: None,
     };
     outbound
@@ -4280,6 +5530,8 @@ async fn send_channel_history(
                 messenger,
                 sender,
                 WireMessage::workspace_update(WorkspaceUpdate {
+                    board_columns: vec![],
+                    board_cards: vec![],
                     action: history_transfer_action(
                         &transfer_id,
                         index + 1,
@@ -4293,6 +5545,8 @@ async fn send_channel_history(
                     agents: vec![],
                     conversation_agents: vec![],
                     conversation_preprompts: vec![],
+                    board_tasks: vec![],
+                    board_timeline_entries: vec![],
                     typing: None,
                 }),
             )
@@ -4336,6 +5590,10 @@ async fn send_workspace_messages_since(
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             }),
         )
@@ -4346,6 +5604,8 @@ async fn send_workspace_messages_since(
                 messenger,
                 sender,
                 WireMessage::workspace_update(WorkspaceUpdate {
+                    board_columns: vec![],
+                    board_cards: vec![],
                     action: history_transfer_action(&transfer_id, index + 1, total_chunks, &action),
                     revision,
                     channels: vec![],
@@ -4354,6 +5614,8 @@ async fn send_workspace_messages_since(
                     agents: vec![],
                     conversation_agents: vec![],
                     conversation_preprompts: vec![],
+                    board_tasks: vec![],
+                    board_timeline_entries: vec![],
                     typing: None,
                 }),
             )
@@ -4383,6 +5645,10 @@ fn nostr_workspace_message_chunks(
             agents: vec![],
             conversation_agents: vec![],
             conversation_preprompts: vec![],
+            board_tasks: vec![],
+            board_timeline_entries: vec![],
+            board_columns: vec![],
+            board_cards: vec![],
             typing: None,
         };
         if WireMessage::workspace_update(update).to_json()?.len()
@@ -4397,6 +5663,8 @@ fn nostr_workspace_message_chunks(
         chunks.push(std::mem::take(&mut chunk));
         chunk.push(message);
         let single_message = WorkspaceUpdate {
+            board_columns: vec![],
+            board_cards: vec![],
             action: transfer_action.clone(),
             revision: 0,
             channels: vec![],
@@ -4405,6 +5673,8 @@ fn nostr_workspace_message_chunks(
             agents: vec![],
             conversation_agents: vec![],
             conversation_preprompts: vec![],
+            board_tasks: vec![],
+            board_timeline_entries: vec![],
             typing: None,
         };
         if WireMessage::workspace_update(single_message)
@@ -4438,6 +5708,10 @@ fn nostr_workspace_snapshot_chunks(
         "agents",
         "conversation_agents",
         "conversation_preprompts",
+        "board_tasks",
+        "board_columns",
+        "board_cards",
+        "board_timeline_entries",
     ];
     let collections: Vec<_> = fields
         .iter()
@@ -4553,7 +5827,19 @@ fn workspace_snapshot(workspace: &WorkspaceStore, member: &str) -> Result<Worksp
             .map(member_payload)
             .collect(),
         messages: recent_workspace_snapshot_messages(workspace, member)?,
+        board_tasks: workspace
+            .board_tasks()?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        board_timeline_entries: workspace
+            .board_timeline_entries()?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         typing: None,
+        board_columns: workspace.board_columns()?,
+        board_cards: workspace.board_cards_for_member(member)?,
     })
 }
 
@@ -4564,7 +5850,10 @@ fn recent_workspace_snapshot_messages(
     member: &str,
 ) -> Result<Vec<WorkspaceMessagePayload>> {
     let mut conversations = BTreeMap::<String, Vec<WorkspaceMessage>>::new();
+    let linked_roots = workspace.board_cards()?.into_iter().filter_map(|card| card.source_thread_id).collect::<HashSet<_>>();
+    let mut board_roots = Vec::new();
     for message in workspace.snapshot_messages(member)? {
+        if linked_roots.contains(&message.id) { board_roots.push(message.clone()); }
         let key = match &message.channel_id {
             Some(channel_id) => format!("channel:{channel_id}"),
             None => {
@@ -4587,6 +5876,9 @@ fn recent_workspace_snapshot_messages(
             messages.into_iter().skip(first)
         })
         .collect::<Vec<_>>();
+    for root in board_roots {
+        if !recent.iter().any(|message| message.id == root.id) { recent.push(root); }
+    }
     recent.sort_by(|left, right| {
         left.created_at
             .cmp(&right.created_at)
@@ -4606,7 +5898,7 @@ async fn broadcast_workspace_update(
             .send(
                 messenger,
                 &member.pubkey,
-                WireMessage::workspace_update(update.clone()),
+                WireMessage::workspace_update(board_update_for_member(workspace, update, &member.pubkey)?),
             )
             .await?;
     }
@@ -4633,6 +5925,10 @@ async fn send_channel_members_update(
         agents: vec![],
         conversation_agents: vec![],
         conversation_preprompts: vec![],
+        board_tasks: vec![],
+        board_timeline_entries: vec![],
+        board_columns: vec![],
+        board_cards: vec![],
         typing: None,
     };
     for member in workspace.channel_members(channel_id)? {
@@ -4672,82 +5968,34 @@ async fn send_agent_typing(
     expires_in: Option<Duration>,
     fips_only: bool,
 ) -> Result<()> {
-    let expires_at = expires_in
-        .map(|duration| {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64
-                + duration.as_secs() as i64
-        })
-        .unwrap_or(0);
-    let update = WorkspaceUpdate {
-        action: "typing".to_string(),
-        revision: workspace.revision()?,
-        channels: vec![],
-        members: vec![],
-        messages: vec![],
-        agents: vec![],
-        conversation_agents: vec![],
-        conversation_preprompts: vec![],
-        typing: Some(WorkspaceTypingPayload {
-            sender_pubkey: format!("agent:{}", agent.id),
-            agent_id: Some(agent.id.clone()),
-            agent_name: Some(agent.name.clone()),
-            stage: stage.map(str::to_string),
-            work_history: work_history.to_vec(),
-            started_at,
-            channel_id: channel_id.map(str::to_string),
-            recipient_pubkey: None,
-            member_pubkey: member.map(str::to_string),
-            peer_pubkey: peer.map(str::to_string),
-            parent_id: parent_id.map(str::to_string),
-            expires_at,
-        }),
-    };
-    let recipients: Vec<String> = if let Some(channel_id) = channel_id {
-        workspace
-            .channel_members(channel_id)?
-            .into_iter()
-            .map(|member| member.pubkey)
-            .collect()
-    } else {
-        [member, peer]
-            .into_iter()
-            .flatten()
-            .map(str::to_string)
-            .collect()
-    };
     let duration = expires_in.unwrap_or(Duration::from_secs(1));
-    for recipient in recipients {
-        let outbound = WORKSPACE_OUTBOUND
-            .lock()
-            .expect("workspace outbound registry lock poisoned")
-            .clone();
-        if let Some(outbound) = outbound {
-            if outbound.has_fips_route(&recipient).await {
-                outbound
-                    .send(
-                        messenger,
-                        &recipient,
-                        WireMessage::workspace_update(update.clone()),
-                    )
-                    .await?;
-                continue;
-            }
-        }
-        if fips_only {
-            continue;
-        }
-        messenger
-            .send_ephemeral_wire_to(
-                PublicKey::parse(&recipient)?,
-                WireMessage::workspace_update(update.clone()),
-                duration,
-            )
-            .await?;
+    send_workspace_typing_payload(
+        workspace,
+        messenger,
+        agent_typing_payload(
+            agent,
+            channel_id,
+            member,
+            peer,
+            parent_id,
+            stage,
+            work_history,
+            started_at,
+            expires_in,
+        ),
+        fips_only,
+        duration,
+    )
+    .await
+}
+
+#[derive(Debug)]
+struct WorkspaceAgentRunHistory(Vec<String>);
+
+impl std::fmt::Display for WorkspaceAgentRunHistory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("workspace agent run interrupted")
     }
-    Ok(())
 }
 
 async fn run_workspace_agent_with_typing(
@@ -4761,7 +6009,7 @@ async fn run_workspace_agent_with_typing(
     body: &str,
     config: &CodexConfig,
     session_id: &str,
-    active_turns: &Arc<Mutex<HashMap<String, CodexCancelToken>>>,
+    active_turns: &ActiveTurns,
     suppress_typing: bool,
 ) -> Result<CodexRunResult> {
     const TYPING_LEASE: Duration = Duration::from_secs(6);
@@ -4770,6 +6018,18 @@ async fn run_workspace_agent_with_typing(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
+    let active_turn_key = active_turn_key(
+        &agent.id,
+        &workspace_conversation(channel_id, member, peer)
+            .context("workspace agent turn is missing a conversation")?,
+    );
+    let cancel_token = {
+        let mut active_turns = active_turns.lock().await;
+        active_turn_token(&mut active_turns, active_turn_key.clone(), parent_id)
+    };
+    if cancel_token.is_cancelled() {
+        return Err(anyhow!("OpenCode cancelled before it started"));
+    }
     if suppress_typing {
         // Topic updates follow a normal reply and can inherit its active lease.
         // Clear it before the invisible control task begins.
@@ -4814,14 +6074,18 @@ async fn run_workspace_agent_with_typing(
     let mut renew = interval(Duration::from_secs(3));
     renew.set_missed_tick_behavior(MissedTickBehavior::Delay);
     renew.tick().await;
-    let cancel_token = CodexCancelToken::new();
-    active_turns
-        .lock()
-        .await
-        .insert(agent.id.clone(), cancel_token.clone());
     let (event_sender, mut events) = mpsc::unbounded_channel();
     let mut stage = None;
     let mut work_history: Vec<String> = Vec::new();
+    let commit_baseline = if parent_id.is_some()
+        && workspace.conversation_coordinator(channel_id, member, peer)?
+            .is_some_and(|coordinator| coordinator.id == agent.id)
+    {
+        git_commit_baseline(&config.working_dir)
+    } else {
+        None
+    };
+    let mut commit_candidates = BTreeSet::new();
     let mut stage_started_at: Option<Instant> = None;
     let mut history_stage = None;
     let mut last_stage_sent = Instant::now() - CODEX_STATUS_MIN_INTERVAL;
@@ -4848,6 +6112,7 @@ async fn run_workspace_agent_with_typing(
                 };
                 last_event_at = Instant::now();
                 inactivity_noted = false;
+                commit_candidates.extend(git_commit_candidates(&event));
                 let Some((next_stage, force)) = codex_status_from_event(&event) else { continue; };
                 // Completion notices are event boundaries, not work that takes
                 // time. Keeping them as stages shifts the preceding command's
@@ -4904,6 +6169,14 @@ async fn run_workspace_agent_with_typing(
             }
         }
     };
+    while let Ok(event) = events.try_recv() {
+        commit_candidates.extend(git_commit_candidates(&event));
+    }
+    if verified_new_git_commit(&config.working_dir, commit_baseline.as_ref(), &commit_candidates) {
+        if let Some(turn) = active_turns.lock().await.get_mut(&active_turn_key) {
+            turn.verified_git_commit = true;
+        }
+    }
     if !suppress_typing {
         if let Err(err) = send_agent_typing(
             workspace,
@@ -4924,16 +6197,18 @@ async fn run_workspace_agent_with_typing(
             warn!(agent = %agent.id, "failed to clear agent typing state: {err:#}");
         }
     }
-    active_turns.lock().await.remove(&agent.id);
-    result.map(|mut result| {
-        if let Some(started_at) = stage_started_at {
-            if let Some(last) = work_history.last_mut() {
-                *last = format_work_history_item(last, started_at.elapsed());
-            }
+    if let Some(started_at) = stage_started_at {
+        if let Some(last) = work_history.last_mut() {
+            *last = format_work_history_item(last, started_at.elapsed());
         }
-        result.work_history = work_history;
-        result
-    })
+    }
+    match result {
+        Ok(mut result) => {
+            result.work_history = work_history;
+            Ok(result)
+        }
+        Err(err) => Err(err.context(WorkspaceAgentRunHistory(work_history))),
+    }
 }
 
 fn format_work_history_item(stage: &str, duration: Duration) -> String {
@@ -4960,7 +6235,6 @@ enum WorkspaceAgentFallback {
     HistoryUnavailable,
     RestartEmpty,
     RestartUnavailable,
-    ContinuationEmpty,
 }
 
 impl WorkspaceAgentFallback {
@@ -4976,7 +6250,6 @@ impl WorkspaceAgentFallback {
             Self::HistoryUnavailable => "history_unavailable",
             Self::RestartEmpty => "restart_empty_response",
             Self::RestartUnavailable => "restart_unavailable",
-            Self::ContinuationEmpty => "continuation_empty_response",
         }
     }
 
@@ -4985,7 +6258,7 @@ impl WorkspaceAgentFallback {
             Self::Cancelled => "The agent reply was cancelled before it completed. Please retry your request.",
             Self::TimedOut => "The agent did not complete before its time limit. Please retry with a smaller request.",
             Self::ResourceExhausted => "The agent worker reached its open-file limit and cannot continue. Restart the worker, then retry your request.",
-            Self::EmptyResponse | Self::RestartEmpty | Self::ContinuationEmpty => "The agent completed without a reply. Please retry your request.",
+            Self::EmptyResponse | Self::RestartEmpty => "The agent completed without a reply. Please retry your request.",
             Self::HistoryFollowUpEmpty | Self::HistoryFollowUpFailed | Self::HistoryUnavailable => "The agent could not complete its required conversation-history lookup. Please retry your request.",
             Self::ExecutionFailed | Self::RestartUnavailable => "The agent could not complete this reply. Please retry your request.",
         }
@@ -5076,6 +6349,8 @@ fn message_payload(message: WorkspaceMessage) -> WorkspaceMessagePayload {
         pinned: message.pinned,
         reactions: message.reactions,
         work_history: message.work_history,
+        edited_at: message.edited_at,
+        deleted_at: message.deleted_at,
         created_at: message.created_at,
     }
 }
@@ -5236,6 +6511,7 @@ fn conversation_agent_payload(
         channel_id: agent.channel_id,
         member_pubkey: agent.member_pubkey,
         peer_pubkey: agent.peer_pubkey,
+        parent_id: agent.parent_id,
         folder_scope: agent.folder_scope,
     }
 }
@@ -5332,6 +6608,11 @@ async fn ensure_conversation_coordinator(
     member: Option<&str>,
     peer: Option<&str>,
 ) -> Result<WorkspaceAgent> {
+    let folder_scope = workspace.conversation_folder_scope(channel_id, member, peer)?;
+    let mut session_config = conversation_execution_config(codex_config, &folder_scope);
+    if let Some(conversation) = workspace_conversation(channel_id, member, peer) {
+        session_config.opencode_server_scope = Some(conversation.opencode_server_scope());
+    }
     if let Some(agent) = workspace.conversation_coordinator(channel_id, member, peer)? {
         let agent = if agent.name != "A0" {
             workspace.rename_agent(&agent.id, "A0")?
@@ -5340,7 +6621,7 @@ async fn ensure_conversation_coordinator(
         };
         if agent.session_status != "ready" || agent.opencode_session_id.is_none() {
             let (session_id, status, session_error) =
-                provision_workspace_agent_session(codex_config).await;
+                provision_workspace_agent_session(&session_config).await;
             return workspace.update_agent_session(
                 &agent.id,
                 session_id.as_deref(),
@@ -5351,11 +6632,11 @@ async fn ensure_conversation_coordinator(
         return Ok(agent);
     }
     let (session_id, session_status, session_error) =
-        provision_workspace_agent_session(codex_config).await;
+        provision_workspace_agent_session(&session_config).await;
     let coordinator = workspace.create_agent_with_profile(
         "A0",
         "Task coordinator",
-        "Coordinate routed main-conversation tasks privately: identify their semantic topic, select the worker that should handle each task, and keep related-thread handoffs compact. When directly mentioned as @A0, answer the user in the current conversation or thread without allocating a worker unless the user explicitly asks for delegation.",
+        "You are the conversation coordinator and the only agent that applies repository changes. Work only when explicitly mentioned. Reply in the originating thread so the request, your decision, and the result are visible. Thread agents investigate, specify changes, and verify the completed work; you integrate their approved changes one request at a time. After each accepted implementation, inspect the resulting diff, create one focused local Git commit with a relevant message, and report its commit ID. Do not push unless the user explicitly requests it.",
         &[],
         None,
         WorkspaceAgentOpenCodeProfile {
@@ -5407,15 +6688,19 @@ async fn ensure_routed_worker(
     member: Option<&str>,
     peer: Option<&str>,
     parent_id: &str,
-    all_workers_busy: bool,
+    _all_workers_busy: bool,
 ) -> Result<WorkspaceAgent> {
-    if !all_workers_busy {
-        if let Some(worker) =
-            workspace.assign_oldest_available_thread_agent(parent_id, channel_id, member, peer)?
-        {
-            return Ok(worker);
-        }
-    }
+    // Each human root owns a durable session. Reusing an idle worker would mix
+    // independent root-thread context and make their queues serial.
+    ensure_conversation_coordinator(
+        workspace,
+        codex_config,
+        created_by,
+        channel_id,
+        member,
+        peer,
+    )
+    .await?;
     let next_number = workspace
         .agents_for_conversation(channel_id, member, peer)?
         .iter()
@@ -5424,16 +6709,16 @@ async fn ensure_routed_worker(
         .unwrap_or(0)
         + 1;
     let folder_scope = workspace.conversation_folder_scope(channel_id, member, peer)?;
-    let mut agent_config = codex_config.clone();
-    if let Some(folder) = folder_scope.first() {
-        agent_config.working_dir = PathBuf::from(folder);
+    let mut agent_config = conversation_execution_config(codex_config, &folder_scope);
+    if let Some(conversation) = workspace_conversation(channel_id, member, peer) {
+        agent_config.opencode_server_scope = Some(conversation.opencode_server_scope());
     }
     let (session_id, status, session_error) =
         provision_workspace_agent_session(&agent_config).await;
     let worker = workspace.create_agent_with_profile(
         &format!("A{next_number}"),
         "Conversation worker",
-        "Work on routed tasks in this conversation. Preserve thread ownership for replies and completion.",
+        "You are the read-only ThreadAgent for this thread. Investigate the request and produce a detailed implementation handoff for @Coordinator: exact files and symbols, intended edits, preserved behaviour, targeted checks, and any required scoped Markdown change note. Do not edit repositories, commit, push, or claim unrun verification. After @Coordinator reports completion, inspect the reported change and verify the specified checks; either accept it or send @Coordinator a precise correction request. Preserve thread ownership for all replies.",
         &[],
         None,
         WorkspaceAgentOpenCodeProfile {
@@ -5446,13 +6731,8 @@ async fn ensure_routed_worker(
         created_by,
     )?;
     workspace.add_conversation_agent(&worker.id, channel_id, member, peer, &folder_scope)?;
-    if all_workers_busy {
-        workspace.assign_thread_agent(&worker.id, parent_id, channel_id, member, peer)?;
-        return Ok(worker);
-    }
-    workspace
-        .assign_oldest_available_thread_agent(parent_id, channel_id, member, peer)?
-        .context("new routed worker was not assigned")
+    workspace.assign_thread_agent(&worker.id, parent_id, channel_id, member, peer)?;
+    Ok(worker)
 }
 
 fn enqueue_native_conversation(
@@ -5513,20 +6793,6 @@ async fn enqueue_conversation_agents(
         }
     };
     let message = workspace.message_by_id(trigger_message_id)?;
-    // Native OpenCode sessions and queues are isolated by conversation. A
-    // reply directly following an agent message continues that same serial
-    // conversation worker unless it explicitly addresses another member.
-    if message
-        .as_ref()
-            .is_some_and(|message| !message.sender_pubkey.starts_with("agent:"))
-    {
-        info!(
-            trigger = trigger_message_id,
-            "queueing native workspace session turn"
-        );
-        queues.enqueue_native(conversation, trigger_message_id.to_string());
-        return Ok(());
-    }
     let parent_id = message
         .as_ref()
         .and_then(|message| message.parent_id.as_deref())
@@ -5534,14 +6800,8 @@ async fn enqueue_conversation_agents(
     let coordinator = workspace.conversation_coordinator(channel_id, member, peer)?;
     let coordinator_targeted = coordinator
         .as_ref()
-        .is_some_and(|agent| conversation_agent_is_targeted(&agent.id, mentions));
-    let coordinator_delegates = coordinator_targeted
-        && message
-            .as_ref()
-            .is_some_and(|message| a0_requests_delegation(&message.body));
-    // A direct @A0 request is a visible coordinator conversation. It must not
-    // allocate a worker, even when the main-message route toggle is enabled.
-    if coordinator_targeted && !coordinator_delegates {
+        .is_some_and(|agent| conversation_coordinator_is_targeted(&agent.id, mentions));
+    if coordinator_targeted {
         let coordinator = coordinator.context("targeted conversation coordinator is missing")?;
         info!(
             trigger = trigger_message_id,
@@ -5552,27 +6812,18 @@ async fn enqueue_conversation_agents(
         queues.enqueue(coordinator.id, conversation, trigger_message_id.to_string());
         return Ok(());
     }
-    let is_routed_root = (route_agent || coordinator_delegates)
+    let is_routed_root = route_agent
         && message.as_ref().is_some_and(|message| {
             message.parent_id.is_none() && !message.sender_pubkey.starts_with("agent:")
         });
     let mut assigned_agent = workspace.thread_agent(parent_id, channel_id, member, peer)?;
     if is_routed_root && assigned_agent.is_none() {
-        observe_and_link_related_thread(
-            workspace,
-            _codex_config,
-            channel_id,
-            member,
-            peer,
-            parent_id,
-        )
-        .await;
         let workers = workspace.agents_for_conversation(channel_id, member, peer)?;
         let active_workers = queues.active_turns.lock().await;
         let all_workers_busy = !workers.is_empty()
-            && workers
-                .iter()
-                .all(|worker| active_workers.contains_key(&worker.id));
+            && workers.iter().all(|worker| {
+                active_workers.contains_key(&active_turn_key(worker.id.as_str(), &conversation))
+            });
         drop(active_workers);
         assigned_agent = Some(
             ensure_routed_worker(
@@ -5593,29 +6844,19 @@ async fn enqueue_conversation_agents(
             .active_turns
             .lock()
             .await
-            .entry(assigned_agent.as_ref().expect("assigned worker").id.clone())
-            .or_insert_with(CodexCancelToken::new);
-        // The message-created update precedes lazy worker allocation. Publish
-        // the allocated worker before its typing lease so clients can resolve
-        // its name and include it in the conversation member list.
-        let update = WorkspaceUpdate {
-            action: "conversation_agents_updated".to_string(),
-            revision: workspace.revision()?,
-            channels: vec![],
-            members: vec![],
-            messages: vec![],
-            agents: assigned_agent
-                .as_ref()
-                .map(|agent| vec![agent_payload(agent.clone())])
-                .unwrap_or_default(),
-            conversation_agents: workspace
-                .conversation_agents()?
-                .into_iter()
-                .map(conversation_agent_payload)
-                .collect(),
-            conversation_preprompts: vec![],
-            typing: None,
-        };
+            .entry(active_turn_key(
+                &assigned_agent.as_ref().expect("assigned worker").id,
+                &conversation,
+            ))
+            .or_insert_with(ActiveTurn::new);
+        // Publish both profiles and the thread assignment before the typing lease.
+        let update = allocated_thread_agent_update(
+            workspace,
+            assigned_agent.as_ref().expect("assigned worker"),
+            channel_id,
+            member,
+            peer,
+        )?;
         broadcast_workspace_update(workspace, messenger, outbound, &update).await?;
     }
     let agents = assigned_agent
@@ -5754,14 +6995,16 @@ fn should_auto_allocate_main_message(route_agent: bool, message: &WorkspaceMessa
 async fn native_workspace_session_worker(
     mut receiver: mpsc::UnboundedReceiver<String>,
     conversation: WorkspaceConversation,
-    active_turns: Arc<Mutex<HashMap<String, CodexCancelToken>>>,
+    active_turns: ActiveTurns,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
     outbound: WorkspaceOutbound,
     codex_config: CodexConfig,
     audio_config: AudioConfig,
+    writable_turn_locks: WritableTurnLocks,
 ) {
     while let Some(trigger_message_id) = receiver.recv().await {
+        let _writer = writable_turn_guard(&writable_turn_locks, &conversation).await;
         let trigger_message_ids = vec![trigger_message_id];
         let trigger_message_id = trigger_message_ids
             .last()
@@ -5869,7 +7112,11 @@ async fn publish_failed_native_workspace_turn(
         agents: vec![],
         conversation_agents: vec![],
         conversation_preprompts: vec![],
+        board_tasks: vec![],
+        board_timeline_entries: vec![],
         typing: None,
+        board_columns: vec![],
+        board_cards: vec![],
     };
     for recipient in recipients {
         workspace.queue_notification(
@@ -5891,7 +7138,7 @@ async fn process_native_workspace_session_message(
     conversation: &WorkspaceConversation,
     trigger_message_id: &str,
     trigger_message_ids: &[String],
-    active_turns: &Arc<Mutex<HashMap<String, CodexCancelToken>>>,
+    active_turns: &ActiveTurns,
 ) -> Result<()> {
     let workspace = WorkspaceStore::open_existing(workspace_path)?;
     let Some(message) = workspace.message_by_id(trigger_message_id)? else {
@@ -6245,28 +7492,7 @@ async fn process_native_workspace_session_message(
     } else {
         blossom_attachments.clone()
     };
-    let mut reply = match channel_id {
-        Some(channel_id) => workspace.add_channel_message_with_main(
-            "agent:native-opencode",
-            channel_id,
-            &result.response,
-            &attachments,
-            &[],
-            Some(thread_root_id),
-            false,
-        )?,
-        None => workspace.add_direct_message_with_main(
-            "agent:native-opencode",
-            peer.unwrap_or_default(),
-            &result.response,
-            &attachments,
-            &[],
-            Some(thread_root_id),
-            false,
-        )?,
-    };
-    workspace.set_message_work_history(&reply.id, &result.work_history)?;
-    reply.work_history = result.work_history;
+    let reply = persist_native_board_reply(&workspace, conversation, thread_root_id, &result.response, &attachments, &result.work_history)?;
     let update = WorkspaceUpdate {
         action: "message_created".to_string(),
         revision: workspace.revision()?,
@@ -6276,7 +7502,11 @@ async fn process_native_workspace_session_message(
         agents: vec![agent_payload(native_agent)],
         conversation_agents: vec![],
         conversation_preprompts: vec![],
+        board_tasks: vec![],
+        board_timeline_entries: vec![],
         typing: None,
+        board_columns: vec![],
+        board_cards: vec![],
     };
     // Each active FIPS recipient gets a reference to its locally delivered
     // bytes. Everyone else receives the encrypted Blossom reference.
@@ -6421,16 +7651,20 @@ async fn upload_workspace_artifact(path: &Path) -> Result<MediaReference> {
 async fn workspace_agent_queue_worker(
     mut receiver: mpsc::UnboundedReceiver<WorkspaceAgentJob>,
     agent_id: String,
-    active_turns: Arc<Mutex<HashMap<String, CodexCancelToken>>>,
+    active_turns: ActiveTurns,
     workspace_path: PathBuf,
     messenger: Arc<NostrMessenger>,
     outbound: WorkspaceOutbound,
     codex_config: CodexConfig,
     audio_config: AudioConfig,
+    handoff_sender: mpsc::UnboundedSender<WorkspaceAgentHandoff>,
+    writable_turn_locks: WritableTurnLocks,
+    handoff_claims: Arc<std::sync::Mutex<HashSet<(String, String)>>>,
 ) {
     let mut thread_checkpoint = None;
     while let Some(job) = receiver.recv().await {
-        if let Err(err) = process_workspace_agent_job(
+        let _writer = writable_turn_guard(&writable_turn_locks, &job.conversation).await;
+        let result = process_workspace_agent_job(
             &workspace_path,
             messenger.as_ref(),
             &outbound,
@@ -6439,13 +7673,38 @@ async fn workspace_agent_queue_worker(
             &agent_id,
             &job,
             &active_turns,
+            &handoff_sender,
             &mut thread_checkpoint,
         )
-        .await
-        {
+        .await;
+        if let Err(err) = &result {
             warn!(agent = %agent_id, trigger = %job.trigger_message_id, "workspace agent job failed: {err:#}");
         }
-        active_turns.lock().await.remove(&agent_id);
+        // Cancellation is terminal. Leaving its outbox item pending would run
+        // the cancelled implementation again when the handoff is polled.
+        // Successful replies complete the incoming handoff in their transaction,
+        // before notifications. An Ok without a committed reply is not completion.
+        // Check the token too: a later usage-notification error can mask the
+        // cancellation error without revoking the user's stop request.
+        let cancelled = active_turns
+            .lock()
+            .await
+            .get(&active_turn_key(&agent_id, &job.conversation))
+            .is_some_and(|turn| turn.cancel_token.is_cancelled());
+        if (cancelled || workspace_agent_job_is_terminal(&result)) && job.handoff_outbox.is_some() {
+            if let Err(err) = WorkspaceStore::open_existing(&workspace_path)
+                .and_then(|workspace| complete_workspace_agent_handoff(&workspace, &job))
+            {
+                warn!(agent = %agent_id, trigger = %job.trigger_message_id, "failed to complete workspace agent handoff: {err:#}");
+            }
+        }
+        active_turns
+            .lock()
+            .await
+            .remove(&active_turn_key(&agent_id, &job.conversation));
+        if let Some(key) = &job.handoff_outbox {
+            release_workspace_agent_handoff(&mut handoff_claims.lock().unwrap(), key);
+        }
     }
 }
 
@@ -6457,7 +7716,8 @@ async fn process_workspace_agent_job(
     audio_config: &AudioConfig,
     agent_id: &str,
     job: &WorkspaceAgentJob,
-    active_turns: &Arc<Mutex<HashMap<String, CodexCancelToken>>>,
+    active_turns: &ActiveTurns,
+    handoff_sender: &mpsc::UnboundedSender<WorkspaceAgentHandoff>,
     thread_checkpoint: &mut Option<WorkspaceAgentThreadCheckpoint>,
 ) -> Result<()> {
     let workspace = WorkspaceStore::open_existing(workspace_path)?;
@@ -6477,7 +7737,9 @@ async fn process_workspace_agent_job(
                     body,
                     &job.mentions,
                     active_turns,
+                    handoff_sender,
                     thread_checkpoint,
+                    job.handoff_outbox.as_ref(),
                 )
                 .await
             }
@@ -6495,7 +7757,9 @@ async fn process_workspace_agent_job(
                     body,
                     &job.mentions,
                     active_turns,
+                    handoff_sender,
                     thread_checkpoint,
+                    job.handoff_outbox.as_ref(),
                 )
                 .await
             }
@@ -6504,25 +7768,28 @@ async fn process_workspace_agent_job(
     let Some(message) = workspace.message_by_id(&job.trigger_message_id)? else {
         return Ok(());
     };
-    if !workspace_agent_job_matches_trigger(&message, &job.conversation) {
+    if message.deleted_at.is_some()
+        || workspace_thread_root_is_deleted(&workspace, &message)?
+        || !workspace_agent_job_matches_queued_agent_trigger(&message, &job.conversation, agent_id)
+    {
         return Ok(());
     }
-    let body =
+    let message_body =
         workspace_message_body_with_text_attachments(&message, audio_config, messenger).await;
-    let coordinator_id = match (&message.channel_id, &message.recipient_pubkey) {
-        (Some(channel_id), None) => workspace
+    let body = message_body;
+    let coordinator_id = match &job.conversation {
+        WorkspaceConversation::Channel(channel_id) => workspace
             .conversation_coordinator(Some(channel_id), None, None)?
             .map(|agent| agent.id),
-        (None, Some(recipient)) => workspace
-            .conversation_coordinator(None, Some(&message.sender_pubkey), Some(recipient))?
+        WorkspaceConversation::Direct(member, peer) => workspace
+            .conversation_coordinator(None, Some(member), Some(peer))?
             .map(|agent| agent.id),
-        _ => None,
     };
     let reply_parent_id =
         workspace_agent_reply_parent_id_for(&message, agent_id, coordinator_id.as_deref());
 
-    match (&message.channel_id, &message.recipient_pubkey) {
-        (Some(channel_id), None) => {
+    let result = match &job.conversation {
+        WorkspaceConversation::Channel(channel_id) => {
             route_conversation_agents(
                 &workspace,
                 messenger,
@@ -6536,11 +7803,13 @@ async fn process_workspace_agent_job(
                 &body,
                 &message.mentions,
                 active_turns,
+                handoff_sender,
                 thread_checkpoint,
+                job.handoff_outbox.as_ref(),
             )
             .await
         }
-        (None, Some(recipient)) => {
+        WorkspaceConversation::Direct(member, peer) => {
             route_conversation_agents(
                 &workspace,
                 messenger,
@@ -6548,18 +7817,20 @@ async fn process_workspace_agent_job(
                 codex_config,
                 Some(agent_id),
                 None,
-                Some(&message.sender_pubkey),
-                Some(recipient),
+                Some(member),
+                Some(peer),
                 reply_parent_id,
                 &body,
                 &message.mentions,
                 active_turns,
+                handoff_sender,
                 thread_checkpoint,
+                job.handoff_outbox.as_ref(),
             )
             .await
         }
-        _ => Ok(()),
-    }
+    };
+    result
 }
 
 async fn workspace_message_body_with_text_attachments(
@@ -6599,14 +7870,10 @@ fn workspace_agent_reply_parent_id(message: &WorkspaceMessage) -> &str {
 
 fn workspace_agent_reply_parent_id_for<'a>(
     message: &'a WorkspaceMessage,
-    agent_id: &str,
-    coordinator_id: Option<&str>,
+    _agent_id: &str,
+    _coordinator_id: Option<&str>,
 ) -> Option<&'a str> {
-    if message.parent_id.is_none() && coordinator_id == Some(agent_id) {
-        None
-    } else {
-        Some(workspace_agent_reply_parent_id(message))
-    }
+    Some(workspace_agent_reply_parent_id(message))
 }
 
 fn workspace_agent_profile_from_request(
@@ -6718,6 +7985,511 @@ fn codex_config_for_workspace_agent_record(
     codex_config_for_workspace_agent(config, &profile)
 }
 
+async fn coordinator_continue_once<F, Fut>(
+    is_coordinator: bool,
+    request: &str,
+    mut result: CodexRunResult,
+    run: F,
+) -> CodexRunResult
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<CodexRunResult>>,
+{
+    if !is_coordinator
+        || !coordinator_implementation_request(request)
+        || !coordinator_unfinished_promise(&result.response)
+    {
+        return result;
+    }
+    let activity = if workspace_history_has_tool_activity(&result.work_history) {
+        "Tool activity was observed, but a read, todo, or other tool call does not establish completion."
+    } else {
+        "No tool activity was observed; planning, drafting, and continuing are not tool execution."
+    };
+    let prompt = format!(
+        "{COORDINATOR_TURN_WORKFLOW}\n\nCorrective continuation for the same request in this session and thread. Your previous final reply only promised further work. {activity} Continue the authorized implementation now, run the relevant checks, and report the actual results. If a concrete blocker prevents work, state it precisely. Do not invent a blocker or claim that work started or completed without evidence. This is the only corrective continuation.\n\nOriginal request:\n{request}"
+    );
+    let next = match run(prompt).await {
+        Ok(mut next) => {
+            if next.response.trim().is_empty()
+                || workspace_history_request_count(&next.response).is_some()
+                || coordinator_unfinished_promise(&next.response)
+            {
+                next.response = "The Coordinator worker stalled after one corrective continuation. It did not provide an implementation result. Completion has not been established; no further automatic continuation will run.".to_string();
+            }
+            next
+        }
+        Err(err) => {
+            warn!("Coordinator corrective continuation failed: {err:#}");
+            let mut next = interrupted_workspace_agent_result(workspace_agent_error_fallback(&err));
+            if let Some(history) = err.downcast_ref::<WorkspaceAgentRunHistory>() {
+                next.work_history = history.0.clone();
+            }
+            next
+        }
+    };
+    append_workspace_agent_result(&mut result, next);
+    result
+}
+
+const COORDINATOR_TURN_WORKFLOW: &str = "Coordinator workflow: For an authorized implementation request, perform the scoped work and verification in this turn. A plan, todo update, read, or promise to continue is not a completed implementation. Respect plan-only requests, questions, stop/cancel instructions, and concrete blockers. Report only changes and checks actually performed. After implementation, hand the result to @ThreadAgent for read-only verification. Address precise corrections and return for verification. ThreadAgent's final acceptance ends the loop with no further handoff.";
+
+fn workspace_agent_job_is_terminal(result: &Result<()>) -> bool {
+    result.as_ref().err().is_some_and(is_agent_cancelled_error)
+}
+
+fn append_workspace_agent_result(result: &mut CodexRunResult, next: CodexRunResult) {
+    result.response = next.response;
+    if next.session_id.is_some() {
+        result.session_id = next.session_id;
+    }
+    result.token_usage = match (result.token_usage, next.token_usage) {
+        (Some(first), Some(second)) => Some(CodexTokenUsage {
+            input_tokens: first.input_tokens.saturating_add(second.input_tokens),
+            output_tokens: first.output_tokens.saturating_add(second.output_tokens),
+        }),
+        (first, second) => first.or(second),
+    };
+    result.work_history.extend(next.work_history);
+}
+
+fn workspace_history_has_tool_activity(history: &[String]) -> bool {
+    history.iter().any(|item| {
+        let stage = item
+            .split_once('\t')
+            .map_or(item.as_str(), |(_, stage)| stage);
+        stage.starts_with("OpenCode: running ") || stage.starts_with("OpenCode: finished ")
+    })
+}
+
+// Deliberately narrow English-language guard, not a general intent classifier.
+// Require explicit implementation intent and an unfinished first-person promise.
+// Tool activity (including reads/todos) never overrides that promise. Ambiguous
+// requests are left to the per-turn instructions rather than auto-executed.
+// Only a leading action (after an optional mention/polite prefix) opts in.
+// Questions, including action requests written as questions, do not opt in.
+fn coordinator_implementation_request(request: &str) -> bool {
+    let request = request.to_lowercase().replace('’', "'");
+    if request.contains('?')
+        || ["do not", "don't", "plan only", "only plan", "plan-only"]
+            .iter()
+            .any(|phrase| request.contains(phrase))
+    {
+        return false;
+    }
+    let request = request.trim();
+    let request = request
+        .strip_prefix("@coordinator")
+        .filter(|rest| rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ':' | ',')))
+        .map(|rest| rest.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ':' | ',')))
+        .unwrap_or(request);
+    let request = request.strip_prefix("please ").unwrap_or(request);
+    let request = request.strip_prefix("i want you to ").unwrap_or(request);
+    matches!(
+        request.split_whitespace().next(),
+        Some(
+            "implement"
+                | "fix"
+                | "build"
+                | "edit"
+                | "change"
+                | "add"
+                | "remove"
+                | "update"
+                | "finish"
+                | "complete"
+                | "start"
+                | "continue"
+        )
+    )
+}
+
+fn coordinator_unfinished_promise(response: &str) -> bool {
+    let response = response.to_lowercase().replace('’', "'");
+    // Concrete blocker reports are terminal, even if they describe future work.
+    if response.lines().any(|line| {
+        line.trim_start().starts_with("blocked:") && line.trim().len() > "blocked:".len()
+    }) || response.contains("cannot ")
+        || response.contains("can't ")
+        || response.contains("unable to ")
+        || ([" when ", " once ", " until "]
+            .iter()
+            .any(|phrase| response.contains(phrase))
+            && ["missing", "unavailable", "permission denied"]
+                .iter()
+                .any(|phrase| response.contains(phrase)))
+    {
+        return false;
+    }
+    [
+        "i will ",
+        "i'll ",
+        "i am going to ",
+        "i'm going to ",
+        "let me ",
+    ]
+    .iter()
+    .any(|prefix| {
+        response.split(prefix).skip(1).any(|rest| {
+            let sentence = rest.split(['.', '\n', '!', '?']).next().unwrap_or_default();
+            sentence.split(|c: char| !c.is_alphanumeric()).any(|word| {
+                matches!(
+                    word,
+                    "implement"
+                        | "fix"
+                        | "build"
+                        | "edit"
+                        | "change"
+                        | "add"
+                        | "remove"
+                        | "update"
+                        | "finish"
+                        | "complete"
+                        | "continue"
+                        | "start"
+                        | "run"
+                        | "verify"
+                )
+            })
+        })
+    })
+}
+
+fn targeted_workspace_agent_is_unavailable(
+    only_agent_id: Option<&str>,
+    agent_id: &str,
+    session_status: &str,
+) -> bool {
+    only_agent_id == Some(agent_id) && session_status != "ready"
+}
+
+fn targeted_workspace_agent_has_invalid_config(
+    only_agent_id: Option<&str>,
+    agent_id: &str,
+) -> bool {
+    only_agent_id == Some(agent_id)
+}
+
+fn targeted_workspace_agent_is_missing(only_agent_id: Option<&str>, agent_ids: &[String]) -> bool {
+    only_agent_id.is_some_and(|agent_id| !agent_ids.iter().any(|id| id == agent_id))
+}
+
+fn conversation_coordinator_is_targeted(
+    coordinator_id: &str,
+    mentions: &[WorkspaceMentionPayload],
+) -> bool {
+    conversation_agent_is_targeted(coordinator_id, mentions)
+}
+
+fn workspace_agent_handoff_targets(mentions: &[WorkspaceMentionPayload]) -> Vec<String> {
+    mentions
+        .iter()
+        .filter(|mention| mention.kind == "agent")
+        .map(|mention| mention.id.clone())
+        .collect()
+}
+
+fn workspace_agent_handoffs_for_recovery(
+    workspace: &WorkspaceStore,
+) -> Result<Vec<WorkspaceAgentHandoff>> {
+    let mut recovered = Vec::new();
+    for handoff in workspace.pending_agent_handoffs()? {
+        let Some(message) = workspace.message_by_id(&handoff.reply_message_id)? else {
+            continue;
+        };
+        let conversation = handoff
+            .member_pubkey
+            .as_deref()
+            .zip(handoff.peer_pubkey.as_deref())
+            .and_then(|(member, peer)| workspace_conversation(None, Some(member), Some(peer)))
+            .or_else(|| WorkspaceConversation::from_message(&message));
+        let Some(conversation) = conversation else {
+            continue;
+        };
+        if message.deleted_at.is_none()
+            && conversation_agent_is_targeted(&handoff.agent_id, &message.mentions)
+        {
+            recovered.push(WorkspaceAgentHandoff {
+                conversation,
+                persisted_reply_id: handoff.reply_message_id,
+                agent_id: handoff.agent_id,
+            });
+        }
+    }
+    Ok(recovered)
+}
+
+fn claim_workspace_agent_handoff(
+    claims: &mut HashSet<(String, String)>,
+    handoff: &(String, String),
+) -> bool {
+    claims.insert(handoff.clone())
+}
+
+fn release_workspace_agent_handoff(
+    claims: &mut HashSet<(String, String)>,
+    handoff: &(String, String),
+) {
+    claims.remove(handoff);
+}
+
+fn workspace_agent_handoffs_for_retry(
+    workspace: &WorkspaceStore,
+) -> Result<Vec<WorkspaceAgentHandoff>> {
+    workspace_agent_handoffs_for_recovery(workspace)
+}
+
+fn submit_workspace_agent_handoff(
+    _workspace: &WorkspaceStore,
+    queues: &mut WorkspaceAgentQueues,
+    handoff: WorkspaceAgentHandoff,
+) -> Result<()> {
+    queues.enqueue_handoff(handoff);
+    Ok(())
+}
+
+fn complete_workspace_agent_handoff(
+    workspace: &WorkspaceStore,
+    job: &WorkspaceAgentJob,
+) -> Result<()> {
+    if let Some((reply_message_id, agent_id)) = &job.handoff_outbox {
+        workspace.delivered_agent_handoff(reply_message_id, agent_id)?;
+    }
+    Ok(())
+}
+
+fn send_workspace_agent_handoff(
+    sender: &mpsc::UnboundedSender<WorkspaceAgentHandoff>,
+    conversation: &WorkspaceConversation,
+    persisted_reply_id: String,
+    agent_id: String,
+) {
+    if let Err(handoff) = sender.send(WorkspaceAgentHandoff {
+        conversation: conversation.clone(),
+        persisted_reply_id,
+        agent_id,
+    }) {
+        warn!(reply = %handoff.0.persisted_reply_id, "workspace agent handoff queue stopped; dropping handoff");
+    }
+}
+
+fn agent_reply_handoff_mentions(
+    workspace: &WorkspaceStore,
+    body: &str,
+    sender_agent_id: &str,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+    parent_id: Option<&str>,
+) -> Result<Vec<WorkspaceMentionPayload>> {
+    let mut mentions = Vec::new();
+    let mut add = |agent: WorkspaceAgent, label: &str| {
+        if agent.id != sender_agent_id {
+            mentions.push(WorkspaceMentionPayload {
+                kind: "agent".to_string(),
+                id: agent.id,
+                label: label.to_string(),
+            });
+        }
+    };
+    if contains_agent_handoff_mention(body, "@Coordinator") {
+        if let Some(agent) = workspace.conversation_coordinator(channel_id, member, peer)? {
+            add(agent, "Coordinator");
+        }
+    }
+    if contains_agent_handoff_mention(body, "@ThreadAgent") {
+        if let Some(parent_id) = parent_id {
+            if let Some(agent) = workspace.thread_agent(parent_id, channel_id, member, peer)? {
+                add(agent, "ThreadAgent");
+            }
+        }
+    }
+    Ok(mentions)
+}
+
+fn contains_agent_handoff_mention(body: &str, mention: &str) -> bool {
+    let is_identifier =
+        |character: char| character.is_alphanumeric() || matches!(character, '_' | '-' | '@');
+    body.match_indices(mention).any(|(start, _)| {
+        !body[..start].chars().next_back().is_some_and(is_identifier)
+            && !body[start + mention.len()..]
+                .chars()
+                .next()
+                .is_some_and(is_identifier)
+    })
+}
+
+fn agent_typing_payload(
+    agent: &WorkspaceAgent,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+    parent_id: Option<&str>,
+    stage: Option<&str>,
+    work_history: &[String],
+    started_at: Option<i64>,
+    expires_in: Option<Duration>,
+) -> WorkspaceTypingPayload {
+    let expires_at = expires_in
+        .map(|duration| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+                + duration.as_secs() as i64
+        })
+        .unwrap_or(0);
+    WorkspaceTypingPayload {
+        sender_pubkey: format!("agent:{}", agent.id),
+        agent_id: Some(agent.id.clone()),
+        agent_name: Some(agent.name.clone()),
+        stage: stage.map(str::to_string),
+        work_history: work_history.to_vec(),
+        started_at,
+        channel_id: channel_id.map(str::to_string),
+        recipient_pubkey: None,
+        member_pubkey: member.map(str::to_string),
+        peer_pubkey: peer.map(str::to_string),
+        parent_id: parent_id.map(str::to_string),
+        expires_at,
+    }
+}
+
+fn cancelled_agent_typing_payload(
+    agent: &WorkspaceAgent,
+    (active_agent_id, conversation): &ActiveTurnKey,
+    active_turn: &ActiveTurn,
+) -> WorkspaceTypingPayload {
+    let parent_id = active_turn
+        .parent_id
+        .as_deref()
+        .or_else(|| native_turn_root_id(active_agent_id));
+    match conversation {
+        WorkspaceConversation::Channel(channel_id) => agent_typing_payload(
+            agent,
+            Some(channel_id),
+            None,
+            None,
+            parent_id,
+            Some(""),
+            &[],
+            None,
+            None,
+        ),
+        WorkspaceConversation::Direct(member, peer) => agent_typing_payload(
+            agent,
+            None,
+            Some(member),
+            Some(peer),
+            parent_id,
+            Some(""),
+            &[],
+            None,
+            None,
+        ),
+    }
+}
+
+async fn send_workspace_typing_payload(
+    workspace: &WorkspaceStore,
+    messenger: &NostrMessenger,
+    payload: WorkspaceTypingPayload,
+    fips_only: bool,
+    duration: Duration,
+) -> Result<()> {
+    let update = WorkspaceUpdate {
+        action: "typing".to_string(),
+        revision: workspace.revision()?,
+        channels: vec![],
+        members: vec![],
+        messages: vec![],
+        agents: vec![],
+        conversation_agents: vec![],
+        conversation_preprompts: vec![],
+        board_tasks: vec![],
+        board_timeline_entries: vec![],
+        typing: Some(payload.clone()),
+        board_columns: vec![],
+        board_cards: vec![],
+    };
+    let recipients: Vec<String> = if let Some(channel_id) = payload.channel_id.as_deref() {
+        workspace
+            .channel_members(channel_id)?
+            .into_iter()
+            .map(|member| member.pubkey)
+            .collect()
+    } else {
+        [
+            payload.member_pubkey.as_deref(),
+            payload.peer_pubkey.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::to_string)
+        .collect()
+    };
+    for recipient in recipients {
+        let outbound = WORKSPACE_OUTBOUND
+            .lock()
+            .expect("workspace outbound registry lock poisoned")
+            .clone();
+        if let Some(outbound) = outbound {
+            if outbound.has_fips_route(&recipient).await {
+                outbound
+                    .send(
+                        messenger,
+                        &recipient,
+                        WireMessage::workspace_update(update.clone()),
+                    )
+                    .await?;
+                continue;
+            }
+        }
+        if fips_only {
+            continue;
+        }
+        messenger
+            .send_ephemeral_wire_to(
+                PublicKey::parse(&recipient)?,
+                WireMessage::workspace_update(update.clone()),
+                duration,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+fn allocated_thread_agent_update(
+    workspace: &WorkspaceStore,
+    worker: &WorkspaceAgent,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+) -> Result<WorkspaceUpdate> {
+    Ok(WorkspaceUpdate {
+        action: "conversation_agents_updated".to_string(),
+        revision: workspace.revision()?,
+        channels: vec![],
+        members: vec![],
+        messages: vec![],
+        agents: std::iter::once(worker.clone())
+            .chain(workspace.conversation_coordinator(channel_id, member, peer)?)
+            .map(agent_payload)
+            .collect(),
+        conversation_agents: workspace
+            .conversation_agents()?
+            .into_iter()
+            .map(conversation_agent_payload)
+            .collect(),
+        conversation_preprompts: vec![],
+        board_tasks: vec![],
+        board_timeline_entries: vec![],
+        typing: None,
+        board_columns: vec![],
+        board_cards: vec![],
+    })
+}
+
 async fn route_conversation_agents(
     workspace: &WorkspaceStore,
     messenger: &NostrMessenger,
@@ -6730,15 +8502,28 @@ async fn route_conversation_agents(
     parent_id: Option<&str>,
     body: &str,
     mentions: &[WorkspaceMentionPayload],
-    active_turns: &Arc<Mutex<HashMap<String, CodexCancelToken>>>,
+    active_turns: &ActiveTurns,
+    handoff_sender: &mpsc::UnboundedSender<WorkspaceAgentHandoff>,
     thread_checkpoint: &mut Option<WorkspaceAgentThreadCheckpoint>,
+    incoming_handoff: Option<&(String, String)>,
 ) -> Result<()> {
     let preprompts = workspace.conversation_preprompts()?;
     let mut agents = workspace.agents_for_conversation(channel_id, member, peer)?;
-    if let Some(coordinator) = workspace.conversation_coordinator(channel_id, member, peer)? {
+    let coordinator = workspace.conversation_coordinator(channel_id, member, peer)?;
+    let coordinator_id = coordinator.as_ref().map(|agent| agent.id.clone());
+    if let Some(coordinator) = coordinator {
         if only_agent_id == Some(coordinator.id.as_str()) {
             agents.push(coordinator);
         }
+    }
+    if targeted_workspace_agent_is_missing(
+        only_agent_id,
+        &agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<Vec<_>>(),
+    ) {
+        bail!("targeted workspace agent is not in this conversation");
     }
     for mut agent in agents {
         if only_agent_id.is_some_and(|agent_id| agent.id != agent_id) {
@@ -6755,6 +8540,9 @@ async fn route_conversation_agents(
                 Ok(config) => config,
                 Err(err) => {
                     warn!(agent = %agent.id, "workspace agent configuration is invalid: {err:#}");
+                    if targeted_workspace_agent_has_invalid_config(only_agent_id, &agent.id) {
+                        return Err(err);
+                    }
                     continue;
                 }
             };
@@ -6779,6 +8567,10 @@ async fn route_conversation_agents(
                     agents: vec![agent_payload(agent.clone())],
                     conversation_agents: vec![],
                     conversation_preprompts: vec![],
+                    board_tasks: vec![],
+                    board_timeline_entries: vec![],
+                    board_columns: vec![],
+                    board_cards: vec![],
                     typing: None,
                 },
             )
@@ -6789,6 +8581,13 @@ async fn route_conversation_agents(
             .flatten()
         else {
             warn!(agent = %agent.id, status = %agent.session_status, "workspace agent is not ready to respond");
+            if targeted_workspace_agent_is_unavailable(
+                only_agent_id,
+                &agent.id,
+                &agent.session_status,
+            ) {
+                bail!("targeted workspace agent is not ready to respond");
+            }
             continue;
         };
         // Conversation scope is shared by every agent in the conversation.
@@ -6801,15 +8600,45 @@ async fn route_conversation_agents(
             Ok(config) => config,
             Err(err) => {
                 warn!(agent = %agent.id, "workspace agent configuration is invalid: {err:#}");
+                if targeted_workspace_agent_has_invalid_config(only_agent_id, &agent.id) {
+                    return Err(err);
+                }
                 continue;
             }
         };
+        let Some(workspace_conversation) = workspace_conversation(channel_id, member, peer) else {
+            continue;
+        };
+        agent_config.opencode_server_scope = Some(workspace_conversation.opencode_server_scope());
         agent_config.timeout = agent_config.timeout.min(WORKSPACE_AGENT_TIMEOUT);
         // A membership's folder scope owns the execution directory. An agent's
         // saved workdir is only a profile default and must not escape this
         // conversation when the same agent is assigned elsewhere.
-        if let Some(working_folder) = folder_scope.first() {
-            agent_config.working_dir = PathBuf::from(working_folder);
+        agent_config = conversation_agent_execution_config(
+            &agent_config,
+            folder_scope,
+            coordinator_id.as_deref() == Some(agent.id.as_str()),
+        );
+        if let Some(workstream) = workspace.board_task_workstream_for_agent(&agent.id)? {
+            let task = workspace.board_tasks()?.into_iter().find(|task| task.id == workstream.task_id)
+                .context("board workstream task is missing")?;
+            board_task_target(workspace, &task.conversation_key, &task.folder_scope)?;
+            agent_config.workspace_access = OpenCodeWorkspaceAccess::ReadOnly;
+            agent_config.working_dir = PathBuf::from(&task.folder_scope[0]);
+            if workspace
+                .board_tasks()?
+                .into_iter()
+                .any(|task| task.id == workstream.task_id && task.state == "queued")
+            {
+                workspace.start_board_task(&workstream.task_id, board_now())?;
+                broadcast_workspace_update(
+                    workspace,
+                    messenger,
+                    outbound,
+                    &board_workspace_update(workspace)?,
+                )
+                .await?;
+            }
         }
         let preprompt = preprompts
             .iter()
@@ -6851,6 +8680,9 @@ async fn route_conversation_agents(
             Ok(key) => key,
             Err(err) => {
                 warn!(agent = %agent.id, "conversation folder scope is invalid: {err:#}");
+                if only_agent_id == Some(agent.id.as_str()) {
+                    return Err(err);
+                }
                 continue;
             }
         };
@@ -6864,6 +8696,9 @@ async fn route_conversation_agents(
             Ok(scope) => scope,
             Err(err) => {
                 warn!(agent = %agent.id, "conversation folder scope is invalid: {err:#}");
+                if only_agent_id == Some(agent.id.as_str()) {
+                    return Err(err);
+                }
                 continue;
             }
         };
@@ -6875,6 +8710,13 @@ async fn route_conversation_agents(
             ),
             conversation_agent_prompt(&thread_context, body),
         );
+        let prompt = if coordinator_id.as_deref() == Some(agent.id.as_str()) {
+            format!("{COORDINATOR_TURN_WORKFLOW}\n\n{prompt}")
+        } else {
+            format!(
+                "ThreadAgent workflow: remain read-only. Investigate, then hand off a detailed implementation specification to @Coordinator. After Coordinator completes the work, inspect the changes and verify the specified checks. Send precise corrections to @Coordinator when needed. Final acceptance ends the loop: report acceptance without an agent mention or further handoff.\n\n{prompt}"
+            )
+        };
         let prompt = if needs_session_context {
             format!(
                 "{}\n\n{}",
@@ -6884,7 +8726,7 @@ async fn route_conversation_agents(
         } else {
             prompt
         };
-        let mut result = match run_workspace_agent_with_typing(
+        let initial_result = run_workspace_agent_with_typing(
             workspace,
             messenger,
             &agent,
@@ -6899,14 +8741,18 @@ async fn route_conversation_agents(
             suppress_typing,
         )
         .await
-        {
-            Ok(result) if !result.response.trim().is_empty() => {
+        .and_then(|result| {
+            (!result.response.trim().is_empty())
+                .then_some(result)
+                .ok_or_else(|| anyhow!("OpenCode session returned an empty response"))
+        });
+        let mut result = match initial_result {
+            Ok(result) => {
                 if needs_session_context {
                     workspace.set_agent_session_context(&agent.id, &context_key)?;
                 }
                 result
             }
-            Ok(_) => interrupted_workspace_agent_result(WorkspaceAgentFallback::EmptyResponse),
             Err(err) if is_agent_cancelled_error(&err) => {
                 info!(agent = %agent.id, "workspace agent task cancelled");
                 interrupted_workspace_agent_result(WorkspaceAgentFallback::Cancelled)
@@ -6936,7 +8782,11 @@ async fn route_conversation_agents(
                             agents: vec![agent_payload(updated)],
                             conversation_agents: vec![],
                             conversation_preprompts: vec![],
+                            board_tasks: vec![],
+                            board_timeline_entries: vec![],
                             typing: None,
+                            board_columns: vec![],
+                            board_cards: vec![],
                         },
                     )
                     .await?;
@@ -6995,7 +8845,11 @@ async fn route_conversation_agents(
                             agents: vec![agent_payload(updated)],
                             conversation_agents: vec![],
                             conversation_preprompts: vec![],
+                            board_tasks: vec![],
+                            board_timeline_entries: vec![],
                             typing: None,
+                            board_columns: vec![],
+                            board_cards: vec![],
                         },
                     )
                     .await?;
@@ -7039,7 +8893,9 @@ async fn route_conversation_agents(
             )
             .await
             {
-                Ok(next) if !next.response.trim().is_empty() => result = next,
+                Ok(next) if !next.response.trim().is_empty() => {
+                    append_workspace_agent_result(&mut result, next)
+                }
                 Ok(_) => {
                     history_follow_up_failed = true;
                     break;
@@ -7062,40 +8918,51 @@ async fn route_conversation_agents(
                 WorkspaceAgentFallback::HistoryUnavailable
             });
         }
-        if is_workspace_agent_progress_only_response(&result.response) {
-            info!(agent = %agent.id, "continuing workspace agent after plan-only response");
-            let prompt = "Do the requested work now. Use the available tools and do not send another plan, acknowledgement, or progress update. Reply only after completing the work, or state a concrete blocker that prevents completion.";
-            match run_workspace_agent_with_typing(
-                workspace,
-                messenger,
-                &agent,
-                channel_id,
-                member,
-                peer,
-                parent_id,
-                prompt,
-                &agent_config,
-                &active_session_id,
-                active_turns,
-                suppress_typing,
-            )
-            .await
-            {
-                Ok(next) if !next.response.trim().is_empty() => result = next,
-                Ok(_) => {
-                    result = interrupted_workspace_agent_result(
-                        WorkspaceAgentFallback::ContinuationEmpty,
-                    )
-                }
-                Err(err) => {
-                    warn!(agent = %agent.id, "workspace agent continuation failed: {err:#}");
-                    result = interrupted_workspace_agent_result(workspace_agent_error_fallback(&err));
-                }
-            }
-        }
         if suppress_typing && !is_thread_topic_response(&result.response) {
             warn!(agent = %agent.id, "discarded malformed thread topic response");
             continue;
+        }
+        // If the backend recovered a session, continue the session that actually
+        // produced this reply, not the stale requested ID.
+        let continuation_session_id = result
+            .session_id
+            .clone()
+            .unwrap_or_else(|| active_session_id.clone());
+        result = coordinator_continue_once(
+            coordinator_id.as_deref() == Some(agent.id.as_str()) && !suppress_typing,
+            body,
+            result,
+            |prompt| {
+                let agent = &agent;
+                let agent_config = &agent_config;
+                let active_session_id = &continuation_session_id;
+                async move {
+                    run_workspace_agent_with_typing(
+                        workspace,
+                        messenger,
+                        agent,
+                        channel_id,
+                        member,
+                        peer,
+                        parent_id,
+                        &prompt,
+                        agent_config,
+                        active_session_id,
+                        active_turns,
+                        suppress_typing,
+                    )
+                    .await
+                }
+            },
+        )
+        .await;
+        if let Some(session_id) = result.session_id.as_deref() {
+            if session_id != active_session_id {
+                workspace.update_agent_session(&agent.id, Some(session_id), "ready", None)?;
+                active_session_id = session_id.to_string();
+                // update_agent_session clears the context key. A recovered
+                // session needs the full per-conversation instructions next turn.
+            }
         }
         if let Some(usage) = result.token_usage {
             let updated = workspace.record_agent_token_usage(
@@ -7116,37 +8983,62 @@ async fn route_conversation_agents(
                     agents: vec![agent_payload(updated)],
                     conversation_agents: vec![],
                     conversation_preprompts: vec![],
+                    board_tasks: vec![],
+                    board_timeline_entries: vec![],
                     typing: None,
+                    board_columns: vec![],
+                    board_cards: vec![],
                 },
             )
             .await?;
         }
+        let active_turn_key = active_turn_key(&agent.id, &workspace_conversation);
+        let active_turns_guard = active_turns.lock().await;
+        ensure_active_turn_not_cancelled(&active_turns_guard, &active_turn_key)?;
+        // Keep cancellation and the durable reply/handoff commit ordered. No
+        // network await occurs while this guard is held.
+        let handoff_mentions = agent_reply_handoff_mentions(
+            workspace,
+            &result.response,
+            &agent.id,
+            channel_id,
+            member,
+            peer,
+            parent_id,
+        )?;
         if is_thread_topic_response(&result.response) {
             let direct_recipient = peer
                 .filter(|peer| !peer.starts_with("agent:"))
                 .or(member)
                 .unwrap_or_default();
-            let message = match channel_id {
-                Some(channel_id) => workspace.add_channel_message_with_main(
+            let (message, handoffs) = match channel_id {
+                Some(channel_id) => workspace.add_channel_agent_reply_with_handoffs(
                     &format!("agent:{}", agent.id),
                     channel_id,
                     &result.response,
-                    &[],
-                    &[],
+                    &handoff_mentions,
                     parent_id,
                     false,
+                    incoming_handoff,
                 )?,
-                None => workspace.add_direct_message_with_main(
+                None => workspace.add_direct_agent_reply_with_handoffs(
                     &format!("agent:{}", agent.id),
                     direct_recipient,
                     &result.response,
-                    &[],
-                    &[],
+                    &handoff_mentions,
                     parent_id,
                     false,
+                    member.unwrap_or_default(),
+                    peer.unwrap_or_default(),
+                    incoming_handoff,
                 )?,
             };
             let message_id = message.id.clone();
+            let board_changed = sync_persisted_agent_thread_card(
+                workspace, &message, &workspace_conversation,
+                active_turns_guard.get(&active_turn_key),
+            )?;
+            drop(active_turns_guard);
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
                 revision: workspace.revision()?,
@@ -7156,6 +9048,10 @@ async fn route_conversation_agents(
                 agents: vec![],
                 conversation_agents: vec![],
                 conversation_preprompts: vec![],
+                board_tasks: vec![],
+                board_timeline_entries: vec![],
+                board_columns: vec![],
+                board_cards: vec![],
                 typing: None,
             };
             let recipients = if let Some(channel_id) = channel_id {
@@ -7171,7 +9067,18 @@ async fn route_conversation_agents(
                 ]
             };
             queue_workspace_update(workspace, recipients, &update).await?;
+            if board_changed {
+                queue_board_update(workspace)?;
+            }
             flush_workspace_notification_outbox(workspace, messenger, outbound).await;
+            for handoff in handoffs {
+                send_workspace_agent_handoff(
+                    handoff_sender,
+                    &workspace_conversation,
+                    handoff.reply_message_id,
+                    handoff.agent_id,
+                );
+            }
             if let Some(parent_id) = parent_id {
                 *thread_checkpoint = Some(WorkspaceAgentThreadCheckpoint {
                     session_id: active_session_id.clone(),
@@ -7186,29 +9093,41 @@ async fn route_conversation_agents(
             .filter(|peer| !peer.starts_with("agent:"))
             .or(member)
             .unwrap_or_default();
-        let mut message = match channel_id {
-            Some(channel_id) => workspace.add_channel_message_with_main(
+        let (mut message, handoffs) = match channel_id {
+            Some(channel_id) => workspace.add_channel_agent_reply_with_handoffs(
                 &format!("agent:{}", agent.id),
                 channel_id,
                 &result.response,
-                &[],
-                &[],
+                &handoff_mentions,
                 parent_id,
                 also_send_to_main,
+                incoming_handoff,
             )?,
-            None => workspace.add_direct_message_with_main(
+            None => workspace.add_direct_agent_reply_with_handoffs(
                 &format!("agent:{}", agent.id),
                 direct_recipient,
                 &result.response,
-                &[],
-                &[],
+                &handoff_mentions,
                 parent_id,
                 also_send_to_main,
+                member.unwrap_or_default(),
+                peer.unwrap_or_default(),
+                incoming_handoff,
             )?,
         };
+        let message_id = message.id.clone();
         workspace.set_message_work_history(&message.id, &result.work_history)?;
         message.work_history = result.work_history;
-        let message_id = message.id.clone();
+        let board_changed = sync_persisted_agent_thread_card(
+            workspace, &message, &workspace_conversation,
+            active_turns_guard.get(&active_turn_key),
+        )?;
+        drop(active_turns_guard);
+        if let Some(workstream) = workspace.board_task_workstream_for_agent(&agent.id)? {
+            if board_proposal_is_ready(&result.response) {
+                workspace.mark_board_proposal_ready(&workstream.task_id, &message_id)?;
+            }
+        }
         let update = WorkspaceUpdate {
             action: "message_created".to_string(),
             revision: workspace.revision()?,
@@ -7218,6 +9137,10 @@ async fn route_conversation_agents(
             agents: vec![],
             conversation_agents: vec![],
             conversation_preprompts: vec![],
+            board_tasks: vec![],
+                    board_timeline_entries: vec![],
+                    board_columns: vec![],
+                    board_cards: vec![],
             typing: None,
         };
         let recipients = if channel_id.is_some() {
@@ -7233,7 +9156,18 @@ async fn route_conversation_agents(
             ]
         };
         queue_workspace_update(workspace, recipients, &update).await?;
+        if board_changed {
+            queue_board_update(workspace)?;
+        }
         flush_workspace_notification_outbox(workspace, messenger, outbound).await;
+        for handoff in handoffs {
+            send_workspace_agent_handoff(
+                handoff_sender,
+                &workspace_conversation,
+                handoff.reply_message_id,
+                handoff.agent_id,
+            );
+        }
         if let Some(parent_id) = parent_id {
             *thread_checkpoint = Some(WorkspaceAgentThreadCheckpoint {
                 session_id: active_session_id.clone(),
@@ -7243,6 +9177,185 @@ async fn route_conversation_agents(
         }
     }
     Ok(())
+}
+
+/// Tool output supplies candidates only. Do not reinterpret shell tokens:
+/// quoted operators, printf arguments and shell scripts are not commit proof.
+fn git_commit_candidates(event: &serde_json::Value) -> Vec<String> {
+    let (output, exit) = match event.get("type").and_then(|v| v.as_str()) {
+        Some("message.part.updated") | Some("tool_use") => {
+            let part = event.pointer("/properties/part").or_else(|| event.get("part")).unwrap_or(event);
+            if part.get("tool").and_then(|v| v.as_str()) != Some("bash") || part.pointer("/state/status").and_then(|v| v.as_str()) != Some("completed") { return vec![]; }
+            (part.pointer("/state/output"), part.pointer("/state/metadata/exit"))
+        }
+        Some("item.completed") => {
+            let Some(item) = event.get("item") else { return vec![]; };
+            if item.get("type").and_then(|v| v.as_str()) != Some("command_execution") { return vec![]; }
+            (item.get("aggregated_output"), item.get("exit_code"))
+        }
+        _ => return vec![],
+    };
+    if exit.and_then(|v| v.as_i64()) != Some(0) { return vec![]; }
+    output.and_then(|v| v.as_str()).unwrap_or_default().lines().filter_map(|line| {
+        let (header, _) = line.strip_prefix('[')?.split_once("] ")?;
+        let hash = header.split_whitespace().last()?;
+        (hash.len() >= 7 && hash.len() <= 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit())).then(|| hash.to_string())
+    }).collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GitCommitBaseline {
+    Existing(String),
+    Unborn(String),
+}
+
+fn git_commit_baseline(workdir: &Path) -> Option<GitCommitBaseline> {
+    if let Ok(head) = run_git(workdir, &["rev-parse", "--verify", "HEAD^{commit}"]) {
+        return Some(GitCommitBaseline::Existing(head));
+    }
+    if run_git(workdir, &["rev-parse", "--is-inside-work-tree"]).ok()?.as_str() != "true" {
+        return None;
+    }
+    let branch = run_git(workdir, &["symbolic-ref", "--quiet", "HEAD"]).ok()?;
+    if !branch.starts_with("refs/heads/") {
+        return None;
+    }
+    // Exit 1 means this branch does not exist yet. Other failures must not
+    // authorize an initial commit on behalf of an unknown baseline.
+    let output = StdCommand::new("git")
+        .args(["show-ref", "--verify", "--quiet", &branch])
+        .current_dir(workdir)
+        .output()
+        .ok()?;
+    (output.status.code() == Some(1)).then_some(GitCommitBaseline::Unborn(branch))
+}
+
+fn verified_new_git_commit(workdir: &Path, baseline: Option<&GitCommitBaseline>, candidates: &BTreeSet<String>) -> bool {
+    let Some(baseline) = baseline else { return false; };
+    if candidates.is_empty() { return false; }
+    let Ok(head) = run_git(workdir, &["rev-parse", "--verify", "HEAD^{commit}"]) else { return false; };
+    if !candidates.iter().any(|hash| head.starts_with(hash)) { return false; }
+    let Ok(action) = run_git(workdir, &["reflog", "-1", "--format=%gs", "HEAD"]) else { return false; };
+    match baseline {
+        GitCommitBaseline::Existing(previous) => {
+            head != *previous
+                && run_git(workdir, &["merge-base", "--is-ancestor", previous, &head]).is_ok()
+                && (action.starts_with("commit: ") || action.starts_with("commit (merge): "))
+        }
+        GitCommitBaseline::Unborn(branch) => {
+            action.starts_with("commit (initial): ")
+                && run_git(workdir, &["symbolic-ref", "--quiet", "HEAD"]).is_ok_and(|current| current == *branch)
+                && run_git(workdir, &["show", "-s", "--format=%P", &head]).is_ok_and(|parents| parents.is_empty())
+        }
+    }
+}
+
+fn sync_persisted_agent_thread_card(
+    workspace: &WorkspaceStore,
+    message: &WorkspaceMessage,
+    conversation: &WorkspaceConversation,
+    active_turn: Option<&ActiveTurn>,
+) -> Result<bool> {
+    let mut changed = sync_thread_card_after_message(workspace, message)?;
+    if active_turn.is_some_and(|turn| {
+        turn.verified_git_commit && turn.parent_id.as_deref() == message.parent_id.as_deref()
+    }) {
+        if let (Some(root_id), Some(agent_id)) = (
+            message.parent_id.as_deref(), message.sender_pubkey.strip_prefix("agent:"),
+        ) {
+            let (channel_id, member, peer) = match conversation {
+                WorkspaceConversation::Channel(channel) => (Some(channel.as_str()), None, None),
+                WorkspaceConversation::Direct(member, peer) => (None, Some(member.as_str()), Some(peer.as_str())),
+            };
+            changed |= integrate_coordinator_thread_card(workspace, agent_id, channel_id, member, peer, root_id)?;
+        }
+    }
+    Ok(changed)
+}
+
+fn integrate_coordinator_thread_card(
+    workspace: &WorkspaceStore,
+    agent_id: &str,
+    channel_id: Option<&str>,
+    member: Option<&str>,
+    peer: Option<&str>,
+    root_id: &str,
+) -> Result<bool> {
+    if !workspace.conversation_coordinator(channel_id, member, peer)?
+        .is_some_and(|coordinator| coordinator.id == agent_id)
+    {
+        return Ok(false);
+    }
+    workspace.validate_thread_root(root_id, channel_id, member, peer)?;
+    workspace.integrate_thread_board_card(root_id)
+}
+
+fn persist_native_board_reply(
+    workspace: &WorkspaceStore,
+    conversation: &WorkspaceConversation,
+    root_id: &str,
+    body: &str,
+    attachments: &[MediaReference],
+    work_history: &[String],
+) -> Result<WorkspaceMessage> {
+    let mut reply = match conversation {
+        WorkspaceConversation::Channel(channel) => workspace.add_channel_message_with_main(
+            "agent:native-opencode", channel, body, attachments, &[], Some(root_id), false,
+        )?,
+        WorkspaceConversation::Direct(_, peer) => workspace.add_direct_message_with_main(
+            "agent:native-opencode", peer, body, attachments, &[], Some(root_id), false,
+        )?,
+    };
+    workspace.set_message_work_history(&reply.id, work_history)?;
+    reply.work_history = work_history.to_vec();
+    if sync_thread_card_after_message(workspace, &reply)? {
+        queue_board_update(workspace)?;
+    }
+    Ok(reply)
+}
+
+fn sync_thread_topic_card(workspace: &WorkspaceStore, marker: &WorkspaceMessage, root_id: Option<&str>) -> Result<bool> {
+    let Some(root_id) = root_id else { return Ok(false); };
+    if !is_thread_topic_response(&marker.body) || marker.deleted_at.is_some() || marker.parent_id.as_deref() != Some(root_id) {
+        return Ok(false);
+    }
+    let Some(persisted) = workspace.message_by_id(&marker.id)? else { return Ok(false); };
+    let Some(root) = workspace.message_by_id(root_id)? else { return Ok(false); };
+    if persisted != *marker || persisted.parent_id.as_deref() != Some(root_id)
+        || root.parent_id.is_some() || root.deleted_at.is_some() || root.channel_id != marker.channel_id {
+        return Ok(false);
+    }
+    if root.channel_id.is_none() && ![Some(root.sender_pubkey.as_str()), root.recipient_pubkey.as_deref()].contains(&marker.recipient_pubkey.as_deref()) {
+        return Ok(false);
+    }
+    if root.channel_id.is_none() && !marker.sender_pubkey.starts_with("agent:")
+        && !((marker.sender_pubkey == root.sender_pubkey && marker.recipient_pubkey == root.recipient_pubkey)
+            || (Some(marker.sender_pubkey.as_str()) == root.recipient_pubkey.as_deref()
+                && marker.recipient_pubkey.as_deref() == Some(root.sender_pubkey.as_str())))
+    {
+        return Ok(false);
+    }
+    let topic = marker.body.trim().strip_prefix("[[THREAD_TOPIC:").unwrap().strip_suffix("]]").unwrap().trim();
+    let revision = workspace.revision()?;
+    workspace.create_board_card_from_thread(root_id, topic)?;
+    Ok(workspace.revision()? != revision)
+}
+
+fn sync_thread_card_after_message(workspace: &WorkspaceStore, message: &WorkspaceMessage) -> Result<bool> {
+    let Some(root_id) = message.parent_id.as_deref() else { return Ok(false); };
+    if message.deleted_at.is_some() { return Ok(false); }
+    if !workspace.message_by_id(root_id)?.is_some_and(|root| root.parent_id.is_none() && root.deleted_at.is_none()) {
+        return Ok(false);
+    }
+    // The title may predate the third content reply. Reuse the latest durable
+    // marker, rather than requiring another title request or inventing a title.
+    let marker = workspace.thread_messages(root_id)?.into_iter().rev().find(|candidate| {
+        candidate.deleted_at.is_none() && is_thread_topic_response(&candidate.body)
+    });
+    match marker {
+        Some(marker) => sync_thread_topic_card(workspace, &marker, Some(root_id)),
+        None => Ok(false),
+    }
 }
 
 fn is_thread_topic_response(response: &str) -> bool {
@@ -7417,12 +9530,6 @@ fn workspace_agent_batched_prompt_body(messages: &[(String, String)]) -> Option<
     })
 }
 
-fn is_workspace_agent_progress_only_response(response: &str) -> bool {
-    let response = response.trim().to_ascii_lowercase();
-    response.starts_with("i'll ")
-        || response.starts_with("i will ")
-        || response.starts_with("let me ")
-}
 
 fn workspace_thread_context_since(
     workspace: &WorkspaceStore,
@@ -7737,8 +9844,9 @@ fn native_turn_is_routed(
 ) -> Result<bool> {
     let requested = agent_turn_is_routed(agent_routing_enabled, request);
     let Some(parent_id) = message.parent_id.as_deref() else {
-        workspace.set_thread_agent_routing(&message.id, requested)?;
-        return Ok(requested);
+        let routed = !message.sender_pubkey.starts_with("agent:") || requested;
+        workspace.set_thread_agent_routing(&message.id, routed)?;
+        return Ok(routed);
     };
     // A thread inherits its root's Ask agent choice. An explicit @agent mention
     // remains an intentional exception for a later reply.
@@ -12473,12 +14581,16 @@ fn is_codex_cancelled_error(err: &anyhow::Error) -> bool {
 
 fn is_agent_cancelled_error(err: &anyhow::Error) -> bool {
     let message = format!("{err:#}");
-    message.contains("Codex cancelled") || message.contains("OpenCode cancelled")
+    message.contains("Codex cancelled")
+        || message.contains("OpenCode cancelled")
+        || message.contains("workspace task cancelled")
 }
 
 fn workspace_agent_error_fallback(err: &anyhow::Error) -> WorkspaceAgentFallback {
     let message = format!("{err:#}");
-    if message.contains("Too many open files") || message.contains("EMFILE") {
+    if is_agent_cancelled_error(err) {
+        WorkspaceAgentFallback::Cancelled
+    } else if message.contains("Too many open files") || message.contains("EMFILE") {
         WorkspaceAgentFallback::ResourceExhausted
     } else if message.contains("timed out") {
         WorkspaceAgentFallback::TimedOut
@@ -12581,7 +14693,7 @@ fn env_csv(name: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_lib_nostr_codex_phone::codex::OpenCodeConfig;
+    use rust_lib_nostr_codex_phone::codex::{OpenCodeConfig, OpenCodeWorkspaceAccess};
 
     static ENV_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
         once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
@@ -12602,6 +14714,8 @@ mod tests {
             timeout: Duration::from_secs(300),
             persist_sessions: true,
             usage_limit_fallback_model: None,
+            workspace_access: OpenCodeWorkspaceAccess::ReadWrite,
+            opencode_server_scope: None,
             opencode: OpenCodeConfig {
                 bin: "opencode".to_string(),
                 agent: "build".to_string(),
@@ -12614,6 +14728,113 @@ mod tests {
     fn git_worktree_paths_are_rejected() {
         assert!(is_git_worktree_path(Path::new("/repo/.worktrees/issue-58")));
         assert!(!is_git_worktree_path(Path::new("/repo/src")));
+    }
+
+    #[test]
+    fn privileged_workspace_actions_require_admin() {
+        for action in [
+            "create_board_task",
+            "update_board_task",
+            "cancel_board_task",
+            "retry_board_task",
+            "set_conversation_preprompt",
+        ] {
+            assert!(workspace_action_requires_admin(action), "{action}");
+        }
+    }
+
+    #[test]
+    fn board_task_waits_while_its_conversation_is_busy() {
+        let mut busy = HashSet::new();
+        busy.insert("channel:engineering".to_string());
+
+        assert!(!board_task_can_start(&busy, "channel:engineering"));
+        assert!(board_task_can_start(&busy, "channel:design"));
+    }
+
+    #[test]
+    fn head_integration_uses_the_task_scope_as_its_workdir() {
+        let global = tempfile::tempdir().unwrap();
+        let task_scope = tempfile::tempdir().unwrap();
+
+        let config = head_integration_config(
+            &test_codex_config(global.path().to_path_buf()),
+            &[task_scope.path().to_string_lossy().to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(config.working_dir, task_scope.path());
+        assert_eq!(config.workspace_access, OpenCodeWorkspaceAccess::ReadWrite);
+    }
+
+    #[test]
+    fn only_coordinator_turns_can_write_in_the_first_shared_folder() {
+        let global = tempfile::tempdir().unwrap();
+        let active = tempfile::tempdir().unwrap();
+
+        let coordinator = conversation_agent_execution_config(
+            &test_codex_config(global.path().to_path_buf()),
+            &[active.path().to_string_lossy().to_string()],
+            true,
+        );
+        let worker = conversation_agent_execution_config(
+            &test_codex_config(global.path().to_path_buf()),
+            &[active.path().to_string_lossy().to_string()],
+            false,
+        );
+
+        assert_eq!(coordinator.working_dir, active.path());
+        assert_eq!(
+            coordinator.workspace_access,
+            OpenCodeWorkspaceAccess::ReadWrite
+        );
+        assert_eq!(worker.workspace_access, OpenCodeWorkspaceAccess::ReadOnly);
+    }
+
+    #[test]
+    fn failed_board_turn_blocks_its_task() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "Review",
+                "channel:engineering",
+                "Review.",
+                &[],
+                "once",
+                1,
+            )
+            .unwrap();
+        store.claim_due_board_task(&task.id, 1).unwrap();
+
+        finish_board_turn(&store, &task.id, Err(anyhow!("agent failed"))).unwrap();
+
+        assert_eq!(store.board_tasks().unwrap()[0].state, "blocked");
+    }
+
+    #[test]
+    fn only_explicit_task_proposals_are_ready_for_head_integration() {
+        assert!(!board_proposal_is_ready(
+            "I investigated the issue and have a question."
+        ));
+        assert!(board_proposal_is_ready(
+            "Proposal follows.\n[[PROPOSAL_READY]]"
+        ));
+        assert!(!board_proposal_is_ready("[[PROPOSAL_READY]] later"));
+    }
+
+    #[test]
+    fn direct_task_roots_use_the_creator_identity() {
+        assert_eq!(
+            direct_task_root_recipient("alice", "alice", "bob").unwrap(),
+            "bob"
+        );
+        assert_eq!(
+            direct_task_root_recipient("bob", "alice", "bob").unwrap(),
+            "alice"
+        );
+        assert!(direct_task_root_recipient("mallory", "alice", "bob").is_err());
     }
 
     #[test]
@@ -12770,6 +14991,8 @@ mod tests {
             pinned: false,
             reactions: vec![],
             work_history: vec![],
+            edited_at: None,
+            deleted_at: None,
             created_at: 0,
         };
         assert!(should_auto_allocate_main_message(true, &root));
@@ -12781,45 +15004,6 @@ mod tests {
         assert!(!should_auto_allocate_main_message(true, &reply));
     }
 
-    #[test]
-    fn targeted_coordinator_replies_in_place() {
-        let root = WorkspaceMessage {
-            id: "root".to_string(),
-            channel_id: Some("channel".to_string()),
-            recipient_pubkey: None,
-            sender_pubkey: "member".to_string(),
-            body: "@A0 summarize this conversation".to_string(),
-            attachments: vec![],
-            mentions: vec![WorkspaceMentionPayload {
-                kind: "agent".to_string(),
-                id: "a0".to_string(),
-                label: "A0".to_string(),
-            }],
-            parent_id: None,
-            also_send_to_main: false,
-            pinned: false,
-            reactions: vec![],
-            work_history: vec![],
-            created_at: 0,
-        };
-        assert_eq!(
-            workspace_agent_reply_parent_id_for(&root, "a0", Some("a0")),
-            None
-        );
-        assert_eq!(
-            workspace_agent_reply_parent_id_for(&root, "a1", Some("a0")),
-            Some("root")
-        );
-
-        let reply = WorkspaceMessage {
-            parent_id: Some("root".to_string()),
-            ..root
-        };
-        assert_eq!(
-            workspace_agent_reply_parent_id_for(&reply, "a0", Some("a0")),
-            Some("root")
-        );
-    }
 
     #[tokio::test]
     async fn workspace_fips_capabilities_are_random_member_bound_and_single_use() {
@@ -12847,6 +15031,10 @@ mod tests {
             agents: vec![],
             conversation_agents: vec![],
             conversation_preprompts: vec![],
+            board_tasks: vec![],
+            board_timeline_entries: vec![],
+            board_columns: vec![],
+            board_cards: vec![],
             typing: None,
         })
         .to_json()
@@ -12875,6 +15063,8 @@ mod tests {
             reactions: vec![],
             work_history: vec![],
             pinned: false,
+            edited_at: None,
+            deleted_at: None,
             created_at: 0,
         };
         let conversation = WorkspaceConversation::Direct("alice".to_string(), "bob".to_string());
@@ -12904,18 +15094,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn detects_plan_only_workspace_agent_responses() {
-        assert!(is_workspace_agent_progress_only_response(
-            "I'll implement the requested change now."
-        ));
-        assert!(is_workspace_agent_progress_only_response(
-            "Let me inspect the repository."
-        ));
-        assert!(!is_workspace_agent_progress_only_response(
-            "Implemented the requested change."
-        ));
-    }
 
     #[test]
     fn batches_rapid_workspace_messages_into_one_agent_prompt() {
@@ -12944,6 +15122,274 @@ mod tests {
             "[[THREAD_TOPIC: Deployment]]\nThe deployment is complete."
         ));
         assert!(!is_thread_topic_response("Deployment"));
+    }
+
+    #[test]
+    fn thread_board_manual_and_native_persisted_topics_share_one_card() {
+        for direct in [false, true] {
+            let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+            workspace.add_member("owner").unwrap();
+            workspace.add_member("peer").unwrap();
+            let channel = workspace.create_channel("engineering", "owner").unwrap();
+            let root = if direct {
+                workspace.add_direct_message_with_main("owner", "peer", "root", &[], &[], None, true)
+            } else {
+                workspace.add_channel_message_with_main("owner", &channel.id, "root", &[], &[], None, true)
+            }.unwrap();
+            let persist = |body: &str| if direct {
+                workspace.add_direct_message_with_main("owner", "peer", body, &[], &[], Some(&root.id), false)
+            } else {
+                workspace.add_channel_message_with_main("owner", &channel.id, body, &[], &[], Some(&root.id), false)
+            }.unwrap();
+            persist("first");
+            persist("second");
+            let early = persist("[[THREAD_TOPIC: Too early]]");
+            assert!(!sync_thread_topic_card(&workspace, &early, Some(&root.id)).unwrap());
+            persist("third");
+            let manual = persist("[[THREAD_TOPIC: Manual title]]");
+            assert!(sync_thread_topic_card(&workspace, &manual, Some(&root.id)).unwrap());
+            let original = workspace.board_cards().unwrap().remove(0);
+            let native = if direct {
+                workspace.add_direct_message_with_main("agent:a0", "owner", "[[THREAD_TOPIC: Native title]]", &[], &[], Some(&root.id), false)
+            } else {
+                workspace.add_channel_message_with_main("agent:a0", &channel.id, "[[THREAD_TOPIC: Native title]]", &[], &[], Some(&root.id), false)
+            }.unwrap();
+            assert!(sync_thread_topic_card(&workspace, &native, Some(&root.id)).unwrap());
+            assert!(!sync_thread_topic_card(&workspace, &native, Some(&root.id)).unwrap());
+            let card = workspace.board_cards().unwrap().remove(0);
+            assert_eq!(card.id, original.id);
+            assert_eq!(card.title, "Native title");
+            let conversation = if direct { WorkspaceConversation::Direct("owner".into(), "peer".into()) } else { WorkspaceConversation::Channel(channel.id.clone()) };
+            let native_reply = persist_native_board_reply(&workspace, &conversation, &root.id, "[[THREAD_TOPIC: Native persisted title]]", &[], &[]).unwrap();
+            assert!(!sync_thread_topic_card(&workspace, &native_reply, Some(&root.id)).unwrap());
+            assert_eq!(workspace.board_cards().unwrap()[0].id, original.id);
+            assert_eq!(workspace.board_cards().unwrap()[0].title, "Native persisted title");
+            assert!(workspace.board_tasks().unwrap().is_empty());
+            let mut forged = native.clone();
+            forged.body = "[[THREAD_TOPIC: Not persisted]]".to_string();
+            assert!(!sync_thread_topic_card(&workspace, &forged, Some(&root.id)).unwrap());
+            forged = native.clone();
+            forged.channel_id = Some("wrong-channel".into());
+            assert!(!sync_thread_topic_card(&workspace, &forged, Some(&root.id)).unwrap());
+            assert!(!sync_thread_topic_card(&workspace, &native, Some(&native.id)).unwrap());
+            for _ in 0..=WORKSPACE_SNAPSHOT_MESSAGE_LIMIT {
+                if direct {
+                    workspace.add_direct_message_with_main("owner", "peer", "later", &[], &[], None, true).unwrap();
+                } else {
+                    workspace.add_channel_message_with_main("owner", &channel.id, "later", &[], &[], None, true).unwrap();
+                }
+            }
+            let snapshot = workspace_snapshot(&workspace, "owner").unwrap();
+            assert!(snapshot.messages.iter().any(|message| message.id == root.id));
+            assert_eq!(snapshot.board_cards.len(), 1);
+            assert!(snapshot.board_columns.iter().any(|column| column.name == "Backlog"));
+            let frames = nostr_workspace_snapshot_chunks(&snapshot, "test").unwrap();
+            assert_eq!(frames.iter().map(|frame| frame.board_cards.len()).sum::<usize>(), 1);
+            let coordinator = workspace.create_agent("A0", "Coordinator", "", &[], None, Some("session"), "ready", None, "owner").unwrap();
+            let (channel_id, member, peer) = if direct { (None, Some("owner"), Some("peer")) } else { (Some(channel.id.as_str()), None, None) };
+            workspace.set_conversation_coordinator(&coordinator.id, channel_id, member, peer).unwrap();
+            assert!(!integrate_coordinator_thread_card(&workspace, "other-agent", channel_id, member, peer, &root.id).unwrap());
+            let other_channel = workspace.create_channel("other", "owner").unwrap();
+            let unrelated = workspace.add_channel_message("owner", &other_channel.id, "unrelated root", &[], &[], None).unwrap();
+            assert!(integrate_coordinator_thread_card(&workspace, &coordinator.id, channel_id, member, peer, &unrelated.id).is_err());
+            assert!(integrate_coordinator_thread_card(&workspace, &coordinator.id, channel_id, member, peer, &root.id).unwrap());
+            assert!(!integrate_coordinator_thread_card(&workspace, &coordinator.id, channel_id, member, peer, &root.id).unwrap());
+            let integrating = workspace.board_cards().unwrap().remove(0);
+            assert_eq!(integrating.id, original.id);
+            assert_eq!(integrating.created_at, original.created_at);
+            assert!(workspace.board_columns().unwrap().iter().any(|column| column.id == integrating.column_id && column.name == "Integrating"));
+            assert!(workspace.board_tasks().unwrap().is_empty());
+            assert!(workspace.board_runs(&integrating.id).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn thread_board_commit_evidence_requires_successful_tool_output() {
+        let event = serde_json::json!({"type":"message.part.updated", "properties":{"part":{"type":"tool", "tool":"bash", "state":{"status":"completed", "input":{"command":"git add src && git commit -m fix"}, "output":"[main 1a2b3c4] fix\n 1 file changed", "metadata":{"exit":0}}}}});
+        assert_eq!(git_commit_candidates(&event), ["1a2b3c4"]);
+        for (pointer, value) in [
+            ("/properties/part/state/status", serde_json::json!("running")),
+            ("/properties/part/state/metadata/exit", serde_json::json!(1)),
+            ("/properties/part/state/output", serde_json::json!("I committed the changes.")),
+        ] {
+            let mut invalid = event.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            assert!(git_commit_candidates(&invalid).is_empty(), "{pointer}");
+        }
+        assert!(git_commit_candidates(&serde_json::json!({"type":"text", "text":"committed"})).is_empty());
+        assert_eq!(git_commit_candidates(&serde_json::json!({"type":"item.completed", "item":{"type":"command_execution", "command":"git commit -m fix", "exit_code":0, "aggregated_output":"[main 1a2b3c4] fix"}})), ["1a2b3c4"]);
+        assert_eq!(git_commit_candidates(&serde_json::json!({"type":"tool_use", "part":event["properties"]["part"]})), ["1a2b3c4"]);
+    }
+
+    #[test]
+    fn thread_board_commit_proof_rejects_shell_spoofs_and_verifies_a_real_new_commit() {
+        let repo = tempfile::tempdir().unwrap();
+        let dir = repo.path();
+        run_git(dir, &["init", "-q"]).unwrap();
+        fs::write(dir.join("file.txt"), "before").unwrap();
+        run_git(dir, &["add", "file.txt"]).unwrap();
+        let commit = ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "test commit"];
+        run_git(dir, &commit).unwrap();
+        let baseline = run_git(dir, &["rev-parse", "HEAD"]).unwrap();
+        let proof_baseline = git_commit_baseline(dir).unwrap();
+        let shell_event = |command: &str| {
+            let output = StdCommand::new("sh").args(["-c", command]).current_dir(dir).output().unwrap();
+            serde_json::json!({"type":"item.completed", "item":{"type":"command_execution", "command":command, "exit_code":output.status.code(), "aggregated_output":String::from_utf8_lossy(&output.stdout)}})
+        };
+        for command in [
+            "printf '[main 1a2b3c4] %s %s %s\\n' '&&' git commit".to_string(),
+            "printf '[main 1a2b3c4] %s\\n' 'git commit'".to_string(),
+            format!("printf '[main {}] old existing commit\\n'", &baseline[..7]),
+            "false && git commit -m fail; printf '[main 1a2b3c4] not committed\\n'".to_string(),
+        ] {
+            let candidates = git_commit_candidates(&shell_event(&command)).into_iter().collect();
+            assert!(!verified_new_git_commit(dir, Some(&proof_baseline), &candidates), "{command}");
+        }
+        fs::write(dir.join("file.txt"), "after").unwrap();
+        let event = shell_event("git add file.txt && git -c user.name=Test -c user.email=test@example.invalid -c commit.gpgsign=false commit -m 'real commit with quoted && text'");
+        let candidates = git_commit_candidates(&event).into_iter().collect();
+        assert!(verified_new_git_commit(dir, Some(&proof_baseline), &candidates));
+        let head = run_git(dir, &["rev-parse", "HEAD"]).unwrap();
+        assert!(!verified_new_git_commit(dir, git_commit_baseline(dir).as_ref(), &candidates));
+        assert!(!verified_new_git_commit(dir, None, &candidates));
+        assert!(!verified_new_git_commit(dir, Some(&proof_baseline), &BTreeSet::from(["1a2b3c4".into()])));
+        let mut failed = event.clone();
+        failed["item"]["exit_code"] = 1.into();
+        assert!(!verified_new_git_commit(dir, Some(&proof_baseline), &git_commit_candidates(&failed).into_iter().collect()));
+        run_git(dir, &["reset", "--hard", &baseline]).unwrap();
+        run_git(dir, &["reset", "--hard", &head]).unwrap();
+        assert!(!verified_new_git_commit(dir, Some(&proof_baseline), &candidates), "moving HEAD to an old commit is not a new commit");
+    }
+
+    #[test]
+    fn thread_board_commit_proof_accepts_a_real_initial_commit() {
+        let repo = tempfile::tempdir().unwrap();
+        let dir = repo.path();
+        run_git(dir, &["init", "-q"]).unwrap();
+        let baseline = git_commit_baseline(dir).unwrap();
+        assert!(matches!(&baseline, GitCommitBaseline::Unborn(_)));
+        fs::write(dir.join("file.txt"), "initial content").unwrap();
+        run_git(dir, &["add", "file.txt"]).unwrap();
+        let output = run_git(dir, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "initial commit"]).unwrap();
+        let event = serde_json::json!({"type":"item.completed", "item":{"type":"command_execution", "exit_code":0, "aggregated_output":output}});
+        let candidates = git_commit_candidates(&event).into_iter().collect();
+        assert!(verified_new_git_commit(dir, Some(&baseline), &candidates));
+        assert!(!verified_new_git_commit(dir, None, &candidates));
+        assert!(!verified_new_git_commit(dir, Some(&baseline), &BTreeSet::from(["1a2b3c4".into()])));
+    }
+
+    #[test]
+    fn thread_board_commit_proof_does_not_treat_a_missing_repo_as_unborn() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert_eq!(git_commit_baseline(&missing), None);
+        let baseline = git_commit_baseline(dir.path());
+        assert_eq!(baseline, None);
+        // A later valid initial commit cannot repair a failed pre-turn lookup.
+        run_git(dir.path(), &["init", "-q"]).unwrap();
+        fs::write(dir.path().join("file.txt"), "initial content").unwrap();
+        run_git(dir.path(), &["add", "file.txt"]).unwrap();
+        run_git(dir.path(), &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "initial commit"]).unwrap();
+        let head = run_git(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        assert!(!verified_new_git_commit(dir.path(), baseline.as_ref(), &BTreeSet::from([head])));
+    }
+
+    #[tokio::test]
+    async fn thread_board_private_cards_are_filtered_for_snapshots_history_and_live_delivery() {
+        let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        for member in ["owner", "peer", "third"] { workspace.add_member(member).unwrap(); }
+        let channel = workspace.create_channel("private", "owner").unwrap();
+        workspace.add_channel_member(&channel.id, "peer").unwrap();
+        let channel_root = workspace.add_channel_message("owner", &channel.id, "private channel body", &[], &[], None).unwrap();
+        let dm_root = workspace.add_direct_message_with_main("owner", "peer", "private DM body", &[], &[], None, true).unwrap();
+        for root in [&channel_root, &dm_root] {
+            for _ in 0..3 {
+                if root.channel_id.is_some() {
+                    workspace.add_channel_message("owner", &channel.id, "reply", &[], &[], Some(&root.id)).unwrap();
+                } else {
+                    workspace.add_direct_message_with_main("owner", "peer", "reply", &[], &[], Some(&root.id), false).unwrap();
+                }
+            }
+            workspace.create_board_card_from_thread(&root.id, "private title").unwrap();
+        }
+        let shared = workspace.create_board_card("owner", "Shared card", "Public description", &workspace.board_columns().unwrap()[0].id, "none").unwrap();
+        let update = board_workspace_update(&workspace).unwrap();
+        for member in ["owner", "peer", "third"] {
+            let expected = if member == "third" { 1 } else { 3 };
+            let snapshot = workspace_snapshot(&workspace, member).unwrap();
+            assert_eq!(snapshot.board_cards.len(), expected);
+            let chunks = nostr_workspace_snapshot_chunks(&snapshot, "private-test").unwrap();
+            assert_eq!(chunks.iter().map(|chunk| chunk.board_cards.len()).sum::<usize>(), expected);
+            let live = board_update_for_member(&workspace, &update, member).unwrap();
+            assert_eq!(live.board_cards.len(), expected);
+            assert!(live.board_cards.iter().any(|card| card.id == shared.id));
+            if member == "third" {
+                assert!(live.messages.is_empty());
+                assert!(!serde_json::to_string(&snapshot).unwrap().contains("private"));
+                assert!(!serde_json::to_string(&chunks).unwrap().contains("private title"));
+            } else {
+                assert!(live.messages.iter().any(|root| root.id == channel_root.id));
+                assert!(live.messages.iter().any(|root| root.id == dm_root.id));
+            }
+        }
+        queue_workspace_update(&workspace, ["owner".into(), "peer".into(), "third".into()], &update).await.unwrap();
+        let notifications = workspace.pending_notifications().unwrap();
+        assert!(!notifications.iter().find(|entry| entry.recipient == "third").unwrap().payload.contains("private"));
+        assert!(notifications.iter().find(|entry| entry.recipient == "peer").unwrap().payload.contains("private DM body"));
+        assert!(workspace.add_channel_message("third", &channel.id, "[[THREAD_TOPIC: stolen]]", &[], &[], Some(&channel_root.id)).is_err());
+        assert!(workspace.add_direct_message_with_main("third", "owner", "[[THREAD_TOPIC: stolen]]", &[], &[], Some(&dm_root.id), false).is_err());
+        workspace.delete_direct_conversation("owner", "peer").unwrap();
+        assert_eq!(workspace.board_cards_for_member("third").unwrap(), [shared]);
+    }
+
+    #[tokio::test]
+    async fn thread_board_early_topic_is_rechecked_on_user_agent_and_native_content() {
+        for direct in [false, true] {
+            for source in ["user", "agent", "native"] {
+                let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+                workspace.add_member("owner").unwrap();
+                workspace.add_member("peer").unwrap();
+                let channel = workspace.create_channel("private", "owner").unwrap();
+                let root = if direct {
+                    workspace.add_direct_message_with_main("owner", "peer", "root", &[], &[], None, true)
+                } else {
+                    workspace.add_channel_message("owner", &channel.id, "root", &[], &[], None)
+                }.unwrap();
+                let persist = |body: &str| if direct {
+                    workspace.add_direct_message_with_main("owner", "peer", body, &[], &[], Some(&root.id), false)
+                } else {
+                    workspace.add_channel_message("owner", &channel.id, body, &[], &[], Some(&root.id))
+                }.unwrap();
+                let title = persist("[[THREAD_TOPIC: Early title]]");
+                assert!(!sync_thread_card_after_message(&workspace, &title).unwrap());
+                for _ in 0..2 { assert!(!sync_thread_card_after_message(&workspace, &persist("reply")).unwrap()); }
+                assert!(workspace.board_cards().unwrap().is_empty());
+                let third = match source {
+                    "user" => persist("third reply"),
+                    "agent" => if direct {
+                        workspace.add_direct_message_with_main("agent:a1", "owner", "third reply", &[], &[], Some(&root.id), false).unwrap()
+                    } else {
+                        workspace.add_channel_message_with_main("agent:a1", &channel.id, "third reply", &[], &[], Some(&root.id), false).unwrap()
+                    },
+                    _ => {
+                        let conversation = if direct { WorkspaceConversation::Direct("owner".into(), "peer".into()) } else { WorkspaceConversation::Channel(channel.id.clone()) };
+                        persist_native_board_reply(&workspace, &conversation, &root.id, "third reply", &[], &[]).unwrap()
+                    }
+                };
+                let update: WorkspaceUpdate = serde_json::from_value(serde_json::json!({"action":"message_created", "messages":[message_payload(third)]})).unwrap();
+                queue_workspace_update(&workspace, ["owner".into()], &update).await.unwrap();
+                let card = workspace.board_cards().unwrap().remove(0);
+                assert_eq!(card.title, "Early title");
+                assert_eq!(card.source_thread_id.as_deref(), Some(root.id.as_str()));
+                let board_notifications = || workspace.pending_notifications().unwrap().iter().filter(|entry| entry.payload.contains("\"action\":\"board_updated\"")).count();
+                let count = board_notifications();
+                assert_eq!(count, 2);
+                queue_workspace_update(&workspace, ["owner".into()], &update).await.unwrap();
+                assert_eq!(board_notifications(), count);
+                assert_eq!(workspace.board_cards().unwrap(), [card]);
+                assert!(workspace.board_tasks().unwrap().is_empty());
+            }
+        }
     }
 
     #[test]
@@ -12987,6 +15433,7 @@ mod tests {
                     ephemeral_body: None,
                     mentions: vec![],
                     reply_parent_id: None,
+                    handoff_outbox: None,
                 })
                 .unwrap();
         }
@@ -13446,7 +15893,7 @@ mod tests {
     }
 
     #[test]
-    fn unasked_thread_does_not_route_unmentioned_human_replies() {
+    fn every_human_root_routes_its_replies_to_the_same_thread_agent() {
         let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
         workspace.add_member("owner").unwrap();
         workspace.add_member("member").unwrap();
@@ -13460,7 +15907,7 @@ mod tests {
             "route_agent": false,
         }))
         .unwrap();
-        assert!(!native_turn_is_routed(&workspace, &root, true, &unasked).unwrap());
+        assert!(native_turn_is_routed(&workspace, &root, true, &unasked).unwrap());
 
         let reply = workspace
             .add_channel_message("member", &channel.id, "I agree", &[], &[], Some(&root.id))
@@ -13469,7 +15916,7 @@ mod tests {
             "action": "send_channel_message",
         }))
         .unwrap();
-        assert!(!native_turn_is_routed(&workspace, &reply, true, &inherited).unwrap());
+        assert!(native_turn_is_routed(&workspace, &reply, true, &inherited).unwrap());
 
         let mentioned: WorkspaceRequest = serde_json::from_value(serde_json::json!({
             "action": "send_channel_message",
@@ -14143,6 +16590,8 @@ mod tests {
             timeout: Duration::from_secs(300),
             persist_sessions: true,
             usage_limit_fallback_model: None,
+            workspace_access: OpenCodeWorkspaceAccess::ReadWrite,
+            opencode_server_scope: None,
             opencode: OpenCodeConfig {
                 bin: "opencode".to_string(),
                 agent: "build".to_string(),
@@ -15250,5 +17699,1390 @@ mod tests {
             "payload": {"type": "token_count"}
         });
         fs::write(path, format!("{first}\n{last}\n")).unwrap();
+    }
+
+    fn coordinator_test_result(response: &str, history: &[&str]) -> CodexRunResult {
+        CodexRunResult {
+            response: response.to_string(),
+            session_id: Some("same-session".to_string()),
+            token_usage: Some(CodexTokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+            }),
+            work_history: history.iter().map(|item| item.to_string()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn writable_turns_for_one_conversation_share_one_lock() {
+        let locks = WritableTurnLocks::default();
+        let conversation = WorkspaceConversation::Channel("engineering".to_string());
+        let first = writable_turn_guard(&locks, &conversation).await;
+        let lock = writable_turn_lock(&locks, &conversation).await;
+
+        assert!(lock.try_lock().is_err());
+        drop(first);
+        assert!(lock.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn coordinator_continuation_accepts_start_and_continue_tasks() {
+        for request in ["Start task 1", "Continue task 1"] {
+            let result = coordinator_continue_once(
+                true,
+                request,
+                coordinator_test_result("I will finish task 1.", &[]),
+                |_| async {
+                    Ok(coordinator_test_result(
+                        "Implemented and verified task 1.",
+                        &[],
+                    ))
+                },
+            )
+            .await;
+            assert_eq!(
+                result.response, "Implemented and verified task 1.",
+                "{request}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_continuation_accepts_punctuated_mentions() {
+        for request in [
+            "@Coordinator: implement task 1",
+            "@Coordinator, finish task 1",
+        ] {
+            let result = coordinator_continue_once(
+                true,
+                request,
+                coordinator_test_result("I will finish task 1.", &[]),
+                |_| async {
+                    Ok(coordinator_test_result(
+                        "Implemented and verified task 1.",
+                        &[],
+                    ))
+                },
+            )
+            .await;
+            assert_eq!(
+                result.response, "Implemented and verified task 1.",
+                "{request}"
+            );
+        }
+    }
+
+    #[test]
+    fn coordinator_continuation_requires_an_exact_mention_boundary() {
+        for request in [
+            "@CoordinatorExtra implement task 1",
+            "@CoordinatorExtra: implement task 1",
+            "@Coordinatorimplement task 1",
+            "@Coordinator@Coordinator implement task 1",
+            "@Coordinator: plan task 1",
+            "@Coordinator, start task 1?",
+            "@Coordinator: stop task 1",
+            "Continue task 1 plan only",
+        ] {
+            assert!(!coordinator_implementation_request(request), "{request}");
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_continuation_replaces_promise_and_preserves_both_runs() {
+        let first = coordinator_test_result(
+            "I will finish task 1 and then verify it.",
+            &[
+                "1s\tOpenCode: planning its next step.",
+                "2s\tOpenCode is drafting a response.",
+                "OpenCode is continuing work.",
+            ],
+        );
+        let result = coordinator_continue_once(
+            true,
+            "@Coordinator implement task 1",
+            first,
+            |prompt| async move {
+                assert!(prompt.contains("No tool activity"));
+                Ok(coordinator_test_result(
+                    "Implemented task 1; cargo test passed. @ThreadAgent verify it.",
+                    &["1s\tOpenCode: running apply_patch."],
+                ))
+            },
+        )
+        .await;
+        assert!(result.response.starts_with("Implemented"));
+        assert_eq!(result.session_id.as_deref(), Some("same-session"));
+        assert_eq!(result.work_history.len(), 4);
+        assert_eq!(
+            result.token_usage,
+            Some(CodexTokenUsage {
+                input_tokens: 20,
+                output_tokens: 10
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_continuation_is_bounded_even_after_read_or_todo() {
+        for history in [
+            vec![],
+            vec!["1s\tOpenCode: running Read src/main.rs."],
+            vec!["OpenCode todos: 1/1 complete"],
+        ] {
+            let first = coordinator_test_result("I'll implement the fix now.", &history);
+            let result = coordinator_continue_once(true, "Please fix the bug", first, |_| async {
+                Ok(coordinator_test_result(
+                    "I will finish the fix. @ThreadAgent",
+                    &["OpenCode is drafting a response."],
+                ))
+            })
+            .await;
+            assert!(result.response.contains("stalled"), "{}", result.response);
+            assert!(!result.response.contains('@'));
+            assert!(!result.response.contains("started"));
+            assert_eq!(result.work_history.len(), history.len() + 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_continuation_excludes_non_execution_and_blockers() {
+        for (coordinator, request, response) in [
+            (false, "Implement task 1", "I will implement it."),
+            (true, "Plan the fix only", "I will implement it."),
+            (
+                true,
+                "Write a plan to implement task 1",
+                "I will implement it.",
+            ),
+            (
+                true,
+                "Please plan how to fix task 1",
+                "I will implement it.",
+            ),
+            (
+                true,
+                "Can you explain how to fix task 1?",
+                "I will implement it.",
+            ),
+            (
+                true,
+                "How would you implement task 1?",
+                "I will implement it.",
+            ),
+            (
+                true,
+                "What is the status of the fix?",
+                "I will implement it.",
+            ),
+            (true, "Stop implementing task 1", "I will implement it."),
+            (true, "Cancel the fix", "I will implement it."),
+            (true, "Do not implement task 1", "I will implement it."),
+            (
+                true,
+                "Implement task 1",
+                "Blocked: /repo is missing. I will implement it when the repository is available.",
+            ),
+            (
+                true,
+                "Implement task 1",
+                "I cannot continue because the required API credential is missing.",
+            ),
+            (
+                true,
+                "Implement task 1",
+                "I cannot continue: the credential is missing. I will implement it later.",
+            ),
+            (
+                true,
+                "Implement task 1",
+                "I will continue when /repo is available. /repo is missing.",
+            ),
+            (true, "Implement task 1", "Implemented and verified task 1."),
+        ] {
+            let result = coordinator_continue_once(
+                coordinator,
+                request,
+                coordinator_test_result(response, &[]),
+                |_| async {
+                    panic!("must not continue: {request}");
+                    #[allow(unreachable_code)]
+                    Ok(coordinator_test_result("unexpected", &[]))
+                },
+            )
+            .await;
+            assert_eq!(result.response, response);
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_continuation_errors_are_terminal_and_keep_first_run() {
+        for error in [
+            "OpenCode cancelled",
+            "OpenCode timed out",
+            "worker disconnected",
+        ] {
+            let result = coordinator_continue_once(
+                true,
+                "Implement task 1",
+                coordinator_test_result(
+                    "I will implement it.",
+                    &["OpenCode is drafting a response."],
+                ),
+                |_| async { Err(anyhow!(error)) },
+            )
+            .await;
+            assert_eq!(result.work_history.len(), 1);
+            assert_eq!(result.token_usage.unwrap().input_tokens, 10);
+            assert!(!result.response.contains("I will"));
+            assert!(!result.response.contains('@'));
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_continuation_handles_update_requests_and_error_history() {
+        let result = coordinator_continue_once(
+            true,
+            "Please update the handler",
+            coordinator_test_result("I will update the handler.", &[]),
+            |_| async {
+                Err(
+                    anyhow!("OpenCode timed out").context(WorkspaceAgentRunHistory(vec![
+                        "OpenCode: running Read handler.rs.".to_string(),
+                    ])),
+                )
+            },
+        )
+        .await;
+        assert!(result.response.contains("time limit"));
+        assert_eq!(result.work_history, ["OpenCode: running Read handler.rs."]);
+        assert_eq!(result.token_usage.unwrap().input_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn coordinator_continuation_keeps_recovered_session_and_bounds_control_replies() {
+        for response in ["", "[[WORKSPACE_HISTORY:10]]"] {
+            let result = coordinator_continue_once(
+                true,
+                "Implement task 1",
+                coordinator_test_result("I will implement it.", &[]),
+                |_| async {
+                    let mut next = coordinator_test_result(response, &[]);
+                    next.session_id = Some("recovered-session".to_string());
+                    Ok(next)
+                },
+            )
+            .await;
+            assert!(result.response.contains("stalled"));
+            assert_eq!(result.session_id.as_deref(), Some("recovered-session"));
+            assert_eq!(result.token_usage.unwrap().input_tokens, 20);
+        }
+    }
+
+    #[test]
+    fn coordinator_continuation_cancelled_jobs_are_terminal() {
+        // Success without a persisted result must not acknowledge a handoff.
+        assert!(!workspace_agent_job_is_terminal(&Ok(())));
+        assert!(workspace_agent_job_is_terminal(&Err(anyhow!(
+            "workspace task cancelled"
+        ))));
+        assert!(workspace_agent_job_is_terminal(&Err(anyhow!(
+            "OpenCode cancelled"
+        )
+        .context("turn failed"))));
+        assert!(!workspace_agent_job_is_terminal(&Err(anyhow!(
+            "database is locked"
+        ))));
+    }
+
+    #[test]
+    fn coordinator_continuation_distinguishes_tool_stages_from_progress() {
+        assert!(!workspace_history_has_tool_activity(&[
+            "1s\tOpenCode: planning its next step.".to_string(),
+            "OpenCode is drafting a response.".to_string(),
+            "OpenCode is continuing work.".to_string(),
+            "OpenCode todos: 1/1 complete".to_string(),
+        ]));
+        for stage in [
+            "1s\tOpenCode: running Read src/main.rs.",
+            "OpenCode: finished apply_patch.",
+        ] {
+            assert!(workspace_history_has_tool_activity(&[stage.to_string()]));
+        }
+    }
+
+    #[test]
+    fn targeted_coordinator_replies_in_the_originating_thread() {
+        let root = WorkspaceMessage {
+            id: "root".to_string(),
+            channel_id: Some("channel".to_string()),
+            recipient_pubkey: None,
+            sender_pubkey: "member".to_string(),
+            body: "@A0 summarize this conversation".to_string(),
+            attachments: vec![],
+            mentions: vec![WorkspaceMentionPayload {
+                kind: "agent".to_string(),
+                id: "a0".to_string(),
+                label: "A0".to_string(),
+            }],
+            parent_id: None,
+            also_send_to_main: false,
+            pinned: false,
+            reactions: vec![],
+            work_history: vec![],
+            edited_at: None,
+            deleted_at: None,
+            created_at: 0,
+        };
+        assert_eq!(
+            workspace_agent_reply_parent_id_for(&root, "a0", Some("a0")),
+            Some("root")
+        );
+        assert_eq!(
+            workspace_agent_reply_parent_id_for(&root, "a1", Some("a0")),
+            Some("root")
+        );
+
+        let reply = WorkspaceMessage {
+            parent_id: Some("root".to_string()),
+            ..root
+        };
+        assert_eq!(
+            workspace_agent_reply_parent_id_for(&reply, "a0", Some("a0")),
+            Some("root")
+        );
+    }
+
+    #[test]
+    fn explicit_coordinator_routing_targets_only_a0() {
+        let a0_mention = vec![WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: "a0".to_string(),
+            label: "Coordinator".to_string(),
+        }];
+        let a1_mention = vec![WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: "a1".to_string(),
+            label: "ThreadAgent".to_string(),
+        }];
+
+        assert!(conversation_coordinator_is_targeted("a0", &a0_mention));
+        assert!(!conversation_coordinator_is_targeted("a0", &a1_mention));
+        assert!(!conversation_coordinator_is_targeted("a0", &[]));
+    }
+
+    #[test]
+    fn queued_agent_handoff_requires_a_structured_target_for_its_worker() {
+        let message = WorkspaceMessage {
+            id: "reply".to_string(),
+            channel_id: Some("channel".to_string()),
+            recipient_pubkey: None,
+            sender_pubkey: "agent:a1".to_string(),
+            body: "@Coordinator handoff".to_string(),
+            attachments: vec![],
+            mentions: vec![WorkspaceMentionPayload {
+                kind: "agent".to_string(),
+                id: "a0".to_string(),
+                label: "Coordinator".to_string(),
+            }],
+            parent_id: Some("root".to_string()),
+            also_send_to_main: false,
+            pinned: false,
+            reactions: vec![],
+            work_history: vec![],
+            edited_at: None,
+            deleted_at: None,
+            created_at: 0,
+        };
+        let conversation = WorkspaceConversation::Channel("channel".to_string());
+
+        assert!(workspace_agent_job_matches_queued_agent_trigger(
+            &message,
+            &conversation,
+            "a0"
+        ));
+        assert!(!workspace_agent_job_matches_queued_agent_trigger(
+            &WorkspaceMessage {
+                mentions: vec![],
+                ..message.clone()
+            },
+            &conversation,
+            "a0"
+        ));
+        assert!(!workspace_agent_job_matches_queued_agent_trigger(
+            &message,
+            &conversation,
+            "a2"
+        ));
+    }
+
+    #[test]
+    fn queued_direct_handoff_uses_the_original_human_conversation() {
+        let message = WorkspaceMessage {
+            id: "reply".to_string(),
+            channel_id: None,
+            recipient_pubkey: Some("bob".to_string()),
+            sender_pubkey: "agent:a1".to_string(),
+            body: "@Coordinator".to_string(),
+            attachments: vec![],
+            mentions: vec![WorkspaceMentionPayload {
+                kind: "agent".to_string(),
+                id: "a0".to_string(),
+                label: "Coordinator".to_string(),
+            }],
+            parent_id: None,
+            also_send_to_main: false,
+            pinned: false,
+            work_history: vec![],
+            reactions: vec![],
+            edited_at: None,
+            deleted_at: None,
+            created_at: 0,
+        };
+        let conversation = WorkspaceConversation::Direct("alice".to_string(), "bob".to_string());
+
+        assert!(workspace_agent_job_matches_queued_agent_trigger(
+            &message,
+            &conversation,
+            "a0"
+        ));
+    }
+
+    #[test]
+    fn queued_child_handoff_is_rejected_after_its_root_is_tombstoned() {
+        let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        workspace.add_member("owner").unwrap();
+        let channel = workspace.create_channel("engineering", "owner").unwrap();
+        let agent = workspace
+            .create_agent(
+                "A0",
+                "Coordinator",
+                "",
+                &[],
+                None,
+                Some("session"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        let root = workspace
+            .add_channel_message("owner", &channel.id, "Root", &[], &[], None)
+            .unwrap();
+        let mentions = [WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: agent.id.clone(),
+            label: "Coordinator".to_string(),
+        }];
+        let (child, _) = workspace
+            .add_channel_agent_reply_with_handoffs(
+                "agent:a1",
+                &channel.id,
+                "@Coordinator",
+                &mentions,
+                Some(&root.id),
+                false,
+                None,
+            )
+            .unwrap();
+        let queued = workspace.message_by_id(&child.id).unwrap().unwrap();
+        assert!(workspace_agent_job_matches_queued_agent_trigger(
+            &queued,
+            &WorkspaceConversation::Channel(channel.id.clone()),
+            &agent.id
+        ));
+        assert!(!workspace_thread_root_is_deleted(&workspace, &queued).unwrap());
+
+        workspace.delete_message("owner", &root.id).unwrap();
+
+        assert!(workspace_thread_root_is_deleted(&workspace, &queued).unwrap());
+    }
+
+    #[test]
+    fn startup_recovers_persisted_agent_handoff() {
+        let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        workspace.add_member("owner").unwrap();
+        let channel = workspace.create_channel("engineering", "owner").unwrap();
+        let agent = workspace
+            .create_agent(
+                "A0",
+                "Coordinator",
+                "",
+                &[],
+                None,
+                Some("session"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        let mentions = vec![WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: agent.id.clone(),
+            label: "Coordinator".to_string(),
+        }];
+        let reply = workspace
+            .add_channel_message(
+                "agent:a1",
+                &channel.id,
+                "@Coordinator handoff",
+                &[],
+                &mentions,
+                None,
+            )
+            .unwrap();
+        workspace
+            .queue_agent_handoffs(&reply.id, &mentions)
+            .unwrap();
+
+        assert_eq!(
+            workspace_agent_handoffs_for_recovery(&workspace).unwrap(),
+            vec![WorkspaceAgentHandoff {
+                conversation: WorkspaceConversation::Channel(channel.id),
+                persisted_reply_id: reply.id,
+                agent_id: agent.id,
+            }]
+        );
+    }
+
+    #[test]
+    fn startup_recovers_direct_handoff_with_human_participants() {
+        let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        workspace.add_member("alice").unwrap();
+        workspace.add_member("bob").unwrap();
+        let agent = workspace
+            .create_agent(
+                "A0",
+                "Coordinator",
+                "",
+                &[],
+                None,
+                Some("session"),
+                "ready",
+                None,
+                "alice",
+            )
+            .unwrap();
+        let mentions = vec![WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: agent.id.clone(),
+            label: "Coordinator".to_string(),
+        }];
+        let (reply, _) = workspace
+            .add_direct_agent_reply_with_handoffs(
+                &format!("agent:{}", agent.id),
+                "bob",
+                "@Coordinator handoff",
+                &mentions,
+                None,
+                false,
+                "alice",
+                "bob",
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            workspace_agent_handoffs_for_recovery(&workspace).unwrap(),
+            vec![WorkspaceAgentHandoff {
+                conversation: WorkspaceConversation::Direct("alice".to_string(), "bob".to_string()),
+                persisted_reply_id: reply.id,
+                agent_id: agent.id,
+            }]
+        );
+    }
+
+    #[test]
+    fn retry_tick_selects_pending_durable_handoffs() {
+        let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        workspace.add_member("owner").unwrap();
+        let channel = workspace.create_channel("engineering", "owner").unwrap();
+        let agent = workspace
+            .create_agent(
+                "A0",
+                "Coordinator",
+                "",
+                &[],
+                None,
+                Some("session"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        let mentions = vec![WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: agent.id.clone(),
+            label: "Coordinator".to_string(),
+        }];
+        let (reply, _) = workspace
+            .add_channel_agent_reply_with_handoffs(
+                "agent:a1",
+                &channel.id,
+                "@Coordinator",
+                &mentions,
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            workspace_agent_handoffs_for_retry(&workspace).unwrap(),
+            vec![WorkspaceAgentHandoff {
+                conversation: WorkspaceConversation::Channel(channel.id),
+                persisted_reply_id: reply.id,
+                agent_id: agent.id,
+            }]
+        );
+    }
+
+    #[test]
+    fn handoff_enqueue_claims_an_outbox_entry_once() {
+        let mut claims = HashSet::new();
+        let key = ("reply".to_string(), "a0".to_string());
+
+        assert!(claim_workspace_agent_handoff(&mut claims, &key));
+        assert!(!claim_workspace_agent_handoff(&mut claims, &key));
+        release_workspace_agent_handoff(&mut claims, &key);
+        assert!(claim_workspace_agent_handoff(&mut claims, &key));
+    }
+
+    #[test]
+    fn conversation_coordinator_resolves_agent_handoff_mentions() {
+        let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        workspace.add_member("owner").unwrap();
+        let channel = workspace.create_channel("engineering", "owner").unwrap();
+        let coordinator = workspace
+            .create_agent(
+                "A0",
+                "Coordinator",
+                "",
+                &[],
+                None,
+                Some("session"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        workspace
+            .set_conversation_coordinator(&coordinator.id, Some(&channel.id), None, None)
+            .unwrap();
+
+        assert_eq!(
+            agent_reply_handoff_mentions(
+                &workspace,
+                "@Coordinator",
+                "a1",
+                Some(&channel.id),
+                None,
+                None,
+                None
+            )
+            .unwrap(),
+            vec![WorkspaceMentionPayload {
+                kind: "agent".to_string(),
+                id: coordinator.id,
+                label: "Coordinator".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn thread_agent_mentions_export_assignments_and_handoff_both_directions() {
+        for direct in [false, true] {
+            let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+            workspace.add_member("alice").unwrap();
+            workspace.add_member("bob").unwrap();
+            let channel = workspace.create_channel("engineering", "alice").unwrap();
+            let channel_id = (!direct).then_some(channel.id.as_str());
+            let member = direct.then_some("alice");
+            let peer = direct.then_some("bob");
+            let create = |name, role| {
+                workspace
+                    .create_agent(
+                        name,
+                        role,
+                        "",
+                        &[],
+                        None,
+                        Some("session"),
+                        "ready",
+                        None,
+                        "alice",
+                    )
+                    .unwrap()
+            };
+            let coordinator = create("A0", "Task coordinator");
+            let worker = create("A12", "Conversation worker");
+            let other = create("A13", "Conversation worker");
+            workspace
+                .set_conversation_coordinator(&coordinator.id, channel_id, member, peer)
+                .unwrap();
+            for agent in [&worker, &other] {
+                workspace
+                    .add_conversation_agent(&agent.id, channel_id, member, peer, &[])
+                    .unwrap();
+            }
+            let root = |body| {
+                if direct {
+                    workspace.add_direct_message("alice", "bob", body, &[], &[], None)
+                } else {
+                    workspace.add_channel_message("alice", &channel.id, body, &[], &[], None)
+                }
+                .unwrap()
+            };
+            let first = root("first");
+            let second = root("second");
+            let unassigned = root("unassigned");
+            workspace
+                .assign_thread_agent(&worker.id, &first.id, channel_id, member, peer)
+                .unwrap();
+            workspace
+                .assign_thread_agent(&other.id, &second.id, channel_id, member, peer)
+                .unwrap();
+            // Reusing a profile in another conversation must not make this root visible there.
+            workspace.add_member("carol").unwrap();
+            let foreign_channel = workspace.create_channel("other", "alice").unwrap();
+            let foreign_id = (!direct).then_some(foreign_channel.id.as_str());
+            let foreign_member = direct.then_some("alice");
+            let foreign_peer = direct.then_some("carol");
+            workspace
+                .add_conversation_agent(&worker.id, foreign_id, foreign_member, foreign_peer, &[])
+                .unwrap();
+            assert!(agent_reply_handoff_mentions(
+                &workspace,
+                "@ThreadAgent",
+                &coordinator.id,
+                foreign_id,
+                foreign_member,
+                foreign_peer,
+                Some(&first.id),
+            )
+            .unwrap()
+            .is_empty());
+            let update =
+                allocated_thread_agent_update(&workspace, &worker, channel_id, member, peer)
+                    .unwrap();
+            assert_eq!(update.action, "conversation_agents_updated");
+            assert_eq!(
+                update
+                    .agents
+                    .iter()
+                    .map(|agent| agent.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec![worker.id.as_str(), coordinator.id.as_str()],
+            );
+            let json = serde_json::to_value(&update.conversation_agents).unwrap();
+            assert!(json
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| { row["agent_id"] == worker.id && row["parent_id"] == first.id }));
+            assert_eq!(
+                json.as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|row| row["parent_id"] == first.id)
+                    .count(),
+                1,
+            );
+            let resolve = |body: &str, sender: &str, parent: Option<&str>| {
+                agent_reply_handoff_mentions(
+                    &workspace, body, sender, channel_id, member, peer, parent,
+                )
+                .unwrap()
+            };
+            assert!(resolve("@ThreadAgent", &coordinator.id, None).is_empty());
+            assert!(resolve("@ThreadAgent", &coordinator.id, Some(&unassigned.id)).is_empty());
+            assert!(resolve("@ThreadAgent", &worker.id, Some(&first.id)).is_empty());
+            assert!(resolve("@Coordinator", &coordinator.id, Some(&first.id)).is_empty());
+            for body in [
+                "@ThreadAgentExtra",
+                "x@ThreadAgent",
+                "@CoordinatorExtra",
+                "x@Coordinator",
+                "@ThreadAgent_2",
+                "@Coordinator2",
+                "@ThreadAgent-based",
+                "@Coordinator-extra",
+                "@@ThreadAgent",
+            ] {
+                assert!(
+                    resolve(body, "outsider", Some(&first.id)).is_empty(),
+                    "{body}"
+                );
+            }
+            assert_eq!(
+                resolve("@ThreadAgent", &coordinator.id, Some(&second.id))[0].id,
+                other.id,
+            );
+            for (sender, target, body) in [
+                (&coordinator, &worker, "@ThreadAgent, verify this"),
+                (&worker, &coordinator, "(@Coordinator) apply this"),
+            ] {
+                let mentions = resolve(body, &sender.id, Some(&first.id));
+                assert_eq!(mentions.len(), 1);
+                assert_eq!(mentions[0].id, target.id);
+                let (reply, handoffs) = if direct {
+                    workspace.add_direct_agent_reply_with_handoffs(
+                        &format!("agent:{}", sender.id),
+                        "bob",
+                        body,
+                        &mentions,
+                        Some(&first.id),
+                        false,
+                        "alice",
+                        "bob",
+                        None,
+                    )
+                } else {
+                    workspace.add_channel_agent_reply_with_handoffs(
+                        &format!("agent:{}", sender.id),
+                        &channel.id,
+                        body,
+                        &mentions,
+                        Some(&first.id),
+                        false,
+                        None,
+                    )
+                }
+                .unwrap();
+                assert_eq!(reply.parent_id.as_deref(), Some(first.id.as_str()));
+                assert_eq!(handoffs.len(), 1);
+                assert_eq!(handoffs[0].agent_id, target.id);
+                assert!(workspace_agent_handoffs_for_recovery(&workspace)
+                    .unwrap()
+                    .iter()
+                    .any(|handoff| handoff.persisted_reply_id == reply.id
+                        && handoff.agent_id == target.id));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handoff_notification_failure_does_not_recover_completed_work() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let workspace = WorkspaceStore::open(file.path()).unwrap();
+        workspace.add_member("owner").unwrap();
+        let channel = workspace.create_channel("engineering", "owner").unwrap();
+        let agent = workspace
+            .create_agent(
+                "A0",
+                "Coordinator",
+                "",
+                &[],
+                None,
+                Some("session"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        let mentions = vec![WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: agent.id.clone(),
+            label: "Coordinator".to_string(),
+        }];
+        let (reply, _) = workspace
+            .add_channel_agent_reply_with_handoffs(
+                "agent:a1",
+                &channel.id,
+                "@Coordinator handoff",
+                &mentions,
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+        let job = WorkspaceAgentJob {
+            conversation: WorkspaceConversation::Channel(channel.id.clone()),
+            trigger_message_id: reply.id.clone(),
+            ephemeral_body: None,
+            mentions: vec![],
+            reply_parent_id: None,
+            handoff_outbox: Some((reply.id.clone(), agent.id.clone())),
+        };
+
+        assert_eq!(workspace.pending_agent_handoffs().unwrap().len(), 1);
+        let (response, _) = workspace
+            .add_channel_agent_reply_with_handoffs(
+                &format!("agent:{}", agent.id),
+                &channel.id,
+                "Implemented; @Coordinator verify",
+                &mentions,
+                Some(&reply.id),
+                false,
+                job.handoff_outbox.as_ref(),
+            )
+            .unwrap();
+        rusqlite::Connection::open(file.path())
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_notification BEFORE INSERT ON workspace_notification_outbox
+             BEGIN SELECT RAISE(ABORT, 'simulated notification failure'); END;",
+            )
+            .unwrap();
+        let update = WorkspaceUpdate {
+            action: "message_created".to_string(),
+            revision: workspace.revision().unwrap(),
+            channels: vec![],
+            members: vec![],
+            messages: vec![message_payload(response.clone())],
+            agents: vec![],
+            conversation_agents: vec![],
+            conversation_preprompts: vec![],
+            board_tasks: vec![],
+            board_timeline_entries: vec![],
+            board_columns: vec![],
+            board_cards: vec![],
+            typing: None,
+        };
+        let result = queue_workspace_update(&workspace, ["owner".to_string()], &update).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("simulated notification failure"));
+        // The worker never reaches successful-job cleanup here.
+        drop(workspace);
+        let workspace = WorkspaceStore::open_existing(file.path()).unwrap();
+        assert_eq!(
+            workspace.message_by_id(&response.id).unwrap().unwrap().body,
+            response.body
+        );
+        let recovered = workspace_agent_handoffs_for_retry(&workspace).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].persisted_reply_id, response.id);
+        assert_ne!(recovered[0].persisted_reply_id, job.trigger_message_id);
+    }
+
+    #[tokio::test]
+    async fn targeted_scope_failure_retains_handoff_after_reopen() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let workspace = WorkspaceStore::open(file.path()).unwrap();
+        workspace.add_member("owner").unwrap();
+        let channel = workspace.create_channel("engineering", "owner").unwrap();
+        let agent = workspace
+            .create_agent(
+                "A1",
+                "Worker",
+                "",
+                &[],
+                None,
+                Some("session"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        workspace
+            .add_conversation_agent(&agent.id, Some(&channel.id), None, None, &[])
+            .unwrap();
+        let missing = file
+            .path()
+            .join("missing-folder")
+            .to_string_lossy()
+            .into_owned();
+        workspace
+            .set_conversation_preprompt(Some(&channel.id), None, None, "", &[missing], None, None)
+            .unwrap();
+        let mentions = [WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: agent.id.clone(),
+            label: "Worker".to_string(),
+        }];
+        let (reply, _) = workspace
+            .add_channel_agent_reply_with_handoffs(
+                "agent:sender",
+                &channel.id,
+                "@Worker implement",
+                &mentions,
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+        // Use only a local, non-listening relay address; routing fails before any send.
+        let messenger = NostrMessenger::connect(NostrConfig {
+            secret_key: "0000000000000000000000000000000000000000000000000000000000000001"
+                .to_string(),
+            peer_pubkey: None,
+            receive_pubkeys: vec![],
+            relays: vec!["ws://127.0.0.1:1".to_string()],
+        })
+        .await
+        .unwrap();
+        let (fips_outgoing, _receiver) = mpsc::channel(1);
+        let outbound = WorkspaceOutbound {
+            fips_routes: Arc::new(Mutex::new(HashMap::new())),
+            pending_fips_responses: Arc::new(Mutex::new(HashMap::new())),
+            fips_outgoing,
+        };
+        let (handoff_sender, _handoffs) = mpsc::unbounded_channel();
+        let incoming = (reply.id.clone(), agent.id.clone());
+        let result = route_conversation_agents(
+            &workspace,
+            &messenger,
+            &outbound,
+            &test_codex_config(env::current_dir().unwrap()),
+            Some(&agent.id),
+            Some(&channel.id),
+            None,
+            None,
+            None,
+            &reply.body,
+            &mentions,
+            &Arc::new(Mutex::new(HashMap::new())),
+            &handoff_sender,
+            &mut None,
+            Some(&incoming),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "explicit scope failures must reach the queue worker"
+        );
+        drop(workspace);
+        let reopened = WorkspaceStore::open_existing(file.path()).unwrap();
+        assert_eq!(
+            reopened.pending_agent_handoffs().unwrap()[0].reply_message_id,
+            reply.id
+        );
+        assert_eq!(reopened.channel_messages(&channel.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unavailable_targeted_coordinator_keeps_handoff_retryable() {
+        assert!(targeted_workspace_agent_is_unavailable(
+            Some("a0"),
+            "a0",
+            "failed"
+        ));
+        assert!(!targeted_workspace_agent_is_unavailable(
+            Some("a0"),
+            "a0",
+            "ready"
+        ));
+        assert!(!targeted_workspace_agent_is_unavailable(
+            None, "a0", "failed"
+        ));
+    }
+
+    #[test]
+    fn invalidly_configured_targeted_coordinator_keeps_handoff_retryable() {
+        assert!(targeted_workspace_agent_has_invalid_config(
+            Some("a0"),
+            "a0"
+        ));
+        assert!(!targeted_workspace_agent_has_invalid_config(
+            Some("a0"),
+            "a1"
+        ));
+        assert!(!targeted_workspace_agent_has_invalid_config(None, "a0"));
+    }
+
+    #[test]
+    fn missing_targeted_coordinator_keeps_handoff_retryable() {
+        assert!(targeted_workspace_agent_is_missing(
+            Some("a0"),
+            &["a1".to_string()]
+        ));
+        assert!(!targeted_workspace_agent_is_missing(
+            Some("a0"),
+            &["a0".to_string()]
+        ));
+        assert!(!targeted_workspace_agent_is_missing(None, &[]));
+    }
+
+    #[test]
+    fn workspace_agent_handoff_targets_only_structured_agent_mentions() {
+        let mentions = vec![
+            WorkspaceMentionPayload {
+                kind: "agent".to_string(),
+                id: "coordinator".to_string(),
+                label: "Coordinator".to_string(),
+            },
+            WorkspaceMentionPayload {
+                kind: "member".to_string(),
+                id: "member".to_string(),
+                label: "Member".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            workspace_agent_handoff_targets(&mentions),
+            vec!["coordinator"]
+        );
+        assert!(workspace_agent_handoff_targets(&[]).is_empty());
+    }
+
+    #[test]
+    fn normal_roots_keep_distinct_agents_sessions_and_queue_keys() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let first_root = store
+            .add_channel_message("owner", &channel.id, "First task", &[], &[], None)
+            .unwrap();
+        let second_root = store
+            .add_channel_message("owner", &channel.id, "Second task", &[], &[], None)
+            .unwrap();
+        let first = store
+            .create_agent(
+                "A1",
+                "Conversation worker",
+                "",
+                &[],
+                None,
+                Some("session-1"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        let second = store
+            .create_agent(
+                "A2",
+                "Conversation worker",
+                "",
+                &[],
+                None,
+                Some("session-2"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        for agent in [&first, &second] {
+            store
+                .add_conversation_agent(&agent.id, Some(&channel.id), None, None, &[])
+                .unwrap();
+        }
+        store
+            .assign_thread_agent(&first.id, &first_root.id, Some(&channel.id), None, None)
+            .unwrap();
+        store
+            .assign_thread_agent(&second.id, &second_root.id, Some(&channel.id), None, None)
+            .unwrap();
+
+        assert_ne!(first.id, second.id);
+        assert_ne!(first.opencode_session_id, second.opencode_session_id);
+        assert_eq!(
+            store
+                .thread_agent(&first_root.id, Some(&channel.id), None, None)
+                .unwrap()
+                .unwrap()
+                .id,
+            first.id
+        );
+        assert_eq!(
+            store
+                .thread_agent(&second_root.id, Some(&channel.id), None, None)
+                .unwrap()
+                .unwrap()
+                .id,
+            second.id
+        );
+        let queue_keys = HashSet::from([first.id, second.id]);
+        assert_eq!(queue_keys.len(), 2);
+    }
+
+    #[test]
+    fn scopes_active_turns_to_their_conversation() {
+        let ribbit = WorkspaceConversation::Channel("ribbit".to_string());
+        let quec = WorkspaceConversation::Channel("quec".to_string());
+
+        assert_ne!(
+            active_turn_key("native-opencode", &ribbit),
+            active_turn_key("native-opencode", &quec),
+        );
+    }
+
+    #[test]
+    fn legacy_abort_requires_an_unambiguous_active_turn() {
+        let ribbit = WorkspaceConversation::Channel("ribbit".to_string());
+        let quec = WorkspaceConversation::Channel("quec".to_string());
+        let mut active_turns = HashMap::new();
+        active_turns.insert(
+            active_turn_key("native-opencode", &ribbit),
+            ActiveTurn::new(),
+        );
+
+        assert_eq!(
+            active_turn_key_for_abort("native-opencode", None, &active_turns).unwrap(),
+            Some(active_turn_key("native-opencode", &ribbit)),
+        );
+
+        active_turns.insert(active_turn_key("native-opencode", &quec), ActiveTurn::new());
+        assert!(active_turn_key_for_abort("native-opencode", None, &active_turns).is_err());
+    }
+
+    #[test]
+    fn generic_native_abort_selects_the_active_turn_in_its_conversation() {
+        let ribbit = WorkspaceConversation::Channel("ribbit".to_string());
+        let quec = WorkspaceConversation::Channel("quec".to_string());
+        let mut active_turns = HashMap::new();
+        active_turns.insert(
+            active_turn_key(&native_turn_agent_id("ribbit-root"), &ribbit),
+            ActiveTurn::new(),
+        );
+        active_turns.insert(
+            active_turn_key(&native_turn_agent_id("quec-root"), &quec),
+            ActiveTurn::new(),
+        );
+
+        assert_eq!(
+            active_turn_key_for_abort("native-opencode", Some(ribbit.clone()), &active_turns)
+                .unwrap(),
+            Some(active_turn_key(
+                &native_turn_agent_id("ribbit-root"),
+                &ribbit
+            )),
+        );
+
+        active_turns.insert(
+            active_turn_key(&native_turn_agent_id("ribbit-other-root"), &ribbit),
+            ActiveTurn::new(),
+        );
+        assert!(active_turn_key_for_abort("native-opencode", Some(ribbit), &active_turns).is_err());
+        assert_eq!(
+            active_turn_key_for_abort(
+                "native-opencode",
+                Some(WorkspaceConversation::Channel("missing".to_string())),
+                &active_turns,
+            )
+            .unwrap(),
+            None,
+        );
+    }
+
+    #[test]
+    fn active_turn_remembers_its_typing_parent() {
+        let conversation = WorkspaceConversation::Channel("engineering".to_string());
+        let key = active_turn_key("agent", &conversation);
+        let mut active_turns = HashMap::new();
+
+        active_turn_token(&mut active_turns, key.clone(), Some("thread-root"));
+
+        assert_eq!(active_turns[&key].parent_id.as_deref(), Some("thread-root"),);
+    }
+
+    #[tokio::test]
+    async fn thread_board_committing_third_reply_integrates_after_persistence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let messenger = NostrMessenger::connect(NostrConfig {
+            secret_key: "0000000000000000000000000000000000000000000000000000000000000001".into(),
+            peer_pubkey: None,
+            receive_pubkeys: vec![],
+            relays: vec!["ws://127.0.0.1:1".into()],
+        }).await.unwrap();
+        for direct in [false, true] {
+            for mode in ["commit", "claim", "continuation"] {
+                let repo = tempfile::tempdir_in(env::current_dir().unwrap()).unwrap();
+                run_git(repo.path(), &["init", "-q"]).unwrap();
+                let fixture = repo.path().join("fixture.py");
+                fs::write(&fixture, r#"import json, pathlib, subprocess, sys
+sys.stdin.read()
+mode = sys.argv[1]
+first = not pathlib.Path('change.txt').exists()
+if first:
+    pathlib.Path('change.txt').write_text('verified change')
+    subprocess.run(['git', 'add', 'change.txt'], check=True)
+    output = subprocess.check_output(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'verified change'], text=True)
+    if mode != 'claim':
+        print(json.dumps({'type':'item.completed', 'item':{'type':'command_execution', 'exit_code':0, 'aggregated_output':output}}))
+text = 'I will implement the change.' if first and mode == 'continuation' else ('I committed the change.' if mode == 'claim' else 'Done.')
+print(json.dumps({'type':'item.completed', 'item':{'type':'agent_message', 'text':text}}))
+"#).unwrap();
+                let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+                for member in ["owner", "peer"] { workspace.add_member(member).unwrap(); }
+                let channel = workspace.create_channel("engineering", "owner").unwrap();
+                let (channel_id, member, peer) = if direct {
+                    (None, Some("owner"), Some("peer"))
+                } else {
+                    (Some(channel.id.as_str()), None, None)
+                };
+                let root = if direct {
+                    workspace.add_direct_message_with_main("owner", "peer", "Implement the change", &[], &[], None, true)
+                } else {
+                    workspace.add_channel_message("owner", &channel.id, "Implement the change", &[], &[], None)
+                }.unwrap();
+                let persist = |body: &str| if direct {
+                    workspace.add_direct_message_with_main("owner", "peer", body, &[], &[], Some(&root.id), false)
+                } else {
+                    workspace.add_channel_message("owner", &channel.id, body, &[], &[], Some(&root.id))
+                }.unwrap();
+                for body in ["[[THREAD_TOPIC: Early title]]", "First content reply", "Second content reply"] {
+                    assert!(!sync_thread_card_after_message(&workspace, &persist(body)).unwrap());
+                }
+                assert!(workspace.board_cards().unwrap().is_empty());
+                let coordinator = workspace.create_agent("A0", "Task coordinator", "", &[], None, Some("session"), "ready", None, "owner").unwrap();
+                workspace.set_conversation_coordinator(&coordinator.id, channel_id, member, peer).unwrap();
+                workspace.set_conversation_preprompt(channel_id, member, peer, "", &[repo.path().to_string_lossy().into_owned()], None, None).unwrap();
+                let mut config = test_codex_config(repo.path().to_path_buf());
+                config.bin = "python3".into();
+                config.args = vec![fixture.to_string_lossy().into_owned(), mode.into()];
+                config.timeout = Duration::from_secs(10);
+                let (outgoing, mut receiver) = mpsc::channel::<WorkspaceFipsOutbound>(16);
+                let sent = Arc::new(Mutex::new(Vec::new()));
+                let captured = Arc::clone(&sent);
+                let deliveries = tokio::spawn(async move {
+                    while let Some(delivery) = receiver.recv().await {
+                        captured.lock().await.push((delivery.member, delivery.wire));
+                        let _ = delivery.delivered.send(Ok(()));
+                    }
+                });
+                let outbound = WorkspaceOutbound {
+                    fips_routes: Arc::new(Mutex::new(HashMap::from([
+                        ("owner".into(), "local".into()), ("peer".into(), "local".into()),
+                    ]))),
+                    pending_fips_responses: Arc::default(),
+                    fips_outgoing: outgoing,
+                };
+                let (handoff_sender, _handoffs) = mpsc::unbounded_channel();
+                route_conversation_agents(
+                    &workspace, &messenger, &outbound, &config, Some(&coordinator.id),
+                    channel_id, member, peer, Some(&root.id), "Implement the change", &[],
+                    &Arc::new(Mutex::new(HashMap::new())), &handoff_sender, &mut None, None,
+                ).await.unwrap();
+                let replies = workspace.thread_messages(&root.id).unwrap();
+                let reply = replies.iter().find(|message| message.sender_pubkey == format!("agent:{}", coordinator.id)).unwrap();
+                assert_eq!(reply.body, if mode == "claim" { "I committed the change." } else { "Done." });
+                assert!(run_git(repo.path(), &["rev-parse", "HEAD"]).is_ok());
+                let cards = workspace.board_cards().unwrap();
+                assert_eq!(cards.len(), 1);
+                let card = &cards[0];
+                assert_eq!(card.source_thread_id.as_deref(), Some(root.id.as_str()));
+                assert_eq!(card.title, "Early title");
+                let expected_column = if mode == "claim" { "Backlog" } else { "Integrating" };
+                assert_eq!(workspace.board_columns().unwrap().into_iter().find(|column| column.id == card.column_id).unwrap().name, expected_column, "direct={direct}, mode={mode}");
+                let sent = sent.lock().await;
+                let reply_position = sent.iter().position(|(member, wire)| match wire {
+                    WireMessage::WorkspaceUpdate { workspace_update } => member == "owner"
+                        && workspace_update.action == "message_created"
+                        && workspace_update.messages.iter().any(|message| message.id == reply.id),
+                    _ => false,
+                }).unwrap();
+                let board_position = sent.iter().position(|(member, wire)| match wire {
+                    WireMessage::WorkspaceUpdate { workspace_update } => member == "owner"
+                        && workspace_update.action == "board_updated"
+                        && workspace_update.board_cards.iter().any(|updated| updated.id == card.id),
+                    _ => false,
+                }).unwrap();
+                assert!(reply_position < board_position, "the reply must be delivered before its board transition");
+                let latest = sent.iter().rev().find_map(|(member, wire)| match wire {
+                    WireMessage::WorkspaceUpdate { workspace_update } if member == "owner" && workspace_update.action == "board_updated" => Some(workspace_update),
+                    _ => None,
+                }).unwrap();
+                assert_eq!(latest.board_cards[0].id, card.id);
+                assert_eq!(latest.board_cards[0].column_id, card.column_id);
+                drop(sent);
+                assert!(!sync_thread_card_after_message(&workspace, reply).unwrap());
+                assert_eq!(workspace.board_cards().unwrap()[0].id, card.id);
+                assert!(workspace.board_tasks().unwrap().is_empty());
+                deliveries.abort();
+            }
+        }
     }
 }

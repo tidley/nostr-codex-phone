@@ -84,6 +84,135 @@ void main() {
     expect(defaultFolder.workdir, isNull);
   });
 
+  test('workspace workers use role-based display labels', () {
+    final worker = WorkspaceAgent.fromJson({
+      'id': 'worker-1',
+      'name': 'A12',
+      'role': 'Conversation worker',
+    });
+    final coordinator = WorkspaceAgent.fromJson({
+      'id': 'head-1',
+      'name': 'A0',
+      'role': 'Task coordinator',
+    });
+    final named = WorkspaceAgent.fromJson({
+      'id': 'reviewer-1',
+      'name': 'ResearchBot',
+      'role': 'Research specialist',
+    });
+
+    expect(worker.displayLabel, 'Agent');
+    expect(coordinator.displayLabel, 'Coordinator');
+    expect(named.displayLabel, 'ResearchBot');
+  });
+
+  test('workspace agent mentions remain unique for same-role workers', () {
+    final agents = [
+      WorkspaceAgent.fromJson({
+        'id': 'worker-1',
+        'name': 'A12',
+        'role': 'Conversation worker',
+      }),
+      WorkspaceAgent.fromJson({
+        'id': 'worker-2',
+        'name': 'A13',
+        'role': 'Conversation worker',
+      }),
+    ];
+
+    expect(workspaceAgentMentions(agents).map((mention) => mention.label), [
+      'Agent 1',
+      'Agent 2',
+    ]);
+  });
+
+  test('conversation coordinator remains available as a public mention', () {
+    final state = WorkspaceState()
+      ..apply({
+        'workspace_update': {
+          'action': 'snapshot',
+          'agents': [
+            {
+              'id': 'coordinator',
+              'name': 'R1',
+              'role': 'Round-robin coordinator',
+            },
+            {
+              'id': 'worker',
+              'name': 'Named worker',
+              'role': 'Conversation worker',
+            },
+            {'id': 'thread', 'name': 'A12', 'role': 'ThreadAgent'},
+            {
+              'id': 'other-coordinator',
+              'name': 'A0',
+              'role': 'Task coordinator',
+            },
+          ],
+          'conversation_agents': [
+            {'agent_id': 'coordinator', 'channel_id': 'engineering'},
+            {'agent_id': 'worker', 'channel_id': 'engineering'},
+            {'agent_id': 'thread', 'channel_id': 'engineering'},
+            {'agent_id': 'other-coordinator', 'channel_id': 'other'},
+          ],
+        },
+      });
+
+    expect(
+      workspaceConversationMentions(
+        state,
+        channelId: 'engineering',
+      ).map((mention) => mention.toJson()),
+      [
+        {'kind': 'agent', 'id': 'coordinator', 'label': 'Coordinator'},
+      ],
+    );
+  });
+
+  test('thread mentions use only the assigned ID in the current conversation', () {
+    final state = WorkspaceState()
+      ..agents = [
+        for (final id in ['coordinator', 'worker', 'other', 'foreign'])
+          WorkspaceAgent.fromJson({
+            'id': id,
+            'name': 'A12',
+            'role': id == 'coordinator' ? 'Task coordinator' : 'ThreadAgent',
+          }),
+      ]
+      ..conversationAgents = [
+        for (final channel in ['engineering', null]) ...[
+          for (final id in ['coordinator', 'worker', 'other'])
+            WorkspaceConversationAgent.fromJson({
+              'agent_id': id,
+              'channel_id': channel,
+              if (channel == null) 'member_pubkey': 'alice',
+              if (channel == null) 'peer_pubkey': 'bob',
+              if (id != 'coordinator') 'parent_id': id == 'worker' ? 'root' : 'other-root',
+            }),
+        ],
+        WorkspaceConversationAgent.fromJson({
+          'agent_id': 'foreign', 'member_pubkey': 'alice',
+          'peer_pubkey': 'carol', 'parent_id': 'root',
+        }),
+      ];
+    for (final direct in [false, true]) {
+      List<Map<String, Object?>> mentions(String? parent) => workspaceConversationMentions(
+        state,
+        channelId: direct ? null : 'engineering',
+        memberPubkey: direct ? 'bob' : null,
+        peerPubkey: direct ? 'alice' : null,
+        parentId: parent,
+      ).map((mention) => mention.toJson()).toList();
+      const coordinator = {'kind': 'agent', 'id': 'coordinator', 'label': 'Coordinator'};
+      expect(mentions(null), [coordinator]);
+      expect(mentions('unassigned'), [coordinator]);
+      expect(mentions('root'), [coordinator, {'kind': 'agent', 'id': 'worker', 'label': 'ThreadAgent'}]);
+      expect(mentions('other-root'), [coordinator, {'kind': 'agent', 'id': 'other', 'label': 'ThreadAgent'}]);
+    }
+    expect(workspaceConversationMentions(state, channelId: 'missing', parentId: 'root'), isEmpty);
+    expect(workspaceConversationMentions(state, memberPubkey: 'bob', peerPubkey: 'carol', parentId: 'root'), isEmpty);
+  });
+
   test('does not create a self direct conversation', () {
     final workspace = WorkspaceState();
 
@@ -763,6 +892,128 @@ void main() {
     expect(state.members, ['owner', 'member']);
     expect(state.messages['channel-1']![1].parentId, 'message-1');
   });
+
+  test(
+    'workspace state retains board snapshots and replaces board records',
+    () {
+      final state = WorkspaceState()
+        ..apply({
+          'workspace_update': {
+            'action': 'snapshot',
+            'revision': 1,
+            'board_tasks': [
+              {
+                'id': 'task-1',
+                'title': 'Review release notes',
+                'conversation_key': 'engineering',
+                'instruction': 'Review the release notes.',
+                'folder_scope': ['/work/phone'],
+                'schedule': 'daily',
+                'state': 'running',
+                'next_run_at': 100,
+                'created_by': 'owner',
+                'created_at': 10,
+                'updated_at': 20,
+              },
+            ],
+            'board_timeline_entries': [
+              {
+                'id': 'entry-1',
+                'task_id': 'task-1',
+                'state': 'running',
+                'detail': 'Task started',
+                'created_at': 20,
+              },
+            ],
+          },
+        });
+
+      expect(state.boardTasks.single.title, 'Review release notes');
+      expect(state.boardTasks.single.folderScope, ['/work/phone']);
+      expect(state.boardTimelineEntries.single.detail, 'Task started');
+      expect(state.toSnapshotJson()['board_tasks'], hasLength(1));
+
+      state.apply({
+        'workspace_update': {
+          'action': 'board_updated',
+          'revision': 2,
+          'board_tasks': [
+            {
+              'id': 'task-1',
+              'title': 'Review release notes',
+              'conversation_key': 'engineering',
+              'instruction': 'Review the release notes.',
+              'folder_scope': ['/work/phone'],
+              'schedule': 'daily',
+              'state': 'blocked',
+              'created_by': 'owner',
+              'created_at': 10,
+              'updated_at': 30,
+            },
+          ],
+          'board_timeline_entries': [
+            {
+              'id': 'entry-2',
+              'task_id': 'task-1',
+              'state': 'blocked',
+              'detail': 'Worker stopped',
+              'created_at': 30,
+            },
+          ],
+        },
+      });
+
+      expect(state.boardTasks.single.state, 'blocked');
+      expect(state.boardTasks.single.boardColumn, 'blocked');
+      expect(state.boardTasks.single.nextRunAt, isNull);
+      expect(state.boardTimelineEntries.single.id, 'entry-2');
+    },
+  );
+
+  test(
+    'workspace history transfer aggregates board payloads before applying',
+    () {
+      final state = WorkspaceState();
+      const transferId = 'board-snapshot';
+
+      for (final sequence in [0, 1]) {
+        state.apply({
+          'workspace_update': {
+            'action': 'history_transfer:v1:$transferId:$sequence:2:snapshot',
+            'board_tasks': [
+              {
+                'id': 'task-$sequence',
+                'title': 'Task $sequence',
+                'conversation_key': 'engineering',
+                'instruction': 'Do the work.',
+                'folder_scope': <String>[],
+                'schedule': 'once',
+                'state': 'scheduled',
+                'created_by': 'owner',
+                'created_at': sequence,
+                'updated_at': sequence,
+              },
+            ],
+            'board_timeline_entries': [
+              {
+                'id': 'entry-$sequence',
+                'task_id': 'task-$sequence',
+                'state': 'scheduled',
+                'detail': 'Task created',
+                'created_at': sequence,
+              },
+            ],
+          },
+        });
+      }
+
+      expect(state.boardTasks.map((task) => task.id), ['task-0', 'task-1']);
+      expect(state.boardTimelineEntries.map((entry) => entry.id), [
+        'entry-0',
+        'entry-1',
+      ]);
+    },
+  );
 
   test(
     'identifies replies whose thread root is missing from local history',

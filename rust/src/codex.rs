@@ -40,6 +40,8 @@ pub struct CodexConfig {
     pub timeout: Duration,
     pub persist_sessions: bool,
     pub usage_limit_fallback_model: Option<String>,
+    pub workspace_access: OpenCodeWorkspaceAccess,
+    pub opencode_server_scope: Option<String>,
     pub opencode: OpenCodeConfig,
 }
 
@@ -47,6 +49,21 @@ pub struct CodexConfig {
 pub enum AgentBackend {
     OpenCode,
     Codex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenCodeWorkspaceAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
+impl OpenCodeWorkspaceAccess {
+    fn as_env_value(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::ReadWrite => "read-write",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +195,8 @@ impl CodexConfig {
             timeout: Duration::from_secs(timeout_secs),
             persist_sessions,
             usage_limit_fallback_model,
+            workspace_access: OpenCodeWorkspaceAccess::ReadWrite,
+            opencode_server_scope: None,
             opencode,
         })
     }
@@ -365,7 +384,7 @@ async fn run_opencode_session(
 ) -> Result<CodexRunResult> {
     let session_id = match session_id.filter(|id| !id.is_empty()) {
         Some(id) => validate_opencode_session_id(id)?.to_owned(),
-        None => ensure_opencode_session(config).await?,
+        None => create_opencode_session(config).await?,
     };
     let mut args = opencode_run_args(config, Some(&session_id));
     args.push(prompt.to_string());
@@ -985,6 +1004,10 @@ async fn run_opencode_cli_with_cancel(
     };
     let mut child = command
         .current_dir(&config.working_dir)
+        .env(
+            "OPENCODE_WORKSPACE_ACCESS",
+            config.workspace_access.as_env_value(),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

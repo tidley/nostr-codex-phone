@@ -1,10 +1,13 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::protocol::{MediaReference, WorkspaceMentionPayload, WorkspaceReactionPayload};
+use crate::protocol::{
+    MediaReference, WorkspaceBoardTaskPayload, WorkspaceBoardTimelinePayload,
+    WorkspaceMentionPayload, WorkspaceReactionPayload,
+};
 use anyhow::{bail, Context, Result};
 use rand::{rngs::OsRng, RngCore};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, types::Type, Connection, OptionalExtension};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceChannel {
@@ -42,6 +45,8 @@ pub struct WorkspaceMessage {
     pub pinned: bool,
     pub reactions: Vec<WorkspaceReactionPayload>,
     pub work_history: Vec<String>,
+    pub edited_at: Option<i64>,
+    pub deleted_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -85,6 +90,7 @@ pub struct WorkspaceAgentOpenCodeProfile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceConversationAgent {
+    pub parent_id: Option<String>,
     pub agent_id: String,
     pub channel_id: Option<String>,
     pub member_pubkey: Option<String>,
@@ -117,6 +123,142 @@ pub struct WorkspaceConversationSession {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceBoardTask {
+    pub id: String,
+    pub title: String,
+    pub conversation_key: String,
+    pub instruction: String,
+    pub folder_scope: Vec<String>,
+    pub schedule: String,
+    pub state: String,
+    pub board_column: String,
+    pub next_run_at: Option<i64>,
+    pub created_by: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub root_message_id: Option<String>,
+    pub agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceBoardTaskWorkstream {
+    pub task_id: String,
+    pub root_message_id: String,
+    pub agent_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceBoardIntegration {
+    pub id: String,
+    pub conversation_key: String,
+    pub task_id: String,
+    pub run_id: Option<String>,
+    pub proposal_message_id: String,
+    pub state: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceBoardRun {
+    pub id: String,
+    pub task_id: String,
+    pub scheduled_at: i64,
+    pub state: String,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceBoardTimelineEntry {
+    pub id: String,
+    pub task_id: String,
+    pub state: String,
+    pub detail: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceBoardColumn {
+    pub id: String,
+    pub name: String,
+    pub rank: i64,
+    pub wip_limit: Option<i64>,
+    pub archived_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceBoardCard {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub column_id: String,
+    pub rank: i64,
+    pub priority: String,
+    pub estimate: Option<i64>,
+    pub due_at: Option<i64>,
+    pub created_by: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub archived_at: Option<i64>,
+    pub source_thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceBoardCardActivity {
+    pub id: String,
+    pub card_id: String,
+    pub kind: String,
+    pub detail: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceBoardLabel {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+}
+
+impl From<WorkspaceBoardTask> for WorkspaceBoardTaskPayload {
+    fn from(task: WorkspaceBoardTask) -> Self {
+        Self {
+            id: task.id,
+            title: task.title,
+            conversation_key: task.conversation_key,
+            instruction: task.instruction,
+            folder_scope: task.folder_scope,
+            schedule: task.schedule,
+            state: task.state,
+            board_column: task.board_column,
+            next_run_at: task.next_run_at,
+            created_by: task.created_by,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+            root_message_id: task.root_message_id,
+            agent_id: task.agent_id,
+        }
+    }
+}
+
+impl From<WorkspaceBoardTimelineEntry> for WorkspaceBoardTimelinePayload {
+    fn from(entry: WorkspaceBoardTimelineEntry) -> Self {
+        Self {
+            id: entry.id,
+            task_id: entry.task_id,
+            state: entry.state,
+            detail: entry.detail,
+            created_at: entry.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceThreadAgentTurn {
+    pub parent_id: String,
+    pub agent_id: String,
+}
+
 pub struct WorkspaceStore {
     conn: Connection,
 }
@@ -132,6 +274,14 @@ pub struct WorkspaceNotification {
     pub recipient: String,
     pub payload: String,
     pub attempts: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceAgentHandoffOutboxEntry {
+    pub reply_message_id: String,
+    pub agent_id: String,
+    pub member_pubkey: Option<String>,
+    pub peer_pubkey: Option<String>,
 }
 
 impl WorkspaceStore {
@@ -175,14 +325,217 @@ impl WorkspaceStore {
                 CREATE INDEX IF NOT EXISTS workspace_messages_channel ON workspace_messages(channel_id, created_at);
                 CREATE INDEX IF NOT EXISTS workspace_messages_direct ON workspace_messages(recipient_pubkey, sender_pubkey, created_at);",
         )?;
-        Self::migrate(conn)
+        let store = Self::migrate(conn)?;
+        store.init_board_schema()?;
+        store.init_agent_handoff_schema()?;
+        Ok(store)
     }
 
     /// Opens an already initialized workspace for a queued agent turn.
     pub fn open_existing(path: &Path) -> Result<Self> {
-        Ok(Self {
-            conn: Self::open_connection(path)?,
-        })
+        let store = Self { conn: Self::open_connection(path)? };
+        store.init_agent_handoff_schema()?;
+        Ok(store)
+    }
+
+    fn init_agent_handoff_schema(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS workspace_agent_handoff_outbox (
+                 reply_message_id TEXT NOT NULL REFERENCES workspace_messages(id) ON DELETE CASCADE,
+                 agent_id TEXT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
+                 member_pubkey TEXT,
+                 peer_pubkey TEXT,
+                 PRIMARY KEY (reply_message_id, agent_id)
+             );
+             CREATE TRIGGER IF NOT EXISTS workspace_agent_handoff_target_deleted
+             AFTER DELETE ON workspace_agents BEGIN
+                 DELETE FROM workspace_agent_handoff_outbox WHERE agent_id = OLD.id;
+             END;",
+        )?;
+        let mut columns = self
+            .conn
+            .prepare("PRAGMA table_info(workspace_agent_handoff_outbox)")?;
+        let columns = columns
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for column in ["member_pubkey", "peer_pubkey"] {
+            if !columns.iter().any(|existing| existing == column) {
+                self.conn.execute(
+                    &format!("ALTER TABLE workspace_agent_handoff_outbox ADD COLUMN {column} TEXT"),
+                    [],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn init_board_schema(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS workspace_board_tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                conversation_key TEXT NOT NULL,
+                instruction TEXT NOT NULL,
+                folder_scope_json TEXT NOT NULL DEFAULT '[]',
+                schedule TEXT NOT NULL,
+                state TEXT NOT NULL,
+                next_run_at INTEGER,
+                created_by TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS workspace_board_runs (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES workspace_board_tasks(id) ON DELETE CASCADE,
+                scheduled_at INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER,
+                UNIQUE(task_id, scheduled_at)
+            );
+             CREATE TABLE IF NOT EXISTS workspace_board_timeline (
+                 id TEXT PRIMARY KEY,
+                 task_id TEXT NOT NULL REFERENCES workspace_board_tasks(id) ON DELETE CASCADE,
+                 state TEXT NOT NULL,
+                 detail TEXT NOT NULL,
+                 created_at INTEGER NOT NULL
+             );
+              CREATE TABLE IF NOT EXISTS workspace_board_turns (
+                  message_id TEXT PRIMARY KEY REFERENCES workspace_messages(id) ON DELETE CASCADE,
+                  task_id TEXT NOT NULL REFERENCES workspace_board_tasks(id) ON DELETE CASCADE
+              );
+              CREATE TABLE IF NOT EXISTS workspace_board_task_workstreams (
+                  task_id TEXT PRIMARY KEY REFERENCES workspace_board_tasks(id) ON DELETE CASCADE,
+                  root_message_id TEXT NOT NULL UNIQUE REFERENCES workspace_messages(id) ON DELETE CASCADE,
+                  agent_id TEXT NOT NULL UNIQUE REFERENCES workspace_agents(id) ON DELETE CASCADE
+              );
+               CREATE TABLE IF NOT EXISTS workspace_board_integrations (
+                  id TEXT PRIMARY KEY,
+                  conversation_key TEXT NOT NULL,
+                   task_id TEXT NOT NULL REFERENCES workspace_board_tasks(id) ON DELETE CASCADE,
+                   run_id TEXT REFERENCES workspace_board_runs(id) ON DELETE SET NULL,
+                  proposal_message_id TEXT NOT NULL REFERENCES workspace_messages(id) ON DELETE CASCADE,
+                   state TEXT NOT NULL,
+                   result TEXT,
+                   created_at INTEGER NOT NULL
+              );
+            CREATE INDEX IF NOT EXISTS workspace_board_tasks_due
+                ON workspace_board_tasks(state, next_run_at);
+             CREATE INDEX IF NOT EXISTS workspace_board_timeline_task
+                ON workspace_board_timeline(task_id, created_at);
+             CREATE INDEX IF NOT EXISTS workspace_board_integrations_fifo
+                ON workspace_board_integrations(conversation_key, state, created_at, id);
+            CREATE TRIGGER IF NOT EXISTS workspace_board_tasks_revision_insert AFTER INSERT ON workspace_board_tasks BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+            CREATE TRIGGER IF NOT EXISTS workspace_board_tasks_revision_update AFTER UPDATE ON workspace_board_tasks BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+            CREATE TRIGGER IF NOT EXISTS workspace_board_runs_revision_insert AFTER INSERT ON workspace_board_runs BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+             CREATE TRIGGER IF NOT EXISTS workspace_board_timeline_revision_insert AFTER INSERT ON workspace_board_timeline BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;",
+        )?;
+        let integration_columns = self
+            .conn
+            .prepare("PRAGMA table_info(workspace_board_integrations)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !integration_columns.iter().any(|column| column == "result") {
+            self.conn
+                .execute_batch("ALTER TABLE workspace_board_integrations ADD COLUMN result TEXT")?;
+        }
+        if !integration_columns.iter().any(|column| column == "run_id") {
+            self.conn.execute_batch(
+                "ALTER TABLE workspace_board_integrations RENAME TO workspace_board_integrations_legacy;
+                 CREATE TABLE workspace_board_integrations (
+                     id TEXT PRIMARY KEY,
+                     conversation_key TEXT NOT NULL,
+                     task_id TEXT NOT NULL REFERENCES workspace_board_tasks(id) ON DELETE CASCADE,
+                     run_id TEXT REFERENCES workspace_board_runs(id) ON DELETE SET NULL,
+                     proposal_message_id TEXT NOT NULL REFERENCES workspace_messages(id) ON DELETE CASCADE,
+                     state TEXT NOT NULL,
+                     result TEXT,
+                     created_at INTEGER NOT NULL
+                 );
+                 INSERT INTO workspace_board_integrations (id, conversation_key, task_id, proposal_message_id, state, result, created_at)
+                 SELECT id, conversation_key, task_id, proposal_message_id, state, result, created_at FROM workspace_board_integrations_legacy;
+                 DROP TABLE workspace_board_integrations_legacy;",
+            )?;
+            self.conn.execute_batch("CREATE INDEX IF NOT EXISTS workspace_board_integrations_fifo ON workspace_board_integrations(conversation_key, state, created_at, id);")?;
+        }
+        let board_task_columns = self
+            .conn
+            .prepare("PRAGMA table_info(workspace_board_tasks)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !board_task_columns
+            .iter()
+            .any(|column| column == "board_column")
+        {
+            self.conn.execute_batch(
+                "ALTER TABLE workspace_board_tasks ADD COLUMN board_column TEXT NOT NULL DEFAULT 'scheduled';
+                 UPDATE workspace_board_tasks SET board_column = state;",
+            )?;
+        }
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS workspace_board_columns (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                rank INTEGER NOT NULL,
+                wip_limit INTEGER,
+                archived_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS workspace_board_cards (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                column_id TEXT NOT NULL REFERENCES workspace_board_columns(id),
+                rank INTEGER NOT NULL,
+                priority TEXT NOT NULL DEFAULT 'none',
+                estimate INTEGER,
+                due_at INTEGER,
+                created_by TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL,
+                 archived_at INTEGER,
+                 source_thread_id TEXT UNIQUE REFERENCES workspace_messages(id) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS workspace_board_card_activity (
+                id TEXT PRIMARY KEY,
+                card_id TEXT NOT NULL REFERENCES workspace_board_cards(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS workspace_board_card_assignees (card_id TEXT NOT NULL REFERENCES workspace_board_cards(id) ON DELETE CASCADE, assignee_id TEXT NOT NULL, PRIMARY KEY (card_id, assignee_id));
+            CREATE TABLE IF NOT EXISTS workspace_board_labels (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, color TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS workspace_board_card_labels (card_id TEXT NOT NULL REFERENCES workspace_board_cards(id) ON DELETE CASCADE, label_id TEXT NOT NULL REFERENCES workspace_board_labels(id) ON DELETE CASCADE, PRIMARY KEY (card_id, label_id));
+            CREATE TABLE IF NOT EXISTS workspace_board_card_dependencies (card_id TEXT NOT NULL REFERENCES workspace_board_cards(id) ON DELETE CASCADE, depends_on_card_id TEXT NOT NULL REFERENCES workspace_board_cards(id) ON DELETE CASCADE, PRIMARY KEY (card_id, depends_on_card_id), CHECK (card_id != depends_on_card_id));
+            CREATE INDEX IF NOT EXISTS workspace_board_columns_rank ON workspace_board_columns(rank);
+            CREATE INDEX IF NOT EXISTS workspace_board_cards_column_rank ON workspace_board_cards(column_id, rank);
+            CREATE INDEX IF NOT EXISTS workspace_board_card_activity_card ON workspace_board_card_activity(card_id, created_at);
+            CREATE TRIGGER IF NOT EXISTS workspace_board_columns_revision_insert AFTER INSERT ON workspace_board_columns BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+            CREATE TRIGGER IF NOT EXISTS workspace_board_columns_revision_update AFTER UPDATE ON workspace_board_columns BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+            CREATE TRIGGER IF NOT EXISTS workspace_board_cards_revision_insert AFTER INSERT ON workspace_board_cards BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+            CREATE TRIGGER IF NOT EXISTS workspace_board_cards_revision_update AFTER UPDATE ON workspace_board_cards BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;
+            CREATE TRIGGER IF NOT EXISTS workspace_board_card_activity_revision_insert AFTER INSERT ON workspace_board_card_activity BEGIN UPDATE workspace_metadata SET value = value + 1 WHERE key = 'revision'; END;",
+        )?;
+        self.ensure_board_card_column("estimate", "INTEGER")?;
+        self.ensure_board_card_column("due_at", "INTEGER")?;
+        self.ensure_board_card_column("source_thread_id", "TEXT REFERENCES workspace_messages(id) ON DELETE SET NULL")?;
+        self.conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS workspace_board_cards_source_thread ON workspace_board_cards(source_thread_id) WHERE source_thread_id IS NOT NULL;")?;
+        let column_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM workspace_board_columns", [], |row| {
+                    row.get(0)
+                })?;
+        if column_count == 0 {
+            for (index, name) in ["Backlog", "Ready", "In Progress", "Review", "Done"]
+                .into_iter()
+                .enumerate()
+            {
+                self.conn.execute(
+                    "INSERT INTO workspace_board_columns (id, name, rank) VALUES (?1, ?2, ?3)",
+                    params![new_id(), name, (index as i64 + 1) * 1024],
+                )?;
+            }
+        }
+        Ok(())
     }
 
     pub fn conversation_session(
@@ -264,6 +617,28 @@ impl WorkspaceStore {
             [required("native turn message id", message_id)?],
         )?;
         Ok(())
+    }
+
+    pub fn link_board_turn(&self, task_id: &str, message_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO workspace_board_turns (message_id, task_id) VALUES (?1, ?2)",
+            params![
+                required("native turn message id", message_id)?,
+                required("board task ID", task_id)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn board_task_for_turn(&self, message_id: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT task_id FROM workspace_board_turns WHERE message_id = ?1",
+                [required("native turn message id", message_id)?],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn pending_native_turns(&self) -> Result<Vec<String>> {
@@ -374,6 +749,22 @@ impl WorkspaceStore {
         if !has_work_history {
             conn.execute(
                 "ALTER TABLE workspace_messages ADD COLUMN work_history_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
+        }
+        let message_columns = conn
+            .prepare("PRAGMA table_info(workspace_messages)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !message_columns.iter().any(|column| column == "edited_at") {
+            conn.execute(
+                "ALTER TABLE workspace_messages ADD COLUMN edited_at INTEGER",
+                [],
+            )?;
+        }
+        if !message_columns.iter().any(|column| column == "deleted_at") {
+            conn.execute(
+                "ALTER TABLE workspace_messages ADD COLUMN deleted_at INTEGER",
                 [],
             )?;
         }
@@ -505,11 +896,11 @@ impl WorkspaceStore {
         conn.execute_batch("CREATE TABLE IF NOT EXISTS workspace_channel_members (channel_id TEXT NOT NULL REFERENCES workspace_channels(id), pubkey TEXT NOT NULL REFERENCES workspace_members(pubkey), is_admin INTEGER NOT NULL DEFAULT 0, joined_at INTEGER NOT NULL, PRIMARY KEY (channel_id, pubkey));")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS workspace_conversation_coordinators (agent_id TEXT PRIMARY KEY REFERENCES workspace_agents(id) ON DELETE CASCADE, channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL))); CREATE UNIQUE INDEX IF NOT EXISTS workspace_channel_coordinator ON workspace_conversation_coordinators(channel_id) WHERE channel_id IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS workspace_direct_coordinator ON workspace_conversation_coordinators(member_pubkey, peer_pubkey) WHERE channel_id IS NULL; CREATE TABLE IF NOT EXISTS workspace_completed_thread_agents (parent_id TEXT PRIMARY KEY REFERENCES workspace_messages(id) ON DELETE CASCADE, agent_id TEXT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE); CREATE TABLE IF NOT EXISTS workspace_conversation_round_robin (channel_id TEXT REFERENCES workspace_channels(id), member_pubkey TEXT, peer_pubkey TEXT, next_worker INTEGER NOT NULL DEFAULT 0, CHECK ((channel_id IS NOT NULL AND member_pubkey IS NULL AND peer_pubkey IS NULL) OR (channel_id IS NULL AND member_pubkey IS NOT NULL AND peer_pubkey IS NOT NULL))); CREATE UNIQUE INDEX IF NOT EXISTS workspace_channel_round_robin ON workspace_conversation_round_robin(channel_id) WHERE channel_id IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS workspace_direct_round_robin ON workspace_conversation_round_robin(member_pubkey, peer_pubkey) WHERE channel_id IS NULL;")?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS workspace_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
-        // Native conversation sessions replaced the coordinator/worker model.
-        // Drop its assignments on startup so an upgraded workspace cannot
-        // resume an old per-agent queue after reconnecting.
-        conn.execute_batch(
-            "DELETE FROM workspace_thread_agents;
+        if has_thread_root_session_key {
+            // Native conversation sessions replaced the coordinator/worker model.
+            // Drop legacy assignments while upgrading from per-thread sessions.
+            conn.execute_batch(
+                "DELETE FROM workspace_thread_agents;
              DELETE FROM workspace_completed_thread_agents;
              DELETE FROM workspace_conversation_round_robin;
              DELETE FROM workspace_conversation_coordinators;
@@ -525,10 +916,11 @@ impl WorkspaceStore {
                  WHERE name = 'A0'
                     OR role IN ('Task coordinator', 'Conversation worker', 'Round-robin worker')
                );
-             DELETE FROM workspace_agents
-               WHERE name = 'A0'
-                  OR role IN ('Task coordinator', 'Conversation worker', 'Round-robin worker');",
-        )?;
+              DELETE FROM workspace_agents
+                WHERE name = 'A0'
+                   OR role IN ('Task coordinator', 'Conversation worker', 'Round-robin worker');",
+            )?;
+        }
         if !has_channel_members {
             conn.execute_batch("INSERT OR IGNORE INTO workspace_channel_members (channel_id, pubkey, joined_at) SELECT c.id, m.pubkey, c.created_at FROM workspace_channels c CROSS JOIN workspace_members m; UPDATE workspace_channel_members SET is_admin = 1 WHERE (channel_id, pubkey) IN (SELECT id, created_by FROM workspace_channels);")?;
         }
@@ -584,6 +976,1121 @@ impl WorkspaceStore {
         u64::try_from(revision).context("workspace revision is invalid")
     }
 
+    pub fn create_board_task(
+        &self,
+        created_by: &str,
+        title: &str,
+        conversation_key: &str,
+        instruction: &str,
+        folder_scope: &[String],
+        schedule: &str,
+        next_run_at: i64,
+    ) -> Result<WorkspaceBoardTask> {
+        let title = required("board task title", title)?;
+        let conversation_key = required("board task conversation", conversation_key)?;
+        let instruction = required("board task instruction", instruction)?;
+        let schedule = required("board task schedule", schedule)?;
+        if !matches!(
+            schedule.as_str(),
+            "once" | "daily" | "weekdays" | "weekly" | "monthly"
+        ) {
+            bail!("board task schedule is invalid");
+        }
+        let created_by = required("board task creator", created_by)?;
+        if !self.is_member(&created_by)? {
+            bail!("board task creator is not a workspace member");
+        }
+        let timestamp = now();
+        let task = WorkspaceBoardTask {
+            id: new_id(),
+            title,
+            conversation_key,
+            instruction,
+            folder_scope: folder_scope.to_vec(),
+            schedule,
+            state: "scheduled".to_string(),
+            board_column: "scheduled".to_string(),
+            next_run_at: Some(next_run_at),
+            created_by,
+            created_at: timestamp,
+            updated_at: timestamp,
+            root_message_id: None,
+            agent_id: None,
+        };
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            self.conn.execute(
+                "INSERT INTO workspace_board_tasks (id, title, conversation_key, instruction, folder_scope_json, schedule, state, board_column, next_run_at, created_by, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![task.id, task.title, task.conversation_key, task.instruction, serde_json::to_string(&task.folder_scope)?, task.schedule, task.state, task.board_column, task.next_run_at, task.created_by, task.created_at, task.updated_at],
+            )?;
+            self.append_board_timeline_at(&task.id, "scheduled", "Task scheduled", timestamp)
+        })();
+        self.finish_board_transaction(result)?;
+        Ok(task)
+    }
+
+    pub fn discard_board_task(&self, task_id: &str) -> Result<()> {
+        if self.conn.execute(
+            "DELETE FROM workspace_board_tasks WHERE id = ?1 AND state = 'scheduled'",
+            [required("board task ID", task_id)?],
+        )? != 1
+        {
+            bail!("scheduled board task could not be discarded");
+        }
+        Ok(())
+    }
+
+    pub fn board_tasks(&self) -> Result<Vec<WorkspaceBoardTask>> {
+        Ok(self.conn.prepare("SELECT task.id, task.title, task.conversation_key, task.instruction, task.folder_scope_json, task.schedule, task.state, task.board_column, task.next_run_at, task.created_by, task.created_at, task.updated_at, workstream.root_message_id, workstream.agent_id FROM workspace_board_tasks task LEFT JOIN workspace_board_task_workstreams workstream ON workstream.task_id = task.id ORDER BY task.next_run_at, task.created_at")?
+            .query_map([], board_task_from_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn move_board_task(&self, task_id: &str, board_column: &str) -> Result<()> {
+        let task_id = required("board task ID", task_id)?;
+        let board_column = required("board task board column", board_column)?;
+        if !valid_board_task_column(&board_column) {
+            bail!("board task board column is invalid");
+        }
+        if self.conn.execute(
+            "UPDATE workspace_board_tasks SET board_column = ?2, updated_at = ?3 WHERE id = ?1",
+            params![task_id, board_column, now()],
+        )? != 1
+        {
+            bail!("board task does not exist");
+        }
+        Ok(())
+    }
+
+    pub fn link_board_task_workstream(
+        &self,
+        task_id: &str,
+        root_message_id: &str,
+        agent_id: &str,
+    ) -> Result<()> {
+        let task_id = required("board task ID", task_id)?;
+        let root_message_id = required("board task root message ID", root_message_id)?;
+        let agent_id = required("board task agent ID", agent_id)?;
+        let is_root = self
+            .conn
+            .query_row(
+                "SELECT parent_id IS NULL FROM workspace_messages WHERE id = ?1",
+                [&root_message_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .context("board task root message does not exist")?;
+        if !is_root {
+            bail!("board task workstream message must be a thread root");
+        }
+        if self.conn.execute(
+            "INSERT INTO workspace_board_task_workstreams (task_id, root_message_id, agent_id) VALUES (?1, ?2, ?3)",
+            params![task_id, root_message_id, agent_id],
+        )? != 1 {
+            bail!("board task workstream could not be linked");
+        }
+        Ok(())
+    }
+
+    pub fn board_task_workstream(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<WorkspaceBoardTaskWorkstream>> {
+        self.conn
+            .query_row(
+                "SELECT task_id, root_message_id, agent_id FROM workspace_board_task_workstreams WHERE task_id = ?1",
+                [required("board task ID", task_id)?],
+                |row| {
+                    Ok(WorkspaceBoardTaskWorkstream {
+                        task_id: row.get(0)?,
+                        root_message_id: row.get(1)?,
+                        agent_id: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn board_task_workstream_for_root(
+        &self,
+        root_message_id: &str,
+    ) -> Result<Option<WorkspaceBoardTaskWorkstream>> {
+        self.conn.query_row("SELECT task_id, root_message_id, agent_id FROM workspace_board_task_workstreams WHERE root_message_id = ?1", [required("board task root message ID", root_message_id)?], |row| Ok(WorkspaceBoardTaskWorkstream { task_id: row.get(0)?, root_message_id: row.get(1)?, agent_id: row.get(2)? })).optional().map_err(Into::into)
+    }
+
+    pub fn board_task_workstream_for_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<WorkspaceBoardTaskWorkstream>> {
+        self.conn.query_row("SELECT task_id, root_message_id, agent_id FROM workspace_board_task_workstreams WHERE agent_id = ?1", [required("board task agent ID", agent_id)?], |row| Ok(WorkspaceBoardTaskWorkstream { task_id: row.get(0)?, root_message_id: row.get(1)?, agent_id: row.get(2)? })).optional().map_err(Into::into)
+    }
+
+    pub fn enqueue_board_integration(
+        &self,
+        task_id: &str,
+        proposal_message_id: &str,
+    ) -> Result<WorkspaceBoardIntegration> {
+        let task = self
+            .board_task(task_id)?
+            .context("board task does not exist")?;
+        let workstream = self
+            .board_task_workstream(&task.id)?
+            .context("board task has no workstream")?;
+        let proposal_message_id = required("board proposal message ID", proposal_message_id)?;
+        let proposal = self
+            .message_by_id(&proposal_message_id)?
+            .context("board proposal message does not exist")?;
+        if proposal.parent_id.as_deref() != Some(&workstream.root_message_id) {
+            bail!("board proposal must belong to the task thread");
+        }
+        let run_id = self.conn.query_row(
+            "SELECT id FROM workspace_board_runs WHERE task_id = ?1 AND state = 'running' ORDER BY started_at DESC LIMIT 1",
+            [&task.id],
+            |row| row.get(0),
+        ).optional()?;
+        let integration = WorkspaceBoardIntegration {
+            id: new_id(),
+            conversation_key: task.conversation_key,
+            task_id: task.id,
+            run_id,
+            proposal_message_id,
+            state: "queued".to_string(),
+            created_at: now(),
+        };
+        self.conn.execute("INSERT INTO workspace_board_integrations (id, conversation_key, task_id, run_id, proposal_message_id, state, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![integration.id, integration.conversation_key, integration.task_id, integration.run_id, integration.proposal_message_id, integration.state, integration.created_at])?;
+        self.append_board_timeline(
+            &integration.task_id,
+            "integration_queued",
+            "Proposal queued for private head integration",
+        )?;
+        Ok(integration)
+    }
+
+    /// Marks one task-thread message as the task's explicit integration proposal.
+    pub fn mark_board_proposal_ready(
+        &self,
+        task_id: &str,
+        proposal_message_id: &str,
+    ) -> Result<Option<WorkspaceBoardIntegration>> {
+        let task = self
+            .board_task(task_id)?
+            .context("board task does not exist")?;
+        if task.state != "running" {
+            return Ok(None);
+        }
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_board_integrations WHERE task_id = ?1 AND proposal_message_id = ?2)",
+            params![task_id, proposal_message_id],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(None);
+        }
+        self.enqueue_board_integration(task_id, proposal_message_id)
+            .map(Some)
+    }
+
+    pub fn claim_next_board_integration(
+        &self,
+        conversation_key: &str,
+    ) -> Result<Option<WorkspaceBoardIntegration>> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let integration = self.conn.query_row("SELECT id, conversation_key, task_id, run_id, proposal_message_id, state, created_at FROM workspace_board_integrations WHERE conversation_key = ?1 AND state = 'queued' AND NOT EXISTS (SELECT 1 FROM workspace_board_integrations running WHERE running.conversation_key = workspace_board_integrations.conversation_key AND running.state = 'running') ORDER BY created_at, rowid LIMIT 1", [required("board conversation", conversation_key)?], board_integration_from_row).optional()?;
+            let Some(integration) = integration else {
+                return Ok(None);
+            };
+            self.conn.execute(
+                "UPDATE workspace_board_integrations SET state = 'running' WHERE id = ?1",
+                [&integration.id],
+            )?;
+            self.append_board_timeline(
+                &integration.task_id,
+                "integrating",
+                "Private head integration started",
+            )?;
+            Ok(Some(WorkspaceBoardIntegration {
+                state: "running".to_string(),
+                ..integration
+            }))
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    pub fn cancel_board_integrations(&self, task_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE workspace_board_integrations SET state = 'cancelled', result = 'Integration cancelled' WHERE task_id = ?1 AND state IN ('queued', 'running')",
+            [required("board task ID", task_id)?],
+        )?;
+        Ok(())
+    }
+
+    /// Returns false when cancellation won the race with an in-flight head result.
+    pub fn finish_board_integration(
+        &self,
+        integration_id: &str,
+        result: Result<&str>,
+    ) -> Result<bool> {
+        let integration_id = required("board integration ID", integration_id)?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let transaction = (|| {
+            let (task_id, state): (String, String) = self
+                .conn
+                .query_row(
+                    "SELECT task_id, state FROM workspace_board_integrations WHERE id = ?1",
+                    [&integration_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .context("board integration does not exist")?;
+            if state == "cancelled" {
+                return Ok(false);
+            }
+            if state != "running" {
+                bail!("board integration is not running");
+            }
+            let (state, detail) = match result {
+                Ok(result) => ("completed", result.to_string()),
+                Err(error) => ("failed", format!("Integration failed: {error:#}")),
+            };
+            self.conn.execute(
+                "UPDATE workspace_board_integrations SET state = ?2, result = ?3 WHERE id = ?1",
+                params![integration_id, state, detail],
+            )?;
+            self.append_board_timeline(&task_id, state, &detail)?;
+            if state == "completed" {
+                self.complete_board_task_in_transaction(&task_id, now())?;
+            } else {
+                self.block_board_task_in_transaction(&task_id, &detail, now())?;
+            }
+            Ok(true)
+        })();
+        self.finish_board_transaction(transaction)
+    }
+
+    pub fn recover_board_integrations(&self) -> Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let task_ids = self
+                .conn
+                .prepare(
+                    "SELECT task_id FROM workspace_board_integrations WHERE state = 'running'",
+                )?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for task_id in task_ids {
+                let detail = "Integration interrupted by worker restart";
+                self.conn.execute(
+                    "UPDATE workspace_board_integrations SET state = 'blocked', result = ?2 WHERE task_id = ?1 AND state = 'running'",
+                    params![task_id, detail],
+                )?;
+                self.block_board_task_in_transaction(&task_id, detail, now())?;
+            }
+            Ok(())
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    /// A worker restart cannot resume an in-flight task-agent turn safely.
+    pub fn recover_board_task_workstreams(&self) -> Result<()> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let task_ids = self.conn.prepare(
+                "SELECT task.id
+                 FROM workspace_board_tasks task
+                 JOIN workspace_board_task_workstreams workstream ON workstream.task_id = task.id
+                 WHERE task.state = 'running'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM workspace_board_integrations integration
+                        WHERE integration.task_id = task.id AND integration.state IN ('queued', 'running')
+                    )",
+            )?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+            for task_id in task_ids {
+                self.block_board_task_in_transaction(
+                    &task_id,
+                    "Task worker interrupted by worker restart",
+                    now(),
+                )?;
+            }
+            Ok(())
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    pub fn board_timeline(&self, task_id: &str) -> Result<Vec<WorkspaceBoardTimelineEntry>> {
+        Ok(self.conn.prepare("SELECT id, task_id, state, detail, created_at FROM workspace_board_timeline WHERE task_id = ?1 ORDER BY created_at, rowid")?
+            .query_map([required("board task ID", task_id)?], |row| Ok(WorkspaceBoardTimelineEntry { id: row.get(0)?, task_id: row.get(1)?, state: row.get(2)?, detail: row.get(3)?, created_at: row.get(4)? }))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn board_timeline_entries(&self) -> Result<Vec<WorkspaceBoardTimelineEntry>> {
+        Ok(self.conn.prepare("SELECT id, task_id, state, detail, created_at FROM workspace_board_timeline ORDER BY created_at, rowid")?
+            .query_map([], |row| Ok(WorkspaceBoardTimelineEntry { id: row.get(0)?, task_id: row.get(1)?, state: row.get(2)?, detail: row.get(3)?, created_at: row.get(4)? }))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn board_runs(&self, task_id: &str) -> Result<Vec<WorkspaceBoardRun>> {
+        Ok(self.conn.prepare("SELECT id, task_id, scheduled_at, state, started_at, completed_at FROM workspace_board_runs WHERE task_id = ?1 ORDER BY scheduled_at, id")?
+            .query_map([required("board task ID", task_id)?], board_run_from_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn board_columns(&self) -> Result<Vec<WorkspaceBoardColumn>> {
+        Ok(self
+            .conn
+            .prepare("SELECT id, name, rank, wip_limit, archived_at FROM workspace_board_columns WHERE archived_at IS NULL ORDER BY rank, id")?
+            .query_map([], |row| {
+                Ok(WorkspaceBoardColumn {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    rank: row.get(2)?,
+                    wip_limit: row.get(3)?,
+                    archived_at: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_board_column_wip_limit(
+        &self,
+        column_id: &str,
+        wip_limit: Option<i64>,
+    ) -> Result<()> {
+        let column_id = required("board column ID", column_id)?;
+        if wip_limit.is_some_and(|limit| limit < 1) {
+            bail!("board column WIP limit must be positive");
+        }
+        if self.conn.execute(
+            "UPDATE workspace_board_columns SET wip_limit = ?2 WHERE id = ?1 AND archived_at IS NULL",
+            params![column_id, wip_limit],
+        )? != 1 {
+            bail!("board column does not exist");
+        }
+        Ok(())
+    }
+
+    pub fn board_column_is_over_wip_limit(&self, column_id: &str) -> Result<bool> {
+        self.conn.query_row(
+            "SELECT wip_limit IS NOT NULL AND (SELECT COUNT(*) FROM workspace_board_cards WHERE column_id = workspace_board_columns.id AND archived_at IS NULL) > wip_limit FROM workspace_board_columns WHERE id = ?1 AND archived_at IS NULL",
+            [required("board column ID", column_id)?],
+            |row| row.get(0),
+        ).optional()?.context("board column does not exist")
+    }
+
+    pub fn create_board_card(
+        &self,
+        created_by: &str,
+        title: &str,
+        description: &str,
+        column_id: &str,
+        priority: &str,
+    ) -> Result<WorkspaceBoardCard> {
+        self.create_board_card_with_source(created_by, title, description, column_id, priority, None)
+    }
+
+    fn create_board_card_with_source(
+        &self,
+        created_by: &str,
+        title: &str,
+        description: &str,
+        column_id: &str,
+        priority: &str,
+        source_thread_id: Option<&str>,
+    ) -> Result<WorkspaceBoardCard> {
+        let created_by = required("board card creator", created_by)?;
+        let title = required("board card title", title)?;
+        let column_id = required("board column ID", column_id)?;
+        let priority = validate_board_card_priority(priority)?;
+        let timestamp = now();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let column_exists: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspace_board_columns WHERE id = ?1 AND archived_at IS NULL)",
+                [&column_id],
+                |row| row.get(0),
+            )?;
+            if !column_exists {
+                bail!("board column does not exist");
+            }
+            let rank: i64 = self.conn.query_row(
+                "SELECT COALESCE(MAX(rank), 0) + 1024 FROM workspace_board_cards WHERE column_id = ?1 AND archived_at IS NULL",
+                [&column_id],
+                |row| row.get(0),
+            )?;
+            let card = WorkspaceBoardCard {
+                id: new_id(),
+                title,
+                description: description.trim().to_string(),
+                column_id,
+                rank,
+                priority,
+                estimate: None,
+                due_at: None,
+                created_by,
+                created_at: timestamp,
+                updated_at: timestamp,
+                archived_at: None,
+                source_thread_id: source_thread_id.map(str::to_string),
+            };
+            self.conn.execute(
+                "INSERT INTO workspace_board_cards (id, title, description, column_id, rank, priority, created_by, created_at, updated_at, source_thread_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![card.id, card.title, card.description, card.column_id, card.rank, card.priority, card.created_by, card.created_at, card.updated_at, card.source_thread_id],
+            )?;
+            self.append_board_card_activity_at(&card.id, "created", "Card created", timestamp)?;
+            if source_thread_id.is_some() {
+                self.append_board_card_activity_at(&card.id, "created_from_thread", "Created from thread", timestamp)?;
+            }
+            Ok(card)
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    pub fn create_board_card_from_thread(&self, root_id: &str, topic: &str) -> Result<Option<WorkspaceBoardCard>> {
+        let root_id = required("thread root ID", root_id)?;
+        let topic = required("thread topic", topic)?;
+        let root = self.message_by_id(&root_id)?.context("thread root does not exist")?;
+        if root.parent_id.is_some() || root.deleted_at.is_some() { bail!("thread root must be a live root message"); }
+        if let Some(card_id) = self.conn.query_row("SELECT id FROM workspace_board_cards WHERE source_thread_id = ?1", [&root_id], |row| row.get::<_, String>(0)).optional()? {
+            let card = self.board_card(&card_id)?.context("thread card does not exist")?;
+            if card.title != topic {
+                self.conn.execute_batch("BEGIN IMMEDIATE")?;
+                let result = (|| {
+                    self.conn.execute("UPDATE workspace_board_cards SET title = ?2, updated_at = ?3 WHERE id = ?1", params![card_id, topic, now()])?;
+                    self.append_board_card_activity(&card_id, "title_changed", &topic)
+                })();
+                self.finish_board_transaction(result)?;
+            }
+            return self.board_card(&card_id);
+        }
+        let replies = self.thread_messages(&root_id)?;
+        let content_replies = replies.iter().filter(|message| {
+            let body = message.body.trim();
+            message.parent_id.as_deref() == Some(root_id.as_str())
+                && message.deleted_at.is_none()
+                && !body.starts_with("[[THREAD_")
+                && !body.starts_with("[[RELATED_THREAD")
+                && (!body.is_empty() || !message.attachments.is_empty())
+        }).count();
+        if content_replies < 3 {
+            return Ok(None);
+        }
+        let backlog = self.board_columns()?.into_iter().find(|column| column.name == "Backlog").context("Backlog board column is missing")?;
+        self.create_board_card_with_source(&root.sender_pubkey, &topic, &root.body, &backlog.id, "none", Some(&root_id)).map(Some)
+    }
+
+    pub fn board_cards(&self) -> Result<Vec<WorkspaceBoardCard>> {
+        let ids = self.conn.prepare("SELECT id FROM workspace_board_cards WHERE archived_at IS NULL ORDER BY column_id, rank, id")?
+            .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.iter().map(|id| self.board_card(id)?.context("board card disappeared")).collect()
+    }
+
+    pub fn integrate_thread_board_card(&self, root_id: &str) -> Result<bool> {
+        let Some(card) = self.board_cards()?.into_iter().find(|card| card.source_thread_id.as_deref() == Some(root_id)) else { return Ok(false); };
+        self.conn.execute("INSERT OR IGNORE INTO workspace_board_columns (id, name, rank) VALUES (?1, 'Integrating', 4608)", [new_id()])?;
+        let column = self.board_columns()?.into_iter().find(|column| column.name == "Integrating").context("Integrating board column is missing")?;
+        if card.column_id == column.id { return Ok(false); }
+        self.move_board_card(&card.id, &column.id, None)?;
+        Ok(true)
+    }
+
+    pub fn can_read_board_card(&self, member: &str, card: &WorkspaceBoardCard) -> Result<bool> {
+        if !self.is_member(member)? {
+            return Ok(false);
+        }
+        let Some(root_id) = card.source_thread_id.as_deref() else {
+            // A deleted source must not turn a formerly private card public.
+            return Ok(!self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspace_board_card_activity WHERE card_id = ?1 AND kind = 'created_from_thread')",
+                [&card.id], |row| row.get::<_, bool>(0),
+            )?);
+        };
+        let Some(root) = self.message_by_id(root_id)? else {
+            return Ok(false);
+        };
+        if let Some(channel_id) = root.channel_id.as_deref() {
+            self.is_channel_member(channel_id, member)
+        } else {
+            Ok(root.sender_pubkey == member || root.recipient_pubkey.as_deref() == Some(member))
+        }
+    }
+
+    pub fn board_cards_for_member(&self, member: &str) -> Result<Vec<WorkspaceBoardCard>> {
+        self.board_cards()?.into_iter().filter_map(|card| {
+            match self.can_read_board_card(member, &card) {
+                Ok(true) => Some(Ok(card)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            }
+        }).collect()
+    }
+
+    pub fn move_board_card(
+        &self,
+        card_id: &str,
+        column_id: &str,
+        before_card_id: Option<&str>,
+    ) -> Result<()> {
+        let card_id = required("board card ID", card_id)?;
+        let column_id = required("board column ID", column_id)?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let card = self
+                .board_card(&card_id)?
+                .context("board card does not exist")?;
+            let column_exists: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspace_board_columns WHERE id = ?1 AND archived_at IS NULL)",
+                [&column_id],
+                |row| row.get(0),
+            )?;
+            if !column_exists {
+                bail!("board column does not exist");
+            }
+            let rank = if let Some(before_card_id) = before_card_id {
+                let before_rank: i64 = self.conn.query_row(
+                    "SELECT rank FROM workspace_board_cards WHERE id = ?1 AND column_id = ?2 AND archived_at IS NULL",
+                    params![required("before board card ID", before_card_id)?, column_id],
+                    |row| row.get(0),
+                )?;
+                let previous_rank: i64 = self.conn.query_row(
+                    "SELECT COALESCE(MAX(rank), 0) FROM workspace_board_cards WHERE column_id = ?1 AND archived_at IS NULL AND id != ?2 AND rank < ?3",
+                    params![column_id, card_id, before_rank],
+                    |row| row.get(0),
+                )?;
+                (previous_rank + before_rank) / 2
+            } else {
+                self.conn.query_row(
+                    "SELECT COALESCE(MAX(rank), 0) + 1024 FROM workspace_board_cards WHERE column_id = ?1 AND archived_at IS NULL AND id != ?2",
+                    params![column_id, card_id],
+                    |row| row.get(0),
+                )?
+            };
+            self.conn.execute(
+                "UPDATE workspace_board_cards SET column_id = ?2, rank = ?3, updated_at = ?4 WHERE id = ?1 AND archived_at IS NULL",
+                params![card_id, column_id, rank, now()],
+            )?;
+            self.append_board_card_activity(
+                &card_id,
+                "moved",
+                &format!("Moved from {}", card.column_id),
+            )
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    pub fn set_board_card_metadata(
+        &self,
+        card_id: &str,
+        priority: &str,
+        estimate: Option<i64>,
+        due_at: Option<i64>,
+    ) -> Result<()> {
+        let card_id = required("board card ID", card_id)?;
+        let priority = validate_board_card_priority(priority)?;
+        if estimate.is_some_and(|estimate| estimate < 0) {
+            bail!("board card estimate cannot be negative");
+        }
+        if self.conn.execute(
+            "UPDATE workspace_board_cards SET priority = ?2, estimate = ?3, due_at = ?4, updated_at = ?5 WHERE id = ?1 AND archived_at IS NULL",
+            params![card_id, priority, estimate, due_at, now()],
+        )? != 1 {
+            bail!("board card does not exist");
+        }
+        self.append_board_card_activity(&card_id, "updated", "Planning metadata updated")
+    }
+
+    pub fn archive_board_card(&self, card_id: &str) -> Result<()> {
+        self.set_board_card_archive_state(card_id, Some(now()), "archived", "Card archived")
+    }
+
+    pub fn restore_board_card(&self, card_id: &str) -> Result<()> {
+        self.set_board_card_archive_state(card_id, None, "restored", "Card restored")
+    }
+
+    fn set_board_card_archive_state(
+        &self,
+        card_id: &str,
+        archived_at: Option<i64>,
+        kind: &str,
+        detail: &str,
+    ) -> Result<()> {
+        let card_id = required("board card ID", card_id)?;
+        if self.conn.execute(
+            "UPDATE workspace_board_cards SET archived_at = ?2, updated_at = ?3 WHERE id = ?1",
+            params![card_id, archived_at, now()],
+        )? != 1
+        {
+            bail!("board card does not exist");
+        }
+        self.append_board_card_activity(&card_id, kind, detail)
+    }
+
+    pub fn create_board_label(&self, name: &str, color: &str) -> Result<WorkspaceBoardLabel> {
+        let label = WorkspaceBoardLabel {
+            id: new_id(),
+            name: required("board label name", name)?,
+            color: required("board label color", color)?,
+        };
+        self.conn.execute(
+            "INSERT INTO workspace_board_labels (id, name, color) VALUES (?1, ?2, ?3)",
+            params![label.id, label.name, label.color],
+        )?;
+        Ok(label)
+    }
+
+    pub fn set_board_card_assignees(&self, card_id: &str, assignees: &[String]) -> Result<()> {
+        self.replace_board_card_relation(
+            card_id,
+            "workspace_board_card_assignees",
+            "assignee_id",
+            assignees,
+        )
+    }
+
+    pub fn set_board_card_labels(&self, card_id: &str, labels: &[String]) -> Result<()> {
+        self.replace_board_card_relation(card_id, "workspace_board_card_labels", "label_id", labels)
+    }
+
+    pub fn set_board_card_dependencies(
+        &self,
+        card_id: &str,
+        dependencies: &[String],
+    ) -> Result<()> {
+        if dependencies.iter().any(|dependency| dependency == card_id) {
+            bail!("board card cannot depend on itself");
+        }
+        self.replace_board_card_relation(
+            card_id,
+            "workspace_board_card_dependencies",
+            "depends_on_card_id",
+            dependencies,
+        )
+    }
+
+    pub fn board_card_assignees(&self, card_id: &str) -> Result<Vec<String>> {
+        self.board_card_relation(card_id, "workspace_board_card_assignees", "assignee_id")
+    }
+    pub fn board_card_labels(&self, card_id: &str) -> Result<Vec<String>> {
+        self.board_card_relation(card_id, "workspace_board_card_labels", "label_id")
+    }
+    pub fn board_card_dependencies(&self, card_id: &str) -> Result<Vec<String>> {
+        self.board_card_relation(
+            card_id,
+            "workspace_board_card_dependencies",
+            "depends_on_card_id",
+        )
+    }
+
+    fn replace_board_card_relation(
+        &self,
+        card_id: &str,
+        table: &str,
+        field: &str,
+        values: &[String],
+    ) -> Result<()> {
+        let card_id = required("board card ID", card_id)?;
+        if self.board_card(&card_id)?.is_none() {
+            bail!("board card does not exist");
+        }
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            self.conn.execute(
+                &format!("DELETE FROM {table} WHERE card_id = ?1"),
+                [&card_id],
+            )?;
+            for value in values {
+                self.conn.execute(
+                    &format!("INSERT INTO {table} (card_id, {field}) VALUES (?1, ?2)"),
+                    params![card_id, required("board card relation", value)?],
+                )?;
+            }
+            self.append_board_card_activity(&card_id, "updated", "Card relations updated")
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    fn board_card_relation(&self, card_id: &str, table: &str, field: &str) -> Result<Vec<String>> {
+        Ok(self
+            .conn
+            .prepare(&format!(
+                "SELECT {field} FROM {table} WHERE card_id = ?1 ORDER BY {field}"
+            ))?
+            .query_map([required("board card ID", card_id)?], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn board_card(&self, card_id: &str) -> Result<Option<WorkspaceBoardCard>> {
+        self.conn
+            .query_row(
+                "SELECT id, title, description, column_id, rank, priority, estimate, due_at, created_by, created_at, updated_at, archived_at, source_thread_id FROM workspace_board_cards WHERE id = ?1",
+                [required("board card ID", card_id)?],
+                |row| {
+                    Ok(WorkspaceBoardCard {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        description: row.get(2)?,
+                        column_id: row.get(3)?,
+                    rank: row.get(4)?,
+                    priority: row.get(5)?,
+                    estimate: row.get(6)?,
+                    due_at: row.get(7)?,
+                    created_by: row.get(8)?,
+                    created_at: row.get(9)?,
+                    updated_at: row.get(10)?,
+                    archived_at: row.get(11)?,
+                    source_thread_id: row.get(12)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn board_card_activity(&self, card_id: &str) -> Result<Vec<WorkspaceBoardCardActivity>> {
+        Ok(self
+            .conn
+            .prepare("SELECT id, card_id, kind, detail, created_at FROM workspace_board_card_activity WHERE card_id = ?1 ORDER BY created_at, rowid")?
+            .query_map([required("board card ID", card_id)?], |row| {
+                Ok(WorkspaceBoardCardActivity {
+                    id: row.get(0)?,
+                    card_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    detail: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn append_board_card_activity(&self, card_id: &str, kind: &str, detail: &str) -> Result<()> {
+        self.append_board_card_activity_at(card_id, kind, detail, now())
+    }
+
+    fn append_board_card_activity_at(
+        &self,
+        card_id: &str,
+        kind: &str,
+        detail: &str,
+        created_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO workspace_board_card_activity (id, card_id, kind, detail, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![new_id(), required("board card ID", card_id)?, required("board activity kind", kind)?, required("board activity detail", detail)?, created_at],
+        )?;
+        Ok(())
+    }
+
+    fn ensure_board_card_column(&self, name: &str, definition: &str) -> Result<()> {
+        let columns = self
+            .conn
+            .prepare("PRAGMA table_info(workspace_board_cards)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !columns.iter().any(|column| column == name) {
+            self.conn.execute(
+                &format!("ALTER TABLE workspace_board_cards ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn update_board_task(
+        &self,
+        task_id: &str,
+        title: &str,
+        conversation_key: &str,
+        instruction: &str,
+        folder_scope: &[String],
+        schedule: &str,
+        next_run_at: i64,
+    ) -> Result<()> {
+        let task_id = required("board task ID", task_id)?;
+        let title = required("board task title", title)?;
+        let conversation_key = required("board task conversation", conversation_key)?;
+        let instruction = required("board task instruction", instruction)?;
+        validate_board_schedule(schedule)?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let existing = self
+                .board_task(&task_id)?
+                .context("board task does not exist")?;
+            if self.board_task_workstream(&task_id)?.is_some()
+                && (existing.conversation_key != conversation_key
+                    || existing.folder_scope != folder_scope)
+            {
+                bail!("linked board task target and scope cannot be changed");
+            }
+            if self.conn.execute(
+                "UPDATE workspace_board_tasks SET title = ?2, conversation_key = ?3, instruction = ?4, folder_scope_json = ?5, schedule = ?6, state = 'scheduled', next_run_at = ?7, updated_at = ?8 WHERE id = ?1 AND state IN ('scheduled', 'blocked', 'done')",
+                params![task_id, title, conversation_key, instruction, serde_json::to_string(folder_scope)?, schedule.trim(), next_run_at, now()],
+            )? != 1 {
+                bail!("board task cannot be updated in its current state");
+            }
+            self.append_board_timeline(&task_id, "scheduled", "Task updated")
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    pub fn cancel_board_task(&self, task_id: &str) -> Result<()> {
+        let task_id = required("board task ID", task_id)?;
+        let timestamp = now();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let task = self
+                .board_task(&task_id)?
+                .context("board task does not exist")?;
+            if !["scheduled", "queued", "running", "blocked"].contains(&task.state.as_str()) {
+                bail!("board task cannot transition from {}", task.state);
+            }
+            self.cancel_board_integrations(&task_id)?;
+            self.conn.execute(
+                "UPDATE workspace_board_runs SET state = 'cancelled', completed_at = ?2 WHERE task_id = ?1 AND state IN ('queued', 'running')",
+                params![task_id, timestamp],
+            )?;
+            self.conn.execute(
+                "UPDATE workspace_board_tasks SET state = 'cancelled', next_run_at = NULL, updated_at = ?2 WHERE id = ?1",
+                params![task_id, timestamp],
+            )?;
+            self.append_board_timeline_at(&task_id, "cancelled", "Task cancelled", timestamp)
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    pub fn retry_board_task(&self, task_id: &str, next_run_at: i64) -> Result<()> {
+        let task_id = required("board task ID", task_id)?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            if self.conn.execute(
+                "UPDATE workspace_board_tasks SET state = 'scheduled', next_run_at = ?2, updated_at = ?3 WHERE id = ?1 AND state = 'blocked'",
+                params![task_id, next_run_at, now()],
+            )? != 1 {
+                bail!("only blocked board tasks can be retried");
+            }
+            self.append_board_timeline(&task_id, "scheduled", "Task retried")
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    /// Claims the exact persisted schedule slot and makes it ready for a worker.
+    pub fn queue_board_task(
+        &self,
+        task_id: &str,
+        claimed_at: i64,
+    ) -> Result<Option<WorkspaceBoardTask>> {
+        self.claim_due_board_task(task_id, claimed_at)
+    }
+
+    pub fn claim_due_board_task(
+        &self,
+        task_id: &str,
+        scheduled_at: i64,
+    ) -> Result<Option<WorkspaceBoardTask>> {
+        let task_id = required("board task ID", task_id)?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let Some(task) = self.board_task(&task_id)? else {
+                return Ok(None);
+            };
+            let Some(run_at) = task.next_run_at else {
+                return Ok(None);
+            };
+            if task.state != "scheduled" || run_at > scheduled_at {
+                return Ok(None);
+            }
+            if self.conn.execute(
+                "INSERT OR IGNORE INTO workspace_board_runs (id, task_id, scheduled_at, state) VALUES (?1, ?2, ?3, 'queued')",
+                params![new_id(), task_id, run_at],
+            )? != 1 {
+                return Ok(None);
+            }
+            self.conn.execute(
+                "UPDATE workspace_board_tasks SET state = 'queued', updated_at = ?2 WHERE id = ?1",
+                params![task_id, scheduled_at],
+            )?;
+            self.append_board_timeline_at(&task_id, "queued", "Task queued", scheduled_at)?;
+            Ok(self.board_task(&task_id)?)
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    pub fn start_board_task(&self, task_id: &str, started_at: i64) -> Result<()> {
+        self.transition_board_task(
+            task_id,
+            &["queued"],
+            "running",
+            "Task started",
+            Some(("running", started_at)),
+        )
+    }
+
+    pub fn complete_board_task(&self, task_id: &str, completed_at: i64) -> Result<()> {
+        let task_id = required("board task ID", task_id)?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| self.complete_board_task_in_transaction(&task_id, completed_at))();
+        self.finish_board_transaction(result)
+    }
+
+    pub fn block_board_task(&self, task_id: &str, detail: &str) -> Result<()> {
+        self.transition_board_task(
+            task_id,
+            &["queued", "running"],
+            "blocked",
+            detail,
+            Some(("blocked", now())),
+        )
+    }
+
+    pub fn block_scheduled_board_task(&self, task_id: &str, detail: &str) -> Result<()> {
+        let task_id = required("board task ID", task_id)?;
+        let detail = required("board task detail", detail)?;
+        let timestamp = now();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            if self.conn.execute(
+                "UPDATE workspace_board_tasks SET state = 'blocked', updated_at = ?2 WHERE id = ?1 AND state = 'scheduled'",
+                params![task_id, timestamp],
+            )? != 1 {
+                bail!("scheduled board task cannot be blocked");
+            }
+            self.append_board_timeline_at(&task_id, "blocked", &detail, timestamp)
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    fn complete_board_task_in_transaction(&self, task_id: &str, completed_at: i64) -> Result<()> {
+        let task = self
+            .board_task(task_id)?
+            .context("board task does not exist")?;
+        if task.state != "running" {
+            bail!("only running board tasks can be completed");
+        }
+        let scheduled_at: i64 = self.conn.query_row(
+            "SELECT scheduled_at FROM workspace_board_runs WHERE task_id = ?1 AND state = 'running' ORDER BY scheduled_at DESC LIMIT 1",
+            [task_id], |row| row.get(0),
+        ).context("running board task has no running run")?;
+        let next_run_at = next_board_run_at(&task.schedule, scheduled_at)?;
+        let state = if next_run_at.is_some() {
+            "scheduled"
+        } else {
+            "done"
+        };
+        self.conn.execute(
+            "UPDATE workspace_board_runs SET state = 'completed', completed_at = ?2 WHERE task_id = ?1 AND state = 'running'",
+            params![task_id, completed_at],
+        )?;
+        self.conn.execute(
+            "UPDATE workspace_board_tasks SET state = ?2, next_run_at = ?3, updated_at = ?4 WHERE id = ?1",
+            params![task_id, state, next_run_at, completed_at],
+        )?;
+        self.append_board_timeline_at(task_id, state, "Task completed", completed_at)
+    }
+
+    fn block_board_task_in_transaction(
+        &self,
+        task_id: &str,
+        detail: &str,
+        timestamp: i64,
+    ) -> Result<()> {
+        let task = self
+            .board_task(task_id)?
+            .context("board task does not exist")?;
+        if task.state == "cancelled" {
+            return Ok(());
+        }
+        if !["queued", "running", "blocked"].contains(&task.state.as_str()) {
+            bail!("board task cannot transition from {}", task.state);
+        }
+        self.conn.execute(
+            "UPDATE workspace_board_runs SET state = 'blocked', completed_at = ?2 WHERE task_id = ?1 AND state IN ('queued', 'running')",
+            params![task_id, timestamp],
+        )?;
+        self.conn.execute(
+            "UPDATE workspace_board_tasks SET state = 'blocked', updated_at = ?2 WHERE id = ?1",
+            params![task_id, timestamp],
+        )?;
+        self.append_board_timeline_at(task_id, "blocked", detail, timestamp)
+    }
+
+    fn board_task(&self, task_id: &str) -> Result<Option<WorkspaceBoardTask>> {
+        self.conn.query_row(
+            "SELECT id, title, conversation_key, instruction, folder_scope_json, schedule, state, board_column, next_run_at, created_by, created_at, updated_at, NULL, NULL FROM workspace_board_tasks WHERE id = ?1",
+            [task_id], board_task_from_row,
+        ).optional().map_err(Into::into)
+    }
+
+    fn transition_board_task(
+        &self,
+        task_id: &str,
+        from: &[&str],
+        state: &str,
+        detail: &str,
+        run_update: Option<(&str, i64)>,
+    ) -> Result<()> {
+        let task_id = required("board task ID", task_id)?;
+        let detail = required("board task detail", detail)?;
+        let timestamp = now();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let task = self
+                .board_task(&task_id)?
+                .context("board task does not exist")?;
+            if !from.contains(&task.state.as_str()) {
+                bail!("board task cannot transition from {}", task.state);
+            }
+            if let Some((run_state, run_timestamp)) = run_update {
+                if self.conn.execute(
+                    "UPDATE workspace_board_runs SET state = ?2, started_at = CASE WHEN ?2 = 'running' THEN ?3 ELSE started_at END, completed_at = CASE WHEN ?2 = 'blocked' THEN ?3 ELSE completed_at END WHERE task_id = ?1 AND state = ?4",
+                    params![task_id, run_state, run_timestamp, task.state],
+                )? != 1 {
+                    bail!("board task has no active run");
+                }
+            } else if state == "cancelled" {
+                self.conn.execute(
+                    "UPDATE workspace_board_runs SET state = 'cancelled', completed_at = ?2 WHERE task_id = ?1 AND state = 'queued'",
+                    params![task_id, timestamp],
+                )?;
+            }
+            if self.conn.execute(
+                "UPDATE workspace_board_tasks SET state = ?2, next_run_at = CASE WHEN ?2 = 'cancelled' THEN NULL ELSE next_run_at END, updated_at = ?3 WHERE id = ?1",
+                params![task_id, state, timestamp],
+            )? != 1 {
+                bail!("board task does not exist");
+            }
+            self.append_board_timeline_at(&task_id, state, &detail, timestamp)
+        })();
+        self.finish_board_transaction(result)
+    }
+
+    fn finish_board_transaction<T>(&self, result: Result<T>) -> Result<T> {
+        if result.is_ok() {
+            self.conn.execute_batch("COMMIT")?;
+        } else {
+            self.conn.execute_batch("ROLLBACK")?;
+        }
+        result
+    }
+
+    fn append_board_timeline(&self, task_id: &str, state: &str, detail: &str) -> Result<()> {
+        self.append_board_timeline_at(task_id, state, detail, now())
+    }
+
+    fn append_board_timeline_at(
+        &self,
+        task_id: &str,
+        state: &str,
+        detail: &str,
+        created_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO workspace_board_timeline (id, task_id, state, detail, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![new_id(), task_id, state, detail, created_at],
+        )?;
+        Ok(())
+    }
+
     pub fn add_member(&self, pubkey: &str) -> Result<()> {
         let pubkey = required("member pubkey", pubkey)?;
         self.conn.execute(
@@ -621,6 +2128,171 @@ impl WorkspaceStore {
             [id],
         )?;
         Ok(())
+    }
+
+    pub fn queue_agent_handoffs(
+        &self,
+        reply_message_id: &str,
+        mentions: &[WorkspaceMentionPayload],
+    ) -> Result<Vec<WorkspaceAgentHandoffOutboxEntry>> {
+        let reply_message_id = required("agent handoff reply message ID", reply_message_id)?;
+        let mut handoffs = Vec::new();
+        for mention in mentions.iter().filter(|mention| mention.kind == "agent") {
+            let agent_id = required("agent handoff target", &mention.id)?;
+            if self.conn.execute(
+                "INSERT OR IGNORE INTO workspace_agent_handoff_outbox (reply_message_id, agent_id) VALUES (?1, ?2)",
+                params![reply_message_id, agent_id],
+            )? > 0 {
+                handoffs.push(WorkspaceAgentHandoffOutboxEntry {
+                    reply_message_id: reply_message_id.clone(),
+                    agent_id,
+                    member_pubkey: None,
+                    peer_pubkey: None,
+                });
+            }
+        }
+        Ok(handoffs)
+    }
+
+    pub fn pending_agent_handoffs(&self) -> Result<Vec<WorkspaceAgentHandoffOutboxEntry>> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT reply_message_id, agent_id, member_pubkey, peer_pubkey FROM workspace_agent_handoff_outbox ORDER BY rowid",
+            )?
+            .query_map([], |row| {
+                Ok(WorkspaceAgentHandoffOutboxEntry {
+                    reply_message_id: row.get(0)?,
+                    agent_id: row.get(1)?,
+                    member_pubkey: row.get(2)?,
+                    peer_pubkey: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delivered_agent_handoff(&self, reply_message_id: &str, agent_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM workspace_agent_handoff_outbox WHERE reply_message_id = ?1 AND agent_id = ?2",
+            params![
+                required("agent handoff reply message ID", reply_message_id)?,
+                required("agent handoff target", agent_id)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_channel_agent_reply_with_handoffs(
+        &self,
+        sender: &str,
+        channel_id: &str,
+        body: &str,
+        mentions: &[WorkspaceMentionPayload],
+        parent_id: Option<&str>,
+        also_send_to_main: bool,
+        incoming_handoff: Option<&(String, String)>,
+    ) -> Result<(WorkspaceMessage, Vec<WorkspaceAgentHandoffOutboxEntry>)> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let message = self.add_channel_message_with_main(
+                sender,
+                channel_id,
+                body,
+                &[],
+                mentions,
+                parent_id,
+                also_send_to_main,
+            )?;
+            let handoffs = self.queue_agent_handoffs(&message.id, mentions)?;
+            if let Some((reply_id, agent_id)) = incoming_handoff {
+                self.delivered_agent_handoff(reply_id, agent_id)?;
+            }
+            Ok((message, handoffs))
+        })();
+        match result {
+            Ok(result) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(result)
+            }
+            Err(error) => {
+                self.conn.execute_batch("ROLLBACK")?;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn add_direct_agent_reply_with_handoffs(
+        &self,
+        sender: &str,
+        recipient: &str,
+        body: &str,
+        mentions: &[WorkspaceMentionPayload],
+        parent_id: Option<&str>,
+        also_send_to_main: bool,
+        member_pubkey: &str,
+        peer_pubkey: &str,
+        incoming_handoff: Option<&(String, String)>,
+    ) -> Result<(WorkspaceMessage, Vec<WorkspaceAgentHandoffOutboxEntry>)> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let message = self.add_direct_message_with_main(
+                sender,
+                recipient,
+                body,
+                &[],
+                mentions,
+                parent_id,
+                also_send_to_main,
+            )?;
+            let handoffs = self.queue_direct_agent_handoffs(
+                &message.id,
+                mentions,
+                member_pubkey,
+                peer_pubkey,
+            )?;
+            if let Some((reply_id, agent_id)) = incoming_handoff {
+                self.delivered_agent_handoff(reply_id, agent_id)?;
+            }
+            Ok((message, handoffs))
+        })();
+        match result {
+            Ok(result) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(result)
+            }
+            Err(error) => {
+                self.conn.execute_batch("ROLLBACK")?;
+                Err(error)
+            }
+        }
+    }
+
+    fn queue_direct_agent_handoffs(
+        &self,
+        reply_message_id: &str,
+        mentions: &[WorkspaceMentionPayload],
+        member_pubkey: &str,
+        peer_pubkey: &str,
+    ) -> Result<Vec<WorkspaceAgentHandoffOutboxEntry>> {
+        let reply_message_id = required("agent handoff reply message ID", reply_message_id)?;
+        let member_pubkey = required("direct handoff member", member_pubkey)?;
+        let peer_pubkey = required("direct handoff peer", peer_pubkey)?;
+        let mut handoffs = Vec::new();
+        for mention in mentions.iter().filter(|mention| mention.kind == "agent") {
+            let agent_id = required("agent handoff target", &mention.id)?;
+            if self.conn.execute(
+                "INSERT OR IGNORE INTO workspace_agent_handoff_outbox (reply_message_id, agent_id, member_pubkey, peer_pubkey) VALUES (?1, ?2, ?3, ?4)",
+                params![reply_message_id, agent_id, member_pubkey, peer_pubkey],
+            )? > 0 {
+                handoffs.push(WorkspaceAgentHandoffOutboxEntry {
+                    reply_message_id: reply_message_id.clone(),
+                    agent_id,
+                    member_pubkey: Some(member_pubkey.clone()),
+                    peer_pubkey: Some(peer_pubkey.clone()),
+                });
+            }
+        }
+        Ok(handoffs)
     }
 
     pub fn is_member(&self, pubkey: &str) -> Result<bool> {
@@ -1280,7 +2952,21 @@ impl WorkspaceStore {
     pub fn conversation_agents(&self) -> Result<Vec<WorkspaceConversationAgent>> {
         // Include A0 in client-facing conversation directories without making it
         // an allocatable worker membership.
-        let mut statement = self.conn.prepare("SELECT agent_id, channel_id, member_pubkey, peer_pubkey, folder_scope_json FROM workspace_conversation_agents UNION ALL SELECT agent_id, channel_id, member_pubkey, peer_pubkey, '[]' FROM workspace_conversation_coordinators ORDER BY agent_id")?;
+        let mut statement = self.conn.prepare(
+            "SELECT membership.agent_id, membership.channel_id, membership.member_pubkey,
+                    membership.peer_pubkey, membership.folder_scope_json, assignment.parent_id
+             FROM workspace_conversation_agents membership
+             LEFT JOIN (workspace_thread_agents assignment
+                        JOIN workspace_messages root ON root.id = assignment.parent_id)
+               ON assignment.agent_id = membership.agent_id
+              AND (root.channel_id = membership.channel_id
+                   OR (root.channel_id IS NULL AND membership.channel_id IS NULL
+                       AND ((root.sender_pubkey = membership.member_pubkey AND root.recipient_pubkey = membership.peer_pubkey)
+                            OR (root.sender_pubkey = membership.peer_pubkey AND root.recipient_pubkey = membership.member_pubkey))))
+             UNION ALL
+             SELECT agent_id, channel_id, member_pubkey, peer_pubkey, '[]', NULL
+             FROM workspace_conversation_coordinators ORDER BY agent_id",
+        )?;
         let memberships = statement
             .query_map([], conversation_agent_from_row)?
             .collect::<rusqlite::Result<_>>()?;
@@ -1650,11 +3336,14 @@ impl WorkspaceStore {
         if !matches_scope {
             bail!("thread parent belongs to another conversation");
         }
-        if !self
+        let is_conversation_agent = self
             .agents_for_conversation(channel_id, member, peer)?
             .iter()
-            .any(|agent| agent.id == agent_id)
-        {
+            .any(|agent| agent.id == agent_id);
+        let is_conversation_coordinator = self
+            .conversation_coordinator(channel_id, member, peer)?
+            .is_some_and(|agent| agent.id == agent_id);
+        if !is_conversation_agent && !is_conversation_coordinator {
             bail!("agent is not assigned to this conversation");
         }
         self.conn.execute(
@@ -1763,6 +3452,8 @@ impl WorkspaceStore {
             pinned: false,
             reactions: vec![],
             work_history: vec![],
+            edited_at: None,
+            deleted_at: None,
             created_at: now(),
         };
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -1835,6 +3526,8 @@ impl WorkspaceStore {
                 pinned: false,
                 reactions: vec![],
                 work_history: vec![],
+                edited_at: None,
+                deleted_at: None,
                 created_at: now(),
             };
             self.conn.execute("INSERT INTO workspace_messages (id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, created_at) VALUES (?1, ?2, ?3, ?4, ?5, '[]', '[]', ?6, 0, 0, ?7)", params![message.id, message.channel_id, message.recipient_pubkey, message.sender_pubkey, message.body, message.parent_id, message.created_at])?;
@@ -1915,15 +3608,56 @@ impl WorkspaceStore {
         else {
             return Ok(None);
         };
-        Ok(self
+        let parent = self.message(&parent_id)?;
+        let matches_scope = match channel_id {
+            Some(channel_id) => parent.channel_id.as_deref() == Some(channel_id),
+            None => {
+                let (member, peer) =
+                    direct_participants(member.unwrap_or_default(), peer.unwrap_or_default())?;
+                direct_message_matches(&parent, &member, &peer)
+            }
+        };
+        if !matches_scope {
+            return Ok(None);
+        }
+        let conversation_agent = self
             .agents_for_conversation(channel_id, member, peer)?
             .into_iter()
-            .find(|agent| agent.id == agent_id))
+            .find(|agent| agent.id == agent_id);
+        Ok(conversation_agent.or(self
+            .conversation_coordinator(channel_id, member, peer)?
+            .filter(|agent| agent.id == agent_id)))
     }
 
     /// Returns the newest message in a root thread, including the root itself.
     /// Reactivation uses this as the trigger so the retained agent receives the
     /// new thread's compact handoff rather than replaying stale root text.
+    pub fn pending_thread_agent_turns(&self) -> Result<Vec<WorkspaceThreadAgentTurn>> {
+        let mut statement = self.conn.prepare(
+            "SELECT assignment.parent_id, assignment.agent_id
+             FROM workspace_thread_agents assignment
+             JOIN workspace_messages latest ON latest.id = (
+                 SELECT message.id FROM workspace_messages message
+                 WHERE message.id = assignment.parent_id OR message.parent_id = assignment.parent_id
+                 ORDER BY message.rowid DESC LIMIT 1
+             )
+             LEFT JOIN workspace_board_task_workstreams board
+                 ON board.root_message_id = assignment.parent_id
+             WHERE board.task_id IS NULL
+                 AND latest.deleted_at IS NULL
+                 AND latest.sender_pubkey != 'agent:' || assignment.agent_id",
+        )?;
+        let turns = statement
+            .query_map([], |row| {
+                Ok(WorkspaceThreadAgentTurn {
+                    parent_id: row.get(0)?,
+                    agent_id: row.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(turns)
+    }
+
     pub fn latest_thread_message_id(&self, parent_id: &str) -> Result<String> {
         let parent_id = required("thread parent id", parent_id)?;
         self.conn
@@ -1948,6 +3682,9 @@ impl WorkspaceStore {
         let message = self.message(&parent_id)?;
         if message.parent_id.is_some() {
             bail!("thread operations require root messages");
+        }
+        if message.deleted_at.is_some() {
+            bail!("deleted messages cannot be thread roots");
         }
         let in_scope = match channel_id {
             Some(channel_id) => message.channel_id.as_deref() == Some(channel_id),
@@ -2167,6 +3904,8 @@ impl WorkspaceStore {
             pinned: false,
             reactions: vec![],
             work_history: vec![],
+            edited_at: None,
+            deleted_at: None,
             created_at: now(),
         };
         if message.body.is_empty() && message.attachments.is_empty() {
@@ -2281,6 +4020,69 @@ impl WorkspaceStore {
         self.message(&message_id)
     }
 
+    pub fn edit_message(
+        &self,
+        sender: &str,
+        message_id: &str,
+        body: &str,
+    ) -> Result<WorkspaceMessage> {
+        let sender = required("sender", sender)?;
+        let message_id = required("message id", message_id)?;
+        let body = required("message body", body.trim())?;
+        if !self.is_member(&sender)? {
+            bail!("sender is not a workspace member");
+        }
+        let message = self.message(&message_id)?;
+        if message.sender_pubkey != sender {
+            bail!("only the message author can edit it");
+        }
+        if message.deleted_at.is_some() {
+            bail!("deleted messages cannot be edited");
+        }
+        self.conn.execute(
+            "UPDATE workspace_messages SET body = ?2, edited_at = ?3 WHERE id = ?1",
+            params![message_id, body, now()],
+        )?;
+        self.message(&message_id)
+    }
+
+    pub fn delete_message(&self, sender: &str, message_id: &str) -> Result<WorkspaceMessage> {
+        let sender = required("sender", sender)?;
+        let message_id = required("message id", message_id)?;
+        if !self.is_member(&sender)? {
+            bail!("sender is not a workspace member");
+        }
+        let message = self.message(&message_id)?;
+        if message.sender_pubkey != sender {
+            bail!("only the message author can delete it");
+        }
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE workspace_messages SET body = '', attachments_json = '[]', mentions_json = '[]', deleted_at = ?2 WHERE id = ?1",
+            params![message_id, now()],
+        )?;
+        transaction.execute(
+            "DELETE FROM workspace_agent_handoff_outbox WHERE reply_message_id = ?1",
+            [message_id.as_str()],
+        )?;
+        transaction.execute(
+            "DELETE FROM workspace_native_turns WHERE message_id = ?1",
+            [message_id.as_str()],
+        )?;
+        if message.parent_id.is_none() {
+            transaction.execute(
+                "DELETE FROM workspace_native_turns WHERE message_id IN (SELECT id FROM workspace_messages WHERE id = ?1 OR parent_id = ?1)",
+                [message_id.as_str()],
+            )?;
+            transaction.execute(
+                "DELETE FROM workspace_agent_handoff_outbox WHERE reply_message_id IN (SELECT id FROM workspace_messages WHERE id = ?1 OR parent_id = ?1)",
+                [message_id.as_str()],
+            )?;
+        }
+        transaction.commit()?;
+        self.message(&message_id)
+    }
+
     fn messages<P: rusqlite::Params>(
         &self,
         predicate: &str,
@@ -2288,7 +4090,7 @@ impl WorkspaceStore {
     ) -> Result<Vec<WorkspaceMessage>> {
         // IDs are random and cannot break same-second timestamp ties reliably.
         // Rowid preserves the append order used for thread previews and handoffs.
-        let query = format!("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, work_history_json, created_at FROM workspace_messages WHERE {predicate} ORDER BY created_at, rowid");
+        let query = format!("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, work_history_json, edited_at, deleted_at, created_at FROM workspace_messages WHERE {predicate} ORDER BY created_at, rowid");
         let mut statement = self.conn.prepare(&query)?;
         let mut messages: Vec<WorkspaceMessage> = statement
             .query_map(params, message_from_row)?
@@ -2302,7 +4104,7 @@ impl WorkspaceStore {
     pub fn message_by_id(&self, id: &str) -> Result<Option<WorkspaceMessage>> {
         let message = self
             .conn
-            .query_row("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, work_history_json, created_at FROM workspace_messages WHERE id = ?1", [id], message_from_row)
+            .query_row("SELECT id, channel_id, recipient_pubkey, sender_pubkey, body, attachments_json, mentions_json, parent_id, also_send_to_main, pinned, work_history_json, edited_at, deleted_at, created_at FROM workspace_messages WHERE id = ?1", [id], message_from_row)
             .optional()?;
         message
             .map(|mut message| {
@@ -2315,10 +4117,23 @@ impl WorkspaceStore {
     /// Returns a root message and its direct replies regardless of conversation.
     /// Callers use this for explicit workspace message references only.
     pub fn thread_messages(&self, parent_id: &str) -> Result<Vec<WorkspaceMessage>> {
+        if self.message(parent_id)?.deleted_at.is_some() {
+            bail!("deleted messages cannot be thread roots");
+        }
         self.messages(
             "id = ?1 OR parent_id = ?1",
             [required("thread parent id", parent_id)?],
         )
+    }
+
+    pub fn thread_state(&self, parent_id: &str) -> Result<Vec<(String, Option<i64>, Option<i64>)>> {
+        self.conn
+            .prepare("SELECT id, edited_at, deleted_at FROM workspace_messages WHERE id = ?1 OR parent_id = ?1 ORDER BY rowid")?
+            .query_map([required("thread parent id", parent_id)?], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(Into::into)
     }
 
     fn message(&self, id: &str) -> Result<WorkspaceMessage> {
@@ -2377,12 +4192,23 @@ impl WorkspaceStore {
         recipient: Option<&str>,
         sender: &str,
     ) -> Result<()> {
-        let parent = self.conn.query_row("SELECT channel_id, recipient_pubkey, sender_pubkey FROM workspace_messages WHERE id = ?1", [parent_id], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?))).optional()?;
-        let Some((parent_channel, parent_recipient, parent_sender)) = parent else {
+        let parent = self.conn.query_row("SELECT channel_id, recipient_pubkey, sender_pubkey, deleted_at FROM workspace_messages WHERE id = ?1", [parent_id], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<i64>>(3)?))).optional()?;
+        let Some((parent_channel, parent_recipient, parent_sender, deleted_at)) = parent else {
             bail!("thread parent does not exist")
         };
+        if deleted_at.is_some() {
+            bail!("thread parent is deleted");
+        }
         if parent_channel.as_deref() != channel_id {
             bail!("thread parent belongs to another channel")
+        }
+        if let Some(recipient) = recipient {
+            if !sender.starts_with("agent:") && !parent_sender.starts_with("agent:")
+                && !((parent_sender == sender && parent_recipient.as_deref() == Some(recipient))
+                    || (parent_sender == recipient && parent_recipient.as_deref() == Some(sender)))
+            {
+                bail!("thread parent belongs to another direct conversation");
+            }
         }
         if recipient.is_some()
             && !(parent_sender == sender
@@ -2439,7 +4265,9 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceMessag
         pinned: row.get(9)?,
         reactions: Vec::new(),
         work_history: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
-        created_at: row.get(11)?,
+        edited_at: row.get(11)?,
+        deleted_at: row.get(12)?,
+        created_at: row.get(13)?,
     })
 }
 fn conversation_agent_from_row(
@@ -2451,6 +4279,7 @@ fn conversation_agent_from_row(
         member_pubkey: row.get(2)?,
         peer_pubkey: row.get(3)?,
         folder_scope: serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default(),
+        parent_id: row.get(5)?,
     })
 }
 fn conversation_preprompt_from_row(
@@ -2520,6 +4349,108 @@ fn conversation_session_from_row(
     })
 }
 
+fn board_task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceBoardTask> {
+    let folder_scope_json: String = row.get(4)?;
+    let folder_scope = serde_json::from_str(&folder_scope_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+    })?;
+    Ok(WorkspaceBoardTask {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        conversation_key: row.get(2)?,
+        instruction: row.get(3)?,
+        folder_scope,
+        schedule: row.get(5)?,
+        state: row.get(6)?,
+        board_column: row.get(7)?,
+        next_run_at: row.get(8)?,
+        created_by: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+        root_message_id: row.get(12)?,
+        agent_id: row.get(13)?,
+    })
+}
+
+fn board_integration_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkspaceBoardIntegration> {
+    Ok(WorkspaceBoardIntegration {
+        id: row.get(0)?,
+        conversation_key: row.get(1)?,
+        task_id: row.get(2)?,
+        run_id: row.get(3)?,
+        proposal_message_id: row.get(4)?,
+        state: row.get(5)?,
+        created_at: row.get(6)?,
+    })
+}
+
+fn board_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkspaceBoardRun> {
+    Ok(WorkspaceBoardRun {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        scheduled_at: row.get(2)?,
+        state: row.get(3)?,
+        started_at: row.get(4)?,
+        completed_at: row.get(5)?,
+    })
+}
+
+fn validate_board_schedule(schedule: &str) -> Result<()> {
+    if matches!(
+        schedule.trim(),
+        "once" | "daily" | "weekdays" | "weekly" | "monthly"
+    ) {
+        Ok(())
+    } else {
+        bail!("board task schedule is invalid")
+    }
+}
+
+fn valid_board_task_column(column: &str) -> bool {
+    matches!(
+        column,
+        "scheduled" | "queued" | "running" | "integrating" | "blocked" | "done"
+    )
+}
+
+fn validate_board_card_priority(priority: &str) -> Result<String> {
+    let priority = priority.trim().to_ascii_lowercase();
+    if matches!(
+        priority.as_str(),
+        "none" | "low" | "medium" | "high" | "urgent"
+    ) {
+        Ok(priority)
+    } else {
+        bail!("board card priority is invalid")
+    }
+}
+
+/// Schedules by UTC timestamps because the store has no time-zone setting.
+fn next_board_run_at(schedule: &str, scheduled_at: i64) -> Result<Option<i64>> {
+    const DAY: i64 = 24 * 60 * 60;
+    validate_board_schedule(schedule)?;
+    Ok(match schedule.trim() {
+        "once" => None,
+        "daily" => Some(scheduled_at + DAY),
+        "weekdays" => {
+            let weekday = (scheduled_at.div_euclid(DAY) + 4).rem_euclid(7);
+            Some(
+                scheduled_at
+                    + match weekday {
+                        5 => 3 * DAY,
+                        6 => 2 * DAY,
+                        _ => DAY,
+                    },
+            )
+        }
+        "weekly" => Some(scheduled_at + 7 * DAY),
+        "monthly" => Some(scheduled_at + 30 * DAY),
+        _ => unreachable!(),
+    })
+}
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2535,6 +4466,8 @@ fn new_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use anyhow::anyhow;
     #[test]
     fn persists_channels_messages_and_threads() {
         let path = tempfile::NamedTempFile::new().unwrap();
@@ -2557,6 +4490,466 @@ mod tests {
             .unwrap()
             .iter()
             .any(|message| message.parent_id.as_deref() == Some(parent.id.as_str())));
+    }
+
+    #[test]
+    fn board_task_claims_a_due_run_once() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "Review open issues",
+                "channel:engineering",
+                "Review the open issues and report blockers.",
+                &[],
+                "once",
+                100,
+            )
+            .unwrap();
+
+        assert_eq!(store.board_tasks().unwrap()[0].state, "scheduled");
+        assert!(store.claim_due_board_task(&task.id, 100).unwrap().is_some());
+        assert!(store.claim_due_board_task(&task.id, 100).unwrap().is_none());
+        assert_eq!(store.board_tasks().unwrap()[0].state, "queued");
+        assert_eq!(store.board_runs(&task.id).unwrap()[0].state, "queued");
+        store.start_board_task(&task.id, 101).unwrap();
+        assert_eq!(store.board_tasks().unwrap()[0].state, "running");
+        assert_eq!(store.board_runs(&task.id).unwrap()[0].state, "running");
+        store.block_board_task(&task.id, "agent failed").unwrap();
+        assert_eq!(store.board_tasks().unwrap()[0].state, "blocked");
+        assert_eq!(store.board_runs(&task.id).unwrap()[0].state, "blocked");
+        assert_eq!(
+            store
+                .board_timeline(&task.id)
+                .unwrap()
+                .last()
+                .unwrap()
+                .state,
+            "blocked"
+        );
+    }
+
+    #[test]
+    fn board_task_requires_a_workspace_member_creator() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+
+        assert!(store
+            .create_board_task(
+                "outsider",
+                "Review open issues",
+                "channel:engineering",
+                "Review the open issues and report blockers.",
+                &[],
+                "once",
+                100,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn board_task_move_persists_without_changing_its_execution_state() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        store.add_member("owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "Review open issues",
+                "channel:engineering",
+                "Review the open issues and report blockers.",
+                &[],
+                "once",
+                100,
+            )
+            .unwrap();
+
+        store.move_board_task(&task.id, "done").unwrap();
+        let moved = store.board_tasks().unwrap().pop().unwrap();
+        assert_eq!(moved.board_column, "done");
+        assert_eq!(moved.state, "scheduled");
+        assert_eq!(moved.next_run_at, Some(100));
+        drop(store);
+
+        let reopened = WorkspaceStore::open(path.path()).unwrap();
+        let moved = reopened.board_tasks().unwrap().pop().unwrap();
+        assert_eq!(moved.board_column, "done");
+        assert_eq!(moved.state, "scheduled");
+        assert!(reopened.move_board_task(&task.id, "unknown").is_err());
+    }
+
+    #[test]
+    fn board_cards_move_between_default_columns_and_keep_activity() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        let columns = store.board_columns().unwrap();
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Backlog", "Ready", "In Progress", "Review", "Done"]
+        );
+        let card = store
+            .create_board_card("owner", "Review open issues", "", &columns[0].id, "high")
+            .unwrap();
+
+        store
+            .move_board_card(&card.id, &columns[3].id, None)
+            .unwrap();
+
+        let card = store.board_card(&card.id).unwrap().unwrap();
+        assert_eq!(card.column_id, columns[3].id);
+        assert_eq!(store.board_card_activity(&card.id).unwrap().len(), 2,);
+    }
+
+    #[test]
+    fn thread_board_cards_require_three_live_content_replies_and_preserve_identity() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let root = store.add_channel_message("owner", &channel.id, "root", &[], &[], None).unwrap();
+        for body in ["first", "second", " [[THREAD_TOPIC: title]]", "[[THREAD_TOPIC_REQUEST]]", "[[RELATED_THREAD: other]]"] {
+            store.add_channel_message("owner", &channel.id, body, &[], &[], Some(&root.id)).unwrap();
+        }
+        let deleted = store.add_channel_message("owner", &channel.id, "deleted", &[], &[], Some(&root.id)).unwrap();
+        store.delete_message("owner", &deleted.id).unwrap();
+        assert!(store.create_board_card_from_thread(&root.id, "Title").unwrap().is_none());
+        store.add_channel_message("owner", &channel.id, "[[ordinary linked text]] is content", &[], &[], Some(&root.id)).unwrap();
+        let card = store.create_board_card_from_thread(&root.id, "Title").unwrap().unwrap();
+        assert_eq!(card.source_thread_id.as_deref(), Some(root.id.as_str()));
+        assert_eq!(card.column_id, store.board_columns().unwrap()[0].id);
+        let revision = store.revision().unwrap();
+        assert_eq!(store.create_board_card_from_thread(&root.id, "Title").unwrap().unwrap(), card);
+        assert_eq!(store.revision().unwrap(), revision);
+        let renamed = store.create_board_card_from_thread(&root.id, "New title").unwrap().unwrap();
+        assert_eq!(renamed.id, card.id);
+        assert_eq!(renamed.title, "New title");
+        assert!(store.integrate_thread_board_card(&root.id).unwrap());
+        let history = store.board_card_activity(&card.id).unwrap();
+        assert!(!store.integrate_thread_board_card(&root.id).unwrap());
+        assert_eq!(store.board_card_activity(&card.id).unwrap(), history);
+        assert_eq!(store.create_board_card_from_thread(&root.id, "Latest title").unwrap().unwrap().column_id, store.board_columns().unwrap().into_iter().find(|column| column.name == "Integrating").unwrap().id);
+        assert_eq!(store.board_cards().unwrap().len(), 1);
+        for table in ["workspace_board_tasks", "workspace_board_runs", "workspace_board_task_workstreams"] {
+            assert_eq!(store.conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn thread_board_card_migrates_an_existing_card_table() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(file.path()).unwrap();
+        conn.execute_batch("CREATE TABLE workspace_board_cards (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', column_id TEXT NOT NULL, rank INTEGER NOT NULL, priority TEXT NOT NULL DEFAULT 'none', created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER);
+            INSERT INTO workspace_board_cards VALUES ('existing', 'Keep me', '', 'old-column', 1024, 'none', 'owner', 1, 1, NULL);").unwrap();
+        drop(conn);
+        let store = WorkspaceStore::open(file.path()).unwrap();
+        let card = store.board_card("existing").unwrap().unwrap();
+        assert_eq!(card.title, "Keep me");
+        assert_eq!(card.source_thread_id, None);
+        assert!(store.conn.prepare("SELECT source_thread_id FROM workspace_board_cards").is_ok());
+        drop(store);
+        assert_eq!(WorkspaceStore::open(file.path()).unwrap().board_card("existing").unwrap().unwrap(), card);
+    }
+
+    #[test]
+    fn thread_board_card_link_failure_cannot_leave_an_unlinked_card() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let root = store.add_channel_message("owner", &channel.id, "root", &[], &[], None).unwrap();
+        for _ in 0..3 { store.add_channel_message("owner", &channel.id, "reply", &[], &[], Some(&root.id)).unwrap(); }
+        store.conn.execute_batch("CREATE TRIGGER reject_thread_link_insert BEFORE INSERT ON workspace_board_cards WHEN NEW.source_thread_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'test link failure'); END;
+            CREATE TRIGGER reject_thread_link_update BEFORE UPDATE OF source_thread_id ON workspace_board_cards BEGIN SELECT RAISE(ABORT, 'test link failure'); END;").unwrap();
+        assert!(store.create_board_card_from_thread(&root.id, "title").is_err());
+        assert!(store.board_cards().unwrap().is_empty());
+    }
+
+    #[test]
+    fn board_cards_store_planning_metadata_and_report_wip_overload() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        let ready = store
+            .board_columns()
+            .unwrap()
+            .into_iter()
+            .find(|column| column.name == "Ready")
+            .unwrap();
+        store
+            .set_board_column_wip_limit(&ready.id, Some(1))
+            .unwrap();
+        let card = store
+            .create_board_card("owner", "Release", "", &ready.id, "none")
+            .unwrap();
+
+        store
+            .set_board_card_metadata(&card.id, "urgent", Some(3), Some(200))
+            .unwrap();
+        store
+            .create_board_card("owner", "Follow up", "", &ready.id, "none")
+            .unwrap();
+
+        let card = store.board_card(&card.id).unwrap().unwrap();
+        assert_eq!(card.priority, "urgent");
+        assert_eq!(card.estimate, Some(3));
+        assert_eq!(card.due_at, Some(200));
+        assert!(store.board_column_is_over_wip_limit(&ready.id).unwrap());
+    }
+
+    #[test]
+    fn board_cards_store_assignees_labels_and_dependencies() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        let backlog = store.board_columns().unwrap().remove(0);
+        let blocker = store
+            .create_board_card("owner", "Prepare release", "", &backlog.id, "none")
+            .unwrap();
+        let card = store
+            .create_board_card("owner", "Publish release", "", &backlog.id, "none")
+            .unwrap();
+
+        store
+            .set_board_card_assignees(
+                &card.id,
+                &["member:alice".to_string(), "agent:build".to_string()],
+            )
+            .unwrap();
+        let label = store.create_board_label("release", "#1976d2").unwrap();
+        store
+            .set_board_card_labels(&card.id, &[label.id.clone()])
+            .unwrap();
+        store
+            .set_board_card_dependencies(&card.id, &[blocker.id.clone()])
+            .unwrap();
+
+        assert_eq!(
+            store.board_card_assignees(&card.id).unwrap(),
+            ["agent:build", "member:alice"]
+        );
+        assert_eq!(store.board_card_labels(&card.id).unwrap(), [label.id]);
+        assert_eq!(
+            store.board_card_dependencies(&card.id).unwrap(),
+            [blocker.id]
+        );
+    }
+
+    #[test]
+    fn archived_board_cards_are_hidden_and_can_be_restored() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        let backlog = store.board_columns().unwrap().remove(0);
+        let card = store
+            .create_board_card("owner", "Old work", "", &backlog.id, "none")
+            .unwrap();
+
+        store.archive_board_card(&card.id).unwrap();
+        assert!(store
+            .board_card(&card.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_some());
+        store.restore_board_card(&card.id).unwrap();
+
+        assert!(store
+            .board_card(&card.id)
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_none());
+    }
+
+    #[test]
+    fn board_turn_links_a_native_turn_to_its_task() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "Review open issues",
+                &format!("channel:{}", channel.id),
+                "Review the open issues and report blockers.",
+                &[],
+                "once",
+                100,
+            )
+            .unwrap();
+        let message = store
+            .add_channel_message(
+                "owner",
+                &channel.id,
+                "Review the open issues.",
+                &[],
+                &[],
+                None,
+            )
+            .unwrap();
+
+        store.link_board_turn(&task.id, &message.id).unwrap();
+
+        assert_eq!(
+            store.board_task_for_turn(&message.id).unwrap(),
+            Some(task.id)
+        );
+    }
+
+    #[test]
+    fn converts_board_records_to_protocol_payloads() {
+        let task: WorkspaceBoardTaskPayload = WorkspaceBoardTask {
+            id: "task-1".to_string(),
+            title: "Review open issues".to_string(),
+            conversation_key: "channel:engineering".to_string(),
+            instruction: "Review the open issues and report blockers.".to_string(),
+            folder_scope: vec!["/work/phone".to_string()],
+            schedule: "daily".to_string(),
+            state: "running".to_string(),
+            board_column: "done".to_string(),
+            next_run_at: Some(100),
+            created_by: "owner".to_string(),
+            created_at: 10,
+            updated_at: 20,
+            root_message_id: Some("message-1".to_string()),
+            agent_id: Some("agent-1".to_string()),
+        }
+        .into();
+        assert_eq!(task.board_column, "done");
+        let entry: WorkspaceBoardTimelinePayload = WorkspaceBoardTimelineEntry {
+            id: "entry-1".to_string(),
+            task_id: "task-1".to_string(),
+            state: "running".to_string(),
+            detail: "Task started".to_string(),
+            created_at: 20,
+        }
+        .into();
+
+        assert_eq!(task.conversation_key, "channel:engineering");
+        assert_eq!(task.folder_scope, ["/work/phone"]);
+        assert_eq!(entry.task_id, task.id);
+        assert_eq!(entry.detail, "Task started");
+    }
+
+    #[test]
+    fn completing_tasks_marks_one_time_done_and_reschedules_recurring_tasks() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let once = store
+            .create_board_task("owner", "Once", "channel:eng", "Do it", &[], "once", 100)
+            .unwrap();
+        let daily = store
+            .create_board_task("owner", "Daily", "channel:eng", "Do it", &[], "daily", 100)
+            .unwrap();
+
+        for task in [&once, &daily] {
+            store.claim_due_board_task(&task.id, 100).unwrap();
+            store.start_board_task(&task.id, 101).unwrap();
+            store.complete_board_task(&task.id, 102).unwrap();
+        }
+
+        let tasks = store.board_tasks().unwrap();
+        let once = tasks.iter().find(|task| task.id == once.id).unwrap();
+        let daily = tasks.iter().find(|task| task.id == daily.id).unwrap();
+        assert_eq!(once.state, "done");
+        assert_eq!(once.next_run_at, None);
+        assert_eq!(daily.state, "scheduled");
+        assert_eq!(daily.next_run_at, Some(100 + 24 * 60 * 60));
+        assert_eq!(store.board_runs(&daily.id).unwrap()[0].state, "completed");
+    }
+
+    #[test]
+    fn schedules_weekdays_weekly_and_monthly_with_utc_timestamp_cadence() {
+        const MONDAY: i64 = 4 * 24 * 60 * 60;
+        assert_eq!(
+            next_board_run_at("daily", MONDAY).unwrap(),
+            Some(MONDAY + 24 * 60 * 60)
+        );
+        assert_eq!(
+            next_board_run_at("weekdays", MONDAY + 4 * 24 * 60 * 60).unwrap(),
+            Some(MONDAY + 7 * 24 * 60 * 60)
+        );
+        assert_eq!(
+            next_board_run_at("weekdays", MONDAY + 5 * 24 * 60 * 60).unwrap(),
+            Some(MONDAY + 7 * 24 * 60 * 60)
+        );
+        assert_eq!(
+            next_board_run_at("weekdays", MONDAY + 6 * 24 * 60 * 60).unwrap(),
+            Some(MONDAY + 7 * 24 * 60 * 60)
+        );
+        assert_eq!(
+            next_board_run_at("weekly", MONDAY).unwrap(),
+            Some(MONDAY + 7 * 24 * 60 * 60)
+        );
+        assert_eq!(
+            next_board_run_at("monthly", MONDAY).unwrap(),
+            Some(MONDAY + 30 * 24 * 60 * 60)
+        );
+        assert!(next_board_run_at("once", MONDAY).unwrap().is_none());
+    }
+
+    #[test]
+    fn retrying_a_blocked_task_returns_it_to_scheduled() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let task = store
+            .create_board_task("owner", "Retry", "channel:eng", "Do it", &[], "once", 100)
+            .unwrap();
+        store.claim_due_board_task(&task.id, 100).unwrap();
+        store.start_board_task(&task.id, 101).unwrap();
+        store.block_board_task(&task.id, "failed").unwrap();
+
+        store.retry_board_task(&task.id, 200).unwrap();
+        let task = store.board_tasks().unwrap().pop().unwrap();
+        assert_eq!(task.state, "scheduled");
+        assert_eq!(task.next_run_at, Some(200));
+    }
+
+    #[test]
+    fn corrupt_board_folder_scope_fails_closed() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let task = store
+            .create_board_task("owner", "Scope", "channel:eng", "Do it", &[], "once", 100)
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE workspace_board_tasks SET folder_scope_json = 'not-json' WHERE id = ?1",
+                [&task.id],
+            )
+            .unwrap();
+
+        assert!(store.board_tasks().is_err());
+    }
+
+    #[test]
+    fn invalid_unlinked_scheduled_task_can_be_blocked_without_affecting_other_tasks() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let invalid = store
+            .create_board_task("owner", "Invalid", "channel:bad", "Do it", &[], "once", 1)
+            .unwrap();
+        let valid = store
+            .create_board_task("owner", "Valid", "channel:good", "Do it", &[], "once", 1)
+            .unwrap();
+
+        store
+            .block_scheduled_board_task(&invalid.id, "Task blocked: invalid target")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .claim_due_board_task(&valid.id, 1)
+                .unwrap()
+                .unwrap()
+                .state,
+            "queued"
+        );
+        assert_eq!(
+            store
+                .board_tasks()
+                .unwrap()
+                .into_iter()
+                .find(|task| task.id == invalid.id)
+                .unwrap()
+                .state,
+            "blocked"
+        );
     }
 
     #[test]
@@ -2643,6 +5036,31 @@ mod tests {
 
         assert_eq!(store.message_by_id(&message.id).unwrap(), Some(message));
         assert_eq!(store.message_by_id("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn edits_and_tombstones_author_messages_and_cancels_native_turns() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        store.add_member("member").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        store.add_channel_member(&channel.id, "member").unwrap();
+        let message = store
+            .add_channel_message("member", &channel.id, "original", &[], &[], None)
+            .unwrap();
+        store.queue_native_turn(&message.id).unwrap();
+
+        let edited = store
+            .edit_message("member", &message.id, "revised")
+            .unwrap();
+        assert_eq!(edited.body, "revised");
+        assert!(edited.edited_at.is_some());
+        assert!(store.edit_message("owner", &message.id, "blocked").is_err());
+
+        let deleted = store.delete_message("member", &message.id).unwrap();
+        assert!(deleted.deleted_at.is_some());
+        assert!(deleted.body.is_empty());
+        assert!(!store.pending_native_turns().unwrap().contains(&message.id));
     }
 
     #[test]
@@ -3201,13 +5619,19 @@ mod tests {
             .unwrap()
             .iter()
             .any(|agent| agent.id == coordinator.id));
+        store
+            .set_conversation_coordinator(&coordinator.id, Some(&channel.id), None, None)
+            .unwrap();
+        store
+            .assign_thread_agent(&coordinator.id, &root.id, Some(&channel.id), None, None)
+            .unwrap();
         assert_eq!(
             store
                 .thread_agent(&root.id, Some(&channel.id), None, None)
                 .unwrap()
                 .unwrap()
                 .id,
-            worker.id
+            coordinator.id
         );
     }
 
@@ -3842,5 +6266,1007 @@ mod tests {
             .unwrap()
             .iter()
             .any(|message| message.id == reply.id));
+    }
+
+    #[test]
+    fn persists_one_board_task_workstream_across_reopen() {
+        let path = tempfile::NamedTempFile::new().unwrap();
+        let store = WorkspaceStore::open(path.path()).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "Implement workstream",
+                &format!("channel:{}", channel.id),
+                "Implement the workstream.",
+                &["/tmp".to_string()],
+                "once",
+                1,
+            )
+            .unwrap();
+        let root = store
+            .add_channel_message(
+                "owner",
+                &channel.id,
+                "Implement the workstream.",
+                &[],
+                &[],
+                None,
+            )
+            .unwrap();
+        let agent = store
+            .create_agent(
+                "Task agent",
+                "Board task worker",
+                "",
+                &[],
+                None,
+                Some("ses_task"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+
+        store
+            .link_board_task_workstream(&task.id, &root.id, &agent.id)
+            .unwrap();
+        assert!(store
+            .link_board_task_workstream(&task.id, &root.id, &agent.id)
+            .is_err());
+        drop(store);
+
+        let reopened = WorkspaceStore::open(path.path()).unwrap();
+        assert_eq!(
+            reopened.board_task_workstream(&task.id).unwrap(),
+            Some(WorkspaceBoardTaskWorkstream {
+                task_id: task.id,
+                root_message_id: root.id,
+                agent_id: agent.id,
+            })
+        );
+    }
+
+    #[test]
+    fn board_integrations_are_fifo_and_cancellation_removes_queued_work() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let make_task = |title: &str| {
+            let task = store
+                .create_board_task(
+                    "owner",
+                    title,
+                    &format!("channel:{}", channel.id),
+                    "Implement it.",
+                    &[],
+                    "once",
+                    1,
+                )
+                .unwrap();
+            let root = store
+                .add_channel_message("owner", &channel.id, title, &[], &[], None)
+                .unwrap();
+            let proposal = store
+                .add_channel_message("owner", &channel.id, "Proposal", &[], &[], Some(&root.id))
+                .unwrap();
+            let agent = store
+                .create_agent(
+                    "Task agent",
+                    "Board task worker",
+                    "",
+                    &[],
+                    None,
+                    Some("ses_task"),
+                    "ready",
+                    None,
+                    "owner",
+                )
+                .unwrap();
+            store
+                .link_board_task_workstream(&task.id, &root.id, &agent.id)
+                .unwrap();
+            (task, proposal)
+        };
+        let (first, first_proposal) = make_task("first");
+        let (second, second_proposal) = make_task("second");
+        let first_integration = store
+            .enqueue_board_integration(&first.id, &first_proposal.id)
+            .unwrap();
+        store
+            .enqueue_board_integration(&second.id, &second_proposal.id)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .claim_next_board_integration(&first.conversation_key)
+                .unwrap()
+                .unwrap()
+                .id,
+            first_integration.id
+        );
+        store.cancel_board_task(&second.id).unwrap();
+        assert!(store
+            .claim_next_board_integration(&first.conversation_key)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn completed_board_integration_records_its_private_head_result() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "first",
+                &format!("channel:{}", channel.id),
+                "Implement it.",
+                &[],
+                "once",
+                1,
+            )
+            .unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "first", &[], &[], None)
+            .unwrap();
+        let proposal = store
+            .add_channel_message("owner", &channel.id, "Proposal", &[], &[], Some(&root.id))
+            .unwrap();
+        let agent = store
+            .create_agent(
+                "Task agent",
+                "Board task worker",
+                "",
+                &[],
+                None,
+                Some("ses_task"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        store
+            .link_board_task_workstream(&task.id, &root.id, &agent.id)
+            .unwrap();
+        store.claim_due_board_task(&task.id, 1).unwrap();
+        store.start_board_task(&task.id, 1).unwrap();
+        let integration = store
+            .enqueue_board_integration(&task.id, &proposal.id)
+            .unwrap();
+        store
+            .claim_next_board_integration(&task.conversation_key)
+            .unwrap()
+            .unwrap();
+
+        assert!(store
+            .finish_board_integration(&integration.id, Ok("Applied the proposal."))
+            .unwrap());
+
+        assert!(store
+            .claim_next_board_integration(&task.conversation_key)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .board_timeline(&task.id)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.detail == "Applied the proposal."));
+    }
+
+    #[test]
+    fn board_proposal_is_enqueued_once_and_completion_finishes_the_task_run() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "first",
+                &format!("channel:{}", channel.id),
+                "Implement it.",
+                &[],
+                "once",
+                1,
+            )
+            .unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "first", &[], &[], None)
+            .unwrap();
+        let proposal = store
+            .add_channel_message(
+                "agent:task",
+                &channel.id,
+                "Proposal",
+                &[],
+                &[],
+                Some(&root.id),
+            )
+            .unwrap();
+        let agent = store
+            .create_agent(
+                "Task agent",
+                "Board task worker",
+                "",
+                &[],
+                None,
+                Some("ses_task"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        store
+            .link_board_task_workstream(&task.id, &root.id, &agent.id)
+            .unwrap();
+        store.claim_due_board_task(&task.id, 1).unwrap();
+        store.start_board_task(&task.id, 1).unwrap();
+
+        let integration = store
+            .mark_board_proposal_ready(&task.id, &proposal.id)
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .mark_board_proposal_ready(&task.id, &proposal.id)
+            .unwrap()
+            .is_none());
+        store
+            .claim_next_board_integration(&task.conversation_key)
+            .unwrap()
+            .unwrap();
+        assert!(store
+            .finish_board_integration(&integration.id, Ok("Applied."))
+            .unwrap());
+        assert!(store
+            .mark_board_proposal_ready(&task.id, &proposal.id)
+            .unwrap()
+            .is_none());
+
+        assert_eq!(store.board_tasks().unwrap()[0].state, "done");
+        assert_eq!(store.board_runs(&task.id).unwrap()[0].state, "completed");
+    }
+
+    #[test]
+    fn recurring_task_keeps_integration_history_across_runs_and_retries() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "daily",
+                &format!("channel:{}", channel.id),
+                "Implement it.",
+                &[],
+                "daily",
+                1,
+            )
+            .unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "daily", &[], &[], None)
+            .unwrap();
+        let agent = store
+            .create_agent(
+                "Task agent",
+                "Board task worker",
+                "",
+                &[],
+                None,
+                Some("ses_task"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        store
+            .link_board_task_workstream(&task.id, &root.id, &agent.id)
+            .unwrap();
+
+        let first = store
+            .add_channel_message(
+                "agent:task",
+                &channel.id,
+                "First proposal",
+                &[],
+                &[],
+                Some(&root.id),
+            )
+            .unwrap();
+        store.claim_due_board_task(&task.id, 1).unwrap();
+        store.start_board_task(&task.id, 1).unwrap();
+        let first_integration = store
+            .mark_board_proposal_ready(&task.id, &first.id)
+            .unwrap()
+            .unwrap();
+        store
+            .claim_next_board_integration(&task.conversation_key)
+            .unwrap();
+        store
+            .finish_board_integration(&first_integration.id, Ok("Applied first."))
+            .unwrap();
+
+        let second = store
+            .add_channel_message(
+                "agent:task",
+                &channel.id,
+                "Second proposal",
+                &[],
+                &[],
+                Some(&root.id),
+            )
+            .unwrap();
+        store
+            .claim_due_board_task(&task.id, 24 * 60 * 60 + 1)
+            .unwrap();
+        store.start_board_task(&task.id, 24 * 60 * 60 + 1).unwrap();
+        let second_integration = store
+            .mark_board_proposal_ready(&task.id, &second.id)
+            .unwrap()
+            .unwrap();
+        store
+            .claim_next_board_integration(&task.conversation_key)
+            .unwrap();
+        store
+            .finish_board_integration(&second_integration.id, Err(anyhow!("head failed")))
+            .unwrap();
+
+        store
+            .retry_board_task(&task.id, 2 * 24 * 60 * 60 + 1)
+            .unwrap();
+        let retried = store
+            .add_channel_message(
+                "agent:task",
+                &channel.id,
+                "Retried proposal",
+                &[],
+                &[],
+                Some(&root.id),
+            )
+            .unwrap();
+        store
+            .claim_due_board_task(&task.id, 2 * 24 * 60 * 60 + 1)
+            .unwrap();
+        store
+            .start_board_task(&task.id, 2 * 24 * 60 * 60 + 1)
+            .unwrap();
+        assert!(store
+            .mark_board_proposal_ready(&task.id, &retried.id)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn cancelling_running_task_cancels_active_integration_and_prevents_finish() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "first",
+                &format!("channel:{}", channel.id),
+                "Implement it.",
+                &[],
+                "once",
+                1,
+            )
+            .unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "first", &[], &[], None)
+            .unwrap();
+        let proposal = store
+            .add_channel_message(
+                "agent:task",
+                &channel.id,
+                "Proposal",
+                &[],
+                &[],
+                Some(&root.id),
+            )
+            .unwrap();
+        let agent = store
+            .create_agent(
+                "Task agent",
+                "Board task worker",
+                "",
+                &[],
+                None,
+                Some("ses_task"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        store
+            .link_board_task_workstream(&task.id, &root.id, &agent.id)
+            .unwrap();
+        store.claim_due_board_task(&task.id, 1).unwrap();
+        store.start_board_task(&task.id, 1).unwrap();
+        let integration = store
+            .mark_board_proposal_ready(&task.id, &proposal.id)
+            .unwrap()
+            .unwrap();
+        store
+            .claim_next_board_integration(&task.conversation_key)
+            .unwrap();
+
+        store.cancel_board_task(&task.id).unwrap();
+
+        assert_eq!(store.board_tasks().unwrap()[0].state, "cancelled");
+        assert_eq!(store.board_runs(&task.id).unwrap()[0].state, "cancelled");
+        assert!(!store
+            .finish_board_integration(&integration.id, Ok("too late"))
+            .unwrap());
+    }
+
+    #[test]
+    fn linked_board_task_cannot_change_conversation_or_scope() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let other = store.create_channel("design", "owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "first",
+                &format!("channel:{}", channel.id),
+                "Implement it.",
+                &["/tmp".to_string()],
+                "once",
+                1,
+            )
+            .unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "first", &[], &[], None)
+            .unwrap();
+        let agent = store
+            .create_agent(
+                "Task agent",
+                "Board task worker",
+                "",
+                &[],
+                None,
+                Some("ses_task"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        store
+            .link_board_task_workstream(&task.id, &root.id, &agent.id)
+            .unwrap();
+
+        assert!(store
+            .update_board_task(
+                &task.id,
+                "first",
+                &format!("channel:{}", other.id),
+                "Implement it.",
+                &["/tmp".to_string()],
+                "once",
+                1
+            )
+            .is_err());
+        assert!(store
+            .update_board_task(
+                &task.id,
+                "first",
+                &format!("channel:{}", channel.id),
+                "Implement it.",
+                &["/var/tmp".to_string()],
+                "once",
+                1
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn restart_preserves_queued_integrations_until_they_complete() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "first",
+                &format!("channel:{}", channel.id),
+                "Implement it.",
+                &[],
+                "once",
+                1,
+            )
+            .unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "first", &[], &[], None)
+            .unwrap();
+        let proposal = store
+            .add_channel_message(
+                "agent:task",
+                &channel.id,
+                "Proposal",
+                &[],
+                &[],
+                Some(&root.id),
+            )
+            .unwrap();
+        let agent = store
+            .create_agent(
+                "Task agent",
+                "Board task worker",
+                "",
+                &[],
+                None,
+                Some("ses_task"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        store
+            .link_board_task_workstream(&task.id, &root.id, &agent.id)
+            .unwrap();
+        store.claim_due_board_task(&task.id, 1).unwrap();
+        store.start_board_task(&task.id, 1).unwrap();
+        let integration = store
+            .mark_board_proposal_ready(&task.id, &proposal.id)
+            .unwrap()
+            .unwrap();
+
+        store.recover_board_integrations().unwrap();
+        store.recover_board_task_workstreams().unwrap();
+
+        assert_eq!(store.board_tasks().unwrap()[0].state, "running");
+        assert_eq!(
+            store
+                .claim_next_board_integration(&task.conversation_key)
+                .unwrap()
+                .unwrap()
+                .id,
+            integration.id
+        );
+        assert!(store
+            .finish_board_integration(&integration.id, Ok("Applied after restart."))
+            .unwrap());
+        assert_eq!(store.board_tasks().unwrap()[0].state, "done");
+    }
+
+    #[test]
+    fn restart_blocks_running_task_workstreams_without_an_integration() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let task = store
+            .create_board_task(
+                "owner",
+                "first",
+                &format!("channel:{}", channel.id),
+                "Implement it.",
+                &[],
+                "once",
+                1,
+            )
+            .unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "first", &[], &[], None)
+            .unwrap();
+        let agent = store
+            .create_agent(
+                "Task agent",
+                "Board task worker",
+                "",
+                &[],
+                None,
+                Some("ses_task"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        store
+            .link_board_task_workstream(&task.id, &root.id, &agent.id)
+            .unwrap();
+        store.claim_due_board_task(&task.id, 1).unwrap();
+        store.start_board_task(&task.id, 1).unwrap();
+
+        store.recover_board_task_workstreams().unwrap();
+
+        assert_eq!(store.board_tasks().unwrap()[0].state, "blocked");
+        assert_eq!(store.board_runs(&task.id).unwrap()[0].state, "blocked");
+        assert!(store
+            .board_timeline(&task.id)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.detail.contains("Task worker interrupted")));
+    }
+
+    #[test]
+    fn agent_handoffs_survive_store_reopen() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let (reply_id, agent_id) = {
+            let store = WorkspaceStore::open(file.path()).unwrap();
+            store.add_member("owner").unwrap();
+            let channel = store.create_channel("engineering", "owner").unwrap();
+            let agent = store
+                .create_agent(
+                    "A0",
+                    "Coordinator",
+                    "",
+                    &[],
+                    None,
+                    Some("session"),
+                    "ready",
+                    None,
+                    "owner",
+                )
+                .unwrap();
+            let mentions = vec![WorkspaceMentionPayload {
+                kind: "agent".to_string(),
+                id: agent.id.clone(),
+                label: "Coordinator".to_string(),
+            }];
+            let reply = store
+                .add_channel_message(
+                    "agent:a1",
+                    &channel.id,
+                    "@Coordinator",
+                    &[],
+                    &mentions,
+                    None,
+                )
+                .unwrap();
+            store.queue_agent_handoffs(&reply.id, &mentions).unwrap();
+            (reply.id, agent.id)
+        };
+
+        let store = WorkspaceStore::open_existing(file.path()).unwrap();
+        assert_eq!(
+            store.pending_agent_handoffs().unwrap(),
+            vec![WorkspaceAgentHandoffOutboxEntry {
+                reply_message_id: reply_id,
+                agent_id,
+                member_pubkey: None,
+                peer_pubkey: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn incoming_handoff_completion_is_atomic_with_reply_after_reopen() {
+        for direct in [false, true] {
+            for rollback in [false, true] {
+                let file = tempfile::NamedTempFile::new().unwrap();
+                let store = WorkspaceStore::open(file.path()).unwrap();
+                store.add_member("alice").unwrap();
+                store.add_member("bob").unwrap();
+                let channel = store.create_channel("engineering", "alice").unwrap();
+                let agent = store
+                    .create_agent(
+                        "A0",
+                        "Coordinator",
+                        "",
+                        &[],
+                        None,
+                        Some("session"),
+                        "ready",
+                        None,
+                        "alice",
+                    )
+                    .unwrap();
+                let mentions = [WorkspaceMentionPayload {
+                    kind: "agent".to_string(),
+                    id: agent.id.clone(),
+                    label: "Coordinator".to_string(),
+                }];
+                let incoming = store
+                    .add_channel_message("alice", &channel.id, "implement", &[], &mentions, None)
+                    .unwrap();
+                store.queue_agent_handoffs(&incoming.id, &mentions).unwrap();
+                let revision = store.revision().unwrap();
+                if rollback {
+                    store.conn.execute_batch(
+                        "CREATE TRIGGER fail_handoff_completion BEFORE DELETE ON workspace_agent_handoff_outbox
+                         BEGIN SELECT RAISE(ABORT, 'simulated completion failure'); END;",
+                    ).unwrap();
+                }
+                let result = if direct {
+                    store.add_direct_agent_reply_with_handoffs(
+                        "agent:a0",
+                        "bob",
+                        "completed",
+                        &mentions,
+                        None,
+                        false,
+                        "alice",
+                        "bob",
+                        Some(&(incoming.id.clone(), agent.id.clone())),
+                    )
+                } else {
+                    store.add_channel_agent_reply_with_handoffs(
+                        "agent:a0",
+                        &channel.id,
+                        "completed",
+                        &mentions,
+                        None,
+                        false,
+                        Some(&(incoming.id.clone(), agent.id.clone())),
+                    )
+                };
+                if rollback {
+                    assert!(result.is_err());
+                } else {
+                    assert!(result.is_ok());
+                }
+                let reply_id = result.ok().map(|(reply, _)| reply.id);
+                drop(store);
+                let store = WorkspaceStore::open_existing(file.path()).unwrap();
+                let pending = store.pending_agent_handoffs().unwrap();
+                assert_eq!(pending.len(), 1);
+                if rollback {
+                    assert_eq!(pending[0].reply_message_id, incoming.id);
+                    assert_eq!(store.revision().unwrap(), revision);
+                    assert_eq!(store.channel_messages(&channel.id).unwrap().len(), 1);
+                    assert!(store.direct_messages("agent:a0", "bob").unwrap().is_empty());
+                } else {
+                    assert_eq!(pending[0].reply_message_id, reply_id.unwrap());
+                    assert_eq!(
+                        store
+                            .message_by_id(&pending[0].reply_message_id)
+                            .unwrap()
+                            .unwrap()
+                            .body,
+                        "completed"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn agent_reply_handoff_transaction_rolls_back_both_writes() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let invalid_mention = [WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: "missing".to_string(),
+            label: "Coordinator".to_string(),
+        }];
+
+        assert!(store
+            .add_channel_agent_reply_with_handoffs(
+                "agent:a1",
+                &channel.id,
+                "@Coordinator",
+                &invalid_mention,
+                None,
+                false,
+                None,
+            )
+            .is_err());
+        assert!(store.channel_messages(&channel.id).unwrap().is_empty());
+        assert!(store.pending_agent_handoffs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn direct_agent_handoff_retains_human_conversation() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("alice").unwrap();
+        store.add_member("bob").unwrap();
+        let coordinator = store
+            .create_agent(
+                "A0",
+                "Coordinator",
+                "",
+                &[],
+                None,
+                Some("session"),
+                "ready",
+                None,
+                "alice",
+            )
+            .unwrap();
+        let mentions = [WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: coordinator.id.clone(),
+            label: "Coordinator".to_string(),
+        }];
+
+        let (_, handoffs) = store
+            .add_direct_agent_reply_with_handoffs(
+                &format!("agent:{}", coordinator.id),
+                "bob",
+                "@Coordinator",
+                &mentions,
+                None,
+                false,
+                "alice",
+                "bob",
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(handoffs[0].member_pubkey, Some("alice".to_string()));
+        assert_eq!(handoffs[0].peer_pubkey, Some("bob".to_string()));
+    }
+
+    #[test]
+    fn deleting_target_agent_cancels_pending_handoff() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let agent = store
+            .create_agent(
+                "A0",
+                "Coordinator",
+                "",
+                &[],
+                None,
+                Some("session"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        let mentions = [WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: agent.id.clone(),
+            label: "Coordinator".to_string(),
+        }];
+        store
+            .add_channel_agent_reply_with_handoffs(
+                "agent:a1",
+                &channel.id,
+                "@Coordinator",
+                &mentions,
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+
+        store.delete_agent(&agent.id).unwrap();
+
+        assert!(store.pending_agent_handoffs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tombstoning_handoff_reply_cancels_pending_handoff() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let agent = store
+            .create_agent(
+                "A0",
+                "Coordinator",
+                "",
+                &[],
+                None,
+                Some("session"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        let mentions = [WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: agent.id,
+            label: "Coordinator".to_string(),
+        }];
+        let reply = store
+            .add_channel_message("owner", &channel.id, "@Coordinator", &[], &mentions, None)
+            .unwrap();
+        store.queue_agent_handoffs(&reply.id, &mentions).unwrap();
+
+        store.delete_message("owner", &reply.id).unwrap();
+
+        assert!(store.pending_agent_handoffs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tombstoning_thread_root_cancels_child_handoff() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let agent = store
+            .create_agent(
+                "A0",
+                "Coordinator",
+                "",
+                &[],
+                None,
+                Some("session"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "Root", &[], &[], None)
+            .unwrap();
+        let mentions = [WorkspaceMentionPayload {
+            kind: "agent".to_string(),
+            id: agent.id,
+            label: "Coordinator".to_string(),
+        }];
+        let (child, _) = store
+            .add_channel_agent_reply_with_handoffs(
+                "agent:a1",
+                &channel.id,
+                "@Coordinator",
+                &mentions,
+                Some(&root.id),
+                false,
+                None,
+            )
+            .unwrap();
+
+        store.delete_message("owner", &root.id).unwrap();
+
+        assert!(store.pending_agent_handoffs().unwrap().is_empty());
+        assert!(store.message(&child.id).unwrap().deleted_at.is_none());
+    }
+
+    #[test]
+    fn migrates_handoff_outbox_without_direct_participant_columns() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let connection = Connection::open(file.path()).unwrap();
+        connection.execute_batch("CREATE TABLE workspace_agent_handoff_outbox (reply_message_id TEXT NOT NULL, agent_id TEXT NOT NULL, PRIMARY KEY (reply_message_id, agent_id));").unwrap();
+        drop(connection);
+
+        let store = WorkspaceStore::open(file.path()).unwrap();
+        let columns = store
+            .conn
+            .prepare("PRAGMA table_info(workspace_agent_handoff_outbox)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(columns.contains(&"member_pubkey".to_string()));
+        assert!(columns.contains(&"peer_pubkey".to_string()));
+    }
+
+    #[test]
+    fn completed_thread_agent_turn_is_not_requeued_after_restart() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "Task", &[], &[], None)
+            .unwrap();
+        let agent = store
+            .create_agent(
+                "A1",
+                "Conversation worker",
+                "",
+                &[],
+                None,
+                Some("session-1"),
+                "ready",
+                None,
+                "owner",
+            )
+            .unwrap();
+        store
+            .add_conversation_agent(&agent.id, Some(&channel.id), None, None, &[])
+            .unwrap();
+        store
+            .assign_thread_agent(&agent.id, &root.id, Some(&channel.id), None, None)
+            .unwrap();
+        store
+            .add_channel_message(
+                &format!("agent:{}", agent.id),
+                &channel.id,
+                "Done",
+                &[],
+                &[],
+                Some(&root.id),
+            )
+            .unwrap();
+
+        assert!(store.pending_thread_agent_turns().unwrap().is_empty());
     }
 }

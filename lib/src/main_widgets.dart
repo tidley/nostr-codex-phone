@@ -58,7 +58,7 @@ class _WorkspaceEntryPageState extends State<_WorkspaceEntryPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final palette = theme.extension<_WorkspacePalette>()!;
+    final palette = _WorkspacePalette.of(context);
     return Scaffold(
       backgroundColor: palette.background,
       body: SafeArea(
@@ -729,7 +729,580 @@ class _WorkersPage extends StatelessWidget {
 
 enum _WorkerAction { test, remove }
 
-enum _WorkspaceSection { threads, channel, direct, people, access }
+enum _WorkspaceSection { board, threads, channel, direct, people, access }
+
+Future<void> showWorkspaceBoardTaskEditor({
+  required BuildContext context,
+  required String title,
+  required String conversationKey,
+  required List<String> folderScope,
+  required Map<String, String> conversationOptions,
+  required Future<void> Function(Map<String, Object?> request) onRequest,
+  WorkspaceBoardTask? task,
+  Map<String, List<String>> conversationScopes = const {},
+}) async {
+  final titleController = TextEditingController(text: task?.title ?? title);
+  final instruction = TextEditingController(text: task?.instruction ?? '');
+  var selectedConversation = task?.conversationKey ?? conversationKey;
+  var selectedScope = task?.folderScope ?? folderScope;
+  var schedule = task?.schedule ?? 'once';
+  var scheduledAt = task?.nextRunAt == null
+      ? DateTime.now().add(const Duration(minutes: 5))
+      : DateTime.fromMillisecondsSinceEpoch(task!.nextRunAt! * 1000).toLocal();
+  final saved = await showDialog<bool>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setDialogState) => AlertDialog(
+        title: Text(task == null ? 'New board task' : 'Edit board task'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: titleController,
+                onChanged: (_) => setDialogState(() {}),
+                decoration: const InputDecoration(labelText: 'Title'),
+              ),
+              TextField(
+                controller: instruction,
+                minLines: 3,
+                maxLines: 6,
+                onChanged: (_) => setDialogState(() {}),
+                decoration: const InputDecoration(labelText: 'Instruction'),
+              ),
+              DropdownButtonFormField<String>(
+                initialValue: selectedConversation.isEmpty
+                    ? null
+                    : selectedConversation,
+                decoration: const InputDecoration(labelText: 'Conversation'),
+                items: [
+                  for (final option in conversationOptions.entries)
+                    DropdownMenuItem(
+                      value: option.key,
+                      child: Text(option.value),
+                    ),
+                ],
+                onChanged: (value) => setDialogState(() {
+                  selectedConversation = value ?? '';
+                  selectedScope =
+                      conversationScopes[selectedConversation] ?? [];
+                }),
+              ),
+              if (selectedScope.isNotEmpty)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Text('Scope: ${selectedScope.join(', ')}'),
+                  ),
+                ),
+              DropdownButtonFormField<String>(
+                initialValue: schedule,
+                decoration: const InputDecoration(labelText: 'Schedule'),
+                items: const [
+                  DropdownMenuItem(value: 'once', child: Text('Once')),
+                  DropdownMenuItem(value: 'daily', child: Text('Daily')),
+                  DropdownMenuItem(value: 'weekdays', child: Text('Weekdays')),
+                  DropdownMenuItem(value: 'weekly', child: Text('Weekly')),
+                  DropdownMenuItem(value: 'monthly', child: Text('Monthly')),
+                ],
+                onChanged: (value) =>
+                    setDialogState(() => schedule = value ?? 'once'),
+              ),
+              const SizedBox(height: 12),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(
+                  schedule == 'once' ? 'Date and time' : 'Start time',
+                ),
+                subtitle: Text(
+                  '${scheduledAt.day.toString().padLeft(2, '0')}/${scheduledAt.month.toString().padLeft(2, '0')}/${scheduledAt.year} '
+                  '${scheduledAt.hour.toString().padLeft(2, '0')}:${scheduledAt.minute.toString().padLeft(2, '0')}',
+                ),
+                trailing: const Icon(Icons.schedule),
+                onTap: () async {
+                  var next = scheduledAt;
+                  if (schedule == 'once') {
+                    final date = await showDatePicker(
+                      context: context,
+                      initialDate: scheduledAt,
+                      firstDate: DateTime.now().subtract(
+                        const Duration(days: 1),
+                      ),
+                      lastDate: DateTime(2100),
+                    );
+                    if (date == null) return;
+                    next = DateTime(
+                      date.year,
+                      date.month,
+                      date.day,
+                      next.hour,
+                      next.minute,
+                    );
+                  }
+                  final time = await showTimePicker(
+                    context: context,
+                    initialTime: TimeOfDay.fromDateTime(next),
+                  );
+                  if (time == null) return;
+                  setDialogState(() {
+                    scheduledAt = DateTime(
+                      next.year,
+                      next.month,
+                      next.day,
+                      time.hour,
+                      time.minute,
+                    );
+                  });
+                },
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed:
+                titleController.text.trim().isEmpty ||
+                    instruction.text.trim().isEmpty ||
+                    selectedConversation.isEmpty ||
+                    selectedScope.isEmpty
+                ? null
+                : () => Navigator.pop(context, true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    ),
+  );
+  if (saved == true) {
+    await onRequest({
+      'action': task == null ? 'create_board_task' : 'update_board_task',
+      'board_task': {
+        if (task != null) 'task_id': task.id,
+        'title': titleController.text.trim(),
+        'conversation_key': selectedConversation,
+        'instruction': instruction.text.trim(),
+        'folder_scope': selectedScope,
+        'schedule': schedule,
+        'next_run_at': scheduledAt.millisecondsSinceEpoch ~/ 1000,
+      },
+    });
+  }
+}
+
+class WorkspaceBoard extends StatefulWidget {
+  const WorkspaceBoard({
+    super.key,
+    required this.tasks,
+    required this.timelineEntries,
+    required this.isAdmin,
+    required this.conversationLabel,
+    required this.onCreate,
+    required this.onEdit,
+    required this.onRetry,
+    required this.onCancel,
+    required this.onMoveToScheduled,
+    required this.onMove,
+    required this.onOpenTaskThread,
+    this.columns = const [],
+    this.cards = const [],
+    this.onOpenCardThread,
+  });
+
+  final List<WorkspaceBoardTask> tasks;
+  final List<WorkspaceBoardColumn> columns;
+  final List<WorkspaceBoardCard> cards;
+  final ValueChanged<String>? onOpenCardThread;
+  final List<WorkspaceBoardTimelineEntry> timelineEntries;
+  final bool isAdmin;
+  final String Function(String conversationKey) conversationLabel;
+  final Future<void> Function() onCreate;
+  final Future<void> Function(WorkspaceBoardTask task) onEdit;
+  final Future<void> Function(WorkspaceBoardTask task) onRetry;
+  final Future<void> Function(WorkspaceBoardTask task) onCancel;
+  final Future<void> Function(WorkspaceBoardTask task) onMoveToScheduled;
+  final Future<void> Function(WorkspaceBoardTask task, String boardColumn)
+  onMove;
+  final ValueChanged<WorkspaceBoardTask> onOpenTaskThread;
+
+  @override
+  State<WorkspaceBoard> createState() => _WorkspaceBoardState();
+}
+
+class _WorkspaceBoardState extends State<WorkspaceBoard> {
+  static const _states = [
+    'scheduled',
+    'queued',
+    'running',
+    'integrating',
+    'blocked',
+    'done',
+  ];
+  static const _labels = {
+    'scheduled': 'Scheduled',
+    'queued': 'Queued',
+    'running': 'Running',
+    'integrating': 'Integrating',
+    'integration_queued': 'Waiting for head',
+    'blocked': 'Blocked',
+    'done': 'Done',
+  };
+
+  final _columnsController = ScrollController();
+  Timer? _columnsScrollTimer;
+  var _columnsScrollDirection = 0.0;
+
+  List<WorkspaceBoardTask> get tasks => widget.tasks;
+  List<WorkspaceBoardTimelineEntry> get timelineEntries =>
+      widget.timelineEntries;
+  bool get isAdmin => widget.isAdmin;
+  String Function(String conversationKey) get conversationLabel =>
+      widget.conversationLabel;
+  Future<void> Function() get onCreate => widget.onCreate;
+  Future<void> Function(WorkspaceBoardTask task) get onEdit => widget.onEdit;
+  Future<void> Function(WorkspaceBoardTask task) get onRetry => widget.onRetry;
+  Future<void> Function(WorkspaceBoardTask task) get onCancel =>
+      widget.onCancel;
+  Future<void> Function(WorkspaceBoardTask task) get onMoveToScheduled =>
+      widget.onMoveToScheduled;
+  Future<void> Function(WorkspaceBoardTask task, String boardColumn)
+  get onMove => widget.onMove;
+  ValueChanged<WorkspaceBoardTask> get onOpenTaskThread =>
+      widget.onOpenTaskThread;
+
+  @override
+  void dispose() {
+    _columnsScrollTimer?.cancel();
+    _columnsController.dispose();
+    super.dispose();
+  }
+
+  void _scrollColumnsWhileDragging(DragUpdateDetails details) {
+    if (!_columnsController.hasClients) return;
+    const edge = 72.0;
+    final width = MediaQuery.sizeOf(context).width;
+    _columnsScrollDirection = details.globalPosition.dx < edge
+        ? -1
+        : details.globalPosition.dx > width - edge
+        ? 1
+        : 0;
+    if (_columnsScrollDirection == 0) return _stopScrollingColumns();
+    _columnsScrollTimer ??= Timer.periodic(const Duration(milliseconds: 16), (
+      _,
+    ) {
+      if (!_columnsController.hasClients) return;
+      final position = _columnsController.position;
+      _columnsController.jumpTo(
+        (_columnsController.offset + _columnsScrollDirection * 12).clamp(
+          0.0,
+          position.maxScrollExtent,
+        ),
+      );
+    });
+  }
+
+  void _stopScrollingColumns() {
+    _columnsScrollDirection = 0;
+    _columnsScrollTimer?.cancel();
+    _columnsScrollTimer = null;
+  }
+
+  String _timelineTimestamp(int seconds) {
+    final date = DateTime.fromMillisecondsSinceEpoch(seconds * 1000).toLocal();
+    return '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year} '
+        '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+  }
+
+  void _showDetails(BuildContext context, WorkspaceBoardTask task) {
+    final entries =
+        timelineEntries
+            .where((entry) => entry.taskId == task.id)
+            .toList(growable: false)
+          ..sort((left, right) => right.createdAt.compareTo(left.createdAt));
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              Text(task.title, style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 8),
+              Text(task.instruction),
+              const SizedBox(height: 12),
+              TextButton.icon(
+                onPressed: () {
+                  Navigator.pop(context);
+                  onOpenTaskThread(task);
+                },
+                icon: const Icon(Icons.forum_outlined),
+                label: Text(conversationLabel(task.conversationKey)),
+              ),
+              const Divider(),
+              Text('Timeline', style: Theme.of(context).textTheme.titleSmall),
+              if (entries.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 12),
+                  child: Text('No activity yet.'),
+                ),
+              for (final entry in entries)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(_iconFor(entry.state)),
+                  title: Text(entry.detail),
+                  subtitle: Text(
+                    '${_labels[entry.state] ?? entry.state} · ${_timelineTimestamp(entry.createdAt)}',
+                  ),
+                ),
+              if (isAdmin) ...[
+                const Divider(),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    OutlinedButton(
+                      onPressed: () async {
+                        Navigator.pop(context);
+                        await onEdit(task);
+                      },
+                      child: const Text('Edit'),
+                    ),
+                    if (task.state == 'blocked')
+                      FilledButton(
+                        onPressed: () async {
+                          Navigator.pop(context);
+                          await onRetry(task);
+                        },
+                        child: const Text('Retry'),
+                      ),
+                    if (task.state == 'scheduled' ||
+                        task.state == 'queued' ||
+                        task.state == 'blocked')
+                      OutlinedButton(
+                        onPressed: () async {
+                          Navigator.pop(context);
+                          await onCancel(task);
+                        },
+                        child: const Text('Cancel'),
+                      ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selectedConversation = ValueNotifier<String?>(null);
+    final conversations =
+        tasks.map((task) => task.conversationKey).toSet().toList()..sort();
+    final latestEntries = <String, WorkspaceBoardTimelineEntry>{};
+    for (final entry in timelineEntries) {
+      final previous = latestEntries[entry.taskId];
+      if (previous == null || entry.createdAt > previous.createdAt) {
+        latestEntries[entry.taskId] = entry;
+      }
+    }
+    return ValueListenableBuilder<String?>(
+      valueListenable: selectedConversation,
+      builder: (context, selected, _) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Board',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                ),
+                if (conversations.isNotEmpty)
+                  DropdownButton<String?>(
+                    value: selected,
+                    hint: const Text('All conversations'),
+                    items: [
+                      const DropdownMenuItem<String?>(
+                        value: null,
+                        child: Text('All conversations'),
+                      ),
+                      for (final conversation in conversations)
+                        DropdownMenuItem<String?>(
+                          value: conversation,
+                          child: Text(conversationLabel(conversation)),
+                        ),
+                    ],
+                    onChanged: (value) => selectedConversation.value = value,
+                  ),
+                const SizedBox(width: 8),
+                if (isAdmin)
+                  FilledButton.icon(
+                    onPressed: onCreate,
+                    icon: const Icon(Icons.add),
+                    label: const Text('New task'),
+                  ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: SingleChildScrollView(
+              controller: _columnsController,
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 16),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (final state in {
+                    for (final column in widget.columns) column.name.toLowerCase(),
+                    ..._states,
+                  })
+                    Builder(
+                      builder: (context) {
+                        final stateTasks = tasks
+                            .where(
+                              (task) =>
+                                  task.boardColumn == state &&
+                                  (selected == null ||
+                                      task.conversationKey == selected),
+                            )
+                            .toList(growable: false);
+                        final columnIds = widget.columns.where((column) => column.name.toLowerCase() == state).map((column) => column.id).toSet();
+                        final stateCards = widget.cards.where((card) => card.archivedAt == null && columnIds.contains(card.columnId)).toList();
+                        return SizedBox(
+                          width: 280,
+                          child: DragTarget<WorkspaceBoardTask>(
+                            onWillAccept: (task) =>
+                                isAdmin && _states.contains(state) && task?.boardColumn != state,
+                            onAccept: (task) => onMove(task, state),
+                            builder: (context, _, __) => Card(
+                              margin: const EdgeInsets.all(4),
+                              child: Padding(
+                                padding: const EdgeInsets.all(8),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Text(
+                                          _labels[state] ?? widget.columns.firstWhere((column) => column.name.toLowerCase() == state).name,
+                                          style: Theme.of(
+                                            context,
+                                          ).textTheme.titleSmall,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Text('${stateTasks.length + stateCards.length}'),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Expanded(
+                                      child: ListView.separated(
+                                        itemCount: stateTasks.length + stateCards.length,
+                                        separatorBuilder: (_, _) =>
+                                            const SizedBox(height: 6),
+                                        itemBuilder: (context, taskIndex) {
+                                          if (taskIndex < stateCards.length) {
+                                            final card = stateCards[taskIndex];
+                                            return Card(
+                                              key: ValueKey('board-card-${card.id}'),
+                                              child: ListTile(
+                                                title: Text(card.title),
+                                                subtitle: Text(card.description, maxLines: 3, overflow: TextOverflow.ellipsis),
+                                                trailing: card.sourceThreadId == null ? null : const Icon(Icons.forum_outlined),
+                                                onTap: card.sourceThreadId == null ? null : () => widget.onOpenCardThread?.call(card.sourceThreadId!),
+                                              ),
+                                            );
+                                          }
+                                          final task = stateTasks[taskIndex - stateCards.length];
+                                          final entry = latestEntries[task.id];
+                                          Widget taskCard() => Card(
+                                            child: ListTile(
+                                              onTap: () =>
+                                                  _showDetails(context, task),
+                                              title: Text(task.title),
+                                              subtitle: Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(
+                                                    conversationLabel(
+                                                      task.conversationKey,
+                                                    ),
+                                                  ),
+                                                  Text(
+                                                    'Status: ${_labels[task.state] ?? task.state}',
+                                                  ),
+                                                  if (task.nextRunAt != null)
+                                                    Text(
+                                                      'Next run: ${task.nextRunAt}',
+                                                    ),
+                                                  if (entry != null)
+                                                    Text(entry.detail),
+                                                ],
+                                              ),
+                                            ),
+                                          );
+                                          if (!isAdmin) return taskCard();
+                                          return Draggable<WorkspaceBoardTask>(
+                                            data: task,
+                                            onDragUpdate:
+                                                _scrollColumnsWhileDragging,
+                                            onDragEnd: (_) =>
+                                                _stopScrollingColumns(),
+                                            onDragCompleted:
+                                                _stopScrollingColumns,
+                                            onDraggableCanceled: (_, _) =>
+                                                _stopScrollingColumns(),
+                                            feedback: SizedBox(
+                                              width: 280,
+                                              child: Material(
+                                                color: Colors.transparent,
+                                                child: taskCard(),
+                                              ),
+                                            ),
+                                            childWhenDragging: Opacity(
+                                              opacity: 0.35,
+                                              child: taskCard(),
+                                            ),
+                                            child: taskCard(),
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static IconData _iconFor(String state) => switch (state) {
+    'blocked' => Icons.block_outlined,
+    'running' => Icons.play_circle_outline,
+    'done' => Icons.task_alt,
+    _ => Icons.schedule_outlined,
+  };
+}
 
 class _WorkspaceOnboardingGuide extends StatelessWidget {
   const _WorkspaceOnboardingGuide({
@@ -968,6 +1541,118 @@ class _WorkspacePanelState {
   final FileBrowserResult? fileBrowser;
   final FileContentResult? filePreview;
 }
+
+@visibleForTesting
+Widget teamWorkspaceForTest({
+  required WorkspaceState workspace,
+  required String conversationKey,
+  String? threadId,
+  required Future<void> Function(Map<String, Object?>) onRequest,
+}) => _TeamWorkspace(
+  sessions: const [],
+  spaces: const [],
+  activeSpace: null,
+  sidebarSections: const {},
+  onSidebarSectionChanged: (_, _) {},
+  hasUnreadOtherSpaces: false,
+  otherWorkspaceAttentionVersion: 0,
+  unreadOtherWorkspaceIds: const {},
+  otherWorkspaceAttentionVersions: const {},
+  canManageAgents: false,
+  canManageMembers: false,
+  canRemoveMembers: false,
+  onSwitchSpace: (_) {},
+  onRenameSpace: (_) {},
+  onLeaveSpace: (_) {},
+  onOpenSessions: () {},
+  onOpenSettings: () {},
+  onEnterInviteCode: () {},
+  diagnostics: ValueNotifier([]),
+  fipsHeartbeat: ValueNotifier(const _WorkspaceFipsHeartbeat()),
+  fipsConnectedSpaceIds: const {},
+  onOpenDiagnostics: () {},
+  onOpenWorkerConsole: () {},
+  onOpenFiles: (_, _) async {},
+  fileBrowser: ValueNotifier(null),
+  filePreview: ValueNotifier(null),
+  onBrowseFiles: (_, _, _, _) async {},
+  onReadWorkspaceFile: (_, _, _, _, {onResult}) async {},
+  onLoadRepositoryRemote: (_, _, _) async => null,
+  workspaceRevision: ValueNotifier(0),
+  onLoadOpenCodeModels: () async => [],
+  initialFolderChoices: const [],
+  onLoadFolders: (_) async => [],
+  inviteCode: null,
+  memberStatus: '',
+  workspace: workspace,
+  conversationDrafts: {},
+  threadDrafts: {},
+  focusedConversationKey: conversationKey,
+  openThreadKey: threadId == null ? null : '$conversationKey:$threadId',
+  panelStates: {
+    conversationKey: _WorkspacePanelState(
+      threadId: threadId,
+      openThreadIds: [if (threadId != null) threadId],
+      expandedMessageIds: {},
+      collapsedThreadMessageIds: {},
+      widthFraction: 0.5,
+      sidebarCollapsed: true,
+      alsoSendToMain: false,
+      filesSelected: false,
+      threadFullWindow: false,
+    ),
+  },
+  workspaceViewSnapshot: null,
+  onPanelStateChanged: () {},
+  ownPubkey: 'alice',
+  localSenderIds: const {'alice'},
+  fipsConnectedPeers: const {},
+  displayName: 'Alice',
+  memberAliases: const {},
+  conversationPreferences: const {},
+  localMessagePinIds: const {},
+  memberNames: const {},
+  unreadCounts: const {},
+  threadUnreadCounts: const {},
+  focusLostMessageIds: const {},
+  onDisplayNameChanged: (_) {},
+  onMemberAliasChanged: (_, _) {},
+  onConversationPreferenceChanged:
+      (_, {pinned, archived, muted, autoSpeak, sortByRecentReply}) {},
+  onToggleLocalMessagePin: (_) {},
+  onRemoveMember: (_) async {},
+  onFocusConversation: (_) {},
+  onClearConversationUnread: (_) {},
+  onMarkConversationUnread: (_) {},
+  onMarkAllThreadsRead: (_) {},
+  onMarkThreadUnread: (_, _) {},
+  onOpenThread: (_, _) {},
+  onCloseThread: () {},
+  onRequest: onRequest,
+  onLoadFolderChoices: () async => [],
+  onTyping: (_) async {},
+  onAttach: (_) async => false,
+  onSendLargeText: (_, _) async => false,
+  voiceResult: ValueNotifier(null),
+  onVoiceTranscribe: (_, _) async {},
+  onOpenAttachment: (_) async {},
+  onCreateInvite: () async {},
+  callPhase: _CallPhase.idle,
+  callPeerPubkey: null,
+  groupCallPhase: _CallPhase.idle,
+  groupCallChannelId: null,
+  onStartCall: (_) {},
+  onStartChannelCall: (_) async {},
+  onAcceptCall: () {},
+  onRejectCall: () {},
+  onHangupCall: () {},
+  onAcceptGroupCall: () {},
+  onRejectGroupCall: () {},
+  onHangupGroupCall: () {},
+  mediaSource: _CallMediaSource.audioOnly,
+  onMediaSourceChanged: (_) {},
+  dateFormat: WorkspaceDateFormat.values.first,
+);
 
 class _TeamWorkspace extends StatefulWidget {
   const _TeamWorkspace({
@@ -1296,6 +1981,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   String? _conversationKeyFor(_WorkspaceSection section, String id) =>
       switch (section) {
+        _WorkspaceSection.board => null,
         _WorkspaceSection.threads => null,
         _WorkspaceSection.channel => id,
         _WorkspaceSection.direct => WorkspaceState.directKey(
@@ -2049,11 +2735,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   List<WorkspaceMention> _mentionOptionsFor(TextEditingController composer) {
     final options = <WorkspaceMention>[
-      const WorkspaceMention(
-        kind: 'agent',
-        id: 'native-opencode',
-        label: 'agent',
-      ),
       for (final member in _conversationMembers)
         if (member != widget.ownPubkey)
           WorkspaceMention(
@@ -2061,14 +2742,23 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
             id: member,
             label: _memberLabel(member),
           ),
-      for (final agent in _mentionableAgents)
-        WorkspaceMention(kind: 'agent', id: agent.id, label: agent.name),
+      if (_section == _WorkspaceSection.channel ||
+          _section == _WorkspaceSection.direct)
+        ...workspaceConversationMentions(
+          widget.workspace,
+          channelId: _section == _WorkspaceSection.channel ? _active : null,
+          memberPubkey: widget.ownPubkey,
+          peerPubkey: _section == _WorkspaceSection.direct ? _active : null,
+          parentId: identical(composer, _threadComposer) ? _thread?.id : null,
+        ),
     ];
     final query = _mentionQueryFor(composer);
     if (query == null) return const [];
     final normalized = query.toLowerCase();
+    final visible = <String>{};
     return options
         .where((option) => option.label.toLowerCase().contains(normalized))
+        .where((option) => visible.add('${option.kind}:${option.label}'))
         .toList(growable: false);
   }
 
@@ -2077,29 +2767,6 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     return widget.workspace.channels
         .where((channel) => channel.id == _active)
         .expand((channel) => channel.members.map((member) => member.pubkey));
-  }
-
-  Iterable<WorkspaceAgent> get _mentionableAgents {
-    final assignedAgentIds = widget.workspace.conversationAgents
-        .where((membership) {
-          if (_section == _WorkspaceSection.channel) {
-            return membership.channelId == _active;
-          }
-          return membership.channelId == null &&
-              {
-                membership.memberPubkey,
-                membership.peerPubkey,
-              }.contains(widget.ownPubkey) &&
-              {
-                membership.memberPubkey,
-                membership.peerPubkey,
-              }.contains(_active);
-        })
-        .map((membership) => membership.agentId)
-        .toSet();
-    return widget.workspace.agents.where(
-      (agent) => agent.name != 'R1' && assignedAgentIds.contains(agent.id),
-    );
   }
 
   String? _mentionQueryFor(TextEditingController composer) {
@@ -2473,6 +3140,8 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
 
   String get _title {
     switch (_section) {
+      case _WorkspaceSection.board:
+        return 'Board';
       case _WorkspaceSection.threads:
         return 'Threads';
       case _WorkspaceSection.channel:
@@ -2486,6 +3155,110 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     }
   }
 
+  String _boardConversationLabel(String key) {
+    const channelPrefix = 'channel:';
+    if (key.startsWith(channelPrefix)) {
+      final channelId = key.substring(channelPrefix.length);
+      return '# ${widget.workspace.channelName(channelId) ?? channelId}';
+    }
+    const directPrefix = 'direct:';
+    if (key.startsWith(directPrefix)) {
+      final directKey = key.substring(directPrefix.length);
+      final peer = widget.workspace
+          .directPeers(widget.ownPubkey)
+          .where(
+            (candidate) =>
+                WorkspaceState.directKey(widget.ownPubkey, candidate) ==
+                directKey,
+          )
+          .firstOrNull;
+      if (peer != null) return _memberLabel(peer);
+    }
+    return key;
+  }
+
+  void _openBoardConversation(String key) {
+    const channelPrefix = 'channel:';
+    if (key.startsWith(channelPrefix)) {
+      _select(_WorkspaceSection.channel, key.substring(channelPrefix.length));
+      return;
+    }
+    const directPrefix = 'direct:';
+    if (key.startsWith(directPrefix)) {
+      final directKey = key.substring(directPrefix.length);
+      final peer = widget.workspace
+          .directPeers(widget.ownPubkey)
+          .where(
+            (candidate) =>
+                WorkspaceState.directKey(widget.ownPubkey, candidate) ==
+                directKey,
+          )
+          .firstOrNull;
+      if (peer != null) _select(_WorkspaceSection.direct, peer);
+    }
+  }
+
+  void _openBoardTaskThread(WorkspaceBoardTask task) {
+    _openBoardConversation(task.conversationKey);
+    final rootMessageId = task.rootMessageId;
+    if (rootMessageId == null || rootMessageId.isEmpty) return;
+    final section = task.conversationKey.startsWith('channel:')
+        ? _WorkspaceSection.channel
+        : _WorkspaceSection.direct;
+    final id = task.conversationKey.startsWith('channel:')
+        ? task.conversationKey.substring('channel:'.length)
+        : _active;
+    if (id == null) return;
+    setState(() {
+      _thread = _threadWithIdFor(section, id, rootMessageId);
+      _threadReplyTargetId = null;
+    });
+  }
+
+  Future<void> _editBoardTask({
+    WorkspaceBoardTask? task,
+    String title = '',
+    String? conversationKey,
+    List<String>? folderScope,
+  }) {
+    final options = <String, String>{};
+    final scopes = <String, List<String>>{};
+    for (final channel in widget.workspace.channels) {
+      final key = 'channel:${channel.id}';
+      options[key] = '# ${channel.name}';
+      scopes[key] = widget.workspace.conversationFolderScope(
+        channelId: channel.id,
+        ownPubkey: widget.ownPubkey,
+        peerPubkey: null,
+      );
+    }
+    for (final peer in widget.workspace.directPeers(widget.ownPubkey)) {
+      final key = 'direct:${WorkspaceState.directKey(widget.ownPubkey, peer)}';
+      options[key] = _memberLabel(peer);
+      scopes[key] = widget.workspace.conversationFolderScope(
+        channelId: null,
+        ownPubkey: widget.ownPubkey,
+        peerPubkey: peer,
+      );
+    }
+    final target =
+        task?.conversationKey ??
+        conversationKey ??
+        options.keys.firstOrNull ??
+        '';
+    return showWorkspaceBoardTaskEditor(
+      context: context,
+      title: title,
+      conversationKey: target,
+      folderScope:
+          task?.folderScope ?? folderScope ?? scopes[target] ?? const [],
+      conversationOptions: options,
+      conversationScopes: scopes,
+      task: task,
+      onRequest: widget.onRequest,
+    );
+  }
+
   String _memberLabel(String pubkey) {
     if (pubkey == widget.ownPubkey) {
       return widget.memberNames[pubkey] ??
@@ -2496,7 +3269,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
       return widget.workspace.agents
               .where((agent) => agent.id == id)
               .firstOrNull
-              ?.name ??
+              ?.displayLabel ??
           workspaceFallbackAgentName(pubkey);
     }
     return widget.memberAliases[pubkey] ??
@@ -2613,7 +3386,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     }
     return [
       ...mentions,
-      WorkspaceMention(kind: 'agent', id: agentId, label: agent.name),
+      WorkspaceMention(kind: 'agent', id: agentId, label: agent.displayLabel),
     ];
   }
 
@@ -3159,7 +3932,49 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
         );
       },
     );
-    final Widget conversation = _section == _WorkspaceSection.threads
+    final Widget conversation = _section == _WorkspaceSection.board
+        ? WorkspaceBoard(
+            tasks: widget.workspace.boardTasks,
+            columns: widget.workspace.boardColumns,
+            cards: widget.workspace.boardCards,
+            onOpenCardThread: (rootId) {
+              final root = widget.workspace.messages.values.expand((messages) => messages).where((message) => message.id == rootId).firstOrNull;
+              if (root != null) _openReferencedMessage(root);
+            },
+            timelineEntries: widget.workspace.boardTimelineEntries,
+            isAdmin: widget.workspace.memberAdmins.contains(widget.ownPubkey),
+            conversationLabel: _boardConversationLabel,
+            onCreate: () => _editBoardTask(),
+            onEdit: (task) => _editBoardTask(task: task),
+            onRetry: (task) => widget.onRequest({
+              'action': 'retry_board_task',
+              'board_task': {
+                'task_id': task.id,
+                'next_run_at': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              },
+            }),
+            onCancel: (task) => widget.onRequest({
+              'action': 'cancel_board_task',
+              'board_task': {'task_id': task.id},
+            }),
+            onMoveToScheduled: (task) => widget.onRequest({
+              'action': 'update_board_task',
+              'board_task': {
+                'task_id': task.id,
+                'title': task.title,
+                'conversation_key': task.conversationKey,
+                'instruction': task.instruction,
+                'folder_scope': task.folderScope,
+                'schedule': task.schedule,
+              },
+            }),
+            onMove: (task, boardColumn) => widget.onRequest({
+              'action': 'move_board_task',
+              'board_task': {'task_id': task.id, 'board_column': boardColumn},
+            }),
+            onOpenTaskThread: _openBoardTaskThread,
+          )
+        : _section == _WorkspaceSection.threads
         ? _WorkspaceThreadsView(
             workspace: widget.workspace,
             ownPubkey: widget.ownPubkey,
@@ -3365,6 +4180,22 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                           ? _active
                           : null,
                     ),
+                onCreateBoardTask: (title) {
+                  final conversationKey = _conversationKey;
+                  return _editBoardTask(
+                    title: title,
+                    conversationKey: conversationKey,
+                    folderScope: widget.workspace.conversationFolderScope(
+                      channelId: _section == _WorkspaceSection.channel
+                          ? _active
+                          : null,
+                      ownPubkey: widget.ownPubkey,
+                      peerPubkey: _section == _WorkspaceSection.direct
+                          ? _active
+                          : null,
+                    ),
+                  );
+                },
                 onEditConversationFolder: (folders) => widget.onRequest({
                   'action': 'set_conversation_preprompt',
                   'body': widget.workspace.conversationPreprompt(
@@ -3509,14 +4340,35 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           memberNames: widget.memberNames,
           agents: widget.workspace.agents,
           agentDirectory: widget.workspace.agents,
+          canManageAgents: widget.workspace.memberAdmins.contains(
+            widget.ownPubkey,
+          ),
           typingStatuses: threadTyping,
           typingLabels: _typingLabels(threadTyping),
-          onCancelAgentTask: (agentId) => widget.onRequest({
-            'action': 'abort_agent_task',
-            'agent_id': agentId,
-          }),
+          onCancelAgentTask:
+              widget.workspace.memberAdmins.contains(widget.ownPubkey)
+              ? (agentId) => widget.onRequest({
+                  'action': 'abort_agent_task',
+                  'agent_id': agentId,
+                  if (_section == _WorkspaceSection.channel)
+                    'channel_id': _active,
+                  if (_section == _WorkspaceSection.direct)
+                    'recipient_pubkey': _active,
+                })
+              : null,
           respondingThreadIds: respondingThreadIds,
           onCompleteThread: _toggleSelectedThreadCompletion,
+          onCreateBoardTask: () => _editBoardTask(
+            title: selectedThread == null
+                ? 'Thread'
+                : _threadTopicFor(selectedThread) ?? 'Thread',
+            conversationKey: _conversationKey,
+            folderScope: widget.workspace.conversationFolderScope(
+              channelId: _section == _WorkspaceSection.channel ? _active : null,
+              ownPubkey: widget.ownPubkey,
+              peerPubkey: _section == _WorkspaceSection.direct ? _active : null,
+            ),
+          ),
           onRequestTopic: () {
             final thread = _thread;
             if (thread != null) _requestThreadTopic(thread);
@@ -3762,9 +4614,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
           },
           child: Scaffold(
             key: _scaffoldKey,
-            backgroundColor: Theme.of(
-              context,
-            ).extension<_WorkspacePalette>()!.background,
+            backgroundColor: _WorkspacePalette.of(context).background,
             appBar: wide
                 ? null
                 : mobileThreadView
@@ -3934,6 +4784,25 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                       ),
                     ],
                   )
+                : _section == _WorkspaceSection.board
+                ? AppBar(
+                    leading: IconButton(
+                      onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+                      icon: const Icon(Icons.arrow_back),
+                      tooltip: 'Back',
+                    ),
+                    title: const Text('Board'),
+                    actions: [
+                      if (widget.workspace.memberAdmins.contains(
+                        widget.ownPubkey,
+                      ))
+                        IconButton(
+                          onPressed: () => unawaited(_editBoardTask()),
+                          icon: const Icon(Icons.add_task_outlined),
+                          tooltip: 'Add task',
+                        ),
+                    ],
+                  )
                 : AppBar(
                     leading: IconButton(
                       onPressed: () => _scaffoldKey.currentState?.openDrawer(),
@@ -3987,9 +4856,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
                             width: _sidebarCollapsed ? 56 : _sidebarWidth,
                             child: _sidebarCollapsed
                                 ? ColoredBox(
-                                    color: Theme.of(
-                                      context,
-                                    ).extension<_WorkspacePalette>()!.sidebar,
+                                    color: _WorkspacePalette.of(context).sidebar,
                                     child: Align(
                                       alignment: Alignment.topCenter,
                                       child: IconButton(
@@ -4204,8 +5071,19 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
     };
   }
 
+  String _typingName(WorkspaceTyping status) {
+    if (status.agentId != null) {
+      return widget.workspace.agents
+              .where((agent) => agent.id == status.agentId)
+              .firstOrNull
+              ?.displayLabel ??
+          _memberLabel(status.senderPubkey);
+    }
+    return status.agentName ?? _memberLabel(status.senderPubkey);
+  }
+
   String _typingLabel(WorkspaceTyping status) {
-    final name = status.agentName ?? _memberLabel(status.senderPubkey);
+    final name = _typingName(status);
     if (status.agentId != null) {
       final stage = status.stage?.trim();
       if (stage != null && stage.isNotEmpty) {
@@ -4224,7 +5102,7 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   }
 
   String _compactTypingLabel(WorkspaceTyping status) {
-    final name = status.agentName ?? _memberLabel(status.senderPubkey);
+    final name = _typingName(status);
     if (status.agentId == null) return '$name is typing...';
     final parentId = status.parentId;
     final topic = parentId == null
@@ -4248,9 +5126,9 @@ class _TeamWorkspaceState extends State<_TeamWorkspace> {
   }
 
   String _typingActivityLabel(WorkspaceTyping status) {
-    final name = status.agentName ?? _memberLabel(status.senderPubkey);
+    final name = _typingName(status);
     if (status.agentId == null) return '$name is typing...';
-    return 'Agent is working...';
+    return '$name is working...';
   }
 
   void _onWorkspaceRevision() {
@@ -4943,7 +5821,7 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
     if (isWorkspaceAgentSender(pubkey)) {
       final agentId = pubkey.substring('agent:'.length);
       for (final agent in widget.workspace.agents) {
-        if (agent.id == agentId) return agent.name;
+        if (agent.id == agentId) return agent.displayLabel;
       }
       return workspaceFallbackAgentName(pubkey);
     }
@@ -5010,7 +5888,13 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
   }
 
   String _threadTypingLabel(WorkspaceTyping status) {
-    final name = status.agentName ?? _memberLabel(status.senderPubkey);
+    final name = status.agentId == null
+        ? status.agentName ?? _memberLabel(status.senderPubkey)
+        : widget.workspace.agents
+                  .where((agent) => agent.id == status.agentId)
+                  .firstOrNull
+                  ?.displayLabel ??
+              _memberLabel(status.senderPubkey);
     final stage = status.stage?.trim();
     if (status.agentId != null && stage != null && stage.isNotEmpty) {
       return '$name: $stage';
@@ -5227,7 +6111,7 @@ class _WorkspaceThreadsViewState extends State<_WorkspaceThreadsView> {
       }
     }
     return ColoredBox(
-      color: Theme.of(context).extension<_WorkspacePalette>()!.content,
+      color: _WorkspacePalette.of(context).content,
       child: ListView(
         padding: const EdgeInsets.fromLTRB(12, 10, 12, 28),
         children: [
@@ -6142,7 +7026,7 @@ class _WorkspaceSidebar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = Theme.of(context).extension<_WorkspacePalette>()!;
+    final palette = _WorkspacePalette.of(context);
     String memberLabel(String pubkey) {
       if (pubkey == ownPubkey) {
         return memberNames[pubkey] ??
@@ -6153,7 +7037,7 @@ class _WorkspaceSidebar extends StatelessWidget {
         return workspace.agents
                 .where((agent) => agent.id == id)
                 .firstOrNull
-                ?.name ??
+                ?.displayLabel ??
             workspaceFallbackAgentName(pubkey);
       }
       return memberAliases[pubkey] ??
@@ -6532,6 +7416,40 @@ class _WorkspaceSidebar extends StatelessWidget {
         scrollable: ListView(
           padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
           children: [
+            const SizedBox(height: 8),
+            Container(
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: section == _WorkspaceSection.board
+                      ? Theme.of(
+                          context,
+                        ).colorScheme.primary.withValues(alpha: 0.38)
+                      : Colors.transparent,
+                ),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: ListTile(
+                dense: true,
+                selected: section == _WorkspaceSection.board,
+                selectedColor: palette.label,
+                selectedTileColor: palette.selected,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                minLeadingWidth: 24,
+                horizontalTitleGap: 8,
+                leading: const Icon(Icons.view_kanban_outlined, size: 19),
+                title: const Text('Board'),
+                trailing: workspace.boardTasks.isEmpty && workspace.boardCards.isEmpty
+                    ? null
+                    : Text(
+                        '${workspace.boardTasks.length + workspace.boardCards.length}',
+                        style: Theme.of(context).textTheme.labelSmall,
+                      ),
+                onTap: () => onSelect(_WorkspaceSection.board, 'board'),
+              ),
+            ),
             const SizedBox(height: 8),
             Container(
               decoration: BoxDecoration(
@@ -7219,7 +8137,7 @@ class _SidebarSectionState extends State<_SidebarSection> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = Theme.of(context).extension<_WorkspacePalette>()!;
+    final palette = _WorkspacePalette.of(context);
     final showUnreadAttention = !widget.expanded && widget.hasUnread;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -7353,6 +8271,7 @@ class _WorkspaceConversation extends StatefulWidget {
     required this.initialFolderChoices,
     required this.onLoadFolders,
     required this.conversationFolderScope,
+    required this.onCreateBoardTask,
     required this.onEditConversationFolder,
     required this.mentionOptions,
     required this.onMentionSelected,
@@ -7463,6 +8382,7 @@ class _WorkspaceConversation extends StatefulWidget {
   final List<RepoChoice> initialFolderChoices;
   final Future<List<RepoChoice>> Function(String? path) onLoadFolders;
   final List<String> conversationFolderScope;
+  final Future<void> Function(String title) onCreateBoardTask;
   final Future<void> Function(List<String> folders) onEditConversationFolder;
   final List<WorkspaceMention> mentionOptions;
   final ValueChanged<WorkspaceMention> onMentionSelected;
@@ -7649,6 +8569,10 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
       await widget.onRequest({
         'action': 'abort_agent_task',
         'agent_id': agentId,
+        if (widget.section == _WorkspaceSection.channel)
+          'channel_id': widget.channelId,
+        if (widget.section == _WorkspaceSection.direct)
+          'recipient_pubkey': widget.directPeer,
       });
     } catch (_) {
       if (mounted) {
@@ -7743,6 +8667,9 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     );
     if (folders != null) await widget.onEditConversationFolder(folders);
   }
+
+  Future<void> _createBoardTask({String? title}) =>
+      widget.onCreateBoardTask(title ?? widget.title);
 
   Future<void> _editConversationPrompt() async {
     final controller = TextEditingController(
@@ -8858,7 +9785,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
     if (pubkey.startsWith('agent:')) {
       final id = pubkey.substring('agent:'.length);
       for (final agent in widget.workspace.agents) {
-        if (agent.id == id) return agent.name;
+        if (agent.id == id) return agent.displayLabel;
       }
       return workspaceFallbackAgentName(pubkey);
     }
@@ -9157,7 +10084,7 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
         onLoadOpenCodeModels: widget.onLoadOpenCodeModels,
       );
     }
-    final palette = Theme.of(context).extension<_WorkspacePalette>()!;
+    final palette = _WorkspacePalette.of(context);
     final visibleMessages = _visibleMessages;
     final mainLiveMessages = widget.typingStatuses
         .where(_showsMainLiveMessage)
@@ -9284,6 +10211,11 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                               icon: const Icon(Icons.open_in_browser),
                               tooltip: 'Open repository',
                             ),
+                          IconButton(
+                            onPressed: () => unawaited(_createBoardTask()),
+                            icon: const Icon(Icons.add_task_outlined),
+                            tooltip: 'Create board task',
+                          ),
                           TextButton.icon(
                             onPressed: () => unawaited(_openScratchpad()),
                             style: _scratchpadHasContent
@@ -9473,7 +10405,12 @@ class _WorkspaceConversationState extends State<_WorkspaceConversation> {
                                     ),
                                     onOpenMention: _showMentionDetails,
                                     compactWorkStatus: true,
-                                    onCancelAgentTask: _cancelAgentTask,
+                                    onCancelAgentTask:
+                                        widget.workspace.memberAdmins.contains(
+                                          widget.ownPubkey,
+                                        )
+                                        ? _cancelAgentTask
+                                        : null,
                                     cancelling:
                                         status.agentId != null &&
                                         _cancellingAgentIds.contains(
@@ -11578,9 +12515,7 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                           1 - _outlineController.value,
                         );
                         final mainHistoryBubble = !fitBubbleToContent;
-                        final palette = Theme.of(
-                          context,
-                        ).extension<_WorkspacePalette>()!;
+                        final palette = _WorkspacePalette.of(context);
                         final baseColor = mainHistoryBubble
                             ? palette.content
                             : widget.isLocalSender
@@ -11950,7 +12885,7 @@ class _WorkspaceFrogAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final circleRadius = radius - 2;
-    final palette = Theme.of(context).extension<_WorkspacePalette>()!;
+    final palette = _WorkspacePalette.of(context);
     final defaultColors = palette.monochrome
         ? (
             Theme.of(context).colorScheme.surfaceContainerHighest,
@@ -13071,7 +14006,7 @@ class _WorkspaceMentionDetails extends StatelessWidget {
     final agent = mention.kind == 'agent'
         ? workspace.agents.where((agent) => agent.id == mention.id).firstOrNull
         : null;
-    final title = agent?.name ?? _memberLabel();
+    final title = agent?.displayLabel ?? _memberLabel();
     final subtitle = agent == null
         ? (workspace.memberAdmins.contains(mention.id)
               ? 'Workspace admin'
@@ -13437,11 +14372,13 @@ class _WorkspaceContext extends StatelessWidget {
     required this.memberNames,
     required this.agents,
     required this.agentDirectory,
+    required this.canManageAgents,
     required this.typingStatuses,
     required this.typingLabels,
-    required this.onCancelAgentTask,
+    this.onCancelAgentTask,
     required this.respondingThreadIds,
     required this.onCompleteThread,
+    required this.onCreateBoardTask,
     required this.onRequestTopic,
     required this.topicOverride,
     this.threadTopic,
@@ -13504,11 +14441,13 @@ class _WorkspaceContext extends StatelessWidget {
   final Map<String, String> memberNames;
   final List<WorkspaceAgent> agents;
   final List<WorkspaceAgent> agentDirectory;
+  final bool canManageAgents;
   final List<WorkspaceTyping> typingStatuses;
   final List<String> typingLabels;
-  final Future<void> Function(String agentId) onCancelAgentTask;
+  final Future<void> Function(String agentId)? onCancelAgentTask;
   final Set<String> respondingThreadIds;
   final Future<void> Function() onCompleteThread;
+  final Future<void> Function() onCreateBoardTask;
   final VoidCallback onRequestTopic;
   final ValueNotifier<String?> topicOverride;
   final String? threadTopic;
@@ -13526,7 +14465,7 @@ class _WorkspaceContext extends StatelessWidget {
     if (pubkey.startsWith('agent:')) {
       final id = pubkey.substring('agent:'.length);
       for (final agent in agentDirectory) {
-        if (agent.id == id) return agent.name;
+        if (agent.id == id) return agent.displayLabel;
       }
       return workspaceFallbackAgentName(pubkey);
     }
@@ -13770,6 +14709,18 @@ class _WorkspaceContext extends StatelessWidget {
     });
   }
 
+  Future<void> _pickUpThreadWithHead() async {
+    final current = message;
+    if (current == null) return;
+    await onRequest({
+      'action': 'pick_up_thread_with_head',
+      if (current.channelId != null) 'channel_id': current.channelId,
+      if (current.recipientPubkey != null)
+        'recipient_pubkey': current.recipientPubkey,
+      'parent_id': current.id,
+    });
+  }
+
   Widget _messageRow(
     WorkspaceMessage message, {
     required bool groupedWithPrevious,
@@ -13873,6 +14824,11 @@ class _WorkspaceContext extends StatelessWidget {
                         ),
                       ),
                       IconButton(
+                        tooltip: 'Create board task',
+                        onPressed: () => unawaited(onCreateBoardTask()),
+                        icon: const Icon(Icons.add_task_outlined),
+                      ),
+                      IconButton(
                         tooltip: threadCompleted
                             ? 'Mark thread incomplete'
                             : 'Mark thread complete',
@@ -13928,6 +14884,12 @@ class _WorkspaceContext extends StatelessWidget {
                           onPressed: () =>
                               unawaited(_offerRelatedThread(context)),
                           icon: const _PulsingThreadLinkIcon(),
+                        ),
+                      if (canManageAgents && message != null)
+                        IconButton(
+                          tooltip: 'Continue with Coordinator',
+                          onPressed: () => unawaited(_pickUpThreadWithHead()),
+                          icon: const Icon(Icons.support_agent_outlined),
                         ),
                       IconButton(
                         tooltip: fullWindow
@@ -14046,7 +15008,11 @@ class _WorkspaceContext extends StatelessWidget {
                             authorName: _memberLabel(status.senderPubkey),
                             displayText: status.agentId == null
                                 ? null
-                                : 'Agent is working...',
+                                : '${agentDirectory
+                                        .where((agent) => agent.id == status.agentId)
+                                        .firstOrNull
+                                        ?.displayLabel ??
+                                    'Agent'} is working...',
                             onOpenMention: onOpenMention,
                             fitBubbleToContent: true,
                             onCancelAgentTask: onCancelAgentTask,
@@ -15127,7 +16093,9 @@ class _WorkspaceMentionOverlayState extends State<_WorkspaceMentionOverlay> {
   @override
   void didUpdateWidget(covariant _WorkspaceMentionOverlay oldWidget) {
     super.didUpdateWidget(oldWidget);
-    _syncOverlay();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _syncOverlay();
+    });
   }
 
   @override
@@ -17092,7 +18060,7 @@ class _WorkspaceAccessPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final palette = theme.extension<_WorkspacePalette>()!;
+    final palette = _WorkspacePalette.of(context);
     return ListView(
       padding: const EdgeInsets.all(24),
       children: [
@@ -21560,7 +22528,7 @@ class _ThemeSettings extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = Theme.of(context).extension<_WorkspacePalette>()!;
+    final palette = _WorkspacePalette.of(context);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),

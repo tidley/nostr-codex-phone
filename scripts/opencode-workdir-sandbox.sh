@@ -4,6 +4,7 @@ set -euo pipefail
 workdir="$(pwd -P)"
 read_root="${AGENT_READ_ROOT:-${AGENT_WORKDIR:-$(dirname "$workdir")}}"
 read_root="$(realpath "$read_root")"
+workspace_access="${OPENCODE_WORKSPACE_ACCESS:-read-write}"
 real_bin="${OPENCODE_REAL_BIN:-${OPENCODE_BIN_REAL:-opencode}}"
 if [[ "$real_bin" != /* ]]; then
   real_bin="$(command -v "$real_bin")"
@@ -76,7 +77,15 @@ add_destination_path "$read_root"
 add_destination_path "$workdir"
 add_destination_path "$(dirname "$real_bin")"
 args+=(--ro-bind "$read_root" "$read_root")
-args+=(--bind "$workdir" "$workdir")
+case "$workspace_access" in
+  read-only) args+=(--ro-bind "$workdir" "$workdir") ;;
+  read-write) args+=(--bind "$workdir" "$workdir") ;;
+  *)
+    printf 'OpenCode workspace access must be read-only or read-write: %s\n' "$workspace_access" >&2
+    exit 1
+    ;;
+esac
+
 args+=(--ro-bind "$real_bin" "$real_bin")
 if [[ -n "$node_runtime" ]]; then
   add_destination_path "$node_runtime"
