@@ -107,6 +107,72 @@ void main() {
     expect(find.text('Edit'), findsNothing);
   });
 
+  testWidgets('workspace board hides inactive task-state lanes', (tester) async {
+    final columns = [
+      ('backlog', 'Backlog'),
+      ('ready', 'Ready'),
+      ('progress', 'In Progress'),
+      ('review', 'Review'),
+      ('done', 'Done'),
+    ]
+        .map(
+          (column) => WorkspaceBoardColumn.fromJson({
+            'id': column.$1,
+            'name': column.$2,
+            'rank': 1024,
+          }),
+        )
+        .toList();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: WorkspaceBoard(
+            tasks: [
+              WorkspaceBoardTask(
+                id: 'task-1',
+                title: 'Build release',
+                conversationKey: 'engineering',
+                instruction: 'Build the release.',
+                folderScope: const [],
+                schedule: 'once',
+                state: 'scheduled',
+                boardColumn: '',
+                createdBy: 'owner',
+                createdAt: 10,
+                updatedAt: 20,
+              ),
+            ],
+            columns: columns,
+            timelineEntries: const [],
+            isAdmin: true,
+            conversationLabel: (key) => '# $key',
+            onCreate: () async {},
+            onEdit: (_) async {},
+            onRetry: (_) async {},
+            onCancel: (_) async {},
+            onMoveToScheduled: (_) async {},
+            onMove: (_, _) async {},
+            onOpenTaskThread: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    for (final label in [
+      'Backlog',
+      'Ready',
+      'In Progress',
+      'Review',
+      'Done',
+      'Scheduled',
+    ]) {
+      expect(find.text(label), findsOneWidget);
+    }
+    for (final label in ['Queued', 'Running', 'Integrating', 'Blocked']) {
+      expect(find.text(label), findsNothing);
+    }
+  });
+
   testWidgets('workspace board opens the linked task thread from details', (
     tester,
   ) async {

@@ -1113,6 +1113,13 @@ class _WorkspaceBoardState extends State<WorkspaceBoard> {
         latestEntries[entry.taskId] = entry;
       }
     }
+    String taskColumn(WorkspaceBoardTask task) =>
+        task.boardColumn.isEmpty ? task.state : task.boardColumn;
+    final boardStates = {
+      for (final column in widget.columns) column.name.toLowerCase(),
+      if (widget.columns.isEmpty) ..._states,
+      for (final task in tasks) taskColumn(task),
+    };
     return ValueListenableBuilder<String?>(
       valueListenable: selectedConversation,
       builder: (context, selected, _) => Column(
@@ -1163,27 +1170,25 @@ class _WorkspaceBoardState extends State<WorkspaceBoard> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  for (final state in {
-                    for (final column in widget.columns) column.name.toLowerCase(),
-                    ..._states,
-                  })
+                  for (final state in boardStates)
                     Builder(
                       builder: (context) {
                         final stateTasks = tasks
                             .where(
                               (task) =>
-                                  task.boardColumn == state &&
+                                  taskColumn(task) == state &&
                                   (selected == null ||
                                       task.conversationKey == selected),
                             )
                             .toList(growable: false);
                         final columnIds = widget.columns.where((column) => column.name.toLowerCase() == state).map((column) => column.id).toSet();
+                        final boardColumn = widget.columns.where((column) => column.name.toLowerCase() == state).firstOrNull;
                         final stateCards = widget.cards.where((card) => card.archivedAt == null && columnIds.contains(card.columnId)).toList();
                         return SizedBox(
                           width: 280,
                           child: DragTarget<WorkspaceBoardTask>(
                             onWillAccept: (task) =>
-                                isAdmin && _states.contains(state) && task?.boardColumn != state,
+                                isAdmin && _states.contains(state) && task != null && taskColumn(task) != state,
                             onAccept: (task) => onMove(task, state),
                             builder: (context, _, __) => Card(
                               margin: const EdgeInsets.all(4),
@@ -1195,7 +1200,7 @@ class _WorkspaceBoardState extends State<WorkspaceBoard> {
                                     Row(
                                       children: [
                                         Text(
-                                          _labels[state] ?? widget.columns.firstWhere((column) => column.name.toLowerCase() == state).name,
+                                          _labels[state] ?? boardColumn?.name ?? state,
                                           style: Theme.of(
                                             context,
                                           ).textTheme.titleSmall,
