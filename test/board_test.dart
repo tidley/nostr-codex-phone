@@ -107,7 +107,9 @@ void main() {
     expect(find.text('Edit'), findsNothing);
   });
 
-  testWidgets('workspace board hides inactive task-state lanes', (tester) async {
+  testWidgets('workspace board keeps six ordered workflow lanes', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1900, 800));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     final columns = [
       ('backlog', 'Backlog'),
       ('ready', 'Ready'),
@@ -158,18 +160,25 @@ void main() {
       ),
     );
 
-    for (final label in [
+    final laneHeaders = [
       'Backlog',
-      'Ready',
+      'Scheduled',
       'In Progress',
       'Review',
+      'Blocked',
       'Done',
-      'Scheduled',
-    ]) {
+    ];
+    for (final label in laneHeaders) {
       expect(find.text(label), findsOneWidget);
     }
-    for (final label in ['Queued', 'Running', 'Integrating', 'Blocked']) {
+    for (final label in ['Queued', 'Running', 'Integrating']) {
       expect(find.text(label), findsNothing);
+    }
+    final positions = laneHeaders
+        .map((label) => tester.getRect(find.text(label)).left)
+        .toList();
+    for (var index = 1; index < positions.length; index++) {
+      expect(positions[index], greaterThan(positions[index - 1]));
     }
   });
 
@@ -259,7 +268,7 @@ void main() {
       ),
     );
 
-    await tester.drag(find.text('Review release notes'), const Offset(1400, 0));
+    await tester.drag(find.text('Review release notes'), const Offset(1120, 0));
     await tester.pumpAndSettle();
 
     expect(moved?.id, 'task-1');

@@ -934,9 +934,9 @@ class WorkspaceBoard extends StatefulWidget {
 }
 
 class _WorkspaceBoardState extends State<WorkspaceBoard> {
-  static const _states = [
+  static const _lanes = [
+    'backlog',
     'scheduled',
-    'queued',
     'running',
     'integrating',
     'blocked',
@@ -948,6 +948,14 @@ class _WorkspaceBoardState extends State<WorkspaceBoard> {
     'running': 'Running',
     'integrating': 'Integrating',
     'integration_queued': 'Waiting for head',
+    'blocked': 'Blocked',
+    'done': 'Done',
+  };
+  static const _laneLabels = {
+    'backlog': 'Backlog',
+    'scheduled': 'Scheduled',
+    'running': 'In Progress',
+    'integrating': 'Review',
     'blocked': 'Blocked',
     'done': 'Done',
   };
@@ -1011,6 +1019,27 @@ class _WorkspaceBoardState extends State<WorkspaceBoard> {
     _columnsScrollTimer = null;
   }
 
+  String _taskLane(WorkspaceBoardTask task) => switch (
+    task.boardColumn.isEmpty ? task.state : task.boardColumn
+  ) {
+    'backlog' => 'backlog',
+    'ready' || 'scheduled' || 'queued' => 'scheduled',
+    'in progress' || 'in_progress' || 'running' => 'running',
+    'review' || 'integrating' || 'integration_queued' => 'integrating',
+    'blocked' => 'blocked',
+    'done' => 'done',
+    _ => 'scheduled',
+  };
+
+  String _cardLane(String columnName) => switch (columnName.toLowerCase()) {
+    'backlog' => 'backlog',
+    'ready' || 'scheduled' || 'queued' => 'scheduled',
+    'in progress' || 'in_progress' || 'running' => 'running',
+    'review' || 'integrating' => 'integrating',
+    'blocked' => 'blocked',
+    'done' => 'done',
+    _ => 'scheduled',
+  };
   String _timelineTimestamp(int seconds) {
     final date = DateTime.fromMillisecondsSinceEpoch(seconds * 1000).toLocal();
     return '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year} '
@@ -1113,12 +1142,8 @@ class _WorkspaceBoardState extends State<WorkspaceBoard> {
         latestEntries[entry.taskId] = entry;
       }
     }
-    String taskColumn(WorkspaceBoardTask task) =>
-        task.boardColumn.isEmpty ? task.state : task.boardColumn;
-    final boardStates = {
-      for (final column in widget.columns) column.name.toLowerCase(),
-      if (widget.columns.isEmpty) ..._states,
-      for (final task in tasks) taskColumn(task),
+    final cardLanes = {
+      for (final column in widget.columns) column.id: _cardLane(column.name),
     };
     return ValueListenableBuilder<String?>(
       valueListenable: selectedConversation,
@@ -1170,25 +1195,31 @@ class _WorkspaceBoardState extends State<WorkspaceBoard> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  for (final state in boardStates)
+                  for (final state in _lanes)
                     Builder(
                       builder: (context) {
                         final stateTasks = tasks
                             .where(
                               (task) =>
-                                  taskColumn(task) == state &&
+                                  _taskLane(task) == state &&
                                   (selected == null ||
                                       task.conversationKey == selected),
                             )
                             .toList(growable: false);
-                        final columnIds = widget.columns.where((column) => column.name.toLowerCase() == state).map((column) => column.id).toSet();
-                        final boardColumn = widget.columns.where((column) => column.name.toLowerCase() == state).firstOrNull;
-                        final stateCards = widget.cards.where((card) => card.archivedAt == null && columnIds.contains(card.columnId)).toList();
+                        final stateCards = widget.cards
+                            .where(
+                              (card) =>
+                                  card.archivedAt == null &&
+                                  cardLanes[card.columnId] == state,
+                            )
+                            .toList();
                         return SizedBox(
                           width: 280,
                           child: DragTarget<WorkspaceBoardTask>(
                             onWillAccept: (task) =>
-                                isAdmin && _states.contains(state) && task != null && taskColumn(task) != state,
+                                isAdmin &&
+                                state != 'backlog' &&
+                                task != null && _taskLane(task) != state,
                             onAccept: (task) => onMove(task, state),
                             builder: (context, _, __) => Card(
                               margin: const EdgeInsets.all(4),
@@ -1200,7 +1231,7 @@ class _WorkspaceBoardState extends State<WorkspaceBoard> {
                                     Row(
                                       children: [
                                         Text(
-                                          _labels[state] ?? boardColumn?.name ?? state,
+                                          _laneLabels[state] ?? state,
                                           style: Theme.of(
                                             context,
                                           ).textTheme.titleSmall,

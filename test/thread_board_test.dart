@@ -106,9 +106,9 @@ void main() {
     await show('integrating');
     await tester.pump();
     final cardRect = tester.getRect(find.byKey(const ValueKey('board-card-card-1')));
-    final integratingRect = tester.getRect(find.text('Integrating'));
-    expect(cardRect.left, greaterThanOrEqualTo(integratingRect.left));
-    expect(cardRect.left - integratingRect.left, lessThan(30));
+    final reviewRect = tester.getRect(find.text('Review'));
+    expect(cardRect.left, greaterThanOrEqualTo(reviewRect.left));
+    expect(cardRect.left - reviewRect.left, lessThan(30));
     expect(find.byType(Draggable<WorkspaceBoardTask>), findsNothing);
   });
 }
