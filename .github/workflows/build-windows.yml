@@ -23,6 +23,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable

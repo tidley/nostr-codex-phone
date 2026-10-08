@@ -28,6 +28,10 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable

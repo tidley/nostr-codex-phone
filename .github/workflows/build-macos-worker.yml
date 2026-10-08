@@ -21,6 +21,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
       - name: Build Apple Silicon worker
         run: cargo build --release --manifest-path rust/Cargo.toml --bin nostr-codex-server
 

@@ -259,6 +259,24 @@ pub struct WorkspaceThreadAgentTurn {
     pub agent_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedConversationBinding {
+    pub conversation_id: String,
+    pub ready: bool,
+    pub closed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedThreadBinding {
+    pub conversation_id: String,
+    pub thread_id: String,
+    pub last_activity_at: i64,
+    pub ready: bool,
+    pub closed_at: Option<i64>,
+}
+
+const EMBEDDED_THREAD_EXPIRY_SECONDS: i64 = 7 * 24 * 60 * 60;
+
 pub struct WorkspaceStore {
     conn: Connection,
 }
@@ -328,14 +346,221 @@ impl WorkspaceStore {
         let store = Self::migrate(conn)?;
         store.init_board_schema()?;
         store.init_agent_handoff_schema()?;
+        store.init_herdr_schema()?;
         Ok(store)
     }
 
     /// Opens an already initialized workspace for a queued agent turn.
     pub fn open_existing(path: &Path) -> Result<Self> {
-        let store = Self { conn: Self::open_connection(path)? };
+        let store = Self {
+            conn: Self::open_connection(path)?,
+        };
         store.init_agent_handoff_schema()?;
+        store.init_herdr_schema()?;
         Ok(store)
+    }
+
+    fn init_herdr_schema(&self) -> Result<()> {
+        self.conn.execute_batch(
+             "CREATE TABLE IF NOT EXISTS herdr_embedded_conversation_bindings (
+                 conversation_id TEXT PRIMARY KEY,
+                 ready INTEGER NOT NULL DEFAULT 0,
+                 closed_at INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS herdr_embedded_thread_bindings (
+                 conversation_id TEXT NOT NULL,
+                 thread_id TEXT NOT NULL,
+                 last_activity_at INTEGER NOT NULL,
+                 ready INTEGER NOT NULL DEFAULT 0,
+                 closed_at INTEGER,
+                 PRIMARY KEY (conversation_id, thread_id)
+             );
+             CREATE INDEX IF NOT EXISTS herdr_embedded_thread_bindings_expiry
+                 ON herdr_embedded_thread_bindings(last_activity_at);
+             CREATE TABLE IF NOT EXISTS herdr_worker_execution_attempts (
+                  delivery_id TEXT NOT NULL,
+                  execution_attempt TEXT NOT NULL,
+                  turn_id TEXT NOT NULL UNIQUE,
+                  PRIMARY KEY (delivery_id, execution_attempt)
+              );",
+        )?;
+        Ok(())
+    }
+
+    pub fn claim_embedded_conversation_binding(&self, conversation_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO herdr_embedded_conversation_bindings (conversation_id, ready, closed_at)
+             VALUES (?1, 0, NULL)
+             ON CONFLICT(conversation_id) DO UPDATE SET ready = 0, closed_at = NULL",
+            [required("embedded conversation ID", conversation_id)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_embedded_conversation_binding_ready(&self, conversation_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE herdr_embedded_conversation_bindings SET ready = 1 WHERE conversation_id = ?1",
+            [required("embedded conversation ID", conversation_id)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn invalidate_embedded_conversation_binding(&self, conversation_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE herdr_embedded_conversation_bindings SET ready = 0 WHERE conversation_id = ?1",
+            [required("embedded conversation ID", conversation_id)?],
+        )?;
+        Ok(())
+    }
+
+    /// Event subscriptions are lossy. Once their continuity is unknown, no
+    /// persisted embedded target may be treated as ready.
+    pub fn invalidate_all_embedded_bindings(&self) -> Result<()> {
+        self.conn.execute(
+            "UPDATE herdr_embedded_conversation_bindings SET ready = 0",
+            [],
+        )?;
+        self.conn.execute(
+            "UPDATE herdr_embedded_thread_bindings SET ready = 0",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn embedded_conversation_binding(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<EmbeddedConversationBinding>> {
+        self.conn
+            .query_row(
+                "SELECT conversation_id, ready, closed_at FROM herdr_embedded_conversation_bindings WHERE conversation_id = ?1",
+                [required("embedded conversation ID", conversation_id)?],
+                |row| {
+                    Ok(EmbeddedConversationBinding {
+                        conversation_id: row.get(0)?,
+                        ready: row.get(1)?,
+                        closed_at: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn claim_embedded_thread_binding(
+        &self,
+        conversation_id: &str,
+        thread_id: &str,
+        last_activity_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO herdr_embedded_thread_bindings (conversation_id, thread_id, last_activity_at, ready, closed_at)
+             VALUES (?1, ?2, ?3, 0, NULL)
+             ON CONFLICT(conversation_id, thread_id) DO UPDATE SET last_activity_at = excluded.last_activity_at, ready = 0, closed_at = NULL",
+            params![required("embedded conversation ID", conversation_id)?, required("embedded thread ID", thread_id)?, last_activity_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_embedded_thread_binding_ready(
+        &self,
+        conversation_id: &str,
+        thread_id: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE herdr_embedded_thread_bindings SET ready = 1 WHERE conversation_id = ?1 AND thread_id = ?2",
+            params![required("embedded conversation ID", conversation_id)?, required("embedded thread ID", thread_id)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn invalidate_embedded_thread_binding(
+        &self,
+        conversation_id: &str,
+        thread_id: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE herdr_embedded_thread_bindings SET ready = 0 WHERE conversation_id = ?1 AND thread_id = ?2",
+            params![required("embedded conversation ID", conversation_id)?, required("embedded thread ID", thread_id)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn close_embedded_thread_binding(
+        &self,
+        conversation_id: &str,
+        thread_id: &str,
+        closed_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE herdr_embedded_thread_bindings SET ready = 0, closed_at = ?3 WHERE conversation_id = ?1 AND thread_id = ?2",
+            params![required("embedded conversation ID", conversation_id)?, required("embedded thread ID", thread_id)?, closed_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn expired_embedded_threads(&self, current_time: i64) -> Result<Vec<EmbeddedThreadBinding>> {
+        self.conn
+            .prepare(
+                "SELECT conversation_id, thread_id, last_activity_at, ready, closed_at
+                 FROM herdr_embedded_thread_bindings
+                 WHERE closed_at IS NULL AND last_activity_at <= ?1",
+            )?
+            .query_map([current_time - EMBEDDED_THREAD_EXPIRY_SECONDS], |row| {
+                Ok(EmbeddedThreadBinding {
+                    conversation_id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    last_activity_at: row.get(2)?,
+                    ready: row.get(3)?,
+                    closed_at: row.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn embedded_thread_binding(
+        &self,
+        conversation_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<EmbeddedThreadBinding>> {
+        self.conn
+            .query_row(
+                "SELECT conversation_id, thread_id, last_activity_at, ready, closed_at FROM herdr_embedded_thread_bindings WHERE conversation_id = ?1 AND thread_id = ?2",
+                params![required("embedded conversation ID", conversation_id)?, required("embedded thread ID", thread_id)?],
+                |row| {
+                    Ok(EmbeddedThreadBinding {
+                        conversation_id: row.get(0)?,
+                        thread_id: row.get(1)?,
+                        last_activity_at: row.get(2)?,
+                        ready: row.get(3)?,
+                        closed_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn worker_turn_id_for_execution_attempt(
+        &self,
+        delivery_id: &str,
+        execution_attempt: &str,
+    ) -> Result<String> {
+        let delivery_id = required("worker delivery ID", delivery_id)?;
+        let execution_attempt = required("worker execution attempt", execution_attempt)?;
+        let turn_id = format!("worker:{delivery_id}:{execution_attempt}");
+        self.conn.execute(
+            "INSERT OR IGNORE INTO herdr_worker_execution_attempts (delivery_id, execution_attempt, turn_id) VALUES (?1, ?2, ?3)",
+            params![delivery_id, execution_attempt, turn_id],
+        )?;
+        self.conn
+            .query_row(
+                "SELECT turn_id FROM herdr_worker_execution_attempts WHERE delivery_id = ?1 AND execution_attempt = ?2",
+                params![delivery_id, execution_attempt],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     fn init_agent_handoff_schema(&self) -> Result<()> {
@@ -517,7 +742,10 @@ impl WorkspaceStore {
         )?;
         self.ensure_board_card_column("estimate", "INTEGER")?;
         self.ensure_board_card_column("due_at", "INTEGER")?;
-        self.ensure_board_card_column("source_thread_id", "TEXT REFERENCES workspace_messages(id) ON DELETE SET NULL")?;
+        self.ensure_board_card_column(
+            "source_thread_id",
+            "TEXT REFERENCES workspace_messages(id) ON DELETE SET NULL",
+        )?;
         self.conn.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS workspace_board_cards_source_thread ON workspace_board_cards(source_thread_id) WHERE source_thread_id IS NOT NULL;")?;
         let column_count: i64 =
             self.conn
@@ -845,7 +1073,10 @@ impl WorkspaceStore {
                 [],
             )?;
         }
-        if !conversation_preprompt_columns.iter().any(|column| column == "model") {
+        if !conversation_preprompt_columns
+            .iter()
+            .any(|column| column == "model")
+        {
             conn.execute(
                 "ALTER TABLE workspace_conversation_preprompts ADD COLUMN model TEXT",
                 [],
@@ -883,8 +1114,8 @@ impl WorkspaceStore {
         }
         if !has_thread_root_session_key
             && !conversation_session_columns
-            .iter()
-            .any(|column| column == "session_context")
+                .iter()
+                .any(|column| column == "session_context")
         {
             conn.execute(
                 "ALTER TABLE workspace_conversation_sessions ADD COLUMN session_context TEXT",
@@ -1388,7 +1619,14 @@ impl WorkspaceStore {
         column_id: &str,
         priority: &str,
     ) -> Result<WorkspaceBoardCard> {
-        self.create_board_card_with_source(created_by, title, description, column_id, priority, None)
+        self.create_board_card_with_source(
+            created_by,
+            title,
+            description,
+            column_id,
+            priority,
+            None,
+        )
     }
 
     fn create_board_card_with_source(
@@ -1441,20 +1679,43 @@ impl WorkspaceStore {
             )?;
             self.append_board_card_activity_at(&card.id, "created", "Card created", timestamp)?;
             if source_thread_id.is_some() {
-                self.append_board_card_activity_at(&card.id, "created_from_thread", "Created from thread", timestamp)?;
+                self.append_board_card_activity_at(
+                    &card.id,
+                    "created_from_thread",
+                    "Created from thread",
+                    timestamp,
+                )?;
             }
             Ok(card)
         })();
         self.finish_board_transaction(result)
     }
 
-    pub fn create_board_card_from_thread(&self, root_id: &str, topic: &str) -> Result<Option<WorkspaceBoardCard>> {
+    pub fn create_board_card_from_thread(
+        &self,
+        root_id: &str,
+        topic: &str,
+    ) -> Result<Option<WorkspaceBoardCard>> {
         let root_id = required("thread root ID", root_id)?;
         let topic = required("thread topic", topic)?;
-        let root = self.message_by_id(&root_id)?.context("thread root does not exist")?;
-        if root.parent_id.is_some() || root.deleted_at.is_some() { bail!("thread root must be a live root message"); }
-        if let Some(card_id) = self.conn.query_row("SELECT id FROM workspace_board_cards WHERE source_thread_id = ?1", [&root_id], |row| row.get::<_, String>(0)).optional()? {
-            let card = self.board_card(&card_id)?.context("thread card does not exist")?;
+        let root = self
+            .message_by_id(&root_id)?
+            .context("thread root does not exist")?;
+        if root.parent_id.is_some() || root.deleted_at.is_some() {
+            bail!("thread root must be a live root message");
+        }
+        if let Some(card_id) = self
+            .conn
+            .query_row(
+                "SELECT id FROM workspace_board_cards WHERE source_thread_id = ?1",
+                [&root_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            let card = self
+                .board_card(&card_id)?
+                .context("thread card does not exist")?;
             if card.title != topic {
                 self.conn.execute_batch("BEGIN IMMEDIATE")?;
                 let result = (|| {
@@ -1466,32 +1727,61 @@ impl WorkspaceStore {
             return self.board_card(&card_id);
         }
         let replies = self.thread_messages(&root_id)?;
-        let content_replies = replies.iter().filter(|message| {
-            let body = message.body.trim();
-            message.parent_id.as_deref() == Some(root_id.as_str())
-                && message.deleted_at.is_none()
-                && !body.starts_with("[[THREAD_")
-                && !body.starts_with("[[RELATED_THREAD")
-                && (!body.is_empty() || !message.attachments.is_empty())
-        }).count();
+        let content_replies = replies
+            .iter()
+            .filter(|message| {
+                let body = message.body.trim();
+                message.parent_id.as_deref() == Some(root_id.as_str())
+                    && message.deleted_at.is_none()
+                    && !body.starts_with("[[THREAD_")
+                    && !body.starts_with("[[RELATED_THREAD")
+                    && (!body.is_empty() || !message.attachments.is_empty())
+            })
+            .count();
         if content_replies < 3 {
             return Ok(None);
         }
-        let backlog = self.board_columns()?.into_iter().find(|column| column.name == "Backlog").context("Backlog board column is missing")?;
-        self.create_board_card_with_source(&root.sender_pubkey, &topic, &root.body, &backlog.id, "none", Some(&root_id)).map(Some)
+        let backlog = self
+            .board_columns()?
+            .into_iter()
+            .find(|column| column.name == "Backlog")
+            .context("Backlog board column is missing")?;
+        self.create_board_card_with_source(
+            &root.sender_pubkey,
+            &topic,
+            &root.body,
+            &backlog.id,
+            "none",
+            Some(&root_id),
+        )
+        .map(Some)
     }
 
     pub fn board_cards(&self) -> Result<Vec<WorkspaceBoardCard>> {
         let ids = self.conn.prepare("SELECT id FROM workspace_board_cards WHERE archived_at IS NULL ORDER BY column_id, rank, id")?
             .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        ids.iter().map(|id| self.board_card(id)?.context("board card disappeared")).collect()
+        ids.iter()
+            .map(|id| self.board_card(id)?.context("board card disappeared"))
+            .collect()
     }
 
     pub fn integrate_thread_board_card(&self, root_id: &str) -> Result<bool> {
-        let Some(card) = self.board_cards()?.into_iter().find(|card| card.source_thread_id.as_deref() == Some(root_id)) else { return Ok(false); };
+        let Some(card) = self
+            .board_cards()?
+            .into_iter()
+            .find(|card| card.source_thread_id.as_deref() == Some(root_id))
+        else {
+            return Ok(false);
+        };
         self.conn.execute("INSERT OR IGNORE INTO workspace_board_columns (id, name, rank) VALUES (?1, 'Integrating', 4608)", [new_id()])?;
-        let column = self.board_columns()?.into_iter().find(|column| column.name == "Integrating").context("Integrating board column is missing")?;
-        if card.column_id == column.id { return Ok(false); }
+        let column = self
+            .board_columns()?
+            .into_iter()
+            .find(|column| column.name == "Integrating")
+            .context("Integrating board column is missing")?;
+        if card.column_id == column.id {
+            return Ok(false);
+        }
         self.move_board_card(&card.id, &column.id, None)?;
         Ok(true)
     }
@@ -1518,13 +1808,14 @@ impl WorkspaceStore {
     }
 
     pub fn board_cards_for_member(&self, member: &str) -> Result<Vec<WorkspaceBoardCard>> {
-        self.board_cards()?.into_iter().filter_map(|card| {
-            match self.can_read_board_card(member, &card) {
+        self.board_cards()?
+            .into_iter()
+            .filter_map(|card| match self.can_read_board_card(member, &card) {
                 Ok(true) => Some(Ok(card)),
                 Ok(false) => None,
                 Err(error) => Some(Err(error)),
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     pub fn move_board_card(
@@ -3029,7 +3320,11 @@ impl WorkspaceStore {
 
     pub fn default_model(&self) -> Result<Option<String>> {
         self.conn
-            .query_row("SELECT value FROM workspace_settings WHERE key = 'default_model'", [], |row| row.get(0))
+            .query_row(
+                "SELECT value FROM workspace_settings WHERE key = 'default_model'",
+                [],
+                |row| row.get(0),
+            )
             .optional()
             .map_err(Into::into)
     }
@@ -3080,7 +3375,11 @@ impl WorkspaceStore {
         ).optional()?.unwrap_or(false);
         let agent_routing_enabled = agent_routing_enabled.unwrap_or(existing_routing_enabled);
         self.conn.execute("DELETE FROM workspace_conversation_preprompts WHERE channel_id IS ?1 AND member_pubkey IS ?2 AND peer_pubkey IS ?3", params![channel_id, member, peer])?;
-        if !preprompt.is_empty() || !folder_scope.is_empty() || agent_routing_enabled || model.is_some() {
+        if !preprompt.is_empty()
+            || !folder_scope.is_empty()
+            || agent_routing_enabled
+            || model.is_some()
+        {
             self.conn.execute("INSERT INTO workspace_conversation_preprompts (channel_id, member_pubkey, peer_pubkey, preprompt, folder_scope_json, agent_routing_enabled, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![channel_id, member, peer, preprompt, serde_json::to_string(folder_scope)?, agent_routing_enabled, model])?;
         }
         Ok(())
@@ -4203,7 +4502,8 @@ impl WorkspaceStore {
             bail!("thread parent belongs to another channel")
         }
         if let Some(recipient) = recipient {
-            if !sender.starts_with("agent:") && !parent_sender.starts_with("agent:")
+            if !sender.starts_with("agent:")
+                && !parent_sender.starts_with("agent:")
                 && !((parent_sender == sender && parent_recipient.as_deref() == Some(recipient))
                     || (parent_sender == recipient && parent_recipient.as_deref() == Some(sender)))
             {
@@ -4468,6 +4768,80 @@ mod tests {
     use super::*;
 
     use anyhow::anyhow;
+
+    #[test]
+    fn execution_attempt_turn_ids_are_durable_and_distinct_within_a_delivery() {
+        let database = tempfile::NamedTempFile::new().unwrap();
+        let store = WorkspaceStore::open(database.path()).unwrap();
+        store.add_member("owner").unwrap();
+        let channel = store.create_channel("engineering", "owner").unwrap();
+        let first_delivery = store
+            .add_channel_message("owner", &channel.id, "same text", &[], &[], None)
+            .unwrap();
+        let second_delivery = store
+            .add_channel_message("owner", &channel.id, "same text", &[], &[], None)
+            .unwrap();
+
+        let first = store
+            .worker_turn_id_for_execution_attempt(&first_delivery.id, "agent:worker-1:initial")
+            .unwrap();
+        let history_first = store
+            .worker_turn_id_for_execution_attempt(&first_delivery.id, "agent:worker-1:history:0")
+            .unwrap();
+        let history_second = store
+            .worker_turn_id_for_execution_attempt(&first_delivery.id, "agent:worker-1:history:1")
+            .unwrap();
+        let continuation = store
+            .worker_turn_id_for_execution_attempt(&first_delivery.id, "agent:worker-1:continuation")
+            .unwrap();
+        let second = store
+            .worker_turn_id_for_execution_attempt(&second_delivery.id, "agent:worker-1:initial")
+            .unwrap();
+        drop(store);
+        let reopened = WorkspaceStore::open(database.path()).unwrap();
+        let retried = reopened
+            .worker_turn_id_for_execution_attempt(&first_delivery.id, "agent:worker-1:initial")
+            .unwrap();
+
+        assert_eq!(first, retried);
+        assert_ne!(first, history_first);
+        assert_ne!(history_first, history_second);
+        assert_ne!(history_second, continuation);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn embedded_thread_binding_is_keyed_by_conversation_and_thread() {
+        let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
+
+        store
+            .claim_embedded_thread_binding("conversation-1", "thread-1", 100)
+            .unwrap();
+        store
+            .mark_embedded_thread_binding_ready("conversation-1", "thread-1")
+            .unwrap();
+        store
+            .claim_embedded_thread_binding("conversation-2", "thread-1", 200)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .embedded_thread_binding("conversation-1", "thread-1")
+                .unwrap()
+                .unwrap()
+                .ready,
+            true
+        );
+        assert_eq!(
+            store
+                .embedded_thread_binding("conversation-2", "thread-1")
+                .unwrap()
+                .unwrap()
+                .ready,
+            false
+        );
+    }
+
     #[test]
     fn persists_channels_messages_and_threads() {
         let path = tempfile::NamedTempFile::new().unwrap();
@@ -4607,31 +4981,91 @@ mod tests {
         let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
         store.add_member("owner").unwrap();
         let channel = store.create_channel("engineering", "owner").unwrap();
-        let root = store.add_channel_message("owner", &channel.id, "root", &[], &[], None).unwrap();
-        for body in ["first", "second", " [[THREAD_TOPIC: title]]", "[[THREAD_TOPIC_REQUEST]]", "[[RELATED_THREAD: other]]"] {
-            store.add_channel_message("owner", &channel.id, body, &[], &[], Some(&root.id)).unwrap();
+        let root = store
+            .add_channel_message("owner", &channel.id, "root", &[], &[], None)
+            .unwrap();
+        for body in [
+            "first",
+            "second",
+            " [[THREAD_TOPIC: title]]",
+            "[[THREAD_TOPIC_REQUEST]]",
+            "[[RELATED_THREAD: other]]",
+        ] {
+            store
+                .add_channel_message("owner", &channel.id, body, &[], &[], Some(&root.id))
+                .unwrap();
         }
-        let deleted = store.add_channel_message("owner", &channel.id, "deleted", &[], &[], Some(&root.id)).unwrap();
+        let deleted = store
+            .add_channel_message("owner", &channel.id, "deleted", &[], &[], Some(&root.id))
+            .unwrap();
         store.delete_message("owner", &deleted.id).unwrap();
-        assert!(store.create_board_card_from_thread(&root.id, "Title").unwrap().is_none());
-        store.add_channel_message("owner", &channel.id, "[[ordinary linked text]] is content", &[], &[], Some(&root.id)).unwrap();
-        let card = store.create_board_card_from_thread(&root.id, "Title").unwrap().unwrap();
+        assert!(store
+            .create_board_card_from_thread(&root.id, "Title")
+            .unwrap()
+            .is_none());
+        store
+            .add_channel_message(
+                "owner",
+                &channel.id,
+                "[[ordinary linked text]] is content",
+                &[],
+                &[],
+                Some(&root.id),
+            )
+            .unwrap();
+        let card = store
+            .create_board_card_from_thread(&root.id, "Title")
+            .unwrap()
+            .unwrap();
         assert_eq!(card.source_thread_id.as_deref(), Some(root.id.as_str()));
         assert_eq!(card.column_id, store.board_columns().unwrap()[0].id);
         let revision = store.revision().unwrap();
-        assert_eq!(store.create_board_card_from_thread(&root.id, "Title").unwrap().unwrap(), card);
+        assert_eq!(
+            store
+                .create_board_card_from_thread(&root.id, "Title")
+                .unwrap()
+                .unwrap(),
+            card
+        );
         assert_eq!(store.revision().unwrap(), revision);
-        let renamed = store.create_board_card_from_thread(&root.id, "New title").unwrap().unwrap();
+        let renamed = store
+            .create_board_card_from_thread(&root.id, "New title")
+            .unwrap()
+            .unwrap();
         assert_eq!(renamed.id, card.id);
         assert_eq!(renamed.title, "New title");
         assert!(store.integrate_thread_board_card(&root.id).unwrap());
         let history = store.board_card_activity(&card.id).unwrap();
         assert!(!store.integrate_thread_board_card(&root.id).unwrap());
         assert_eq!(store.board_card_activity(&card.id).unwrap(), history);
-        assert_eq!(store.create_board_card_from_thread(&root.id, "Latest title").unwrap().unwrap().column_id, store.board_columns().unwrap().into_iter().find(|column| column.name == "Integrating").unwrap().id);
+        assert_eq!(
+            store
+                .create_board_card_from_thread(&root.id, "Latest title")
+                .unwrap()
+                .unwrap()
+                .column_id,
+            store
+                .board_columns()
+                .unwrap()
+                .into_iter()
+                .find(|column| column.name == "Integrating")
+                .unwrap()
+                .id
+        );
         assert_eq!(store.board_cards().unwrap().len(), 1);
-        for table in ["workspace_board_tasks", "workspace_board_runs", "workspace_board_task_workstreams"] {
-            assert_eq!(store.conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        for table in [
+            "workspace_board_tasks",
+            "workspace_board_runs",
+            "workspace_board_task_workstreams",
+        ] {
+            assert_eq!(
+                store
+                    .conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
         }
     }
 
@@ -4646,9 +5080,19 @@ mod tests {
         let card = store.board_card("existing").unwrap().unwrap();
         assert_eq!(card.title, "Keep me");
         assert_eq!(card.source_thread_id, None);
-        assert!(store.conn.prepare("SELECT source_thread_id FROM workspace_board_cards").is_ok());
+        assert!(store
+            .conn
+            .prepare("SELECT source_thread_id FROM workspace_board_cards")
+            .is_ok());
         drop(store);
-        assert_eq!(WorkspaceStore::open(file.path()).unwrap().board_card("existing").unwrap().unwrap(), card);
+        assert_eq!(
+            WorkspaceStore::open(file.path())
+                .unwrap()
+                .board_card("existing")
+                .unwrap()
+                .unwrap(),
+            card
+        );
     }
 
     #[test]
@@ -4656,11 +5100,19 @@ mod tests {
         let store = WorkspaceStore::open(Path::new(":memory:")).unwrap();
         store.add_member("owner").unwrap();
         let channel = store.create_channel("engineering", "owner").unwrap();
-        let root = store.add_channel_message("owner", &channel.id, "root", &[], &[], None).unwrap();
-        for _ in 0..3 { store.add_channel_message("owner", &channel.id, "reply", &[], &[], Some(&root.id)).unwrap(); }
+        let root = store
+            .add_channel_message("owner", &channel.id, "root", &[], &[], None)
+            .unwrap();
+        for _ in 0..3 {
+            store
+                .add_channel_message("owner", &channel.id, "reply", &[], &[], Some(&root.id))
+                .unwrap();
+        }
         store.conn.execute_batch("CREATE TRIGGER reject_thread_link_insert BEFORE INSERT ON workspace_board_cards WHEN NEW.source_thread_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'test link failure'); END;
             CREATE TRIGGER reject_thread_link_update BEFORE UPDATE OF source_thread_id ON workspace_board_cards BEGIN SELECT RAISE(ABORT, 'test link failure'); END;").unwrap();
-        assert!(store.create_board_card_from_thread(&root.id, "title").is_err());
+        assert!(store
+            .create_board_card_from_thread(&root.id, "title")
+            .is_err());
         assert!(store.board_cards().unwrap().is_empty());
     }
 
@@ -6065,10 +6517,26 @@ mod tests {
         store.add_member("member").unwrap();
         let channel = store.create_channel("engineering", "owner").unwrap();
         store
-            .set_conversation_preprompt(Some(&channel.id), None, None, "Review carefully.", &[], Some(true), None)
+            .set_conversation_preprompt(
+                Some(&channel.id),
+                None,
+                None,
+                "Review carefully.",
+                &[],
+                Some(true),
+                None,
+            )
             .unwrap();
         store
-            .set_conversation_preprompt(None, Some("member"), Some("owner"), "Be concise.", &[], None, None)
+            .set_conversation_preprompt(
+                None,
+                Some("member"),
+                Some("owner"),
+                "Be concise.",
+                &[],
+                None,
+                None,
+            )
             .unwrap();
         drop(store);
 
@@ -6160,12 +6628,7 @@ mod tests {
         assert_eq!(channel_session.session_error.as_deref(), Some("offline"));
         assert_eq!(channel_session.session_context, None);
         store
-            .set_conversation_session_context(
-                Some(&channel.id),
-                None,
-                None,
-                "scope-17-abcdef",
-            )
+            .set_conversation_session_context(Some(&channel.id), None, None, "scope-17-abcdef")
             .unwrap();
         assert_eq!(
             store

@@ -4,6 +4,7 @@ pub mod blossom;
 pub mod codex;
 pub mod fips_harness;
 mod frb_generated;
+pub mod herdr_runtime;
 pub mod invite;
 pub mod nostr_client;
 pub mod protocol;

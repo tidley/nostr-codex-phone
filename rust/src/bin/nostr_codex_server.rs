@@ -2,10 +2,12 @@ use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs::{self, File};
+use std::future::Future;
 use std::io::{BufRead, BufReader};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -36,6 +38,10 @@ use rust_lib_nostr_codex_phone::codex::{
     run_codex_session_with_cancel_and_events, AgentBackend, CodexCancelToken, CodexConfig,
     CodexRunResult, CodexTokenUsage, OpenCodeModel, OpenCodeSessionInfo, OpenCodeWorkspaceAccess,
 };
+use rust_lib_nostr_codex_phone::herdr_runtime::{
+    EmbeddedHerdrRuntime, EmbeddedRuntime, EmbeddedTargetStatus, EmbeddedTurnStatus,
+};
+use herdr::{CancellationToken as HerdrCancellationToken, LocalRuntime, RuntimeConfig as HerdrRuntimeConfig, RuntimeError, RuntimeEvent, SessionSelection, TargetExecutionConfig};
 use rust_lib_nostr_codex_phone::invite::InviteStore;
 use rust_lib_nostr_codex_phone::nostr_client::{
     default_relays, IncomingMessage, NostrConfig, NostrMessenger,
@@ -54,8 +60,8 @@ use rust_lib_nostr_codex_phone::transcribe::{
     DownloadedAudio, TranscribeConfig,
 };
 use rust_lib_nostr_codex_phone::workspace::{
-    WorkspaceAgent, WorkspaceAgentOpenCodeProfile, WorkspaceBoardTaskWorkstream, WorkspaceConversationAgent,
-    WorkspaceConversationPreprompt, WorkspaceMessage, WorkspaceStore,
+    WorkspaceAgent, WorkspaceAgentOpenCodeProfile, WorkspaceBoardTaskWorkstream,
+    WorkspaceConversationAgent, WorkspaceConversationPreprompt, WorkspaceMessage, WorkspaceStore,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
@@ -88,6 +94,7 @@ const CODEX_SERVICE_ISSUE_MESSAGE: &str =
 // Workspace agent queues are serial, so a stalled turn must not block later
 // mentions for longer than the normal interactive agent deadline.
 const WORKSPACE_AGENT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const EMBEDDED_INTERRUPT_SETTLE_TIMEOUT: Duration = Duration::from_secs(1);
 // Let a user finish a short burst of sends before opening an OpenCode turn.
 // The messages remain individual workspace records, but share one request.
 const CODEX_STATUS_MIN_INTERVAL: Duration = Duration::from_secs(8);
@@ -429,8 +436,19 @@ type ActiveTurnKey = (String, WorkspaceConversation);
 struct ActiveTurn {
     cancel_token: CodexCancelToken,
     parent_id: Option<String>,
+    herdr_turn: Option<ActiveHerdrTurn>,
     // Retain verified tool evidence across continuations until reply persistence.
     verified_git_commit: bool,
+}
+
+#[derive(Clone)]
+enum ActiveHerdrTurn {
+    Embedded {
+        runtime: Rc<dyn EmbeddedRuntime>,
+        conversation_id: String,
+        thread_id: Option<String>,
+        turn_id: String,
+    },
 }
 
 impl ActiveTurn {
@@ -438,7 +456,25 @@ impl ActiveTurn {
         Self {
             cancel_token: CodexCancelToken::new(),
             parent_id: None,
+            herdr_turn: None,
             verified_git_commit: false,
+        }
+    }
+}
+
+async fn interrupt_active_herdr_turn(active_turn: &ActiveTurn) -> Result<()> {
+    let Some(turn) = active_turn.herdr_turn.as_ref() else {
+        return Ok(());
+    };
+    match turn {
+        ActiveHerdrTurn::Embedded { runtime, conversation_id, thread_id, turn_id } => {
+            let result = runtime
+                .interrupt_turn(conversation_id, thread_id.as_deref(), turn_id)
+                .await?;
+            if result.status != EmbeddedTurnStatus::Interrupted {
+                bail!("embedded Herdr cancellation did not settle as interrupted");
+            }
+            Ok(())
         }
     }
 }
@@ -545,7 +581,6 @@ fn cancel_active_turn_for_abort(
         .get(&key)
         .cloned()
         .expect("selected active turn is present");
-    active_turn.cancel_token.cancel();
     Ok(Some((key, active_turn)))
 }
 
@@ -559,6 +594,12 @@ fn active_turn_token(
         active_turn.parent_id = parent_id.map(str::to_string);
     }
     active_turn.cancel_token.clone()
+}
+
+async fn clear_active_embedded_turn(active_turns: &ActiveTurns, key: &ActiveTurnKey) {
+    if let Some(active_turn) = active_turns.lock().await.get_mut(key) {
+        active_turn.herdr_turn = None;
+    }
 }
 
 fn ensure_active_turn_not_cancelled(
@@ -683,6 +724,7 @@ struct WorkspaceAgentQueues {
     outbound: WorkspaceOutbound,
     codex_config: CodexConfig,
     audio_config: AudioConfig,
+    embedded_runtime: Option<Rc<dyn EmbeddedRuntime>>,
 }
 
 type WritableTurnLocks = Arc<Mutex<HashMap<WorkspaceConversation, Arc<Mutex<()>>>>>;
@@ -716,6 +758,7 @@ impl WorkspaceAgentQueues {
         outbound: WorkspaceOutbound,
         codex_config: CodexConfig,
         audio_config: AudioConfig,
+        embedded_runtime: Option<Rc<dyn EmbeddedRuntime>>,
     ) -> Self {
         let (board_integration_sender, board_integration_results) = mpsc::unbounded_channel();
         let (handoff_sender, handoffs) = mpsc::unbounded_channel();
@@ -728,6 +771,7 @@ impl WorkspaceAgentQueues {
             outbound,
             codex_config,
             audio_config,
+            embedded_runtime,
             board_integration_results,
             board_integration_sender,
             handoffs,
@@ -773,6 +817,7 @@ impl WorkspaceAgentQueues {
                 self.handoff_sender.clone(),
                 Arc::clone(&self.writable_turn_locks),
                 Arc::clone(&self.handoff_claims),
+                self.embedded_runtime.clone(),
             ));
             sender
         });
@@ -834,8 +879,10 @@ impl WorkspaceAgentQueues {
             self.codex_config.clone(),
             self.audio_config.clone(),
             Arc::clone(&self.writable_turn_locks),
+            self.embedded_runtime.clone(),
         ));
-        self.native_senders.insert(conversation.clone(), sender.clone());
+        self.native_senders
+            .insert(conversation.clone(), sender.clone());
 
         let pending = if replay_pending {
             WorkspaceStore::open_existing(&self.workspace_path)
@@ -908,13 +955,7 @@ impl WorkspaceAgentQueues {
             )?,
         };
         workspace.queue_native_turn(&message.id)?;
-        enqueue_native_conversation(
-            self,
-            channel_id,
-            member,
-            recipient,
-            &message.id,
-        )?;
+        enqueue_native_conversation(self, channel_id, member, recipient, &message.id)?;
         Ok(())
     }
 }
@@ -1533,8 +1574,9 @@ async fn main() -> Result<()> {
         workspace,
         workspace_path,
     };
-    tokio::task::LocalSet::new()
-        .run_until(run_worker_runtime(config))
+    let local_set = tokio::task::LocalSet::new();
+    LocalRuntime::new()
+        .run_until(&local_set, run_worker_runtime(config))
         .await
 }
 
@@ -1658,6 +1700,85 @@ struct SessionWorker {
 }
 
 async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
+    let herdr_cancellation = HerdrCancellationToken::new();
+    let embedded_runtime: Option<Rc<dyn EmbeddedRuntime>> = {
+        let runtime_config = HerdrRuntimeConfig {
+            state_path: worker_state_path(&config.codex_config.working_dir, "herdr-state"),
+            data_path: worker_state_path(&config.codex_config.working_dir, "herdr-data"),
+            cancellation: herdr_cancellation.clone(),
+            ..HerdrRuntimeConfig::default()
+        };
+        match EmbeddedHerdrRuntime::start(runtime_config).await {
+            Ok(runtime) => Some(Rc::new(runtime)),
+            Err(error) => {
+                warn!("embedded Herdr runtime unavailable; using direct OpenCode fallback: {error:#}");
+                None
+            }
+        }
+    };
+    let mut owned_runtime_tasks = Vec::new();
+    if let Some(runtime) = embedded_runtime.as_ref() {
+        let runtime_for_events = Rc::clone(runtime);
+        let workspace_path = config.workspace_path.clone();
+        let control = config.control.clone();
+        owned_runtime_tasks.push(tokio::task::spawn_local(async move {
+            loop {
+                if control.is_shutdown_requested() {
+                    return;
+                }
+                let mut subscription = match runtime_for_events.subscribe().await {
+                    Ok(subscription) => subscription,
+                    Err(error) => {
+                        warn!("embedded Herdr event subscription failed: {error:#}");
+                        tokio::select! {
+                            _ = control.shutdown_notify.notified() => if control.is_shutdown_requested() { return; },
+                            _ = sleep(Duration::from_millis(100)) => {}
+                        }
+                        continue;
+                    }
+                };
+                tokio::select! {
+                    _ = control.shutdown_notify.notified() => {
+                        if control.is_shutdown_requested() { return; }
+                    }
+                    event = subscription.recv() => match event {
+                        Ok(RuntimeEvent::TargetLost { target }) => {
+                            invalidate_embedded_target(&runtime_for_events, &workspace_path, &target);
+                        }
+                        Ok(_) => {}
+                        // Broadcast subscriptions can lag or close. Their event history
+                        // is no longer authoritative, so reopen every logical target.
+                        Err(_) => {
+                            invalidate_all_embedded_targets(&runtime_for_events, &workspace_path);
+                            break;
+                        }
+                    }
+                }
+            }
+        }));
+        let runtime = Rc::clone(runtime);
+        let workspace_path = config.workspace_path.clone();
+        let control = config.control.clone();
+        owned_runtime_tasks.push(tokio::task::spawn_local(async move {
+            let mut ticks = interval(Duration::from_secs(60 * 60));
+            loop {
+                tokio::select! {
+                    _ = control.shutdown_notify.notified() => {
+                        if control.is_shutdown_requested() { return; }
+                    }
+                    _ = ticks.tick() => match WorkspaceStore::open_existing(&workspace_path) {
+                        Ok(workspace) => for binding in workspace.expired_embedded_threads(board_now()).unwrap_or_default() {
+                            match runtime.close_thread(&binding.conversation_id, &binding.thread_id).await {
+                                Ok(()) => { let _ = workspace.close_embedded_thread_binding(&binding.conversation_id, &binding.thread_id, board_now()); }
+                                Err(error) => warn!(thread = %binding.thread_id, "embedded Herdr thread expiry close failed: {error:#}"),
+                            }
+                        },
+                        Err(error) => warn!("embedded Herdr expiry sweep could not open workspace: {error:#}"),
+                    }
+                }
+            }
+        }));
+    }
     let mut session_workers = HashMap::<String, SessionWorker>::new();
     let mut workspace_voice_deduper = WorkspaceVoiceDeduper::new();
     let fips_routes = Arc::new(Mutex::new(HashMap::new()));
@@ -1677,6 +1798,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         workspace_outbound.clone(),
         config.codex_config.clone(),
         config.audio_config.clone(),
+        embedded_runtime.clone(),
     );
     for message_id in config.workspace.pending_native_turns()? {
         let Some(message) = config.workspace.message_by_id(&message_id)? else {
@@ -1686,10 +1808,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             continue;
         };
         if workspace_agent_job_matches_trigger(&message, &conversation) {
-            workspace_agent_queues.enqueue_native(
-                conversation,
-                message_id,
-            );
+            workspace_agent_queues.enqueue_native(conversation, message_id);
         }
     }
     flush_workspace_notification_outbox(
@@ -1761,6 +1880,19 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
     .await?;
 
     loop {
+        // Notify has no retained permit, so observe the atomic state before waiting.
+        if config.control.is_shutdown_requested() {
+            info!("runtime shutdown requested");
+            shutdown_embedded_worker(
+                &workspace_agent_queues.active_turns,
+                &herdr_cancellation,
+                embedded_runtime.as_ref(),
+                &mut owned_runtime_tasks,
+            )
+            .await?;
+            config.messenger.shutdown().await;
+            return Ok(());
+        }
         let message = tokio::select! {
             _ = handoff_ticks.tick() => {
                 for handoff in workspace_agent_handoffs_for_retry(&config.workspace)? {
@@ -1829,6 +1961,15 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
             _ = config.control.shutdown_notify.notified() => {
                 if config.control.is_shutdown_requested() {
                     info!("runtime shutdown requested");
+                    // Stop the runtime first so in-flight turns cannot outlive shutdown.
+                    shutdown_embedded_worker(
+                        &workspace_agent_queues.active_turns,
+                        &herdr_cancellation,
+                        embedded_runtime.as_ref(),
+                        &mut owned_runtime_tasks,
+                    )
+                    .await?;
+                    config.messenger.shutdown().await;
                     return Ok(());
                 }
                 continue;
@@ -2370,7 +2511,9 @@ async fn queue_workspace_update(
         update.revision = workspace.revision()?;
     }
     for recipient in recipients {
-        let payload = WireMessage::workspace_update(board_update_for_member(workspace, &update, &recipient)?).to_json()?;
+        let payload =
+            WireMessage::workspace_update(board_update_for_member(workspace, &update, &recipient)?)
+                .to_json()?;
         workspace.queue_notification(&recipient, &payload)?;
     }
     if board_changed {
@@ -2383,7 +2526,10 @@ fn queue_board_update(workspace: &WorkspaceStore) -> Result<()> {
     let update = board_workspace_update(workspace)?;
     for member in workspace.members()? {
         let update = board_update_for_member(workspace, &update, &member.pubkey)?;
-        workspace.queue_notification(&member.pubkey, &WireMessage::workspace_update(update).to_json()?)?;
+        workspace.queue_notification(
+            &member.pubkey,
+            &WireMessage::workspace_update(update).to_json()?,
+        )?;
     }
     Ok(())
 }
@@ -2798,6 +2944,20 @@ fn conversation_agent_execution_config(
         config.workspace_access = OpenCodeWorkspaceAccess::ReadOnly;
     }
     config
+}
+
+fn embedded_target_execution_config(config: &CodexConfig, session_id: &str) -> TargetExecutionConfig {
+    TargetExecutionConfig {
+        working_directory: config.working_dir.clone(),
+        agent: config.opencode.agent.clone(),
+        model: config
+            .opencode
+            .model
+            .as_ref()
+            .map(|model| format!("{}/{}", model.provider_id, model.model_id))
+            .unwrap_or_default(),
+        session: SessionSelection::Resume(session_id.to_string()),
+    }
 }
 
 async fn create_board_task_workstream(
@@ -3610,9 +3770,16 @@ async fn process_workspace_request(
                     false,
                 )?,
             };
-            let board_changed = sync_thread_topic_card(workspace, &message, request.parent_id.as_deref())?;
+            let board_changed =
+                sync_thread_topic_card(workspace, &message, request.parent_id.as_deref())?;
             if board_changed {
-                broadcast_workspace_update(workspace, messenger, outbound, &board_workspace_update(workspace)?).await?;
+                broadcast_workspace_update(
+                    workspace,
+                    messenger,
+                    outbound,
+                    &board_workspace_update(workspace)?,
+                )
+                .await?;
             }
             let update = WorkspaceUpdate {
                 action: "message_created".to_string(),
@@ -4825,7 +4992,17 @@ async fn process_workspace_request(
                 cancel_active_turn_for_abort(agent_id, conversation, &mut active_turns)?
             };
             if let Some(((active_agent_id, conversation), active_turn)) = active_turn {
+                // Embedded turns settle cancellation before the direct token is cancelled.
+                interrupt_active_herdr_turn(&active_turn).await?;
                 let active_turn_key = (active_agent_id.clone(), conversation.clone());
+                if let Some(active_turn) = agent_queues
+                    .active_turns
+                    .lock()
+                    .await
+                    .get(&active_turn_key)
+                {
+                    active_turn.cancel_token.cancel();
+                }
                 let parent_id = active_turn
                     .parent_id
                     .as_deref()
@@ -5850,10 +6027,16 @@ fn recent_workspace_snapshot_messages(
     member: &str,
 ) -> Result<Vec<WorkspaceMessagePayload>> {
     let mut conversations = BTreeMap::<String, Vec<WorkspaceMessage>>::new();
-    let linked_roots = workspace.board_cards()?.into_iter().filter_map(|card| card.source_thread_id).collect::<HashSet<_>>();
+    let linked_roots = workspace
+        .board_cards()?
+        .into_iter()
+        .filter_map(|card| card.source_thread_id)
+        .collect::<HashSet<_>>();
     let mut board_roots = Vec::new();
     for message in workspace.snapshot_messages(member)? {
-        if linked_roots.contains(&message.id) { board_roots.push(message.clone()); }
+        if linked_roots.contains(&message.id) {
+            board_roots.push(message.clone());
+        }
         let key = match &message.channel_id {
             Some(channel_id) => format!("channel:{channel_id}"),
             None => {
@@ -5877,7 +6060,9 @@ fn recent_workspace_snapshot_messages(
         })
         .collect::<Vec<_>>();
     for root in board_roots {
-        if !recent.iter().any(|message| message.id == root.id) { recent.push(root); }
+        if !recent.iter().any(|message| message.id == root.id) {
+            recent.push(root);
+        }
     }
     recent.sort_by(|left, right| {
         left.created_at
@@ -5898,7 +6083,11 @@ async fn broadcast_workspace_update(
             .send(
                 messenger,
                 &member.pubkey,
-                WireMessage::workspace_update(board_update_for_member(workspace, update, &member.pubkey)?),
+                WireMessage::workspace_update(board_update_for_member(
+                    workspace,
+                    update,
+                    &member.pubkey,
+                )?),
             )
             .await?;
     }
@@ -6011,6 +6200,9 @@ async fn run_workspace_agent_with_typing(
     session_id: &str,
     active_turns: &ActiveTurns,
     suppress_typing: bool,
+    embedded_runtime: Option<&Rc<dyn EmbeddedRuntime>>,
+    delivery_id: &str,
+    execution_attempt: &str,
 ) -> Result<CodexRunResult> {
     const TYPING_LEASE: Duration = Duration::from_secs(6);
     const WORK_HISTORY_INACTIVITY_AFTER: Duration = Duration::from_secs(6);
@@ -6078,7 +6270,8 @@ async fn run_workspace_agent_with_typing(
     let mut stage = None;
     let mut work_history: Vec<String> = Vec::new();
     let commit_baseline = if parent_id.is_some()
-        && workspace.conversation_coordinator(channel_id, member, peer)?
+        && workspace
+            .conversation_coordinator(channel_id, member, peer)?
             .is_some_and(|coordinator| coordinator.id == agent.id)
     {
         git_commit_baseline(&config.working_dir)
@@ -6095,13 +6288,55 @@ async fn run_workspace_agent_with_typing(
     let agent_body = format!(
         "{body}\n\nWhen you create a file that the user should receive, put its absolute path on its own line as [[ARTIFACT: /path/to/file]]. Only mark files intended for delivery."
     );
-    let mut run = Box::pin(run_codex_session_with_cancel_and_events(
-        &agent_body,
-        config,
-        Some(session_id),
-        Some(&cancel_token),
-        Some(event_sender),
-    ));
+    let embedded_turn = embedded_runtime.map(|runtime| {
+        let conversation_id = workspace_conversation(channel_id, member, peer)
+            .expect("workspace agent turn has a conversation")
+            .opencode_server_scope();
+        (
+            Rc::clone(runtime),
+            conversation_id,
+            parent_id.map(str::to_string),
+            embedded_target_execution_config(config, session_id),
+        )
+    });
+    let request_id = workspace.worker_turn_id_for_execution_attempt(delivery_id, execution_attempt)?;
+    if let Some((runtime, conversation_id, thread_id, _)) = embedded_turn.as_ref() {
+        active_turns.lock().await.get_mut(&active_turn_key).expect("active turn exists").herdr_turn = Some(ActiveHerdrTurn::Embedded {
+            runtime: Rc::clone(runtime), conversation_id: conversation_id.clone(), thread_id: thread_id.clone(), turn_id: request_id.clone(),
+        });
+    }
+    let mut run = Box::pin(async {
+        if let Some((runtime, conversation_id, thread_id, execution)) = embedded_turn {
+            return worker_turn_with_embedded_fallback(
+                runtime.as_ref(),
+                &conversation_id,
+                thread_id.as_deref(),
+                execution,
+                &request_id,
+                &agent_body,
+                session_id,
+                config.timeout,
+                active_turns,
+                &active_turn_key,
+                || run_codex_session_with_cancel_and_events(
+                    &agent_body,
+                    config,
+                    Some(session_id),
+                    Some(&cancel_token),
+                    Some(event_sender),
+                ),
+            )
+            .await;
+        }
+        run_codex_session_with_cancel_and_events(
+            &agent_body,
+            config,
+            Some(session_id),
+            Some(&cancel_token),
+            Some(event_sender),
+        )
+        .await
+    });
     let result = loop {
         tokio::select! {
             result = &mut run => break result,
@@ -6172,7 +6407,11 @@ async fn run_workspace_agent_with_typing(
     while let Ok(event) = events.try_recv() {
         commit_candidates.extend(git_commit_candidates(&event));
     }
-    if verified_new_git_commit(&config.working_dir, commit_baseline.as_ref(), &commit_candidates) {
+    if verified_new_git_commit(
+        &config.working_dir,
+        commit_baseline.as_ref(),
+        &commit_candidates,
+    ) {
         if let Some(turn) = active_turns.lock().await.get_mut(&active_turn_key) {
             turn.verified_git_commit = true;
         }
@@ -6208,6 +6447,157 @@ async fn run_workspace_agent_with_typing(
             Ok(result)
         }
         Err(err) => Err(err.context(WorkspaceAgentRunHistory(work_history))),
+    }
+}
+
+async fn embedded_turn_result(
+    runtime: &dyn EmbeddedRuntime,
+    conversation_id: &str,
+    thread_id: Option<&str>,
+    execution: TargetExecutionConfig,
+    turn_id: &str,
+    text: &str,
+    session_id: &str,
+    timeout: Duration,
+) -> Result<Option<CodexRunResult>> {
+    let reply = match runtime
+        .submit_turn(conversation_id, thread_id, execution, turn_id, text, timeout)
+        .await
+    {
+        Ok(reply) => reply,
+        Err(error)
+            if matches!(
+                error.downcast_ref::<RuntimeError>(),
+                Some(RuntimeError::Unavailable | RuntimeError::Closed)
+            ) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match reply.status {
+        EmbeddedTurnStatus::Completed => Ok(Some(CodexRunResult {
+            response: reply.text.unwrap_or_default(),
+            session_id: Some(session_id.to_string()),
+            token_usage: None,
+            work_history: vec!["OpenCode finished completed.".to_string()],
+        })),
+        EmbeddedTurnStatus::Interrupted => Err(anyhow!("OpenCode cancelled")),
+        EmbeddedTurnStatus::Unavailable => Ok(None),
+        EmbeddedTurnStatus::Failed(message) => bail!("embedded Herdr failed: {message}"),
+        EmbeddedTurnStatus::TimedOut => bail!("embedded Herdr turn timed out"),
+    }
+}
+
+async fn worker_turn_with_embedded_fallback<F, Fut>(
+    runtime: &dyn EmbeddedRuntime,
+    conversation_id: &str,
+    thread_id: Option<&str>,
+    execution: TargetExecutionConfig,
+    turn_id: &str,
+    text: &str,
+    session_id: &str,
+    timeout: Duration,
+    active_turns: &ActiveTurns,
+    active_turn_key: &ActiveTurnKey,
+    direct: F,
+) -> Result<CodexRunResult>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<CodexRunResult>>,
+{
+    match embedded_turn_result(
+        runtime,
+        conversation_id,
+        thread_id,
+        execution,
+        turn_id,
+        text,
+        session_id,
+        timeout,
+    )
+    .await?
+    {
+        Some(result) => Ok(result),
+        None => {
+            clear_active_embedded_turn(active_turns, active_turn_key).await;
+            direct().await
+        }
+    }
+}
+
+async fn shutdown_embedded_runtime(runtime: Option<&Rc<dyn EmbeddedRuntime>>) -> Result<()> {
+    if let Some(runtime) = runtime {
+        runtime.shutdown().await?;
+    }
+    Ok(())
+}
+
+async fn join_runtime_tasks(tasks: &mut Vec<tokio::task::JoinHandle<()>>) -> Result<()> {
+    while let Some(task) = tasks.pop() {
+        task.abort();
+        match task.await {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => return Err(error).context("embedded Herdr worker task panicked"),
+        }
+    }
+    Ok(())
+}
+
+async fn shutdown_embedded_worker(
+    active_turns: &ActiveTurns,
+    cancellation: &HerdrCancellationToken,
+    runtime: Option<&Rc<dyn EmbeddedRuntime>>,
+    tasks: &mut Vec<tokio::task::JoinHandle<()>>,
+) -> Result<()> {
+    cancel_active_turns(active_turns).await;
+    cancellation.cancel();
+    shutdown_embedded_runtime(runtime).await?;
+    join_runtime_tasks(tasks).await
+}
+
+async fn cancel_active_turns(active_turns: &ActiveTurns) {
+    let turns = active_turns.lock().await.values().cloned().collect::<Vec<_>>();
+    for turn in &turns {
+        turn.cancel_token.cancel();
+    }
+    match tokio::time::timeout(
+        EMBEDDED_INTERRUPT_SETTLE_TIMEOUT,
+        futures_util::future::join_all(turns.iter().map(interrupt_active_herdr_turn)),
+    )
+    .await
+    {
+        Ok(results) => {
+            for result in results {
+                if let Err(error) = result {
+                    warn!("failed to interrupt active embedded turn during shutdown: {error:#}");
+                }
+            }
+        }
+        Err(_) => warn!("embedded Herdr interrupts did not settle before shutdown"),
+    }
+}
+
+fn invalidate_embedded_target(
+    runtime: &Rc<dyn EmbeddedRuntime>,
+    workspace_path: &Path,
+    target: &herdr::LogicalTarget,
+) {
+    let _ = runtime.invalidate_target(target);
+    if let Ok(workspace) = WorkspaceStore::open_existing(workspace_path) {
+        let _ = match target {
+            herdr::LogicalTarget::Conversation(conversation_id) => {
+                workspace.invalidate_embedded_conversation_binding(conversation_id)
+            }
+            herdr::LogicalTarget::Thread { conversation_id, thread_id } => {
+                workspace.invalidate_embedded_thread_binding(conversation_id, thread_id)
+            }
+        };
+    }
+}
+
+fn invalidate_all_embedded_targets(runtime: &Rc<dyn EmbeddedRuntime>, workspace_path: &Path) {
+    let _ = runtime.invalidate_all_targets();
+    if let Ok(workspace) = WorkspaceStore::open_existing(workspace_path) {
+        let _ = workspace.invalidate_all_embedded_bindings();
     }
 }
 
@@ -6756,11 +7146,11 @@ fn enqueue_native_conversation(
             WorkspaceConversation::Direct(participants[0].clone(), participants[1].clone())
         }
     };
-    info!(trigger = trigger_message_id, "queueing native workspace session turn");
-    queues.enqueue_native(
-        conversation,
-        trigger_message_id.to_string(),
+    info!(
+        trigger = trigger_message_id,
+        "queueing native workspace session turn"
     );
+    queues.enqueue_native(conversation, trigger_message_id.to_string());
     Ok(())
 }
 
@@ -7002,6 +7392,7 @@ async fn native_workspace_session_worker(
     codex_config: CodexConfig,
     audio_config: AudioConfig,
     writable_turn_locks: WritableTurnLocks,
+    embedded_runtime: Option<Rc<dyn EmbeddedRuntime>>,
 ) {
     while let Some(trigger_message_id) = receiver.recv().await {
         let _writer = writable_turn_guard(&writable_turn_locks, &conversation).await;
@@ -7024,6 +7415,7 @@ async fn native_workspace_session_worker(
             trigger_message_id,
             &trigger_message_ids,
             &active_turns,
+            embedded_runtime.as_ref(),
         )
         .await
         {
@@ -7139,6 +7531,7 @@ async fn process_native_workspace_session_message(
     trigger_message_id: &str,
     trigger_message_ids: &[String],
     active_turns: &ActiveTurns,
+    embedded_runtime: Option<&Rc<dyn EmbeddedRuntime>>,
 ) -> Result<()> {
     let workspace = WorkspaceStore::open_existing(workspace_path)?;
     let Some(message) = workspace.message_by_id(trigger_message_id)? else {
@@ -7321,6 +7714,9 @@ async fn process_native_workspace_session_message(
         &session_id,
         active_turns,
         false,
+        embedded_runtime,
+        trigger_message_id,
+        &format!("agent:{}:initial", native_agent.id),
     )
     .await;
     let mut session_failed = false;
@@ -7332,7 +7728,7 @@ async fn process_native_workspace_session_message(
         }
         Err(err) if is_agent_cancelled_error(&err) => {
             info!(trigger = %trigger_message_id, "native workspace session turn cancelled");
-            interrupted_workspace_agent_result(WorkspaceAgentFallback::Cancelled)
+            return Err(err);
         }
         Err(err) => {
             let error = format!("OpenCode session failed: {err:#}");
@@ -7350,7 +7746,7 @@ async fn process_native_workspace_session_message(
             interrupted_workspace_agent_result(workspace_agent_error_fallback(&err))
         }
     };
-    for _ in 0..WORKSPACE_HISTORY_REQUEST_ATTEMPTS {
+    for history_attempt in 0..WORKSPACE_HISTORY_REQUEST_ATTEMPTS {
         let Some(message_count) = workspace_history_request_count(&result.response) else {
             break;
         };
@@ -7378,6 +7774,9 @@ async fn process_native_workspace_session_message(
             &session_id,
             active_turns,
             false,
+            embedded_runtime,
+            trigger_message_id,
+            &format!("agent:{}:history:{history_attempt}", native_agent.id),
         )
         .await
         {
@@ -7386,6 +7785,7 @@ async fn process_native_workspace_session_message(
                 warn!(trigger = %trigger_message_id, "native workspace history follow-up returned an empty response");
                 interrupted_workspace_agent_result(WorkspaceAgentFallback::HistoryFollowUpEmpty)
             }
+            Err(err) if is_agent_cancelled_error(&err) => return Err(err),
             Err(err) => {
                 let error = format!("OpenCode history follow-up failed: {err:#}");
                 session_failed = true;
@@ -7427,12 +7827,7 @@ async fn process_native_workspace_session_message(
             "ready",
             None,
         )?;
-        workspace.set_conversation_session_context(
-            channel_id,
-            member,
-            peer,
-            &context_key,
-        )?;
+        workspace.set_conversation_session_context(channel_id, member, peer, &context_key)?;
     }
     let artifacts = workspace_response_artifacts(&mut result.response).await;
     debug_assert!(!result.response.trim().is_empty() || !artifacts.is_empty());
@@ -7492,7 +7887,14 @@ async fn process_native_workspace_session_message(
     } else {
         blossom_attachments.clone()
     };
-    let reply = persist_native_board_reply(&workspace, conversation, thread_root_id, &result.response, &attachments, &result.work_history)?;
+    let reply = persist_native_board_reply(
+        &workspace,
+        conversation,
+        thread_root_id,
+        &result.response,
+        &attachments,
+        &result.work_history,
+    )?;
     let update = WorkspaceUpdate {
         action: "message_created".to_string(),
         revision: workspace.revision()?,
@@ -7660,6 +8062,7 @@ async fn workspace_agent_queue_worker(
     handoff_sender: mpsc::UnboundedSender<WorkspaceAgentHandoff>,
     writable_turn_locks: WritableTurnLocks,
     handoff_claims: Arc<std::sync::Mutex<HashSet<(String, String)>>>,
+    embedded_runtime: Option<Rc<dyn EmbeddedRuntime>>,
 ) {
     let mut thread_checkpoint = None;
     while let Some(job) = receiver.recv().await {
@@ -7675,6 +8078,7 @@ async fn workspace_agent_queue_worker(
             &active_turns,
             &handoff_sender,
             &mut thread_checkpoint,
+            embedded_runtime.as_ref(),
         )
         .await;
         if let Err(err) = &result {
@@ -7719,6 +8123,7 @@ async fn process_workspace_agent_job(
     active_turns: &ActiveTurns,
     handoff_sender: &mpsc::UnboundedSender<WorkspaceAgentHandoff>,
     thread_checkpoint: &mut Option<WorkspaceAgentThreadCheckpoint>,
+    embedded_runtime: Option<&Rc<dyn EmbeddedRuntime>>,
 ) -> Result<()> {
     let workspace = WorkspaceStore::open_existing(workspace_path)?;
     if let Some(body) = job.ephemeral_body.as_deref() {
@@ -7740,6 +8145,8 @@ async fn process_workspace_agent_job(
                     handoff_sender,
                     thread_checkpoint,
                     job.handoff_outbox.as_ref(),
+                    embedded_runtime,
+                    &job.trigger_message_id,
                 )
                 .await
             }
@@ -7760,6 +8167,8 @@ async fn process_workspace_agent_job(
                     handoff_sender,
                     thread_checkpoint,
                     job.handoff_outbox.as_ref(),
+                    embedded_runtime,
+                    &job.trigger_message_id,
                 )
                 .await
             }
@@ -7806,6 +8215,8 @@ async fn process_workspace_agent_job(
                 handoff_sender,
                 thread_checkpoint,
                 job.handoff_outbox.as_ref(),
+                embedded_runtime,
+                &job.trigger_message_id,
             )
             .await
         }
@@ -7826,6 +8237,8 @@ async fn process_workspace_agent_job(
                 handoff_sender,
                 thread_checkpoint,
                 job.handoff_outbox.as_ref(),
+                embedded_runtime,
+                &job.trigger_message_id,
             )
             .await
         }
@@ -8506,6 +8919,8 @@ async fn route_conversation_agents(
     handoff_sender: &mpsc::UnboundedSender<WorkspaceAgentHandoff>,
     thread_checkpoint: &mut Option<WorkspaceAgentThreadCheckpoint>,
     incoming_handoff: Option<&(String, String)>,
+    embedded_runtime: Option<&Rc<dyn EmbeddedRuntime>>,
+    delivery_id: &str,
 ) -> Result<()> {
     let preprompts = workspace.conversation_preprompts()?;
     let mut agents = workspace.agents_for_conversation(channel_id, member, peer)?;
@@ -8620,7 +9035,10 @@ async fn route_conversation_agents(
             coordinator_id.as_deref() == Some(agent.id.as_str()),
         );
         if let Some(workstream) = workspace.board_task_workstream_for_agent(&agent.id)? {
-            let task = workspace.board_tasks()?.into_iter().find(|task| task.id == workstream.task_id)
+            let task = workspace
+                .board_tasks()?
+                .into_iter()
+                .find(|task| task.id == workstream.task_id)
                 .context("board workstream task is missing")?;
             board_task_target(workspace, &task.conversation_key, &task.folder_scope)?;
             agent_config.workspace_access = OpenCodeWorkspaceAccess::ReadOnly;
@@ -8676,6 +9094,29 @@ async fn route_conversation_agents(
                 continue;
             }
         };
+        let embedded_conversation_id = workspace_conversation.opencode_server_scope();
+        let mut embedded_runtime_for_turn = embedded_runtime;
+        if let Some(runtime) = embedded_runtime {
+            let execution = embedded_target_execution_config(&agent_config, session_id);
+            workspace.claim_embedded_conversation_binding(&embedded_conversation_id)?;
+            if runtime.open_conversation(&embedded_conversation_id, execution.clone()).await? == EmbeddedTargetStatus::Unavailable {
+                workspace.invalidate_embedded_conversation_binding(&embedded_conversation_id)?;
+                embedded_runtime_for_turn = None;
+            } else {
+                workspace.mark_embedded_conversation_binding_ready(&embedded_conversation_id)?;
+            }
+            if embedded_runtime_for_turn.is_some() && coordinator_id.as_deref() != Some(agent.id.as_str()) {
+                if let Some(thread_id) = parent_id {
+                    workspace.claim_embedded_thread_binding(&embedded_conversation_id, thread_id, board_now())?;
+                    if runtime.open_thread(&embedded_conversation_id, thread_id, execution).await? == EmbeddedTargetStatus::Unavailable {
+                        workspace.invalidate_embedded_thread_binding(&embedded_conversation_id, thread_id)?;
+                        embedded_runtime_for_turn = None;
+                    } else {
+                        workspace.mark_embedded_thread_binding_ready(&embedded_conversation_id, thread_id)?;
+                    }
+                }
+            }
+        }
         let context_key = match conversation_context_key(preprompt, folder_scope, &agent_config) {
             Ok(key) => key,
             Err(err) => {
@@ -8739,6 +9180,9 @@ async fn route_conversation_agents(
             &active_session_id,
             active_turns,
             suppress_typing,
+            embedded_runtime_for_turn,
+            delivery_id,
+            &format!("agent:{}:initial", agent.id),
         )
         .await
         .and_then(|result| {
@@ -8755,7 +9199,7 @@ async fn route_conversation_agents(
             }
             Err(err) if is_agent_cancelled_error(&err) => {
                 info!(agent = %agent.id, "workspace agent task cancelled");
-                interrupted_workspace_agent_result(WorkspaceAgentFallback::Cancelled)
+                continue;
             }
             Err(err) if agent.restart_on_failure => {
                 warn!(agent = %agent.id, "workspace agent response failed; restarting dedicated session: {err:#}");
@@ -8808,6 +9252,9 @@ async fn route_conversation_agents(
                         &active_session_id,
                         active_turns,
                         suppress_typing,
+                        embedded_runtime,
+                        delivery_id,
+                        &format!("agent:{}:restart", agent.id),
                     )
                     .await
                     {
@@ -8817,6 +9264,9 @@ async fn route_conversation_agents(
                         }
                         Ok(_) => {
                             interrupted_workspace_agent_result(WorkspaceAgentFallback::RestartEmpty)
+                        }
+                        Err(restart_err) if is_agent_cancelled_error(&restart_err) => {
+                            return Err(restart_err);
                         }
                         Err(restart_err) => {
                             warn!(agent = %agent.id, "workspace agent response failed after restart: {restart_err:#}");
@@ -8862,7 +9312,7 @@ async fn route_conversation_agents(
             }
         };
         let mut history_follow_up_failed = false;
-        for _ in 0..WORKSPACE_HISTORY_REQUEST_ATTEMPTS {
+        for history_attempt in 0..WORKSPACE_HISTORY_REQUEST_ATTEMPTS {
             let Some(message_count) = workspace_history_request_count(&result.response) else {
                 break;
             };
@@ -8890,6 +9340,9 @@ async fn route_conversation_agents(
                 &active_session_id,
                 active_turns,
                 suppress_typing,
+                embedded_runtime,
+                delivery_id,
+                &format!("agent:{}:history:{history_attempt}", agent.id),
             )
             .await
             {
@@ -8900,6 +9353,7 @@ async fn route_conversation_agents(
                     history_follow_up_failed = true;
                     break;
                 }
+                Err(err) if is_agent_cancelled_error(&err) => return Err(err),
                 Err(err) => {
                     warn!(agent = %agent.id, "workspace history request failed: {err:#}");
                     history_follow_up_failed = true;
@@ -8950,6 +9404,9 @@ async fn route_conversation_agents(
                         active_session_id,
                         active_turns,
                         suppress_typing,
+                        embedded_runtime,
+                        delivery_id,
+                        &format!("agent:{}:continuation", agent.id),
                     )
                     .await
                 }
@@ -9035,7 +9492,9 @@ async fn route_conversation_agents(
             };
             let message_id = message.id.clone();
             let board_changed = sync_persisted_agent_thread_card(
-                workspace, &message, &workspace_conversation,
+                workspace,
+                &message,
+                &workspace_conversation,
                 active_turns_guard.get(&active_turn_key),
             )?;
             drop(active_turns_guard);
@@ -9119,7 +9578,9 @@ async fn route_conversation_agents(
         workspace.set_message_work_history(&message.id, &result.work_history)?;
         message.work_history = result.work_history;
         let board_changed = sync_persisted_agent_thread_card(
-            workspace, &message, &workspace_conversation,
+            workspace,
+            &message,
+            &workspace_conversation,
             active_turns_guard.get(&active_turn_key),
         )?;
         drop(active_turns_guard);
@@ -9138,9 +9599,9 @@ async fn route_conversation_agents(
             conversation_agents: vec![],
             conversation_preprompts: vec![],
             board_tasks: vec![],
-                    board_timeline_entries: vec![],
-                    board_columns: vec![],
-                    board_cards: vec![],
+            board_timeline_entries: vec![],
+            board_columns: vec![],
+            board_cards: vec![],
             typing: None,
         };
         let recipients = if channel_id.is_some() {
@@ -9184,23 +9645,45 @@ async fn route_conversation_agents(
 fn git_commit_candidates(event: &serde_json::Value) -> Vec<String> {
     let (output, exit) = match event.get("type").and_then(|v| v.as_str()) {
         Some("message.part.updated") | Some("tool_use") => {
-            let part = event.pointer("/properties/part").or_else(|| event.get("part")).unwrap_or(event);
-            if part.get("tool").and_then(|v| v.as_str()) != Some("bash") || part.pointer("/state/status").and_then(|v| v.as_str()) != Some("completed") { return vec![]; }
-            (part.pointer("/state/output"), part.pointer("/state/metadata/exit"))
+            let part = event
+                .pointer("/properties/part")
+                .or_else(|| event.get("part"))
+                .unwrap_or(event);
+            if part.get("tool").and_then(|v| v.as_str()) != Some("bash")
+                || part.pointer("/state/status").and_then(|v| v.as_str()) != Some("completed")
+            {
+                return vec![];
+            }
+            (
+                part.pointer("/state/output"),
+                part.pointer("/state/metadata/exit"),
+            )
         }
         Some("item.completed") => {
-            let Some(item) = event.get("item") else { return vec![]; };
-            if item.get("type").and_then(|v| v.as_str()) != Some("command_execution") { return vec![]; }
+            let Some(item) = event.get("item") else {
+                return vec![];
+            };
+            if item.get("type").and_then(|v| v.as_str()) != Some("command_execution") {
+                return vec![];
+            }
             (item.get("aggregated_output"), item.get("exit_code"))
         }
         _ => return vec![],
     };
-    if exit.and_then(|v| v.as_i64()) != Some(0) { return vec![]; }
-    output.and_then(|v| v.as_str()).unwrap_or_default().lines().filter_map(|line| {
-        let (header, _) = line.strip_prefix('[')?.split_once("] ")?;
-        let hash = header.split_whitespace().last()?;
-        (hash.len() >= 7 && hash.len() <= 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit())).then(|| hash.to_string())
-    }).collect()
+    if exit.and_then(|v| v.as_i64()) != Some(0) {
+        return vec![];
+    }
+    output
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (header, _) = line.strip_prefix('[')?.split_once("] ")?;
+            let hash = header.split_whitespace().last()?;
+            (hash.len() >= 7 && hash.len() <= 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit()))
+                .then(|| hash.to_string())
+        })
+        .collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -9213,7 +9696,11 @@ fn git_commit_baseline(workdir: &Path) -> Option<GitCommitBaseline> {
     if let Ok(head) = run_git(workdir, &["rev-parse", "--verify", "HEAD^{commit}"]) {
         return Some(GitCommitBaseline::Existing(head));
     }
-    if run_git(workdir, &["rev-parse", "--is-inside-work-tree"]).ok()?.as_str() != "true" {
+    if run_git(workdir, &["rev-parse", "--is-inside-work-tree"])
+        .ok()?
+        .as_str()
+        != "true"
+    {
         return None;
     }
     let branch = run_git(workdir, &["symbolic-ref", "--quiet", "HEAD"]).ok()?;
@@ -9230,12 +9717,26 @@ fn git_commit_baseline(workdir: &Path) -> Option<GitCommitBaseline> {
     (output.status.code() == Some(1)).then_some(GitCommitBaseline::Unborn(branch))
 }
 
-fn verified_new_git_commit(workdir: &Path, baseline: Option<&GitCommitBaseline>, candidates: &BTreeSet<String>) -> bool {
-    let Some(baseline) = baseline else { return false; };
-    if candidates.is_empty() { return false; }
-    let Ok(head) = run_git(workdir, &["rev-parse", "--verify", "HEAD^{commit}"]) else { return false; };
-    if !candidates.iter().any(|hash| head.starts_with(hash)) { return false; }
-    let Ok(action) = run_git(workdir, &["reflog", "-1", "--format=%gs", "HEAD"]) else { return false; };
+fn verified_new_git_commit(
+    workdir: &Path,
+    baseline: Option<&GitCommitBaseline>,
+    candidates: &BTreeSet<String>,
+) -> bool {
+    let Some(baseline) = baseline else {
+        return false;
+    };
+    if candidates.is_empty() {
+        return false;
+    }
+    let Ok(head) = run_git(workdir, &["rev-parse", "--verify", "HEAD^{commit}"]) else {
+        return false;
+    };
+    if !candidates.iter().any(|hash| head.starts_with(hash)) {
+        return false;
+    }
+    let Ok(action) = run_git(workdir, &["reflog", "-1", "--format=%gs", "HEAD"]) else {
+        return false;
+    };
     match baseline {
         GitCommitBaseline::Existing(previous) => {
             head != *previous
@@ -9244,8 +9745,10 @@ fn verified_new_git_commit(workdir: &Path, baseline: Option<&GitCommitBaseline>,
         }
         GitCommitBaseline::Unborn(branch) => {
             action.starts_with("commit (initial): ")
-                && run_git(workdir, &["symbolic-ref", "--quiet", "HEAD"]).is_ok_and(|current| current == *branch)
-                && run_git(workdir, &["show", "-s", "--format=%P", &head]).is_ok_and(|parents| parents.is_empty())
+                && run_git(workdir, &["symbolic-ref", "--quiet", "HEAD"])
+                    .is_ok_and(|current| current == *branch)
+                && run_git(workdir, &["show", "-s", "--format=%P", &head])
+                    .is_ok_and(|parents| parents.is_empty())
         }
     }
 }
@@ -9261,13 +9764,18 @@ fn sync_persisted_agent_thread_card(
         turn.verified_git_commit && turn.parent_id.as_deref() == message.parent_id.as_deref()
     }) {
         if let (Some(root_id), Some(agent_id)) = (
-            message.parent_id.as_deref(), message.sender_pubkey.strip_prefix("agent:"),
+            message.parent_id.as_deref(),
+            message.sender_pubkey.strip_prefix("agent:"),
         ) {
             let (channel_id, member, peer) = match conversation {
                 WorkspaceConversation::Channel(channel) => (Some(channel.as_str()), None, None),
-                WorkspaceConversation::Direct(member, peer) => (None, Some(member.as_str()), Some(peer.as_str())),
+                WorkspaceConversation::Direct(member, peer) => {
+                    (None, Some(member.as_str()), Some(peer.as_str()))
+                }
             };
-            changed |= integrate_coordinator_thread_card(workspace, agent_id, channel_id, member, peer, root_id)?;
+            changed |= integrate_coordinator_thread_card(
+                workspace, agent_id, channel_id, member, peer, root_id,
+            )?;
         }
     }
     Ok(changed)
@@ -9281,7 +9789,8 @@ fn integrate_coordinator_thread_card(
     peer: Option<&str>,
     root_id: &str,
 ) -> Result<bool> {
-    if !workspace.conversation_coordinator(channel_id, member, peer)?
+    if !workspace
+        .conversation_coordinator(channel_id, member, peer)?
         .is_some_and(|coordinator| coordinator.id == agent_id)
     {
         return Ok(false);
@@ -9300,10 +9809,22 @@ fn persist_native_board_reply(
 ) -> Result<WorkspaceMessage> {
     let mut reply = match conversation {
         WorkspaceConversation::Channel(channel) => workspace.add_channel_message_with_main(
-            "agent:native-opencode", channel, body, attachments, &[], Some(root_id), false,
+            "agent:native-opencode",
+            channel,
+            body,
+            attachments,
+            &[],
+            Some(root_id),
+            false,
         )?,
         WorkspaceConversation::Direct(_, peer) => workspace.add_direct_message_with_main(
-            "agent:native-opencode", peer, body, attachments, &[], Some(root_id), false,
+            "agent:native-opencode",
+            peer,
+            body,
+            attachments,
+            &[],
+            Some(root_id),
+            false,
         )?,
     };
     workspace.set_message_work_history(&reply.id, work_history)?;
@@ -9314,44 +9835,90 @@ fn persist_native_board_reply(
     Ok(reply)
 }
 
-fn sync_thread_topic_card(workspace: &WorkspaceStore, marker: &WorkspaceMessage, root_id: Option<&str>) -> Result<bool> {
-    let Some(root_id) = root_id else { return Ok(false); };
-    if !is_thread_topic_response(&marker.body) || marker.deleted_at.is_some() || marker.parent_id.as_deref() != Some(root_id) {
+fn sync_thread_topic_card(
+    workspace: &WorkspaceStore,
+    marker: &WorkspaceMessage,
+    root_id: Option<&str>,
+) -> Result<bool> {
+    let Some(root_id) = root_id else {
+        return Ok(false);
+    };
+    if !is_thread_topic_response(&marker.body)
+        || marker.deleted_at.is_some()
+        || marker.parent_id.as_deref() != Some(root_id)
+    {
         return Ok(false);
     }
-    let Some(persisted) = workspace.message_by_id(&marker.id)? else { return Ok(false); };
-    let Some(root) = workspace.message_by_id(root_id)? else { return Ok(false); };
-    if persisted != *marker || persisted.parent_id.as_deref() != Some(root_id)
-        || root.parent_id.is_some() || root.deleted_at.is_some() || root.channel_id != marker.channel_id {
+    let Some(persisted) = workspace.message_by_id(&marker.id)? else {
+        return Ok(false);
+    };
+    let Some(root) = workspace.message_by_id(root_id)? else {
+        return Ok(false);
+    };
+    if persisted != *marker
+        || persisted.parent_id.as_deref() != Some(root_id)
+        || root.parent_id.is_some()
+        || root.deleted_at.is_some()
+        || root.channel_id != marker.channel_id
+    {
         return Ok(false);
     }
-    if root.channel_id.is_none() && ![Some(root.sender_pubkey.as_str()), root.recipient_pubkey.as_deref()].contains(&marker.recipient_pubkey.as_deref()) {
+    if root.channel_id.is_none()
+        && ![
+            Some(root.sender_pubkey.as_str()),
+            root.recipient_pubkey.as_deref(),
+        ]
+        .contains(&marker.recipient_pubkey.as_deref())
+    {
         return Ok(false);
     }
-    if root.channel_id.is_none() && !marker.sender_pubkey.starts_with("agent:")
-        && !((marker.sender_pubkey == root.sender_pubkey && marker.recipient_pubkey == root.recipient_pubkey)
+    if root.channel_id.is_none()
+        && !marker.sender_pubkey.starts_with("agent:")
+        && !((marker.sender_pubkey == root.sender_pubkey
+            && marker.recipient_pubkey == root.recipient_pubkey)
             || (Some(marker.sender_pubkey.as_str()) == root.recipient_pubkey.as_deref()
                 && marker.recipient_pubkey.as_deref() == Some(root.sender_pubkey.as_str())))
     {
         return Ok(false);
     }
-    let topic = marker.body.trim().strip_prefix("[[THREAD_TOPIC:").unwrap().strip_suffix("]]").unwrap().trim();
+    let topic = marker
+        .body
+        .trim()
+        .strip_prefix("[[THREAD_TOPIC:")
+        .unwrap()
+        .strip_suffix("]]")
+        .unwrap()
+        .trim();
     let revision = workspace.revision()?;
     workspace.create_board_card_from_thread(root_id, topic)?;
     Ok(workspace.revision()? != revision)
 }
 
-fn sync_thread_card_after_message(workspace: &WorkspaceStore, message: &WorkspaceMessage) -> Result<bool> {
-    let Some(root_id) = message.parent_id.as_deref() else { return Ok(false); };
-    if message.deleted_at.is_some() { return Ok(false); }
-    if !workspace.message_by_id(root_id)?.is_some_and(|root| root.parent_id.is_none() && root.deleted_at.is_none()) {
+fn sync_thread_card_after_message(
+    workspace: &WorkspaceStore,
+    message: &WorkspaceMessage,
+) -> Result<bool> {
+    let Some(root_id) = message.parent_id.as_deref() else {
+        return Ok(false);
+    };
+    if message.deleted_at.is_some() {
+        return Ok(false);
+    }
+    if !workspace
+        .message_by_id(root_id)?
+        .is_some_and(|root| root.parent_id.is_none() && root.deleted_at.is_none())
+    {
         return Ok(false);
     }
     // The title may predate the third content reply. Reuse the latest durable
     // marker, rather than requiring another title request or inventing a title.
-    let marker = workspace.thread_messages(root_id)?.into_iter().rev().find(|candidate| {
-        candidate.deleted_at.is_none() && is_thread_topic_response(&candidate.body)
-    });
+    let marker = workspace
+        .thread_messages(root_id)?
+        .into_iter()
+        .rev()
+        .find(|candidate| {
+            candidate.deleted_at.is_none() && is_thread_topic_response(&candidate.body)
+        });
     match marker {
         Some(marker) => sync_thread_topic_card(workspace, &marker, Some(root_id)),
         None => Ok(false),
@@ -9529,7 +10096,6 @@ fn workspace_agent_batched_prompt_body(messages: &[(String, String)]) -> Option<
         )
     })
 }
-
 
 fn workspace_thread_context_since(
     workspace: &WorkspaceStore,
@@ -10069,12 +10635,8 @@ async fn process_nonblocking_control_message(
                 "processing repo list request event {} while codex task is active",
                 message.event_id
             );
-            process_repo_list_request(
-                messenger.as_ref(),
-                &message.sender_pubkey_hex,
-                &request,
-            )
-            .await;
+            process_repo_list_request(messenger.as_ref(), &message.sender_pubkey_hex, &request)
+                .await;
             true
         }
         Some(NonblockingControlRequest::OpenCodeSessions) => {
@@ -10212,7 +10774,8 @@ async fn process_message(
                     )
                     .await;
                     info!("owner confirmed root worker shutdown");
-                    std::process::exit(0);
+                    control.request_shutdown();
+                    return;
                 }
                 send_response(
                     messenger,
@@ -10242,8 +10805,7 @@ async fn process_message(
             }
 
             if let Some(request) = repo_list_request(&message.text) {
-                process_repo_list_request(messenger, &message.sender_pubkey_hex, &request)
-                    .await;
+                process_repo_list_request(messenger, &message.sender_pubkey_hex, &request).await;
                 return;
             }
 
@@ -11331,7 +11893,10 @@ fn resolve_spawn_workdir(request: &SpawnWorkerRequest, current_workdir: &Path) -
 
 fn ensure_spawn_existing_allowed(path: &Path, allowed_roots: &[PathBuf]) -> Result<()> {
     if is_git_worktree_path(path) {
-        anyhow::bail!("`{}` is a Git worktree; use the repository directory instead", path.display());
+        anyhow::bail!(
+            "`{}` is a Git worktree; use the repository directory instead",
+            path.display()
+        );
     }
     if allowed_roots
         .iter()
@@ -11368,7 +11933,8 @@ fn ensure_spawn_create_allowed(path: &Path, allowed_roots: &[PathBuf]) -> Result
 }
 
 fn is_git_worktree_path(path: &Path) -> bool {
-    path.components().any(|component| component.as_os_str() == ".worktrees")
+    path.components()
+        .any(|component| component.as_os_str() == ".worktrees")
 }
 
 fn canonical_worker_root_dir() -> Result<PathBuf> {
@@ -13921,7 +14487,9 @@ fn claim_memory_compaction(key: String) -> Option<MemoryCompactionClaim> {
     let mut active = ACTIVE_MEMORY_COMPACTIONS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    active.insert(key.clone()).then_some(MemoryCompactionClaim(key))
+    active
+        .insert(key.clone())
+        .then_some(MemoryCompactionClaim(key))
 }
 
 async fn compact_memory_if_needed(
@@ -14693,7 +15261,105 @@ fn env_csv(name: &str) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
+
+    use futures_util::future::LocalBoxFuture;
     use rust_lib_nostr_codex_phone::codex::{OpenCodeConfig, OpenCodeWorkspaceAccess};
+    use rust_lib_nostr_codex_phone::herdr_runtime::{EmbeddedTurnResult, EmbeddedRuntime};
+
+    #[derive(Default)]
+    struct FakeEmbeddedRuntime {
+        submitted: RefCell<Vec<(String, Option<String>, String, String)>>,
+        invalidated: RefCell<Vec<herdr::LogicalTarget>>,
+        next_status: RefCell<VecDeque<EmbeddedTurnStatus>>,
+        submit_unavailable: Cell<bool>,
+        target_open: Cell<bool>,
+        opened_targets: Cell<usize>,
+        interrupted: Cell<usize>,
+        block_interrupt: Cell<bool>,
+        shutdown: Cell<usize>,
+        executions: RefCell<Vec<TargetExecutionConfig>>,
+        lifecycle: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl FakeEmbeddedRuntime {
+        fn with_status(status: EmbeddedTurnStatus) -> Self {
+            Self {
+                next_status: RefCell::new(VecDeque::from([status])),
+                ..Self::default()
+            }
+        }
+
+        fn with_blocked_interrupt() -> Self {
+            Self {
+                block_interrupt: Cell::new(true),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl EmbeddedRuntime for FakeEmbeddedRuntime {
+        fn open_conversation<'a>(&'a self, _conversation_id: &'a str, execution: TargetExecutionConfig) -> LocalBoxFuture<'a, Result<EmbeddedTargetStatus>> {
+            self.target_open.set(true);
+            self.opened_targets.set(self.opened_targets.get() + 1);
+            self.executions.borrow_mut().push(execution);
+            Box::pin(async { Ok(EmbeddedTargetStatus::Ready) })
+        }
+
+        fn open_thread<'a>(&'a self, _conversation_id: &'a str, _thread_id: &'a str, execution: TargetExecutionConfig) -> LocalBoxFuture<'a, Result<EmbeddedTargetStatus>> {
+            self.target_open.set(true);
+            self.opened_targets.set(self.opened_targets.get() + 1);
+            self.executions.borrow_mut().push(execution);
+            Box::pin(async { Ok(EmbeddedTargetStatus::Ready) })
+        }
+
+        fn submit_turn<'a>(&'a self, conversation_id: &'a str, thread_id: Option<&'a str>, execution: TargetExecutionConfig, turn_id: &'a str, text: &'a str, _timeout: Duration) -> LocalBoxFuture<'a, Result<EmbeddedTurnResult>> {
+            if self.submit_unavailable.get() {
+                return Box::pin(async { Err(herdr::RuntimeError::Unavailable.into()) });
+            }
+            if !self.target_open.replace(true) {
+                self.opened_targets.set(self.opened_targets.get() + 1);
+            }
+            self.submitted.borrow_mut().push((conversation_id.to_string(), thread_id.map(str::to_string), turn_id.to_string(), text.to_string()));
+            self.executions.borrow_mut().push(execution);
+            let status = self.next_status.borrow_mut().pop_front().unwrap_or(EmbeddedTurnStatus::Completed);
+            Box::pin(async move { Ok(EmbeddedTurnResult { turn_id: turn_id.to_string(), text: (status == EmbeddedTurnStatus::Completed).then(|| "embedded reply".to_string()), status }) })
+        }
+
+        fn interrupt_turn<'a>(&'a self, _conversation_id: &'a str, _thread_id: Option<&'a str>, turn_id: &'a str) -> LocalBoxFuture<'a, Result<EmbeddedTurnResult>> {
+            self.interrupted.set(self.interrupted.get() + 1);
+            self.lifecycle.borrow_mut().push("interrupt");
+            if self.block_interrupt.get() {
+                return Box::pin(std::future::pending());
+            }
+            Box::pin(async move { Ok(EmbeddedTurnResult { turn_id: turn_id.to_string(), status: EmbeddedTurnStatus::Interrupted, text: None }) })
+        }
+
+        fn subscribe<'a>(&'a self) -> LocalBoxFuture<'a, Result<herdr::RuntimeSubscription>> {
+            Box::pin(async { bail!("fake runtime does not publish events") })
+        }
+
+        fn shutdown<'a>(&'a self) -> LocalBoxFuture<'a, Result<()>> {
+            self.shutdown.set(self.shutdown.get() + 1);
+            self.lifecycle.borrow_mut().push("runtime shutdown");
+            Box::pin(async { Ok(()) })
+        }
+
+        fn close_thread<'a>(&'a self, _conversation_id: &'a str, _thread_id: &'a str) -> LocalBoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn invalidate_target(&self, target: &herdr::LogicalTarget) -> Result<()> {
+            self.target_open.set(false);
+            self.invalidated.borrow_mut().push(target.clone());
+            Ok(())
+        }
+
+        fn invalidate_all_targets(&self) -> Result<()> {
+            self.target_open.set(false);
+            Ok(())
+        }
+    }
 
     static ENV_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
         once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
@@ -14722,6 +15388,460 @@ mod tests {
                 model: None,
             },
         }
+    }
+
+    fn test_execution() -> TargetExecutionConfig {
+        embedded_target_execution_config(&test_codex_config(PathBuf::from("/tmp")), "session-1")
+    }
+
+    #[tokio::test]
+    async fn embedded_runtime_is_preferred_without_opening_a_unix_socket() {
+        let runtime = FakeEmbeddedRuntime::default();
+        let direct_runs = Cell::new(0);
+
+        let result = embedded_turn_result(&runtime, "channel:engineering", None, test_execution(), "delivery-1", "prompt", "session-1", Duration::from_secs(300))
+            .await
+            .unwrap();
+        if result.is_none() {
+            direct_runs.set(direct_runs.get() + 1);
+        }
+
+        assert_eq!(direct_runs.get(), 0);
+        assert_eq!(runtime.submitted.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_prompt_text_gets_a_new_turn_id_for_a_new_delivery() {
+        let runtime = FakeEmbeddedRuntime::default();
+
+        embedded_turn_result(&runtime, "channel:engineering", None, test_execution(), "delivery-1", "same prompt", "session-1", Duration::from_secs(300)).await.unwrap();
+        embedded_turn_result(&runtime, "channel:engineering", None, test_execution(), "delivery-2", "same prompt", "session-1", Duration::from_secs(300)).await.unwrap();
+
+        let submitted = runtime.submitted.borrow();
+        assert_eq!(submitted[0].3, submitted[1].3);
+        assert_ne!(submitted[0].2, submitted[1].2);
+    }
+
+    #[tokio::test]
+    async fn runtime_loss_reopens_logical_target_on_next_request() {
+        let runtime = FakeEmbeddedRuntime::default();
+
+        embedded_turn_result(&runtime, "channel:engineering", None, test_execution(), "delivery-1", "prompt", "session-1", Duration::from_secs(300)).await.unwrap();
+        runtime.invalidate_target(&herdr::LogicalTarget::conversation("channel:engineering").unwrap()).unwrap();
+        embedded_turn_result(&runtime, "channel:engineering", None, test_execution(), "delivery-2", "prompt", "session-1", Duration::from_secs(300)).await.unwrap();
+
+        assert_eq!(runtime.invalidated.borrow().len(), 1);
+        assert_eq!(runtime.opened_targets.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn subscription_loss_invalidates_persisted_bindings_and_reopens_provisioning() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let workspace = WorkspaceStore::open(file.path()).unwrap();
+        workspace.claim_embedded_conversation_binding("channel:engineering").unwrap();
+        workspace.mark_embedded_conversation_binding_ready("channel:engineering").unwrap();
+        workspace.claim_embedded_thread_binding("channel:engineering", "thread-1", 1).unwrap();
+        workspace.mark_embedded_thread_binding_ready("channel:engineering", "thread-1").unwrap();
+        let fake = Rc::new(FakeEmbeddedRuntime::default());
+        let runtime: Rc<dyn EmbeddedRuntime> = fake.clone();
+
+        invalidate_all_embedded_targets(&runtime, file.path());
+
+        assert!(!workspace
+            .embedded_conversation_binding("channel:engineering")
+            .unwrap()
+            .unwrap()
+            .ready);
+        assert!(!workspace
+            .embedded_thread_binding("channel:engineering", "thread-1")
+            .unwrap()
+            .unwrap()
+            .ready);
+        assert!(!fake.target_open.get());
+        assert!(embedded_turn_result(
+            fake.as_ref(),
+            "channel:engineering",
+            None,
+            test_execution(),
+            "delivery-after-loss",
+            "prompt",
+            "session-1",
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap()
+        .is_some());
+        assert_eq!(fake.opened_targets.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_yields_one_interrupted_result_without_a_normal_reply() {
+        let runtime = FakeEmbeddedRuntime::with_status(EmbeddedTurnStatus::Interrupted);
+
+        let error = embedded_turn_result(&runtime, "channel:engineering", None, test_execution(), "delivery-1", "prompt", "session-1", Duration::from_secs(300))
+            .await
+            .unwrap_err();
+
+        assert!(is_agent_cancelled_error(&error));
+        assert_eq!(runtime.submitted.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn explicit_embedded_unavailable_falls_back_to_direct_executor() {
+        let runtime = FakeEmbeddedRuntime::with_status(EmbeddedTurnStatus::Unavailable);
+        let direct_runs = Cell::new(0);
+
+        if embedded_turn_result(&runtime, "channel:engineering", None, test_execution(), "delivery-1", "prompt", "session-1", Duration::from_secs(300))
+            .await
+            .unwrap()
+            .is_none()
+        {
+            direct_runs.set(direct_runs.get() + 1);
+        }
+
+        assert_eq!(direct_runs.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn cooperative_root_shutdown_invokes_runtime_shutdown() {
+        let fake = Rc::new(FakeEmbeddedRuntime::default());
+        let runtime: Rc<dyn EmbeddedRuntime> = fake.clone();
+
+        shutdown_embedded_runtime(Some(&runtime)).await.unwrap();
+
+        assert_eq!(fake.shutdown.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_active_embedded_turns_cancels_and_interrupts_them() {
+        let fake = Rc::new(FakeEmbeddedRuntime::default());
+        let active_turns: ActiveTurns = Arc::new(Mutex::new(HashMap::new()));
+        let token = CodexCancelToken::new();
+        active_turns.lock().await.insert(
+            ("agent".to_string(), WorkspaceConversation::Channel("channel".to_string())),
+            ActiveTurn {
+                cancel_token: token.clone(),
+                parent_id: None,
+                herdr_turn: Some(ActiveHerdrTurn::Embedded {
+                    runtime: fake.clone(),
+                    conversation_id: "channel".to_string(),
+                    thread_id: None,
+                    turn_id: "turn".to_string(),
+                }),
+                verified_git_commit: false,
+            },
+        );
+
+        cancel_active_turns(&active_turns).await;
+
+        assert!(token.is_cancelled());
+        assert_eq!(fake.interrupted.get(), 1);
+        let runtime: Rc<dyn EmbeddedRuntime> = fake.clone();
+        shutdown_embedded_runtime(Some(&runtime)).await.unwrap();
+        assert_eq!(fake.shutdown.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_bounds_a_non_settling_embedded_interrupt() {
+        let fake = Rc::new(FakeEmbeddedRuntime::with_blocked_interrupt());
+        let runtime: Rc<dyn EmbeddedRuntime> = fake.clone();
+        let active_turns: ActiveTurns = Arc::new(Mutex::new(HashMap::new()));
+        active_turns.lock().await.insert(
+            ("agent".to_string(), WorkspaceConversation::Channel("channel".to_string())),
+            ActiveTurn {
+                cancel_token: CodexCancelToken::new(),
+                parent_id: None,
+                herdr_turn: Some(ActiveHerdrTurn::Embedded {
+                    runtime: fake.clone(),
+                    conversation_id: "channel".to_string(),
+                    thread_id: None,
+                    turn_id: "turn".to_string(),
+                }),
+                verified_git_commit: false,
+            },
+        );
+        let cancellation = HerdrCancellationToken::new();
+        let mut tasks = vec![];
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            shutdown_embedded_worker(&active_turns, &cancellation, Some(&runtime), &mut tasks),
+        )
+        .await
+        .expect("shutdown must not wait for the original turn timeout")
+        .unwrap();
+
+        assert!(cancellation.is_cancelled());
+        assert_eq!(fake.interrupted.get(), 1);
+        assert_eq!(fake.shutdown.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_active_embedded_turns_before_stopping_the_runtime() {
+        let fake = Rc::new(FakeEmbeddedRuntime::default());
+        let runtime: Rc<dyn EmbeddedRuntime> = fake.clone();
+        let active_turns: ActiveTurns = Arc::new(Mutex::new(HashMap::new()));
+        active_turns.lock().await.insert(
+            ("agent".to_string(), WorkspaceConversation::Channel("channel".to_string())),
+            ActiveTurn {
+                cancel_token: CodexCancelToken::new(),
+                parent_id: None,
+                herdr_turn: Some(ActiveHerdrTurn::Embedded {
+                    runtime: fake.clone(),
+                    conversation_id: "channel".to_string(),
+                    thread_id: Some("thread".to_string()),
+                    turn_id: "turn".to_string(),
+                }),
+                verified_git_commit: false,
+            },
+        );
+        let cancellation = HerdrCancellationToken::new();
+        let mut tasks = vec![];
+
+        shutdown_embedded_worker(&active_turns, &cancellation, Some(&runtime), &mut tasks)
+            .await
+            .unwrap();
+
+        assert_eq!(fake.lifecycle.borrow().as_slice(), ["interrupt", "runtime shutdown"]);
+    }
+
+    #[tokio::test]
+    async fn native_workspace_turn_uses_embedded_runtime() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let workspace = WorkspaceStore::open(file.path()).unwrap();
+        workspace.add_member("owner").unwrap();
+        workspace.add_member("peer").unwrap();
+        let message = workspace
+            .add_direct_message_with_main("owner", "peer", "hello", &[], &[], None, true)
+            .unwrap();
+        workspace
+            .upsert_conversation_session(
+                None,
+                Some("owner"),
+                Some("peer"),
+                "/tmp",
+                "ses_native",
+                "ready",
+                None,
+            )
+            .unwrap();
+        let messenger = NostrMessenger::connect(NostrConfig {
+            secret_key: "0000000000000000000000000000000000000000000000000000000000000001"
+                .to_string(),
+            peer_pubkey: None,
+            receive_pubkeys: vec![],
+            relays: vec!["ws://127.0.0.1:1".to_string()],
+        })
+        .await
+        .unwrap();
+        let (fips_outgoing, _receiver) = mpsc::channel(1);
+        let outbound = WorkspaceOutbound {
+            fips_routes: Arc::new(Mutex::new(HashMap::new())),
+            pending_fips_responses: Arc::new(Mutex::new(HashMap::new())),
+            fips_outgoing,
+        };
+        let fake = Rc::new(FakeEmbeddedRuntime::default());
+        let runtime: Rc<dyn EmbeddedRuntime> = fake.clone();
+        let mut config = test_codex_config(PathBuf::from("/tmp"));
+        config.backend = AgentBackend::OpenCode;
+
+        process_native_workspace_session_message(
+            file.path(),
+            &messenger,
+            &outbound,
+            &config,
+            &AudioConfig { max_bytes: 25 * 1024 * 1024 },
+            &WorkspaceConversation::Direct("owner".to_string(), "peer".to_string()),
+            &message.id,
+            &[message.id.clone()],
+            &Arc::new(Mutex::new(HashMap::new())),
+            Some(&runtime),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fake.submitted.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn embedded_interruption_does_not_persist_a_cancellation_fallback_reply() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let workspace = WorkspaceStore::open(file.path()).unwrap();
+        workspace.add_member("owner").unwrap();
+        workspace.add_member("peer").unwrap();
+        let message = workspace
+            .add_direct_message_with_main("owner", "peer", "hello", &[], &[], None, true)
+            .unwrap();
+        workspace
+            .upsert_conversation_session(
+                None,
+                Some("owner"),
+                Some("peer"),
+                "/tmp",
+                "ses_native",
+                "ready",
+                None,
+            )
+            .unwrap();
+        let messenger = NostrMessenger::connect(NostrConfig {
+            secret_key: "0000000000000000000000000000000000000000000000000000000000000001"
+                .to_string(),
+            peer_pubkey: None,
+            receive_pubkeys: vec![],
+            relays: vec!["ws://127.0.0.1:1".to_string()],
+        })
+        .await
+        .unwrap();
+        let (fips_outgoing, _receiver) = mpsc::channel(1);
+        let outbound = WorkspaceOutbound {
+            fips_routes: Arc::new(Mutex::new(HashMap::new())),
+            pending_fips_responses: Arc::new(Mutex::new(HashMap::new())),
+            fips_outgoing,
+        };
+        let fake = Rc::new(FakeEmbeddedRuntime::with_status(EmbeddedTurnStatus::Interrupted));
+        let runtime: Rc<dyn EmbeddedRuntime> = fake;
+        let mut config = test_codex_config(PathBuf::from("/tmp"));
+        config.backend = AgentBackend::OpenCode;
+
+        let error = process_native_workspace_session_message(
+            file.path(),
+            &messenger,
+            &outbound,
+            &config,
+            &AudioConfig { max_bytes: 25 * 1024 * 1024 },
+            &WorkspaceConversation::Direct("owner".to_string(), "peer".to_string()),
+            &message.id,
+            &[message.id.clone()],
+            &Arc::new(Mutex::new(HashMap::new())),
+            Some(&runtime),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(is_agent_cancelled_error(&error));
+        let messages = workspace.direct_messages("owner", "peer").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(!messages.iter().any(|message| message.body.contains("cancelled")));
+    }
+
+    #[tokio::test]
+    async fn direct_fallback_clears_embedded_abort_handle_before_cancelling() {
+        let fake = Rc::new(FakeEmbeddedRuntime::with_blocked_interrupt());
+        fake.submit_unavailable.set(true);
+        let active_turns: ActiveTurns = Arc::new(Mutex::new(HashMap::new()));
+        let key = (
+            "agent".to_string(),
+            WorkspaceConversation::Channel("channel".to_string()),
+        );
+        let token = CodexCancelToken::new();
+        active_turns.lock().await.insert(
+            key.clone(),
+            ActiveTurn {
+                cancel_token: token.clone(),
+                parent_id: None,
+                herdr_turn: Some(ActiveHerdrTurn::Embedded {
+                    runtime: fake.clone(),
+                    conversation_id: "channel".to_string(),
+                    thread_id: None,
+                    turn_id: "turn".to_string(),
+                }),
+                verified_git_commit: false,
+            },
+        );
+
+        worker_turn_with_embedded_fallback(
+            fake.as_ref(),
+            "channel",
+            None,
+            test_execution(),
+            "turn",
+            "prompt",
+            "session",
+            Duration::from_secs(1),
+            &active_turns,
+            &key,
+            || async {
+                Ok(CodexRunResult {
+                    response: "direct reply".to_string(),
+                    session_id: None,
+                    token_usage: None,
+                    work_history: vec![],
+                })
+            },
+        )
+        .await
+        .unwrap();
+        let (_, active_turn) = {
+            let mut turns = active_turns.lock().await;
+            cancel_active_turn_for_abort(
+                "agent",
+                Some(WorkspaceConversation::Channel("channel".to_string())),
+                &mut turns,
+            )
+            .unwrap()
+            .unwrap()
+        };
+        interrupt_active_herdr_turn(&active_turn).await.unwrap();
+        token.cancel();
+
+        assert!(token.is_cancelled());
+        assert_eq!(fake.interrupted.get(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_aborts_owned_runtime_tasks_before_the_turn_deadline() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let fake = Rc::new(FakeEmbeddedRuntime::default());
+                let runtime: Rc<dyn EmbeddedRuntime> = fake.clone();
+                let active_turns: ActiveTurns = Arc::new(Mutex::new(HashMap::new()));
+                let cancellation = HerdrCancellationToken::new();
+                let mut tasks = vec![tokio::task::spawn_local(std::future::pending())];
+
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    shutdown_embedded_worker(
+                        &active_turns,
+                        &cancellation,
+                        Some(&runtime),
+                        &mut tasks,
+                    ),
+                )
+                .await
+                .expect("shutdown must not wait for an owned task's turn deadline")
+                .unwrap();
+
+                assert!(cancellation.is_cancelled());
+                assert_eq!(fake.shutdown.get(), 1);
+                assert!(tasks.is_empty());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cooperative_shutdown_stops_runtime_before_owned_tasks() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let fake = Rc::new(FakeEmbeddedRuntime::default());
+                let runtime: Rc<dyn EmbeddedRuntime> = fake.clone();
+                let active_turns: ActiveTurns = Arc::new(Mutex::new(HashMap::new()));
+                let cancellation = HerdrCancellationToken::new();
+                let lifecycle = fake.lifecycle.clone();
+                let mut tasks = vec![tokio::task::spawn_local(async move {
+                    lifecycle.borrow_mut().push("runtime task joined");
+                })];
+
+                shutdown_embedded_worker(&active_turns, &cancellation, Some(&runtime), &mut tasks)
+                    .await
+                    .unwrap();
+
+                assert!(cancellation.is_cancelled());
+                assert_eq!(
+                    fake.lifecycle.borrow().as_slice(),
+                    ["runtime shutdown"]
+                );
+            })
+            .await;
     }
 
     #[test]
@@ -14765,6 +15885,24 @@ mod tests {
 
         assert_eq!(config.working_dir, task_scope.path());
         assert_eq!(config.workspace_access, OpenCodeWorkspaceAccess::ReadWrite);
+    }
+
+    #[test]
+    fn embedded_runtime_maps_agent_settings_to_a_target_execution_config() {
+        let workdir = PathBuf::from("/workspace/project");
+        let mut config = test_codex_config(workdir.clone());
+        config.opencode.agent = "reviewer".to_string();
+        config.opencode.model = Some(OpenCodeModel {
+            provider_id: "openai".to_string(),
+            model_id: "gpt-5".to_string(),
+        });
+
+        let execution = embedded_target_execution_config(&config, "ses-123");
+
+        assert_eq!(execution.working_directory, workdir);
+        assert_eq!(execution.agent, "reviewer");
+        assert_eq!(execution.model, "openai/gpt-5");
+        assert_eq!(execution.session, SessionSelection::Resume("ses-123".to_string()));
     }
 
     #[test]
@@ -15004,7 +16142,6 @@ mod tests {
         assert!(!should_auto_allocate_main_message(true, &reply));
     }
 
-
     #[tokio::test]
     async fn workspace_fips_capabilities_are_random_member_bound_and_single_use() {
         let capabilities = Arc::new(Mutex::new(HashMap::new()));
@@ -15094,7 +16231,6 @@ mod tests {
         ));
     }
 
-
     #[test]
     fn batches_rapid_workspace_messages_into_one_agent_prompt() {
         assert_eq!(
@@ -15132,15 +16268,51 @@ mod tests {
             workspace.add_member("peer").unwrap();
             let channel = workspace.create_channel("engineering", "owner").unwrap();
             let root = if direct {
-                workspace.add_direct_message_with_main("owner", "peer", "root", &[], &[], None, true)
+                workspace.add_direct_message_with_main(
+                    "owner",
+                    "peer",
+                    "root",
+                    &[],
+                    &[],
+                    None,
+                    true,
+                )
             } else {
-                workspace.add_channel_message_with_main("owner", &channel.id, "root", &[], &[], None, true)
-            }.unwrap();
-            let persist = |body: &str| if direct {
-                workspace.add_direct_message_with_main("owner", "peer", body, &[], &[], Some(&root.id), false)
-            } else {
-                workspace.add_channel_message_with_main("owner", &channel.id, body, &[], &[], Some(&root.id), false)
-            }.unwrap();
+                workspace.add_channel_message_with_main(
+                    "owner",
+                    &channel.id,
+                    "root",
+                    &[],
+                    &[],
+                    None,
+                    true,
+                )
+            }
+            .unwrap();
+            let persist = |body: &str| {
+                if direct {
+                    workspace.add_direct_message_with_main(
+                        "owner",
+                        "peer",
+                        body,
+                        &[],
+                        &[],
+                        Some(&root.id),
+                        false,
+                    )
+                } else {
+                    workspace.add_channel_message_with_main(
+                        "owner",
+                        &channel.id,
+                        body,
+                        &[],
+                        &[],
+                        Some(&root.id),
+                        false,
+                    )
+                }
+                .unwrap()
+            };
             persist("first");
             persist("second");
             let early = persist("[[THREAD_TOPIC: Too early]]");
@@ -15150,20 +16322,52 @@ mod tests {
             assert!(sync_thread_topic_card(&workspace, &manual, Some(&root.id)).unwrap());
             let original = workspace.board_cards().unwrap().remove(0);
             let native = if direct {
-                workspace.add_direct_message_with_main("agent:a0", "owner", "[[THREAD_TOPIC: Native title]]", &[], &[], Some(&root.id), false)
+                workspace.add_direct_message_with_main(
+                    "agent:a0",
+                    "owner",
+                    "[[THREAD_TOPIC: Native title]]",
+                    &[],
+                    &[],
+                    Some(&root.id),
+                    false,
+                )
             } else {
-                workspace.add_channel_message_with_main("agent:a0", &channel.id, "[[THREAD_TOPIC: Native title]]", &[], &[], Some(&root.id), false)
-            }.unwrap();
+                workspace.add_channel_message_with_main(
+                    "agent:a0",
+                    &channel.id,
+                    "[[THREAD_TOPIC: Native title]]",
+                    &[],
+                    &[],
+                    Some(&root.id),
+                    false,
+                )
+            }
+            .unwrap();
             assert!(sync_thread_topic_card(&workspace, &native, Some(&root.id)).unwrap());
             assert!(!sync_thread_topic_card(&workspace, &native, Some(&root.id)).unwrap());
             let card = workspace.board_cards().unwrap().remove(0);
             assert_eq!(card.id, original.id);
             assert_eq!(card.title, "Native title");
-            let conversation = if direct { WorkspaceConversation::Direct("owner".into(), "peer".into()) } else { WorkspaceConversation::Channel(channel.id.clone()) };
-            let native_reply = persist_native_board_reply(&workspace, &conversation, &root.id, "[[THREAD_TOPIC: Native persisted title]]", &[], &[]).unwrap();
+            let conversation = if direct {
+                WorkspaceConversation::Direct("owner".into(), "peer".into())
+            } else {
+                WorkspaceConversation::Channel(channel.id.clone())
+            };
+            let native_reply = persist_native_board_reply(
+                &workspace,
+                &conversation,
+                &root.id,
+                "[[THREAD_TOPIC: Native persisted title]]",
+                &[],
+                &[],
+            )
+            .unwrap();
             assert!(!sync_thread_topic_card(&workspace, &native_reply, Some(&root.id)).unwrap());
             assert_eq!(workspace.board_cards().unwrap()[0].id, original.id);
-            assert_eq!(workspace.board_cards().unwrap()[0].title, "Native persisted title");
+            assert_eq!(
+                workspace.board_cards().unwrap()[0].title,
+                "Native persisted title"
+            );
             assert!(workspace.board_tasks().unwrap().is_empty());
             let mut forged = native.clone();
             forged.body = "[[THREAD_TOPIC: Not persisted]]".to_string();
@@ -15174,30 +16378,118 @@ mod tests {
             assert!(!sync_thread_topic_card(&workspace, &native, Some(&native.id)).unwrap());
             for _ in 0..=WORKSPACE_SNAPSHOT_MESSAGE_LIMIT {
                 if direct {
-                    workspace.add_direct_message_with_main("owner", "peer", "later", &[], &[], None, true).unwrap();
+                    workspace
+                        .add_direct_message_with_main(
+                            "owner",
+                            "peer",
+                            "later",
+                            &[],
+                            &[],
+                            None,
+                            true,
+                        )
+                        .unwrap();
                 } else {
-                    workspace.add_channel_message_with_main("owner", &channel.id, "later", &[], &[], None, true).unwrap();
+                    workspace
+                        .add_channel_message_with_main(
+                            "owner",
+                            &channel.id,
+                            "later",
+                            &[],
+                            &[],
+                            None,
+                            true,
+                        )
+                        .unwrap();
                 }
             }
             let snapshot = workspace_snapshot(&workspace, "owner").unwrap();
-            assert!(snapshot.messages.iter().any(|message| message.id == root.id));
+            assert!(snapshot
+                .messages
+                .iter()
+                .any(|message| message.id == root.id));
             assert_eq!(snapshot.board_cards.len(), 1);
-            assert!(snapshot.board_columns.iter().any(|column| column.name == "Backlog"));
+            assert!(snapshot
+                .board_columns
+                .iter()
+                .any(|column| column.name == "Backlog"));
             let frames = nostr_workspace_snapshot_chunks(&snapshot, "test").unwrap();
-            assert_eq!(frames.iter().map(|frame| frame.board_cards.len()).sum::<usize>(), 1);
-            let coordinator = workspace.create_agent("A0", "Coordinator", "", &[], None, Some("session"), "ready", None, "owner").unwrap();
-            let (channel_id, member, peer) = if direct { (None, Some("owner"), Some("peer")) } else { (Some(channel.id.as_str()), None, None) };
-            workspace.set_conversation_coordinator(&coordinator.id, channel_id, member, peer).unwrap();
-            assert!(!integrate_coordinator_thread_card(&workspace, "other-agent", channel_id, member, peer, &root.id).unwrap());
+            assert_eq!(
+                frames
+                    .iter()
+                    .map(|frame| frame.board_cards.len())
+                    .sum::<usize>(),
+                1
+            );
+            let coordinator = workspace
+                .create_agent(
+                    "A0",
+                    "Coordinator",
+                    "",
+                    &[],
+                    None,
+                    Some("session"),
+                    "ready",
+                    None,
+                    "owner",
+                )
+                .unwrap();
+            let (channel_id, member, peer) = if direct {
+                (None, Some("owner"), Some("peer"))
+            } else {
+                (Some(channel.id.as_str()), None, None)
+            };
+            workspace
+                .set_conversation_coordinator(&coordinator.id, channel_id, member, peer)
+                .unwrap();
+            assert!(!integrate_coordinator_thread_card(
+                &workspace,
+                "other-agent",
+                channel_id,
+                member,
+                peer,
+                &root.id
+            )
+            .unwrap());
             let other_channel = workspace.create_channel("other", "owner").unwrap();
-            let unrelated = workspace.add_channel_message("owner", &other_channel.id, "unrelated root", &[], &[], None).unwrap();
-            assert!(integrate_coordinator_thread_card(&workspace, &coordinator.id, channel_id, member, peer, &unrelated.id).is_err());
-            assert!(integrate_coordinator_thread_card(&workspace, &coordinator.id, channel_id, member, peer, &root.id).unwrap());
-            assert!(!integrate_coordinator_thread_card(&workspace, &coordinator.id, channel_id, member, peer, &root.id).unwrap());
+            let unrelated = workspace
+                .add_channel_message("owner", &other_channel.id, "unrelated root", &[], &[], None)
+                .unwrap();
+            assert!(integrate_coordinator_thread_card(
+                &workspace,
+                &coordinator.id,
+                channel_id,
+                member,
+                peer,
+                &unrelated.id
+            )
+            .is_err());
+            assert!(integrate_coordinator_thread_card(
+                &workspace,
+                &coordinator.id,
+                channel_id,
+                member,
+                peer,
+                &root.id
+            )
+            .unwrap());
+            assert!(!integrate_coordinator_thread_card(
+                &workspace,
+                &coordinator.id,
+                channel_id,
+                member,
+                peer,
+                &root.id
+            )
+            .unwrap());
             let integrating = workspace.board_cards().unwrap().remove(0);
             assert_eq!(integrating.id, original.id);
             assert_eq!(integrating.created_at, original.created_at);
-            assert!(workspace.board_columns().unwrap().iter().any(|column| column.id == integrating.column_id && column.name == "Integrating"));
+            assert!(workspace
+                .board_columns()
+                .unwrap()
+                .iter()
+                .any(|column| column.id == integrating.column_id && column.name == "Integrating"));
             assert!(workspace.board_tasks().unwrap().is_empty());
             assert!(workspace.board_runs(&integrating.id).unwrap().is_empty());
         }
@@ -15208,17 +16500,36 @@ mod tests {
         let event = serde_json::json!({"type":"message.part.updated", "properties":{"part":{"type":"tool", "tool":"bash", "state":{"status":"completed", "input":{"command":"git add src && git commit -m fix"}, "output":"[main 1a2b3c4] fix\n 1 file changed", "metadata":{"exit":0}}}}});
         assert_eq!(git_commit_candidates(&event), ["1a2b3c4"]);
         for (pointer, value) in [
-            ("/properties/part/state/status", serde_json::json!("running")),
+            (
+                "/properties/part/state/status",
+                serde_json::json!("running"),
+            ),
             ("/properties/part/state/metadata/exit", serde_json::json!(1)),
-            ("/properties/part/state/output", serde_json::json!("I committed the changes.")),
+            (
+                "/properties/part/state/output",
+                serde_json::json!("I committed the changes."),
+            ),
         ] {
             let mut invalid = event.clone();
             *invalid.pointer_mut(pointer).unwrap() = value;
             assert!(git_commit_candidates(&invalid).is_empty(), "{pointer}");
         }
-        assert!(git_commit_candidates(&serde_json::json!({"type":"text", "text":"committed"})).is_empty());
-        assert_eq!(git_commit_candidates(&serde_json::json!({"type":"item.completed", "item":{"type":"command_execution", "command":"git commit -m fix", "exit_code":0, "aggregated_output":"[main 1a2b3c4] fix"}})), ["1a2b3c4"]);
-        assert_eq!(git_commit_candidates(&serde_json::json!({"type":"tool_use", "part":event["properties"]["part"]})), ["1a2b3c4"]);
+        assert!(
+            git_commit_candidates(&serde_json::json!({"type":"text", "text":"committed"}))
+                .is_empty()
+        );
+        assert_eq!(
+            git_commit_candidates(
+                &serde_json::json!({"type":"item.completed", "item":{"type":"command_execution", "command":"git commit -m fix", "exit_code":0, "aggregated_output":"[main 1a2b3c4] fix"}})
+            ),
+            ["1a2b3c4"]
+        );
+        assert_eq!(
+            git_commit_candidates(
+                &serde_json::json!({"type":"tool_use", "part":event["properties"]["part"]})
+            ),
+            ["1a2b3c4"]
+        );
     }
 
     #[test]
@@ -15228,12 +16539,26 @@ mod tests {
         run_git(dir, &["init", "-q"]).unwrap();
         fs::write(dir.join("file.txt"), "before").unwrap();
         run_git(dir, &["add", "file.txt"]).unwrap();
-        let commit = ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "test commit"];
+        let commit = [
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "test commit",
+        ];
         run_git(dir, &commit).unwrap();
         let baseline = run_git(dir, &["rev-parse", "HEAD"]).unwrap();
         let proof_baseline = git_commit_baseline(dir).unwrap();
         let shell_event = |command: &str| {
-            let output = StdCommand::new("sh").args(["-c", command]).current_dir(dir).output().unwrap();
+            let output = StdCommand::new("sh")
+                .args(["-c", command])
+                .current_dir(dir)
+                .output()
+                .unwrap();
             serde_json::json!({"type":"item.completed", "item":{"type":"command_execution", "command":command, "exit_code":output.status.code(), "aggregated_output":String::from_utf8_lossy(&output.stdout)}})
         };
         for command in [
@@ -15242,23 +16567,47 @@ mod tests {
             format!("printf '[main {}] old existing commit\\n'", &baseline[..7]),
             "false && git commit -m fail; printf '[main 1a2b3c4] not committed\\n'".to_string(),
         ] {
-            let candidates = git_commit_candidates(&shell_event(&command)).into_iter().collect();
-            assert!(!verified_new_git_commit(dir, Some(&proof_baseline), &candidates), "{command}");
+            let candidates = git_commit_candidates(&shell_event(&command))
+                .into_iter()
+                .collect();
+            assert!(
+                !verified_new_git_commit(dir, Some(&proof_baseline), &candidates),
+                "{command}"
+            );
         }
         fs::write(dir.join("file.txt"), "after").unwrap();
         let event = shell_event("git add file.txt && git -c user.name=Test -c user.email=test@example.invalid -c commit.gpgsign=false commit -m 'real commit with quoted && text'");
         let candidates = git_commit_candidates(&event).into_iter().collect();
-        assert!(verified_new_git_commit(dir, Some(&proof_baseline), &candidates));
+        assert!(verified_new_git_commit(
+            dir,
+            Some(&proof_baseline),
+            &candidates
+        ));
         let head = run_git(dir, &["rev-parse", "HEAD"]).unwrap();
-        assert!(!verified_new_git_commit(dir, git_commit_baseline(dir).as_ref(), &candidates));
+        assert!(!verified_new_git_commit(
+            dir,
+            git_commit_baseline(dir).as_ref(),
+            &candidates
+        ));
         assert!(!verified_new_git_commit(dir, None, &candidates));
-        assert!(!verified_new_git_commit(dir, Some(&proof_baseline), &BTreeSet::from(["1a2b3c4".into()])));
+        assert!(!verified_new_git_commit(
+            dir,
+            Some(&proof_baseline),
+            &BTreeSet::from(["1a2b3c4".into()])
+        ));
         let mut failed = event.clone();
         failed["item"]["exit_code"] = 1.into();
-        assert!(!verified_new_git_commit(dir, Some(&proof_baseline), &git_commit_candidates(&failed).into_iter().collect()));
+        assert!(!verified_new_git_commit(
+            dir,
+            Some(&proof_baseline),
+            &git_commit_candidates(&failed).into_iter().collect()
+        ));
         run_git(dir, &["reset", "--hard", &baseline]).unwrap();
         run_git(dir, &["reset", "--hard", &head]).unwrap();
-        assert!(!verified_new_git_commit(dir, Some(&proof_baseline), &candidates), "moving HEAD to an old commit is not a new commit");
+        assert!(
+            !verified_new_git_commit(dir, Some(&proof_baseline), &candidates),
+            "moving HEAD to an old commit is not a new commit"
+        );
     }
 
     #[test]
@@ -15270,12 +16619,30 @@ mod tests {
         assert!(matches!(&baseline, GitCommitBaseline::Unborn(_)));
         fs::write(dir.join("file.txt"), "initial content").unwrap();
         run_git(dir, &["add", "file.txt"]).unwrap();
-        let output = run_git(dir, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "initial commit"]).unwrap();
+        let output = run_git(
+            dir,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial commit",
+            ],
+        )
+        .unwrap();
         let event = serde_json::json!({"type":"item.completed", "item":{"type":"command_execution", "exit_code":0, "aggregated_output":output}});
         let candidates = git_commit_candidates(&event).into_iter().collect();
         assert!(verified_new_git_commit(dir, Some(&baseline), &candidates));
         assert!(!verified_new_git_commit(dir, None, &candidates));
-        assert!(!verified_new_git_commit(dir, Some(&baseline), &BTreeSet::from(["1a2b3c4".into()])));
+        assert!(!verified_new_git_commit(
+            dir,
+            Some(&baseline),
+            &BTreeSet::from(["1a2b3c4".into()])
+        ));
     }
 
     #[test]
@@ -15289,56 +16656,156 @@ mod tests {
         run_git(dir.path(), &["init", "-q"]).unwrap();
         fs::write(dir.path().join("file.txt"), "initial content").unwrap();
         run_git(dir.path(), &["add", "file.txt"]).unwrap();
-        run_git(dir.path(), &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "initial commit"]).unwrap();
+        run_git(
+            dir.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial commit",
+            ],
+        )
+        .unwrap();
         let head = run_git(dir.path(), &["rev-parse", "HEAD"]).unwrap();
-        assert!(!verified_new_git_commit(dir.path(), baseline.as_ref(), &BTreeSet::from([head])));
+        assert!(!verified_new_git_commit(
+            dir.path(),
+            baseline.as_ref(),
+            &BTreeSet::from([head])
+        ));
     }
 
     #[tokio::test]
     async fn thread_board_private_cards_are_filtered_for_snapshots_history_and_live_delivery() {
         let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
-        for member in ["owner", "peer", "third"] { workspace.add_member(member).unwrap(); }
+        for member in ["owner", "peer", "third"] {
+            workspace.add_member(member).unwrap();
+        }
         let channel = workspace.create_channel("private", "owner").unwrap();
         workspace.add_channel_member(&channel.id, "peer").unwrap();
-        let channel_root = workspace.add_channel_message("owner", &channel.id, "private channel body", &[], &[], None).unwrap();
-        let dm_root = workspace.add_direct_message_with_main("owner", "peer", "private DM body", &[], &[], None, true).unwrap();
+        let channel_root = workspace
+            .add_channel_message("owner", &channel.id, "private channel body", &[], &[], None)
+            .unwrap();
+        let dm_root = workspace
+            .add_direct_message_with_main("owner", "peer", "private DM body", &[], &[], None, true)
+            .unwrap();
         for root in [&channel_root, &dm_root] {
             for _ in 0..3 {
                 if root.channel_id.is_some() {
-                    workspace.add_channel_message("owner", &channel.id, "reply", &[], &[], Some(&root.id)).unwrap();
+                    workspace
+                        .add_channel_message(
+                            "owner",
+                            &channel.id,
+                            "reply",
+                            &[],
+                            &[],
+                            Some(&root.id),
+                        )
+                        .unwrap();
                 } else {
-                    workspace.add_direct_message_with_main("owner", "peer", "reply", &[], &[], Some(&root.id), false).unwrap();
+                    workspace
+                        .add_direct_message_with_main(
+                            "owner",
+                            "peer",
+                            "reply",
+                            &[],
+                            &[],
+                            Some(&root.id),
+                            false,
+                        )
+                        .unwrap();
                 }
             }
-            workspace.create_board_card_from_thread(&root.id, "private title").unwrap();
+            workspace
+                .create_board_card_from_thread(&root.id, "private title")
+                .unwrap();
         }
-        let shared = workspace.create_board_card("owner", "Shared card", "Public description", &workspace.board_columns().unwrap()[0].id, "none").unwrap();
+        let shared = workspace
+            .create_board_card(
+                "owner",
+                "Shared card",
+                "Public description",
+                &workspace.board_columns().unwrap()[0].id,
+                "none",
+            )
+            .unwrap();
         let update = board_workspace_update(&workspace).unwrap();
         for member in ["owner", "peer", "third"] {
             let expected = if member == "third" { 1 } else { 3 };
             let snapshot = workspace_snapshot(&workspace, member).unwrap();
             assert_eq!(snapshot.board_cards.len(), expected);
             let chunks = nostr_workspace_snapshot_chunks(&snapshot, "private-test").unwrap();
-            assert_eq!(chunks.iter().map(|chunk| chunk.board_cards.len()).sum::<usize>(), expected);
+            assert_eq!(
+                chunks
+                    .iter()
+                    .map(|chunk| chunk.board_cards.len())
+                    .sum::<usize>(),
+                expected
+            );
             let live = board_update_for_member(&workspace, &update, member).unwrap();
             assert_eq!(live.board_cards.len(), expected);
             assert!(live.board_cards.iter().any(|card| card.id == shared.id));
             if member == "third" {
                 assert!(live.messages.is_empty());
-                assert!(!serde_json::to_string(&snapshot).unwrap().contains("private"));
-                assert!(!serde_json::to_string(&chunks).unwrap().contains("private title"));
+                assert!(!serde_json::to_string(&snapshot)
+                    .unwrap()
+                    .contains("private"));
+                assert!(!serde_json::to_string(&chunks)
+                    .unwrap()
+                    .contains("private title"));
             } else {
                 assert!(live.messages.iter().any(|root| root.id == channel_root.id));
                 assert!(live.messages.iter().any(|root| root.id == dm_root.id));
             }
         }
-        queue_workspace_update(&workspace, ["owner".into(), "peer".into(), "third".into()], &update).await.unwrap();
+        queue_workspace_update(
+            &workspace,
+            ["owner".into(), "peer".into(), "third".into()],
+            &update,
+        )
+        .await
+        .unwrap();
         let notifications = workspace.pending_notifications().unwrap();
-        assert!(!notifications.iter().find(|entry| entry.recipient == "third").unwrap().payload.contains("private"));
-        assert!(notifications.iter().find(|entry| entry.recipient == "peer").unwrap().payload.contains("private DM body"));
-        assert!(workspace.add_channel_message("third", &channel.id, "[[THREAD_TOPIC: stolen]]", &[], &[], Some(&channel_root.id)).is_err());
-        assert!(workspace.add_direct_message_with_main("third", "owner", "[[THREAD_TOPIC: stolen]]", &[], &[], Some(&dm_root.id), false).is_err());
-        workspace.delete_direct_conversation("owner", "peer").unwrap();
+        assert!(!notifications
+            .iter()
+            .find(|entry| entry.recipient == "third")
+            .unwrap()
+            .payload
+            .contains("private"));
+        assert!(notifications
+            .iter()
+            .find(|entry| entry.recipient == "peer")
+            .unwrap()
+            .payload
+            .contains("private DM body"));
+        assert!(workspace
+            .add_channel_message(
+                "third",
+                &channel.id,
+                "[[THREAD_TOPIC: stolen]]",
+                &[],
+                &[],
+                Some(&channel_root.id)
+            )
+            .is_err());
+        assert!(workspace
+            .add_direct_message_with_main(
+                "third",
+                "owner",
+                "[[THREAD_TOPIC: stolen]]",
+                &[],
+                &[],
+                Some(&dm_root.id),
+                false
+            )
+            .is_err());
+        workspace
+            .delete_direct_conversation("owner", "peer")
+            .unwrap();
         assert_eq!(workspace.board_cards_for_member("third").unwrap(), [shared]);
     }
 
@@ -15351,40 +16818,116 @@ mod tests {
                 workspace.add_member("peer").unwrap();
                 let channel = workspace.create_channel("private", "owner").unwrap();
                 let root = if direct {
-                    workspace.add_direct_message_with_main("owner", "peer", "root", &[], &[], None, true)
+                    workspace.add_direct_message_with_main(
+                        "owner",
+                        "peer",
+                        "root",
+                        &[],
+                        &[],
+                        None,
+                        true,
+                    )
                 } else {
                     workspace.add_channel_message("owner", &channel.id, "root", &[], &[], None)
-                }.unwrap();
-                let persist = |body: &str| if direct {
-                    workspace.add_direct_message_with_main("owner", "peer", body, &[], &[], Some(&root.id), false)
-                } else {
-                    workspace.add_channel_message("owner", &channel.id, body, &[], &[], Some(&root.id))
-                }.unwrap();
+                }
+                .unwrap();
+                let persist = |body: &str| {
+                    if direct {
+                        workspace.add_direct_message_with_main(
+                            "owner",
+                            "peer",
+                            body,
+                            &[],
+                            &[],
+                            Some(&root.id),
+                            false,
+                        )
+                    } else {
+                        workspace.add_channel_message(
+                            "owner",
+                            &channel.id,
+                            body,
+                            &[],
+                            &[],
+                            Some(&root.id),
+                        )
+                    }
+                    .unwrap()
+                };
                 let title = persist("[[THREAD_TOPIC: Early title]]");
                 assert!(!sync_thread_card_after_message(&workspace, &title).unwrap());
-                for _ in 0..2 { assert!(!sync_thread_card_after_message(&workspace, &persist("reply")).unwrap()); }
+                for _ in 0..2 {
+                    assert!(
+                        !sync_thread_card_after_message(&workspace, &persist("reply")).unwrap()
+                    );
+                }
                 assert!(workspace.board_cards().unwrap().is_empty());
                 let third = match source {
                     "user" => persist("third reply"),
-                    "agent" => if direct {
-                        workspace.add_direct_message_with_main("agent:a1", "owner", "third reply", &[], &[], Some(&root.id), false).unwrap()
-                    } else {
-                        workspace.add_channel_message_with_main("agent:a1", &channel.id, "third reply", &[], &[], Some(&root.id), false).unwrap()
-                    },
+                    "agent" => {
+                        if direct {
+                            workspace
+                                .add_direct_message_with_main(
+                                    "agent:a1",
+                                    "owner",
+                                    "third reply",
+                                    &[],
+                                    &[],
+                                    Some(&root.id),
+                                    false,
+                                )
+                                .unwrap()
+                        } else {
+                            workspace
+                                .add_channel_message_with_main(
+                                    "agent:a1",
+                                    &channel.id,
+                                    "third reply",
+                                    &[],
+                                    &[],
+                                    Some(&root.id),
+                                    false,
+                                )
+                                .unwrap()
+                        }
+                    }
                     _ => {
-                        let conversation = if direct { WorkspaceConversation::Direct("owner".into(), "peer".into()) } else { WorkspaceConversation::Channel(channel.id.clone()) };
-                        persist_native_board_reply(&workspace, &conversation, &root.id, "third reply", &[], &[]).unwrap()
+                        let conversation = if direct {
+                            WorkspaceConversation::Direct("owner".into(), "peer".into())
+                        } else {
+                            WorkspaceConversation::Channel(channel.id.clone())
+                        };
+                        persist_native_board_reply(
+                            &workspace,
+                            &conversation,
+                            &root.id,
+                            "third reply",
+                            &[],
+                            &[],
+                        )
+                        .unwrap()
                     }
                 };
                 let update: WorkspaceUpdate = serde_json::from_value(serde_json::json!({"action":"message_created", "messages":[message_payload(third)]})).unwrap();
-                queue_workspace_update(&workspace, ["owner".into()], &update).await.unwrap();
+                queue_workspace_update(&workspace, ["owner".into()], &update)
+                    .await
+                    .unwrap();
                 let card = workspace.board_cards().unwrap().remove(0);
                 assert_eq!(card.title, "Early title");
                 assert_eq!(card.source_thread_id.as_deref(), Some(root.id.as_str()));
-                let board_notifications = || workspace.pending_notifications().unwrap().iter().filter(|entry| entry.payload.contains("\"action\":\"board_updated\"")).count();
+                let board_notifications = || {
+                    workspace
+                        .pending_notifications()
+                        .unwrap()
+                        .iter()
+                        .filter(|entry| entry.payload.contains("\"action\":\"board_updated\""))
+                        .count()
+                };
                 let count = board_notifications();
                 assert_eq!(count, 2);
-                queue_workspace_update(&workspace, ["owner".into()], &update).await.unwrap();
+                queue_workspace_update(&workspace, ["owner".into()], &update)
+                    .await
+                    .unwrap();
                 assert_eq!(board_notifications(), count);
                 assert_eq!(workspace.board_cards().unwrap(), [card]);
                 assert!(workspace.board_tasks().unwrap().is_empty());
@@ -15459,8 +17002,14 @@ mod tests {
     fn repository_list_recursively_finds_repositories_without_hidden_or_nested_repo_contents() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("apps").join("phone").join(".git")).unwrap();
-        fs::create_dir_all(root.path().join("apps").join("phone").join("nested").join(".git"))
-            .unwrap();
+        fs::create_dir_all(
+            root.path()
+                .join("apps")
+                .join("phone")
+                .join("nested")
+                .join(".git"),
+        )
+        .unwrap();
         fs::create_dir_all(root.path().join("tools").join("script")).unwrap();
         fs::create_dir_all(root.path().join(".hidden").join("secret").join(".git")).unwrap();
 
@@ -15507,8 +17056,14 @@ mod tests {
 
     #[test]
     fn conversation_scope_uses_active_and_reference_folders_without_repo_enumeration() {
-        let active = env::current_dir().unwrap().canonicalize().unwrap();
-        let reference = active.parent().unwrap().to_path_buf();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let active = root.path().join("active");
+        let reference = root.path().join("reference");
+        fs::create_dir_all(&active).unwrap();
+        fs::create_dir_all(&reference).unwrap();
+        let previous_workdir = env::var_os("CODEX_WORKDIR");
+        env::set_var("CODEX_WORKDIR", root.path());
         let config = test_codex_config(active.clone());
 
         let prompt = conversation_scope_prompt(
@@ -15527,6 +17082,7 @@ mod tests {
         assert!(prompt.contains("Shared read-only resources:\n/tmp/pics"));
         assert!(!prompt.contains("Repositories in scope"));
         assert!(!prompt.contains("Read-only local resources"));
+        restore_env_var("CODEX_WORKDIR", previous_workdir);
     }
 
     #[test]
@@ -16868,7 +18424,15 @@ mod tests {
             .add_direct_message("owner", "other", "not for desktop", &[], &[], None)
             .unwrap();
         workspace
-            .set_conversation_preprompt(Some(&channel.id), None, None, "Review carefully.", &[], None, None)
+            .set_conversation_preprompt(
+                Some(&channel.id),
+                None,
+                None,
+                "Review carefully.",
+                &[],
+                None,
+                None,
+            )
             .unwrap();
 
         let snapshot = workspace_snapshot(&workspace, "desktop").unwrap();
@@ -18737,6 +20301,8 @@ mod tests {
             &handoff_sender,
             &mut None,
             Some(&incoming),
+            None,
+            "test-delivery",
         )
         .await;
         assert!(
@@ -18976,7 +20542,9 @@ mod tests {
             peer_pubkey: None,
             receive_pubkeys: vec![],
             relays: vec!["ws://127.0.0.1:1".into()],
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         for direct in [false, true] {
             for mode in ["commit", "claim", "continuation"] {
                 let repo = tempfile::tempdir_in(env::current_dir().unwrap()).unwrap();
@@ -18996,7 +20564,9 @@ text = 'I will implement the change.' if first and mode == 'continuation' else (
 print(json.dumps({'type':'item.completed', 'item':{'type':'agent_message', 'text':text}}))
 "#).unwrap();
                 let workspace = WorkspaceStore::open(Path::new(":memory:")).unwrap();
-                for member in ["owner", "peer"] { workspace.add_member(member).unwrap(); }
+                for member in ["owner", "peer"] {
+                    workspace.add_member(member).unwrap();
+                }
                 let channel = workspace.create_channel("engineering", "owner").unwrap();
                 let (channel_id, member, peer) = if direct {
                     (None, Some("owner"), Some("peer"))
@@ -19004,22 +20574,84 @@ print(json.dumps({'type':'item.completed', 'item':{'type':'agent_message', 'text
                     (Some(channel.id.as_str()), None, None)
                 };
                 let root = if direct {
-                    workspace.add_direct_message_with_main("owner", "peer", "Implement the change", &[], &[], None, true)
+                    workspace.add_direct_message_with_main(
+                        "owner",
+                        "peer",
+                        "Implement the change",
+                        &[],
+                        &[],
+                        None,
+                        true,
+                    )
                 } else {
-                    workspace.add_channel_message("owner", &channel.id, "Implement the change", &[], &[], None)
-                }.unwrap();
-                let persist = |body: &str| if direct {
-                    workspace.add_direct_message_with_main("owner", "peer", body, &[], &[], Some(&root.id), false)
-                } else {
-                    workspace.add_channel_message("owner", &channel.id, body, &[], &[], Some(&root.id))
-                }.unwrap();
-                for body in ["[[THREAD_TOPIC: Early title]]", "First content reply", "Second content reply"] {
+                    workspace.add_channel_message(
+                        "owner",
+                        &channel.id,
+                        "Implement the change",
+                        &[],
+                        &[],
+                        None,
+                    )
+                }
+                .unwrap();
+                let persist = |body: &str| {
+                    if direct {
+                        workspace.add_direct_message_with_main(
+                            "owner",
+                            "peer",
+                            body,
+                            &[],
+                            &[],
+                            Some(&root.id),
+                            false,
+                        )
+                    } else {
+                        workspace.add_channel_message(
+                            "owner",
+                            &channel.id,
+                            body,
+                            &[],
+                            &[],
+                            Some(&root.id),
+                        )
+                    }
+                    .unwrap()
+                };
+                for body in [
+                    "[[THREAD_TOPIC: Early title]]",
+                    "First content reply",
+                    "Second content reply",
+                ] {
                     assert!(!sync_thread_card_after_message(&workspace, &persist(body)).unwrap());
                 }
                 assert!(workspace.board_cards().unwrap().is_empty());
-                let coordinator = workspace.create_agent("A0", "Task coordinator", "", &[], None, Some("session"), "ready", None, "owner").unwrap();
-                workspace.set_conversation_coordinator(&coordinator.id, channel_id, member, peer).unwrap();
-                workspace.set_conversation_preprompt(channel_id, member, peer, "", &[repo.path().to_string_lossy().into_owned()], None, None).unwrap();
+                let coordinator = workspace
+                    .create_agent(
+                        "A0",
+                        "Task coordinator",
+                        "",
+                        &[],
+                        None,
+                        Some("session"),
+                        "ready",
+                        None,
+                        "owner",
+                    )
+                    .unwrap();
+                workspace
+                    .set_conversation_coordinator(&coordinator.id, channel_id, member, peer)
+                    .unwrap();
+                workspace
+                    .set_conversation_preprompt(
+                        channel_id,
+                        member,
+                        peer,
+                        "",
+                        &[repo.path().to_string_lossy().into_owned()],
+                        None,
+                        None,
+                    )
+                    .unwrap();
                 let mut config = test_codex_config(repo.path().to_path_buf());
                 config.bin = "python3".into();
                 config.args = vec![fixture.to_string_lossy().into_owned(), mode.into()];
@@ -19035,46 +20667,114 @@ print(json.dumps({'type':'item.completed', 'item':{'type':'agent_message', 'text
                 });
                 let outbound = WorkspaceOutbound {
                     fips_routes: Arc::new(Mutex::new(HashMap::from([
-                        ("owner".into(), "local".into()), ("peer".into(), "local".into()),
+                        ("owner".into(), "local".into()),
+                        ("peer".into(), "local".into()),
                     ]))),
                     pending_fips_responses: Arc::default(),
                     fips_outgoing: outgoing,
                 };
                 let (handoff_sender, _handoffs) = mpsc::unbounded_channel();
                 route_conversation_agents(
-                    &workspace, &messenger, &outbound, &config, Some(&coordinator.id),
-                    channel_id, member, peer, Some(&root.id), "Implement the change", &[],
-                    &Arc::new(Mutex::new(HashMap::new())), &handoff_sender, &mut None, None,
-                ).await.unwrap();
+                    &workspace,
+                    &messenger,
+                    &outbound,
+                    &config,
+                    Some(&coordinator.id),
+                    channel_id,
+                    member,
+                    peer,
+                    Some(&root.id),
+                    "Implement the change",
+                    &[],
+                    &Arc::new(Mutex::new(HashMap::new())),
+                    &handoff_sender,
+                    &mut None,
+                    None,
+                    None,
+                    "test-delivery",
+                )
+                .await
+                .unwrap();
                 let replies = workspace.thread_messages(&root.id).unwrap();
-                let reply = replies.iter().find(|message| message.sender_pubkey == format!("agent:{}", coordinator.id)).unwrap();
-                assert_eq!(reply.body, if mode == "claim" { "I committed the change." } else { "Done." });
+                let reply = replies
+                    .iter()
+                    .find(|message| message.sender_pubkey == format!("agent:{}", coordinator.id))
+                    .unwrap();
+                assert_eq!(
+                    reply.body,
+                    if mode == "claim" {
+                        "I committed the change."
+                    } else {
+                        "Done."
+                    }
+                );
                 assert!(run_git(repo.path(), &["rev-parse", "HEAD"]).is_ok());
                 let cards = workspace.board_cards().unwrap();
                 assert_eq!(cards.len(), 1);
                 let card = &cards[0];
                 assert_eq!(card.source_thread_id.as_deref(), Some(root.id.as_str()));
                 assert_eq!(card.title, "Early title");
-                let expected_column = if mode == "claim" { "Backlog" } else { "Integrating" };
-                assert_eq!(workspace.board_columns().unwrap().into_iter().find(|column| column.id == card.column_id).unwrap().name, expected_column, "direct={direct}, mode={mode}");
+                let expected_column = if mode == "claim" {
+                    "Backlog"
+                } else {
+                    "Integrating"
+                };
+                assert_eq!(
+                    workspace
+                        .board_columns()
+                        .unwrap()
+                        .into_iter()
+                        .find(|column| column.id == card.column_id)
+                        .unwrap()
+                        .name,
+                    expected_column,
+                    "direct={direct}, mode={mode}"
+                );
                 let sent = sent.lock().await;
-                let reply_position = sent.iter().position(|(member, wire)| match wire {
-                    WireMessage::WorkspaceUpdate { workspace_update } => member == "owner"
-                        && workspace_update.action == "message_created"
-                        && workspace_update.messages.iter().any(|message| message.id == reply.id),
-                    _ => false,
-                }).unwrap();
-                let board_position = sent.iter().position(|(member, wire)| match wire {
-                    WireMessage::WorkspaceUpdate { workspace_update } => member == "owner"
-                        && workspace_update.action == "board_updated"
-                        && workspace_update.board_cards.iter().any(|updated| updated.id == card.id),
-                    _ => false,
-                }).unwrap();
-                assert!(reply_position < board_position, "the reply must be delivered before its board transition");
-                let latest = sent.iter().rev().find_map(|(member, wire)| match wire {
-                    WireMessage::WorkspaceUpdate { workspace_update } if member == "owner" && workspace_update.action == "board_updated" => Some(workspace_update),
-                    _ => None,
-                }).unwrap();
+                let reply_position = sent
+                    .iter()
+                    .position(|(member, wire)| match wire {
+                        WireMessage::WorkspaceUpdate { workspace_update } => {
+                            member == "owner"
+                                && workspace_update.action == "message_created"
+                                && workspace_update
+                                    .messages
+                                    .iter()
+                                    .any(|message| message.id == reply.id)
+                        }
+                        _ => false,
+                    })
+                    .unwrap();
+                let board_position = sent
+                    .iter()
+                    .position(|(member, wire)| match wire {
+                        WireMessage::WorkspaceUpdate { workspace_update } => {
+                            member == "owner"
+                                && workspace_update.action == "board_updated"
+                                && workspace_update
+                                    .board_cards
+                                    .iter()
+                                    .any(|updated| updated.id == card.id)
+                        }
+                        _ => false,
+                    })
+                    .unwrap();
+                assert!(
+                    reply_position < board_position,
+                    "the reply must be delivered before its board transition"
+                );
+                let latest = sent
+                    .iter()
+                    .rev()
+                    .find_map(|(member, wire)| match wire {
+                        WireMessage::WorkspaceUpdate { workspace_update }
+                            if member == "owner" && workspace_update.action == "board_updated" =>
+                        {
+                            Some(workspace_update)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
                 assert_eq!(latest.board_cards[0].id, card.id);
                 assert_eq!(latest.board_cards[0].column_id, card.column_id);
                 drop(sent);
