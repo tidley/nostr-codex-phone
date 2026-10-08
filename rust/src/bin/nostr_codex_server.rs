@@ -14487,9 +14487,11 @@ fn claim_memory_compaction(key: String) -> Option<MemoryCompactionClaim> {
     let mut active = ACTIVE_MEMORY_COMPACTIONS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    active
-        .insert(key.clone())
-        .then_some(MemoryCompactionClaim(key))
+    if active.insert(key.clone()) {
+        Some(MemoryCompactionClaim(key))
+    } else {
+        None
+    }
 }
 
 async fn compact_memory_if_needed(
