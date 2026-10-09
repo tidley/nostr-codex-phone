@@ -2959,6 +2959,7 @@ fn conversation_agent_execution_config(
 fn embedded_target_execution_config(config: &CodexConfig, session_id: &str) -> TargetExecutionConfig {
     TargetExecutionConfig {
         working_directory: config.working_dir.clone(),
+        executable: config.opencode.bin.clone().into(),
         agent: config.opencode.agent.clone(),
         model: config
             .opencode
@@ -15927,6 +15928,7 @@ mod tests {
     fn embedded_runtime_maps_agent_settings_to_a_target_execution_config() {
         let workdir = PathBuf::from("/workspace/project");
         let mut config = test_codex_config(workdir.clone());
+        config.opencode.bin = "/worker/opencode-wrapper".to_string();
         config.opencode.agent = "reviewer".to_string();
         config.opencode.model = Some(OpenCodeModel {
             provider_id: "openai".to_string(),
@@ -15936,6 +15938,7 @@ mod tests {
         let execution = embedded_target_execution_config(&config, "ses-123");
 
         assert_eq!(execution.working_directory, workdir);
+        assert_eq!(execution.executable, PathBuf::from("/worker/opencode-wrapper"));
         assert_eq!(execution.agent, "reviewer");
         assert_eq!(execution.model, "openai/gpt-5");
         assert_eq!(execution.session, SessionSelection::Resume("ses-123".to_string()));
