@@ -82,6 +82,20 @@ static AGENT_SCOPE_METRICS: once_cell::sync::Lazy<StdMutex<HashMap<String, Agent
 static ACTIVE_MEMORY_COMPACTIONS: once_cell::sync::Lazy<StdMutex<HashSet<String>>> =
     once_cell::sync::Lazy::new(|| StdMutex::new(HashSet::new()));
 
+// Tokio task-local values are not inherited by spawned local tasks. Herdr uses
+// one to enforce its LocalRuntime contract, so each task that can call it needs
+// its own LocalSet host.
+fn spawn_embedded_runtime_task<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + 'static,
+    F::Output: 'static,
+{
+    tokio::task::spawn_local(async move {
+        let local_set = tokio::task::LocalSet::new();
+        LocalRuntime::new().run_until(&local_set, future).await
+    })
+}
+
 const WORKER_STATE_DIR: &str = ".nostr-codex";
 const WORKER_REGISTRY_FILE: &str = "workers.json";
 const WORKER_LOCK_FILE: &str = "worker.lock";
@@ -805,7 +819,7 @@ impl WorkspaceAgentQueues {
             // A mentioned message is durable in the workspace store. Do not lose its
             // turn merely because an agent is still working through earlier messages.
             let (sender, receiver) = mpsc::unbounded_channel();
-            tokio::task::spawn_local(workspace_agent_queue_worker(
+            spawn_embedded_runtime_task(workspace_agent_queue_worker(
                 receiver,
                 agent_id.clone(),
                 Arc::clone(&self.active_turns),
@@ -869,7 +883,7 @@ impl WorkspaceAgentQueues {
             replay_pending = true;
         }
         let (sender, receiver) = mpsc::unbounded_channel();
-        tokio::task::spawn_local(native_workspace_session_worker(
+        spawn_embedded_runtime_task(native_workspace_session_worker(
             receiver,
             conversation.clone(),
             Arc::clone(&self.active_turns),
@@ -1721,7 +1735,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         let runtime_for_events = Rc::clone(runtime);
         let workspace_path = config.workspace_path.clone();
         let control = config.control.clone();
-        owned_runtime_tasks.push(tokio::task::spawn_local(async move {
+        owned_runtime_tasks.push(spawn_embedded_runtime_task(async move {
             loop {
                 if control.is_shutdown_requested() {
                     return;
@@ -1730,11 +1744,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
                     Ok(subscription) => subscription,
                     Err(error) => {
                         warn!("embedded Herdr event subscription failed: {error:#}");
-                        tokio::select! {
-                            _ = control.shutdown_notify.notified() => if control.is_shutdown_requested() { return; },
-                            _ = sleep(Duration::from_millis(100)) => {}
-                        }
-                        continue;
+                        return;
                     }
                 };
                 tokio::select! {
@@ -1759,7 +1769,7 @@ async fn run_worker_runtime(mut config: WorkerRuntimeConfig) -> Result<()> {
         let runtime = Rc::clone(runtime);
         let workspace_path = config.workspace_path.clone();
         let control = config.control.clone();
-        owned_runtime_tasks.push(tokio::task::spawn_local(async move {
+        owned_runtime_tasks.push(spawn_embedded_runtime_task(async move {
             let mut ticks = interval(Duration::from_secs(60 * 60));
             loop {
                 tokio::select! {
@@ -15818,6 +15828,30 @@ mod tests {
                 assert!(tasks.is_empty());
             })
             .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn embedded_subscription_from_a_worker_task_stays_on_a_local_runtime() {
+        let state = tempfile::tempdir().unwrap();
+        let host = LocalRuntime::new();
+        let local_set = tokio::task::LocalSet::new();
+        host.run_until(&local_set, async {
+            let runtime = EmbeddedHerdrRuntime::start(HerdrRuntimeConfig {
+                state_path: state.path().join("state"),
+                data_path: state.path().join("data"),
+                cancellation: HerdrCancellationToken::new(),
+                ..HerdrRuntimeConfig::default()
+            })
+            .await
+            .unwrap();
+
+            let subscription = spawn_embedded_runtime_task(async move { runtime.subscribe().await })
+                .await
+                .unwrap();
+
+            assert!(subscription.is_ok());
+        })
+        .await;
     }
 
     #[tokio::test(flavor = "current_thread")]
