@@ -12590,12 +12590,6 @@ class _WorkspaceMessageRowState extends State<_WorkspaceMessageRow>
                                           : Colors.transparent,
                                       width: 3,
                                     ),
-                                    bottom: BorderSide(
-                                      color: Theme.of(context)
-                                          .colorScheme
-                                          .outlineVariant
-                                          .withValues(alpha: 0.36),
-                                    ),
                                   )
                                 : Border.all(
                                     color: flash
