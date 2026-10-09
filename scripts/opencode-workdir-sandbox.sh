@@ -76,6 +76,14 @@ add_destination_path() {
 add_destination_path "$read_root"
 add_destination_path "$workdir"
 add_destination_path "$(dirname "$real_bin")"
+if [[ -n "${HERDR_PANE_REPORT_SOCKET:-}" ]]; then
+  report_socket="$(realpath "$HERDR_PANE_REPORT_SOCKET")"
+  if [[ ! -S "$report_socket" ]]; then
+    printf 'Herdr pane report socket must be an existing Unix socket: %s\n' "$report_socket" >&2
+    exit 1
+  fi
+  add_destination_path "$(dirname "$report_socket")"
+fi
 args+=(--ro-bind "$read_root" "$read_root")
 case "$workspace_access" in
   read-only) args+=(--ro-bind "$workdir" "$workdir") ;;
@@ -87,6 +95,9 @@ case "$workspace_access" in
 esac
 
 args+=(--ro-bind "$real_bin" "$real_bin")
+if [[ -n "${report_socket:-}" ]]; then
+  args+=(--bind "$report_socket" "$report_socket")
+fi
 if [[ -n "$node_runtime" ]]; then
   add_destination_path "$node_runtime"
   args+=(--ro-bind "$node_runtime" "$node_runtime")

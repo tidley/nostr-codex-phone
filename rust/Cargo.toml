@@ -19,7 +19,7 @@ fips-mobile = { git = "https://github.com/tidley/fips.git", rev = "531d890a77401
 fips-client = { path = "fips-client" }
 futures-util = "0.3"
 hound = "3.5"
-herdr = { git = "https://github.com/tidley/herdr.git", rev = "1d949179" }
+herdr = { git = "https://github.com/tidley/herdr.git", rev = "8b75f0f6" }
 iroh = "1.1.0"
 libc = "0.2"
 nostr = { version = "0.45.0-alpha.1", features = ["std", "os-rng", "nip59"] }
